@@ -26,6 +26,14 @@ Default management uses ordinary permissions. Some controller paths require elev
 
 The helper verifies the parent's PID, creation time and executable path. Nonce-bound heartbeat, status and cancel files reject stale sessions. Parent death, cancellation or heartbeat loss releases only its owned child. [Helper](../src/app/backend_helper.rs).
 
-## Limits
+## Coexistence with other software
+
+An answering SDK is not proof that device discovery has finished. Discovery can wait on a shared bus while another application uses it. The manager observes the read-only SDK inventory periodically: a changed controller identity/topology renews the managed outputs' retry budget without restarting a healthy backend. An unchanged inventory does not renew exhausted retries. Inventory polling errors do not justify killing an otherwise healthy server. These checks remain active when the editor is closed.
+
+Prismestra does not stop other lighting, monitoring or cooling applications, release another process's mutex, bypass bus coordination or adopt a foreign SDK listener. Its automatic recovery is restricted to its own backend and outputs. A shared bus can be coordinated by the underlying applications; an exclusive device or two independent color writers may require an explicit choice of owner. Compatibility with arbitrary concurrent software is not guaranteed by backend management.
+
+When troubleshooting, distinguish backend ownership, SDK responsiveness, inventory availability and actual output status. A late inventory can recover without restarting the application. Lifecycle diagnostics record owned child exits/restarts; a missing older log does not establish their cause. A permanently blocked external bus owner still needs a user decision. Rebooting or restarting cooling software is not an automatic recovery action.
+
+## Verification limits
 
 Software fixtures cover multiple endpoints, IPv4/IPv6 ownership, foreign ports, wrong hashes, stale identities/status, backoff, cancellation, owner crash/port release, candidate transactions and targeted recovery. Setup tests never run their fake backend. These do not certify physical controllers, clean Windows or suspend/resume. Persistent errors remain visible in Connections/output status; recovery is not an unlimited hot loop. OpenRGB remains a separate internal process and external dependency, not bundled here. Management does not create support for unknown protocols.

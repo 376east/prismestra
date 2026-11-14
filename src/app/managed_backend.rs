@@ -305,6 +305,11 @@ impl Drop for Manager {
 }
 
 impl Shared {
+    fn lifecycle(&self, pid: u32, reason: impl std::fmt::Display) {
+        let detail = format!("Managed OpenRGB child {pid}: {reason}");
+        eprintln!("{detail}");
+        self.detail(detail);
+    }
     fn detail(&self, detail: impl Into<String>) {
         self.snapshot
             .lock()
@@ -609,82 +614,13 @@ fn run(config: Config, state: &Shared) {
             }
         };
         retry.starts.push_back(Instant::now());
-        let began = Instant::now();
-        let mut ready = false;
-        let mut ever_ready = false;
-        let mut unhealthy = 0;
-        state
-            .snapshot
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .backend_pid = Some(owned.child.id());
-        state.detail("Managed OpenRGB child started; waiting for SDK");
-        'monitor: while !state.cancel.load(Ordering::SeqCst) {
-            match owned.child.try_wait() {
-                Ok(None) => {}
-                Ok(Some(status)) => {
-                    state.detail(format!("Managed OpenRGB exited: {status}"));
-                    break;
-                }
-                Err(e) => {
-                    state.detail(format!("Managed OpenRGB child status failed: {e}"));
-                    break;
-                }
-            }
-            if listener_owned(config.endpoint, owned.child.id())
-                && sdk_ready(config.endpoint)
-                && listener_owned(config.endpoint, owned.child.id())
-            {
-                unhealthy = 0;
-                if !ready {
-                    ready = true;
-                    ever_ready = true;
-                    let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
-                    snapshot.ready = true;
-                    snapshot.ready_generation = snapshot.ready_generation.saturating_add(1);
-                    snapshot.detail = "Managed OpenRGB SDK ready".into();
-                }
-                if began.elapsed() >= Duration::from_secs(60) {
-                    retry.failures = 0;
-                }
-            } else {
-                unhealthy += 1;
-                if ready {
-                    state.detail("Managed OpenRGB SDK temporarily unavailable");
-                }
-                ready = false;
-                state
-                    .snapshot
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .ready = false;
-                if state.restarting.load(Ordering::SeqCst)
-                    && ((ever_ready && unhealthy >= 3)
-                        || (!ever_ready && began.elapsed() >= Duration::from_secs(30)))
-                {
-                    state.detail("Managed OpenRGB SDK unhealthy; restarting owned child");
-                    break;
-                }
-            }
-            // Health checks once per second, with cancellation observed every100ms.
-            for _ in 0..10 {
-                if state.cancel.load(Ordering::SeqCst) {
-                    break;
-                }
-                match owned.child.try_wait() {
-                    Ok(None) => {}
-                    Ok(Some(status)) => {
-                        state.detail(format!("Managed OpenRGB exited: {status}"));
-                        break 'monitor;
-                    }
-                    Err(e) => {
-                        state.detail(format!("Managed OpenRGB child status failed: {e}"));
-                        break 'monitor;
-                    }
-                }
-                thread::sleep(POLL);
-            }
-        }
+        monitor_owned(
+            &config,
+            state,
+            &mut owned,
+            &mut retry,
+            MonitorTiming::default(),
+        );
         drop(owned);
         {
             let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
@@ -696,6 +632,187 @@ fn run(config: Config, state: &Shared) {
         }
     }
     state.detail("Managed OpenRGB stopped");
+}
+
+// Kept injectable only inside this module so the late-detection regression can
+// cross the same startup deadline without waiting30real seconds.
+struct MonitorTiming {
+    startup_limit: Duration,
+    health_interval: Duration,
+    inventory_interval: Duration,
+    poll: Duration,
+}
+impl Default for MonitorTiming {
+    fn default() -> Self {
+        Self {
+            startup_limit: Duration::from_secs(30),
+            health_interval: Duration::from_secs(1),
+            inventory_interval: Duration::from_secs(5),
+            poll: POLL,
+        }
+    }
+}
+
+fn monitor_owned(
+    config: &Config,
+    state: &Shared,
+    owned: &mut OwnedChild,
+    retry: &mut Retry,
+    timing: MonitorTiming,
+) {
+    let began = Instant::now();
+    let mut ready = false;
+    let mut ever_ready = false;
+    let mut unhealthy = 0;
+    let mut inventory = InventoryWatch::default();
+    let mut inventory_at = began;
+    state
+        .snapshot
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .backend_pid = Some(owned.child.id());
+    state.detail("Managed OpenRGB child started; waiting for SDK");
+    'monitor: while !state.cancel.load(Ordering::SeqCst) {
+        match owned.child.try_wait() {
+            Ok(None) => {}
+            Ok(Some(status)) => {
+                state.lifecycle(owned.child.id(), format!("exited: {status}"));
+                break;
+            }
+            Err(e) => {
+                state.lifecycle(owned.child.id(), format!("child status failed: {e}"));
+                break;
+            }
+        }
+        if listener_owned(config.endpoint, owned.child.id())
+            && sdk_ready(config.endpoint)
+            && listener_owned(config.endpoint, owned.child.id())
+        {
+            unhealthy = 0;
+            if !ready {
+                ready = true;
+                ever_ready = true;
+                let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
+                snapshot.ready = true;
+                snapshot.ready_generation = snapshot.ready_generation.saturating_add(1);
+                snapshot.detail = "Managed OpenRGB SDK ready".into();
+            }
+            if Instant::now() >= inventory_at {
+                inventory_at = Instant::now() + timing.inventory_interval;
+                match scan_inventory(config.endpoint, &|| state.cancel.load(Ordering::SeqCst)) {
+                    Ok((count, fingerprint))
+                        if !state.cancel.load(Ordering::SeqCst)
+                            && listener_owned(config.endpoint, owned.child.id()) =>
+                    {
+                        inventory.observe(count, fingerprint, state)
+                    }
+                    Err(e) if !state.cancel.load(Ordering::SeqCst) => state.detail(format!(
+                        "Managed OpenRGB SDK ready; inventory scan unavailable: {e}"
+                    )),
+                    _ => {}
+                }
+            }
+            if began.elapsed() >= Duration::from_secs(60) {
+                retry.failures = 0;
+            }
+        } else {
+            unhealthy += 1;
+            if ready {
+                state.detail("Managed OpenRGB SDK temporarily unavailable");
+            }
+            ready = false;
+            state
+                .snapshot
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .ready = false;
+            if state.restarting.load(Ordering::SeqCst)
+                && ((ever_ready && unhealthy >= 3)
+                    || (!ever_ready && began.elapsed() >= timing.startup_limit))
+            {
+                state.lifecycle(owned.child.id(), format!("SDK unhealthy; restarting owned child (failures={unhealthy}, ready_before={ever_ready}, uptime_ms={})", began.elapsed().as_millis()));
+                break;
+            }
+        }
+        let next_health = Instant::now() + timing.health_interval;
+        while Instant::now() < next_health {
+            if state.cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            match owned.child.try_wait() {
+                Ok(None) => {}
+                Ok(Some(status)) => {
+                    state.lifecycle(owned.child.id(), format!("exited: {status}"));
+                    break 'monitor;
+                }
+                Err(e) => {
+                    state.lifecycle(owned.child.id(), format!("child status failed: {e}"));
+                    break 'monitor;
+                }
+            }
+            thread::sleep(
+                timing
+                    .poll
+                    .min(next_health.saturating_duration_since(Instant::now())),
+            );
+        }
+    }
+}
+
+// Device identity/topology helpers intentionally exclude current colors and mode
+// values. SDKIDs remain part of routing; sort away response-list ordering only.
+fn fingerprint(controllers: &[crate::transport::openrgb::ControllerInfo]) -> [u8; 32] {
+    let mut entries = controllers
+        .iter()
+        .map(|c| {
+            (
+                c.id,
+                crate::devices::openrgb::identity(c),
+                crate::devices::openrgb::topology(c),
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort_unstable();
+    Sha256::digest(serde_json::to_vec(&entries).expect("bounded controller fingerprints")).into()
+}
+
+fn scan_inventory(
+    endpoint: SocketAddr,
+    cancelled: &impl Fn() -> bool,
+) -> Result<(usize, [u8; 32]), String> {
+    // One shared deadline bounds connect+scan. Session checks cancellation every
+    //10ms, so a slow large inventory never delays owner shutdown to this limit.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut session =
+        crate::transport::openrgb::OpenRgbSession::connect(endpoint, deadline, cancelled)?;
+    session
+        .scan(deadline, cancelled)
+        .map(|controllers| (controllers.len(), fingerprint(&controllers)))
+}
+
+struct InventoryWatch {
+    last: [u8; 32],
+}
+impl Default for InventoryWatch {
+    fn default() -> Self {
+        Self {
+            last: fingerprint(&[]),
+        }
+    }
+}
+impl InventoryWatch {
+    fn observe(&mut self, count: usize, fingerprint: [u8; 32], state: &Shared) {
+        let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
+        if self.last != fingerprint {
+            self.last = fingerprint;
+            snapshot.ready_generation = snapshot.ready_generation.saturating_add(1);
+        }
+        snapshot.detail = if count == 0 {
+            "Managed OpenRGB SDK ready; waiting for inventory (0 controllers)".into()
+        } else {
+            format!("Managed OpenRGB SDK ready; inventory {count} controllers")
+        };
+    }
 }
 
 // Same protocol6 negotiation as vendor/openrgb2/src/protocol/{mod,stream}.rs.
@@ -804,6 +921,10 @@ pub fn listener_owner(_: SocketAddr) -> Result<Option<u32>, String> {
 fn listener_owned(endpoint: SocketAddr, pid: u32) -> bool {
     listener_owner(endpoint).ok().flatten() == Some(pid)
 }
+
+#[cfg(all(test, windows))]
+#[path = "managed_backend/inventory_tests.rs"]
+mod inventory_tests;
 
 #[cfg(test)]
 mod tests {
