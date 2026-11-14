@@ -280,24 +280,19 @@ fn proxy_loop(
     let mut heartbeat = Instant::now();
     while !stop.load(Ordering::SeqCst) {
         if heartbeat.elapsed() >= Duration::from_millis(600) {
-            // Do not replace a newer session's request with an old heartbeat.
-            let owns = read_json::<Request>(&directory.join("owner-request.json"))
-                .ok()
-                .is_some_and(|r| r.nonce == request.nonce && r.parent == request.parent);
-            if !owns {
-                break;
-            }
-            let mut current = request.clone();
-            current.timestamp_ms = now_ms();
-            current.restarting = restarting.load(Ordering::SeqCst);
-            if let Err(error) = write_json(&directory.join("owner-request.json"), &current) {
-                *output.lock().unwrap_or_else(|p| p.into_inner()) = Snapshot {
-                    ready_generation: generation,
-                    ready: false,
-                    detail: error,
-                    ..Snapshot::default()
-                };
-                break;
+            match refresh_heartbeat(directory, request, restarting.load(Ordering::SeqCst)) {
+                Heartbeat::Lost => break,
+                Heartbeat::Retry(error) => {
+                    *output.lock().unwrap_or_else(|p| p.into_inner()) = Snapshot {
+                        ready_generation: generation,
+                        ready: false,
+                        detail: error,
+                        ..Snapshot::default()
+                    };
+                    thread::sleep(POLL);
+                    continue; // Never launch a task while owner control I/O is unavailable.
+                }
+                Heartbeat::Published => {}
             }
             heartbeat = Instant::now();
         }
@@ -357,6 +352,30 @@ fn proxy_loop(
     let mut snapshot = output.lock().unwrap_or_else(|p| p.into_inner());
     snapshot.ready = false;
     snapshot.detail = "Backend helper client ownership ended".into();
+}
+
+enum Heartbeat {
+    Published,
+    Retry(String),
+    Lost,
+}
+fn refresh_heartbeat(directory: &Path, request: &Request, restarting: bool) -> Heartbeat {
+    let path = directory.join("owner-request.json");
+    match read_json_typed::<Request>(&path) {
+        Ok(current)
+            if current.version == 1
+                && current.nonce == request.nonce
+                && current.parent == request.parent => {}
+        Ok(_) | Err(ControlRead::Invalid(_)) => return Heartbeat::Lost,
+        Err(ControlRead::Io(error)) => return Heartbeat::Retry(error.to_string()),
+    }
+    let mut current = request.clone();
+    current.timestamp_ms = now_ms();
+    current.restarting = restarting;
+    match write_json(&path, &current) {
+        Ok(()) => Heartbeat::Published,
+        Err(error) => Heartbeat::Retry(error),
+    }
 }
 
 fn valid_status(status: &Status, request: &Request, now: u64) -> bool {
@@ -441,81 +460,145 @@ fn run_helper_inner(state_dir: &Path, pin: Option<(&Path, &str)>) -> Result<(), 
         config.require_identity(executable, sha)?;
     }
     let manager = Manager::start(config)?;
-    let result = (|| {
-        loop {
-            // Any unreadable owner request fails closed; a superseding nonce
-            // ends this session without cancelling or overwriting the new one.
-            let current: Request = read_json(&state_dir.join("owner-request.json"))?;
-            if current.version != 1
-                || current.nonce != request.nonce
-                || current.parent != request.parent
-                || !live_request(&current, now_ms())
-                || identity(request.parent.pid).ok().as_ref() != Some(&request.parent)
-            {
-                break;
-            }
-            if !current.restarting
-                || read_json::<Cancel>(&state_dir.join("owner-pause.json"))
-                    .ok()
-                    .is_some_and(|c| c.version == 1 && c.nonce == request.nonce)
-            {
-                manager.stop_restarting();
-            }
-            if read_json::<Cancel>(&state_dir.join("owner-cancel.json"))
-                .ok()
-                .is_some_and(|c| c.version == 1 && c.nonce == request.nonce)
-            {
-                break;
-            }
-            let snapshot = manager.snapshot();
-            let status = Status {
-                version: 1,
-                nonce: request.nonce.clone(),
-                parent: request.parent.clone(),
-                helper: helper.clone(),
-                timestamp_ms: now_ms(),
-                ready_generation: snapshot.ready_generation,
-                ready: snapshot.ready,
-                backend_pid: snapshot.backend_pid,
-                detail: snapshot.detail.chars().take(1000).collect(),
-            };
-            write_json(&state_dir.join("helper-status.json"), &status)?;
-            thread::sleep(POLL);
-        }
-        Ok(())
-    })();
+    let result = supervise_helper(
+        state_dir,
+        &request,
+        &helper,
+        || manager.snapshot(),
+        || manager.stop_restarting(),
+    );
     manager.stop_restarting();
     drop(manager); // Owns and terminates only this helper's backend child.
     result
 }
 
+fn supervise_helper(
+    state_dir: &Path,
+    request: &Request,
+    helper: &Identity,
+    snapshot: impl Fn() -> super::managed_backend::Snapshot,
+    stop_restarting: impl Fn(),
+) -> Result<(), String> {
+    let mut lease_deadline = Instant::now()
+        + Duration::from_millis(
+            5_000u64.saturating_sub(now_ms().saturating_sub(request.timestamp_ms)),
+        );
+    let mut status_write_failed = false;
+    loop {
+        if Instant::now() >= lease_deadline {
+            break;
+        }
+        if identity(request.parent.pid).ok().as_ref() != Some(&request.parent) {
+            break;
+        }
+        if read_json::<Cancel>(&state_dir.join("owner-cancel.json"))
+            .ok()
+            .is_some_and(|c| c.version == 1 && c.nonce == request.nonce)
+        {
+            break;
+        }
+        if read_json::<Cancel>(&state_dir.join("owner-pause.json"))
+            .ok()
+            .is_some_and(|c| c.version == 1 && c.nonce == request.nonce)
+        {
+            stop_restarting();
+        }
+        match read_json_typed::<Request>(&state_dir.join("owner-request.json")) {
+            Err(ControlRead::Io(_)) => {
+                thread::sleep(POLL);
+                continue;
+            }
+            Err(ControlRead::Invalid(error)) => return Err(error),
+            Ok(current) => {
+                if current.version != 1
+                    || current.nonce != request.nonce
+                    || current.parent != request.parent
+                    || !live_request(&current, now_ms())
+                {
+                    break;
+                }
+                lease_deadline = Instant::now()
+                    + Duration::from_millis(
+                        5_000u64.saturating_sub(now_ms().saturating_sub(current.timestamp_ms)),
+                    );
+                if !current.restarting {
+                    stop_restarting();
+                }
+                if read_json::<Cancel>(&state_dir.join("owner-cancel.json"))
+                    .ok()
+                    .is_some_and(|c| c.version == 1 && c.nonce == request.nonce)
+                {
+                    break;
+                }
+                let snapshot = snapshot();
+                let status = Status {
+                    version: 1,
+                    nonce: request.nonce.clone(),
+                    parent: request.parent.clone(),
+                    helper: helper.clone(),
+                    timestamp_ms: now_ms(),
+                    ready_generation: snapshot.ready_generation,
+                    ready: snapshot.ready,
+                    backend_pid: snapshot.backend_pid,
+                    detail: snapshot.detail.chars().take(1000).collect(),
+                };
+                match write_json(&state_dir.join("helper-status.json"), &status) {
+                    Ok(()) => status_write_failed = false,
+                    Err(error) => {
+                        if !status_write_failed {
+                            eprintln!("Backend helper status publication deferred: {error}");
+                        }
+                        status_write_failed = true;
+                    }
+                }
+            }
+        }
+        thread::sleep(POLL);
+    }
+    Ok(())
+}
+
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
-    let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    read_json_typed(path).map_err(|e| match e {
+        ControlRead::Io(e) => e.to_string(),
+        ControlRead::Invalid(e) => e,
+    })
+}
+enum ControlRead {
+    Io(std::io::Error),
+    Invalid(String),
+}
+fn read_json_typed<T: DeserializeOwned>(path: &Path) -> Result<T, ControlRead> {
+    let metadata = fs::symlink_metadata(path).map_err(ControlRead::Io)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > LIMIT as u64 {
-        return Err("Backend control file must be a bounded regular file".into());
+        return Err(ControlRead::Invalid(
+            "Backend control file must be a bounded regular file".into(),
+        ));
     }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         for ancestor in path.ancestors() {
             if fs::symlink_metadata(ancestor)
-                .map_err(|e| e.to_string())?
+                .map_err(ControlRead::Io)?
                 .file_attributes()
                 & 0x400
                 != 0
             {
-                return Err("Backend control reparse paths are forbidden".into());
+                return Err(ControlRead::Invalid(
+                    "Backend control reparse paths are forbidden".into(),
+                ));
             }
         }
     }
     let mut bytes = Vec::new();
     File::open(path)
-        .map_err(|e| e.to_string())?
+        .map_err(ControlRead::Io)?
         .take(LIMIT as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    let value = super::strict_json::unique_json(&bytes, LIMIT)?;
-    serde_json::from_value(value).map_err(|e| e.to_string())
+        .map_err(ControlRead::Io)?;
+    let value = super::strict_json::unique_json(&bytes, LIMIT).map_err(ControlRead::Invalid)?;
+    serde_json::from_value(value).map_err(|e| ControlRead::Invalid(e.to_string()))
 }
 fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
@@ -679,6 +762,200 @@ fn identity(_: u32) -> Result<Identity, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    fn sharing_fixture(label: &str) -> (PathBuf, Request, Identity) {
+        let directory = std::env::temp_dir().join(format!(
+            "backend-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&directory).unwrap();
+        let helper = identity(std::process::id()).unwrap();
+        let request = Request {
+            version: 1,
+            nonce: label.into(),
+            parent: helper.clone(),
+            timestamp_ms: now_ms(),
+            restarting: true,
+        };
+        write_json(&directory.join("owner-request.json"), &request).unwrap();
+        (directory, request, helper)
+    }
+    #[cfg(windows)]
+    #[test]
+    fn status_and_owner_read_sharing_failures_preserve_supervisor_and_recover() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (directory, request, helper) = sharing_fixture("sharing-recovery");
+        let status_path = directory.join("helper-status.json");
+        fs::write(&status_path, b"{}").unwrap();
+        let reader = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1 | 2)
+            .open(&status_path)
+            .unwrap();
+        let calls = Arc::new(AtomicU64::new(0));
+        let count = calls.clone();
+        let paused = Arc::new(AtomicBool::new(false));
+        let pause_observed = paused.clone();
+        let state_dir = directory.clone();
+        let worker = thread::spawn(move || {
+            supervise_helper(
+                &state_dir,
+                &request,
+                &helper,
+                || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    super::super::managed_backend::Snapshot::default()
+                },
+                || {
+                    pause_observed.store(true, Ordering::SeqCst);
+                },
+            )
+        });
+        thread::sleep(Duration::from_millis(750));
+        assert!(!worker.is_finished());
+        assert!(calls.load(Ordering::SeqCst) >= 2);
+        assert_eq!(fs::read(&status_path).unwrap(), b"{}");
+        drop(reader);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while read_json::<Status>(&status_path).is_err() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let first = read_json::<Status>(&status_path).unwrap();
+        let owner_reader = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(directory.join("owner-request.json"))
+            .unwrap();
+        write_json(
+            &directory.join("owner-pause.json"),
+            &Cancel {
+                version: 1,
+                nonce: "another-owner".into(),
+            },
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(250));
+        assert!(!paused.load(Ordering::SeqCst));
+        write_json(
+            &directory.join("owner-pause.json"),
+            &Cancel {
+                version: 1,
+                nonce: "sharing-recovery".into(),
+            },
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(750));
+        assert!(!worker.is_finished());
+        assert!(
+            paused.load(Ordering::SeqCst),
+            "Stop must suppress respawn even while owner reads are blocked"
+        );
+        drop(owner_reader);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while read_json::<Status>(&status_path).unwrap().timestamp_ms <= first.timestamp_ms
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(read_json::<Status>(&status_path).unwrap().timestamp_ms > first.timestamp_ms);
+        write_json(
+            &directory.join("owner-cancel.json"),
+            &Cancel {
+                version: 1,
+                nonce: "sharing-recovery".into(),
+            },
+        )
+        .unwrap();
+        worker.join().unwrap().unwrap();
+        for name in [
+            "owner-request.json",
+            "owner-cancel.json",
+            "owner-pause.json",
+            "helper-status.json",
+        ] {
+            fs::remove_file(directory.join(name)).unwrap();
+        }
+        fs::remove_dir(directory).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn inaccessible_owner_cannot_extend_last_valid_lease() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (directory, mut request, helper) = sharing_fixture("sharing-expiry");
+        request.timestamp_ms = now_ms().saturating_sub(4_500);
+        write_json(&directory.join("owner-request.json"), &request).unwrap();
+        let reader = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(directory.join("owner-request.json"))
+            .unwrap();
+        let start = Instant::now();
+        supervise_helper(
+            &directory,
+            &request,
+            &helper,
+            || panic!("Unreadable owner must not publish"),
+            || {},
+        )
+        .unwrap();
+        assert!(start.elapsed() < Duration::from_millis(1_000));
+        drop(reader);
+        fs::remove_file(directory.join("owner-request.json")).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn heartbeat_recovers_from_real_windows_sharing_without_losing_nonce() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (directory, request, _) = sharing_fixture("heartbeat-sharing");
+        let path = directory.join("owner-request.json");
+        let reader = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1 | 2)
+            .open(&path)
+            .unwrap();
+        for _ in 0..3 {
+            assert!(matches!(
+                refresh_heartbeat(&directory, &request, true),
+                Heartbeat::Retry(_)
+            ));
+            thread::sleep(POLL);
+        }
+        assert_eq!(
+            read_json::<Request>(&path).unwrap().timestamp_ms,
+            request.timestamp_ms
+        );
+        drop(reader);
+        assert!(matches!(
+            refresh_heartbeat(&directory, &request, false),
+            Heartbeat::Published
+        ));
+        let current = read_json::<Request>(&path).unwrap();
+        assert_eq!(current.nonce, request.nonce);
+        assert!(!current.restarting);
+        assert!(current.timestamp_ms > request.timestamp_ms);
+        let reader = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        assert!(matches!(
+            refresh_heartbeat(&directory, &request, true),
+            Heartbeat::Retry(_)
+        ));
+        drop(reader);
+        let mut other = request.clone();
+        other.nonce = "new-owner".into();
+        write_json(&path, &other).unwrap();
+        assert!(matches!(
+            refresh_heartbeat(&directory, &request, true),
+            Heartbeat::Lost
+        ));
+        assert_eq!(read_json::<Request>(&path).unwrap().nonce, "new-owner");
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
     fn fixture() -> (Request, Status) {
         let parent = Identity {
             pid: 42,
