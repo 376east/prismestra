@@ -34,7 +34,7 @@ class BackendSetupChecks(unittest.TestCase):
         for endpoint in ['127.0.0.1:6789', '[::1]:6790']:
             result = self.setup_backend('-Endpoint', endpoint, '-Force')
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            value = json.loads((self.state / 'managed-openrgb.json').read_text())
+            value = json.loads((self.state / 'managed-openrgb.json').read_text(encoding='utf-8'))
             self.assertEqual(value['endpoint'], endpoint)
             self.assertEqual(value['expected_executable_sha256'], hashlib.sha256(self.exe.read_bytes()).hexdigest())
             self.assertEqual(Path(value['executable']), self.exe)
