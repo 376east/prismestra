@@ -4,6 +4,8 @@ pub mod ambient;
 #[cfg(windows)]
 pub mod ambient_windows;
 pub mod assets;
+#[cfg(windows)]
+pub mod backend_helper;
 pub mod bundle;
 pub mod capture_worker;
 pub mod config;
@@ -15,6 +17,8 @@ pub mod lcd_worker;
 pub mod lighting_bindings;
 #[cfg(windows)]
 pub mod lighting_outputs;
+#[cfg(windows)]
+pub mod managed_backend;
 pub mod preview;
 pub mod runtime;
 pub mod sensor_bindings;

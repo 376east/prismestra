@@ -22,14 +22,15 @@ class PackageChecks(unittest.TestCase):
             portable.mkdir(parents=True)
             (source / "docs").mkdir()
             binary.mkdir()
-            for name in ("Launch Prismestra.ps1", "Open Prismestra.cmd", "Start saved scene.cmd"):
+            for name in ("Launch Prismestra.ps1", "Open Prismestra.cmd", "Start saved scene.cmd", "Configure OpenRGB.ps1"):
                 (portable / name).write_text(name, encoding="utf-8")
             (source / "docs/portable-launch.md").write_text("instructions", encoding="utf-8")
+            (source / "docs/managed-openrgb.md").write_text("backend instructions", encoding="utf-8")
             (portable / "lighting-local.json").write_text("private bindings", encoding="utf-8")
             (portable / "profile.json").write_text("personal scene", encoding="utf-8")
             hashes = release.copy_launch_files(source, binary)
             self.assertEqual(set(hashes), {"Launch Prismestra.ps1", "Open Prismestra.cmd",
-                                           "Start saved scene.cmd", "PORTABLE-LAUNCH.md"})
+                                           "Start saved scene.cmd", "Configure OpenRGB.ps1", "managed-openrgb.md", "PORTABLE-LAUNCH.md"})
             self.assertEqual(set(p.name for p in binary.iterdir()), set(hashes))
             for name, digest in hashes.items():
                 self.assertEqual(digest, release.sha256(binary / name))

@@ -25,6 +25,8 @@ const LIMIT: usize = 1024 * 1024;
 const SCOPE: &str = "pc-control.runtime-desired";
 const ACCEPTED: &str = "Desired state persisted; transport completion is tracked separately";
 pub mod coordinator;
+#[cfg(windows)]
+mod managed_backend;
 mod outputs;
 mod recovery;
 mod registry_input;
@@ -251,6 +253,14 @@ pub struct Runtime {
     capture_view: Option<CaptureView>,
     view_error: Option<String>,
     sample_freshness: Vec<bool>,
+    #[cfg(windows)]
+    managed_backend: Option<super::backend_helper::Backend>,
+    #[cfg(windows)]
+    managed_backend_ids: BTreeSet<String>,
+    #[cfg(windows)]
+    managed_backend_generation: u64,
+    #[cfg(windows)]
+    managed_backend_detail: Option<String>,
 }
 impl Runtime {
     pub fn new(document: Document, journal: Option<PathBuf>) -> Result<Self, String> {
@@ -318,6 +328,14 @@ impl Runtime {
             capture_view: None,
             view_error: None,
             sample_freshness: vec![],
+            #[cfg(windows)]
+            managed_backend: None,
+            #[cfg(windows)]
+            managed_backend_ids: BTreeSet::new(),
+            #[cfg(windows)]
+            managed_backend_generation: 0,
+            #[cfg(windows)]
+            managed_backend_detail: None,
         };
         value.apply_mutes()?;
         Ok(value)
@@ -1062,6 +1080,8 @@ impl Runtime {
         factory: RgbFactory,
     ) -> Result<(), String> {
         self.usable()?;
+        #[cfg(windows)]
+        let factory = self.guard_managed_rgb(id, factory);
         let f = factory.clone();
         self.host.attach_claimed(id, keys.clone(), move |c| f(c))?;
         self.rgb_specs.insert(id.into(), RgbSpec { keys, factory });
@@ -1169,6 +1189,10 @@ impl Runtime {
     }
     pub fn stop(&mut self) {
         self.stopped = true;
+        #[cfg(windows)]
+        if let Some(backend) = &self.managed_backend {
+            backend.stop_restarting();
+        }
         if let Err(error) = self.release_registry_input(crate::clock::monotonic_us()) {
             self.error = Some(error);
         }
@@ -1490,6 +1514,8 @@ impl Runtime {
             return Err("Invalid runtime wall clock".into());
         }
         self.observe(now_us)?;
+        #[cfg(windows)]
+        self.poll_managed_backend();
         let registry_result = self.registry_tick(now_us);
         let result: Result<(), String> = (|| {
             registry_result?;

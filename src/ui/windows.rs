@@ -2878,6 +2878,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         runtime.enable_autonomous_rgb()?;
     }
     if let Some(local) = &native_lighting {
+        runtime.configure_managed_backend(&state_dir, local)?;
         local.attach_missing(&mut runtime, &asset_root)?;
     } else {
         super::stand::attach_missing(&mut runtime, &asset_root, &feed)?;

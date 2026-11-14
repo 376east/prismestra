@@ -122,6 +122,54 @@ fn drain(runtime: &mut Runtime) {
     wait(|| runtime.drained());
 }
 
+#[cfg(windows)]
+#[test]
+fn managed_candidate_without_matching_bindings_keeps_live_owner_until_commit() {
+    let root = std::env::temp_dir().join(format!(
+        "prismestra-managed-plan-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("managed-openrgb.json");
+    std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
+        "version":1,"enabled":true,"executable":std::env::current_exe().unwrap(),
+        "config_dir":root,"endpoint":"127.0.0.1:6742","expected_executable_sha256":"0".repeat(64)
+    })).unwrap()).unwrap();
+    let mut runtime = runtime();
+    runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
+        "127.0.0.1:6742".parse().unwrap(),
+        7,
+    ));
+    runtime.managed_backend_generation = 7;
+    runtime.managed_backend_ids.insert("a".into());
+    let local = crate::app::lighting_outputs::Local {
+        version: 1,
+        devices: Default::default(),
+        monitors: Default::default(),
+        door_brightness: 60,
+    };
+    let document = runtime.document().clone();
+    assert!(
+        !runtime
+            .prepare_managed_outputs(&root, &local, &document, &mut OutputPlan::default())
+            .unwrap()
+    );
+    assert!(runtime.managed_backend.is_some());
+    assert_eq!(runtime.managed_backend_generation, 7);
+    assert!(runtime.managed_backend_ids.contains("a"));
+    // Only the committed new active bindings can release the old owner.
+    runtime.configure_managed_backend(&root, &local).unwrap();
+    assert!(runtime.managed_backend.is_none());
+    assert_eq!(runtime.managed_backend_generation, 0);
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(root).unwrap();
+    drain(&mut runtime);
+}
+
 #[test]
 fn recovery_default_policy_keeps_initial_and_later_failures_terminal() {
     let mut runtime = runtime();
@@ -203,6 +251,45 @@ fn recovery_repeated_initial_factory_failures_exhaust_three_attempts() {
     assert_eq!(link.calls.load(Ordering::SeqCst), 4);
     assert_eq!(runtime.host.status("a").unwrap().submitted, 0);
     assert_eq!(runtime.host.status("a").unwrap().phase, Phase::Failed);
+    #[cfg(windows)]
+    {
+        let other = Arc::new(Link::default());
+        runtime.attach_rgb("b", vec![], factory(&other)).unwrap();
+        working(&mut runtime, "b", &mut now);
+        let other_generation = runtime.host.status("b").unwrap().generation;
+        runtime.managed_backend_ids.insert("a".into());
+        runtime.managed_backend_generation = 1;
+        // Repeated readiness for the same server lifetime cannot refill retry budgets.
+        runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
+            "127.0.0.1:6742".parse().unwrap(),
+            1,
+        ));
+        now += 100_000_000;
+        tick(&mut runtime, &mut now);
+        assert_eq!(link.calls.load(Ordering::SeqCst), 4);
+        // A genuinely recovered backend can restore its output after budget exhaustion.
+        link.fail_open.store(false, Ordering::SeqCst);
+        runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
+            "127.0.0.1:6742".parse().unwrap(),
+            2,
+        ));
+        working(&mut runtime, "a", &mut now);
+        assert_eq!(link.calls.load(Ordering::SeqCst), 5);
+        assert_eq!(other.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            runtime.host.status("b").unwrap().generation,
+            other_generation
+        );
+        runtime.release_managed_backend();
+        assert_eq!(runtime.managed_backend_generation, 0);
+        runtime.managed_backend_ids.insert("a".into());
+        runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
+            "127.0.0.1:6742".parse().unwrap(),
+            2,
+        ));
+        tick(&mut runtime, &mut now);
+        assert_eq!(runtime.managed_backend_generation, 2);
+    }
     drain(&mut runtime);
 }
 

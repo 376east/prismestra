@@ -78,6 +78,8 @@ def copy_launch_files(source, binary):
         "Launch Prismestra.ps1": source / "scripts/portable/Launch Prismestra.ps1",
         "Open Prismestra.cmd": source / "scripts/portable/Open Prismestra.cmd",
         "Start saved scene.cmd": source / "scripts/portable/Start saved scene.cmd",
+        "Configure OpenRGB.ps1": source / "scripts/portable/Configure OpenRGB.ps1",
+        "managed-openrgb.md": source / "docs/managed-openrgb.md",
         "PORTABLE-LAUNCH.md": source / "docs/portable-launch.md",
     }
     for name, path in files.items():

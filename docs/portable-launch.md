@@ -1,6 +1,6 @@
 # Portable launch
 
-Extract the complete Windows ZIP into a folder you can write to. The launchers use the extracted folder, regardless of the current working directory. They do not install anything, request administrator rights, register Windows startup tasks or start OpenRGB.
+Extract the complete Windows ZIP into a folder you can write to. The launchers use the extracted folder, regardless of the current working directory. They do not install anything, request administrator rights or register Windows startup tasks. The native session can start an explicitly configured [managed OpenRGB backend](managed-openrgb.md).
 
 ## First setup
 
@@ -25,7 +25,7 @@ The release ZIP contains no personal profile or state. Your populated folder con
 
 ## OpenRGB and prerequisites
 
-For devices using the OpenRGB adapter, start your own compatible OpenRGB SDK6 server and configure its endpoint in Connections. Direct BLE, Skydimo, LCD, WLED and Home Assistant paths do not become OpenRGB devices through this launcher. Another application's ownership can prevent activation. Keep your fan and pump software running; Prismestra does not control cooling.
+For devices using the OpenRGB adapter, configure [managed local OpenRGB](managed-openrgb.md) or run a compatible external OpenRGB SDK6 server and set its endpoint in Connections. Direct BLE, Skydimo, LCD, WLED and Home Assistant paths do not become OpenRGB devices through this launcher. Another application's ownership can prevent activation. Keep your fan and pump software running; Prismestra does not control cooling.
 
 The package retains the existing Windows x64, Visual C++ v14 and WebView2 requirements described in `START-HERE.md`. To use the classic editor, run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Launch Prismestra.ps1" -ClassicEditor` from the extracted folder; add `-Connected` only to activate the saved scene. The launchers do not install missing runtimes or change machine policy.
 

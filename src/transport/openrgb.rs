@@ -261,6 +261,11 @@ impl OpenRgbSession {
                 async {
                     let group = client.get_all_controllers().await?;
                     let c = exact_controller(&group, expected)?;
+                    if cancelled() {
+                        return Err(openrgb2::OpenRgbError::ProtocolError(
+                            "OpenRGB activation cancelled before changing device mode".into(),
+                        ));
+                    }
                     c.set_controllable_mode().await?;
                     Ok(group
                         .into_iter()

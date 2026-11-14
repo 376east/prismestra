@@ -44,7 +44,10 @@ impl Drop for Lease {
 }
 
 #[derive(Clone, Default)]
-pub struct Cancellation(Arc<AtomicBool>);
+pub struct Cancellation(
+    Arc<AtomicBool>,
+    Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
+);
 impl Cancellation {
     pub(crate) fn cancel(&self) {
         self.0.store(true, Ordering::Release);
@@ -54,7 +57,20 @@ impl Cancellation {
         self.0.store(true, Ordering::Release);
     }
     pub fn cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.load(Ordering::Acquire) || self.1.as_ref().is_some_and(|guard| guard().is_err())
+    }
+    /// Carry ownership checks through native connection setup, including mode writes.
+    pub fn with_guard(&self, guard: Arc<dyn Fn() -> Result<(), String> + Send + Sync>) -> Self {
+        let previous = self.1.clone();
+        Self(
+            self.0.clone(),
+            Some(Arc::new(move || {
+                if let Some(previous) = &previous {
+                    previous()?;
+                }
+                guard()
+            })),
+        )
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,7 +186,7 @@ impl Output {
                 },
             }),
             wake: Condvar::new(),
-            cancel: Cancellation(Arc::new(AtomicBool::new(false))),
+            cancel: Cancellation::default(),
         });
         let worker = shared.clone();
         let thread = std::thread::Builder::new()
@@ -359,6 +375,26 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn connection_guard_rechecks_ownership_and_preserves_shared_cancellation() {
+        let original = Cancellation::default();
+        let owner = Arc::new(AtomicBool::new(true));
+        let check = owner.clone();
+        let guarded = original.with_guard(Arc::new(move || {
+            if check.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err("Owner lost".into())
+            }
+        }));
+        assert!(!guarded.cancelled());
+        owner.store(false, Ordering::Release);
+        assert!(guarded.cancelled());
+        assert!(!original.cancelled());
+        owner.store(true, Ordering::Release);
+        original.cancel();
+        assert!(guarded.cancelled());
+    }
     use super::*;
     use std::sync::mpsc;
     struct Fake {

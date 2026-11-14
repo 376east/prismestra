@@ -534,7 +534,16 @@ impl App {
         } else {
             "Сейчас: программный предпросмотр; физические выходы не подключены."
         };
-        self.set_text(ACTIVE_STATUS, active);
+        let backend = self
+            .runtime
+            .read(|runtime| runtime.managed_backend_detail().map(str::to_owned));
+        self.set_text(
+            ACTIVE_STATUS,
+            &backend.map_or_else(
+                || active.to_owned(),
+                |backend| format!("{active} · {backend}"),
+            ),
+        );
         let switching = self.connections.pending.is_some();
         let ready = self.connections.workspace.is_some() && !switching;
         self.set_text(
@@ -757,7 +766,33 @@ impl App {
                                 .map_err(|_| "Введите IP:порт SDK-сервера OpenRGB")?,
                         );
                         self.connections.scan_endpoint = Some(self.text(ENDPOINT));
-                        discovery::openrgb_factory(endpoint)
+                        let factory = discovery::openrgb_factory(endpoint);
+                        if let Some(guard) = self.runtime.with(|runtime, _| {
+                            runtime.managed_discovery_guard(&self.state_dir, endpoint)
+                        })? {
+                            std::sync::Arc::new(
+                                move |target, cancel: crate::runtime::output::Cancellation| {
+                                    let until = Instant::now() + std::time::Duration::from_secs(35);
+                                    loop {
+                                        if cancel.cancelled() {
+                                            return Err("OpenRGB discovery cancelled".into());
+                                        }
+                                        match guard() {
+                                            Ok(()) => break,
+                                            Err(error) if Instant::now() >= until => {
+                                                return Err(error);
+                                            }
+                                            Err(_) => std::thread::sleep(
+                                                std::time::Duration::from_millis(100),
+                                            ),
+                                        }
+                                    }
+                                    factory(target, cancel.with_guard(guard.clone()))
+                                },
+                            ) as discovery::Factory
+                        } else {
+                            factory
+                        }
                     }
                 } else {
                     self.connections.scan_endpoint = None;
@@ -955,13 +990,18 @@ impl App {
             .activation
             .as_ref()
             .ok_or("Применение к устройствам в этом снимке отключено")?;
-        let (document, plan, local) = if revert {
+        let (document, mut plan, local) = if revert {
             let old = self
                 .connections
                 .previous
                 .as_ref()
                 .ok_or("Нет предыдущего подключения")?;
-            (old.document.clone(), old.plan.clone(), old.local.clone())
+            let plan = if let Some(local) = &old.local {
+                (activation.factory)(local, &old.document, &self.asset_root)?
+            } else {
+                old.plan.clone()
+            };
+            (old.document.clone(), plan, old.local.clone())
         } else {
             let mut document = self.runtime.document().clone();
             let local =
@@ -1002,7 +1042,23 @@ impl App {
             plan: self.runtime.output_plan(),
             local: self.native_lighting.clone(),
         };
-        let revision = self.runtime.request_outputs_for(document, plan)?;
+        plan.validate(&document)?;
+        let revision = self.runtime.with(|runtime, _| {
+            let created = if let Some(local) = &local {
+                runtime.prepare_managed_outputs(&self.state_dir, local, &document, &mut plan)?
+            } else {
+                false
+            };
+            match runtime.request_outputs_for(document, plan) {
+                Ok(revision) => Ok(revision),
+                Err(error) => {
+                    if created {
+                        runtime.release_managed_backend();
+                    }
+                    Err(error)
+                }
+            }
+        })?;
         self.connections.pending = Some(Pending {
             reverting: revert,
             revision,
@@ -1048,15 +1104,6 @@ impl App {
                 self.status =
                     "Подключения выбраны; ожидаю открытия устройств. Файл привязок не изменён."
                         .into();
-                if self.native_lighting.is_some()
-                    && let Err(error) = self.runtime.with(|runtime, _| {
-                        runtime.enable_registered_output_recovery();
-                        Ok(())
-                    })
-                {
-                    self.status =
-                        format!("Подключения выбраны, восстановление не включено: {error}");
-                }
                 unsafe {
                     SetWindowTextW(
                         GetParent(self.h(PC_ON)),
@@ -1103,6 +1150,17 @@ impl App {
             } else {
                 self.connections.watch_outputs = true;
                 self.status="Применение отменено. Восстанавливаются прежние подключения; файл привязок не изменён.".into();
+            }
+            if let Err(error) = self.runtime.with(|runtime, _| {
+                runtime.enable_registered_output_recovery();
+                if let Some(local) = &self.native_lighting {
+                    runtime.configure_managed_backend(&self.state_dir, local)?;
+                } else {
+                    runtime.release_managed_backend();
+                }
+                Ok(())
+            }) {
+                self.status = format!("Состояние локального backend: {error}");
             }
             self.refresh_connections();
             self.show_page();
