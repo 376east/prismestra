@@ -56,6 +56,78 @@ fn setup() -> Setup {
         },
     }
 }
+
+fn metadata_headers(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    // Windows accepted sockets can retain the listener's nonblocking mode.
+    // The fixture polls accept(), but header reads must wait for the client;
+    // a read timeout alone does not switch the socket back to blocking I/O.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let mut request = Vec::new();
+    while !request.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        stream.read_exact(&mut byte)?;
+        request.push(byte[0]);
+        if request.len() >= 8192 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "metadata request headers exceed fixture limit",
+            ));
+        }
+    }
+    Ok(request)
+}
+
+#[test]
+fn metadata_fixture_waits_for_delayed_fragmented_headers_on_accepted_socket() {
+    use std::{
+        io::Write,
+        net::{TcpListener, TcpStream},
+        sync::mpsc,
+    };
+    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = tcp.local_addr().unwrap();
+    let (accepted, ready) = mpsc::channel();
+    let (finished, result) = mpsc::channel();
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = tcp.accept().unwrap();
+        // Reproduce the socket mode seen after accepting from the nonblocking
+        // listener in the identity test, independently of platform inheritance.
+        stream.set_nonblocking(true).unwrap();
+        accepted.send(()).unwrap();
+        finished.send(metadata_headers(&mut stream)).unwrap();
+    });
+    let mut client = TcpStream::connect(endpoint).unwrap();
+    ready.recv_timeout(Duration::from_secs(2)).unwrap();
+    // A correct fixture waits for bytes, rather than interpreting WouldBlock as
+    // an HTTP failure before the connected client gets scheduled to send.
+    assert!(
+        matches!(
+            result.recv_timeout(Duration::from_millis(30)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "fixture completed before the client sent any headers"
+    );
+    client
+        .write_all(b"GET /json/info HTTP/1.1\r\nHost: fixture\r\n")
+        .unwrap();
+    assert!(
+        matches!(
+            result.recv_timeout(Duration::from_millis(30)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "fixture completed before the final header delimiter"
+    );
+    client.write_all(b"\r\n").unwrap();
+    let request = result
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(request, b"GET /json/info HTTP/1.1\r\nHost: fixture\r\n\r\n");
+    drop(client);
+    peer.join().unwrap();
+}
 #[test]
 fn verified_wled_checks_identity_before_any_udp_output_and_adopts_geometry() {
     use pc_control::app::{
@@ -144,7 +216,7 @@ fn discovered_identity_survives_save_output_and_rejects_a_replaced_controller() 
         lighting_bindings::discovery,
     };
     use pc_control::runtime::output::{Cancellation, Phase};
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
 
     let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -167,16 +239,7 @@ fn discovered_identity_survives_save_output_and_rejects_a_replaced_controller() 
                     Err(error) => panic!("metadata fixture: {error}"),
                 }
             };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                let mut byte = [0];
-                stream.read_exact(&mut byte).unwrap();
-                request.push(byte[0]);
-                assert!(request.len() < 8192);
-            }
+            let request = metadata_headers(&mut stream).expect("metadata fixture request headers");
             assert!(request.starts_with(b"GET /json/info HTTP/1.1"));
             let body = format!(r#"{{"mac":"{mac}","leds":{{"count":3}}}}"#);
             write!(
