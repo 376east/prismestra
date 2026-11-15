@@ -559,6 +559,10 @@ fn command(config: &Config) -> Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        // OpenRGB initializes its default settings/log directory before parsing
+        // --config. Isolate that early access too; never rotate the user's
+        // separately installed OpenRGB logs or read its settings at startup.
+        command.env("APPDATA", &config.config_dir);
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW; no elevation/shell.
     }
     command
@@ -966,6 +970,10 @@ mod tests {
                 config.config_dir.to_str().unwrap()
             ]
         );
+        #[cfg(windows)]
+        assert!(command.get_envs().any(|(key, value)| {
+            key == "APPDATA" && value == Some(config.config_dir.as_os_str())
+        }));
     }
 
     #[test]

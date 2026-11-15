@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "repository": "https://github.com/hello-nexus/openrgb-headless",
+  "revision": "6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43",
+  "patch": "prismestra-pc.patch",
+  "patch_sha256": "0a6bbf70231e780b564e95c1b7d5e48310b52fb103f6d6234ea888679f27d6f9",
+  "configuration": [
+    "release",
+    "prismestra_pc_backend"
+  ],
+  "untracked_source_paths": [],
+  "binary_status": "evaluation candidate; not yet bundled with the public application",
+  "excluded_features": [
+    "Philips Hue via hueplusplus (use separate home-lighting adapters)",
+    "unconditional Windows timer-resolution worker"
+  ],
+  "limitations": [
+    "mid-scan contention is Partial and requires explicit rescan",
+    "synchronous driver IOCTLs cannot be cancelled by mutex timeout",
+    "other hardware and clean Windows remain unverified"
+  ]
+}
