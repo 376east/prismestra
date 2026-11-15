@@ -32,7 +32,10 @@
   },
   "repeated_startup": {
     "same_app_helper_backend": true,
-    "existing_task_results": [0, 0],
+    "existing_task_results": [
+      0,
+      0
+    ],
     "new_task_registration": false,
     "new_uac_or_driver_install": false
   },
@@ -48,5 +51,31 @@
     "Signing, bit reproducibility and fully offline component rebuild"
   ],
   "historical_140_second_native_failure_preserved": true,
-  "public_binary_release": false
+  "public_binary_release": false,
+  "final_app_only_restart_regression": {
+    "app_commit": "66efb24a388c42a37a5645298b6b1f46472b54d6",
+    "inventory": 2,
+    "ram_output_restored": false,
+    "smbus_owner_read_only_query": "living FanControl thread",
+    "thread_wait_query": "access denied",
+    "installed_blacksharp_windows_abandoned_wait_defect_confirmed": true,
+    "historical_abandonment_transition": "UNKNOWN",
+    "foreign_processes_settings_and_mutex_ownership_modified": false
+  },
+  "cooperative_shutdown_candidate": {
+    "engine_sha256": "91e754bb908f9ba2a2a1eb3770e884ef74c2e30d10a6ad5fbb678d5ec1556f07",
+    "patch_sha256": "c1e5eaa79798ad5c4a6b676d174ddb91d7da30023413a879f192a6a63589358f",
+    "rust_tests_passed": 632,
+    "rust_ignored": 7,
+    "static_gate_tests_passed": 17,
+    "runtime_files_checked": 14,
+    "no_hardware_pipe_cases_passed": 8,
+    "console_parent_covered": true,
+    "actual_sdk6_smoke": "PASS",
+    "independent_review_open_confirmed_P1_P2": 0,
+    "managed_default_opt_in": false,
+    "parent_grace_seconds": 3,
+    "hardware_cleanup_and_installed_recovery": "NOT YET VERIFIED",
+    "hard_crash_and_hung_kernel_abandonment_solved": false
+  }
 }

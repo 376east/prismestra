@@ -914,11 +914,107 @@ index e9ddcffcab29af0fcdf436537c2750bfd9c87c49..03eba22a9ce41f20471fc68839c4be97
      std::string name;
      HANDLE      handle;
  };
+diff --git a/startup/ParentPipe.h b/startup/ParentPipe.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b22a43135822d0730b9fe0e3bc995929c71ee06
+--- /dev/null
++++ b/startup/ParentPipe.h
+@@ -0,0 +1,24 @@
++// Optional private owner-lifetime pipe; no public shutdown endpoint.
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#if defined(_WIN32) && defined(PRISMESTRA_PC_BACKEND)
++#include <windows.h>
++
++inline HANDLE PrismestraParentPipe()
++{
++    WCHAR enabled[2] = {};
++    if(GetEnvironmentVariableW(L"PRISMESTRA_PARENT_PIPE", enabled, 2) != 1 || enabled[0] != L'1')
++        return NULL;
++    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
++    return input && input != INVALID_HANDLE_VALUE && GetFileType(input) == FILE_TYPE_PIPE ? input : NULL;
++}
++
++inline bool PrismestraParentPipeClosed(HANDLE input)
++{
++    DWORD available = 0;
++    // The parent never writes data. EOF is detected without a blocking reader
++    // thread; an unusable inherited pipe also ends this opted-in session.
++    return !PeekNamedPipe(input, NULL, 0, NULL, &available, NULL);
++}
++#endif
 diff --git a/startup/main_Windows.cpp b/startup/main_Windows.cpp
-index dd6228967b72f9c818395e5a0fae76c8416d9604..4cd86f2e87da6952ea34ffadd0262e6ab9a398b7 100644
+index dd6228967b72f9c818395e5a0fae76c8416d9604..c85c4f6250a0f133ea41f5fd74211c8b3eadeab3 100644
 --- a/startup/main_Windows.cpp
 +++ b/startup/main_Windows.cpp
-@@ -581,9 +581,11 @@ static int common_main(int argc, char* argv[])
+@@ -10,6 +10,7 @@
+ \*---------------------------------------------------------*/
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <condition_variable>
+ #include <mutex>
+ #include <stdio.h>
+@@ -24,6 +25,7 @@
+ #include "DetectionManager.h"
+ #include "ResourceManager.h"
+ #include "StringUtils.h"
++#include "ParentPipe.h"
+ 
+ using namespace std::chrono_literals;
+ 
+@@ -39,7 +41,7 @@ static SERVICE_STATUS_HANDLE service_status_handle;
+ static SERVICE_STATUS        service_status;
+ 
+ static bool                  started_as_service;
+-static volatile bool         service_stop_requested;
++static std::atomic<bool>     service_stop_requested{false};
+ static std::mutex            service_stop_mutex;
+ static std::condition_variable service_stop_cv;
+ static bool                  have_console;
+@@ -448,7 +450,12 @@ int main(int argc, char* argv[])
+     /*-----------------------------------------------------*\
+     | Attach console output                                 |
+     \*-----------------------------------------------------*/
++#ifdef PRISMESTRA_PC_BACKEND
++    // Attaching/reopening CONIN$ would replace the private lifetime pipe.
++    if(!PrismestraParentPipe() && AttachConsole(ATTACH_PARENT_PROCESS))
++#else
+     if(AttachConsole(ATTACH_PARENT_PROCESS))
++#endif
+     {
+         /*-------------------------------------------------*\
+         | We are running under some terminal context;       |
+@@ -522,14 +529,26 @@ void InitializeTimerResolutionThreadFunction()
+ static void WaitWhileServerOnline(NetworkServer* srv)
+ {
+     std::unique_lock<std::mutex> lock(service_stop_mutex);
++#ifdef PRISMESTRA_PC_BACKEND
++    HANDLE parent_pipe = PrismestraParentPipe();
++#endif
+     while(srv->GetOnline())
+     {
+-        if(service_stop_requested)
++        bool stop_requested = service_stop_requested;
++#ifdef PRISMESTRA_PC_BACKEND
++        stop_requested = stop_requested || (parent_pipe && PrismestraParentPipeClosed(parent_pipe));
++#endif
++        if(stop_requested)
+         {
++            LOG_INFO("Headless server stop requested; draining owned resources");
+             srv->StopServer();
+             break;
+         }
++#ifdef PRISMESTRA_PC_BACKEND
++        service_stop_cv.wait_for(lock, parent_pipe ? 50ms : 1000ms);
++#else
+         service_stop_cv.wait_for(lock, 1s);
++#endif
+     };
+ }
+ 
+@@ -581,9 +600,11 @@ static int common_main(int argc, char* argv[])
      /*-----------------------------------------------------*\
      | Start timer resolution correction thread              |
      \*-----------------------------------------------------*/
@@ -930,6 +1026,32 @@ index dd6228967b72f9c818395e5a0fae76c8416d9604..4cd86f2e87da6952ea34ffadd0262e6a
  
      /*-----------------------------------------------------*\
      | Initialize ResourceManager                            |
+diff --git a/startup/startup.cpp b/startup/startup.cpp
+index 522eda75e911b103987e79f16d1fe56104c45a6f..67f2775fe93e497e1ddd26eff90dc38f4e278da0 100644
+--- a/startup/startup.cpp
++++ b/startup/startup.cpp
+@@ -14,6 +14,7 @@
+ #include "ResourceManager.h"
+ #include "NetworkServer.h"
+ #include "startup.h"
++#include "ParentPipe.h"
+ 
+ #ifdef __linux__
+ #include <csignal>
+@@ -62,6 +63,13 @@ int startup(int /*argc*/, char* /*argv*/[], unsigned int ret_flags)
+         return EXIT_FAILURE;
+     }
+ 
++#if defined(_WIN32) && defined(PRISMESTRA_PC_BACKEND)
++    // common_main owns the cooperative stop and ordered cleanup path. Keep the
++    // original blocking startup for standalone/non-opted-in invocations.
++    if(PrismestraParentPipe() && !(ret_flags & RET_FLAG_START_GUI))
++        return EXIT_SUCCESS;
++#endif
++
+     /*-----------------------------------------------------*\
+     | Block forever — the SDK server runs on a background   |
+     | thread, so we'd otherwise return immediately. Sleep   |
 diff --git a/tests/DeferredI2CPolicyTest.cpp b/tests/DeferredI2CPolicyTest.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..d1c224b9327a79f42791753dca4a564d53de3497

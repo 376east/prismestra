@@ -78,6 +78,7 @@ fn fixture_manager(directory: &Path) -> (Manager, SocketAddr) {
             config_dir: directory,
             endpoint,
             expected_executable_sha256: "a".repeat(64),
+            graceful_shutdown: false,
         };
         monitor_owned(
             &config,

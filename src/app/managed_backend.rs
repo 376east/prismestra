@@ -28,6 +28,9 @@ pub struct Config {
     config_dir: PathBuf,
     endpoint: SocketAddr,
     expected_executable_sha256: String,
+    /// Opt in only for a pinned backend implementing PRISMESTRA_PARENT_PIPE=1.
+    #[serde(default)]
+    graceful_shutdown: bool,
 }
 
 impl Config {
@@ -350,6 +353,7 @@ impl Retry {
 
 struct OwnedChild {
     child: Child,
+    running: bool,
     _image: File,
     #[cfg(windows)]
     _job: JobHandle,
@@ -445,8 +449,9 @@ fn spawn_owned(command: &mut Command, image: File) -> Result<OwnedChild, String>
     }
     // No backend instruction executes until assignment to the non-inheritable job.
     command.creation_flags(0x0800_0000 | 0x0000_0004); // CREATE_NO_WINDOW | CREATE_SUSPENDED
-    let owned = OwnedChild {
+    let mut owned = OwnedChild {
         child: command.spawn().map_err(err)?,
+        running: false,
         _image: image,
         _job: job,
     };
@@ -491,6 +496,7 @@ fn spawn_owned(command: &mut Command, image: File) -> Result<OwnedChild, String>
     if resumed != 1 {
         return Err("Could not resume suspended backend exactly once".into());
     }
+    owned.running = true;
     Ok(owned)
 }
 
@@ -502,6 +508,24 @@ impl Drop for OwnedChild {
     fn drop(&mut self) {
         if matches!(self.child.try_wait(), Ok(Some(_))) {
             return;
+        }
+        let cooperative = self.running && self.child.stdin.is_some();
+        // The sole parent write-end is the lease. EOF requests the component's
+        // normal StopServer/ServiceShutdown/Cleanup path; never write commands.
+        drop(self.child.stdin.take());
+        if cooperative {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                match self.child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) => thread::sleep(Duration::from_millis(10)),
+                    Err(_) => break,
+                }
+            }
+            eprintln!(
+                "Managed OpenRGB child {}: cooperative shutdown did not finish within 3s; terminating owned process",
+                self.child.id()
+            );
         }
         let _ = self.child.kill();
         let deadline = Instant::now() + Duration::from_millis(300);
@@ -553,9 +577,15 @@ fn command(config: &Config) -> Command {
         .arg("--noautoconnect")
         .arg("--config")
         .arg(&config.config_dir)
+        .env_remove("PRISMESTRA_PARENT_PIPE")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if config.graceful_shutdown {
+        command
+            .env("PRISMESTRA_PARENT_PIPE", "1")
+            .stdin(Stdio::piped());
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -1040,6 +1070,7 @@ mod tests {
             config_dir: std::env::temp_dir(),
             endpoint: "127.0.0.1:6742".parse().unwrap(),
             expected_executable_sha256: "a".repeat(64),
+            graceful_shutdown: false,
         }
     }
 
@@ -1055,6 +1086,26 @@ mod tests {
         config = fixture();
         config.expected_executable_sha256 = "z".repeat(64);
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn graceful_shutdown_is_explicit_and_does_not_leak_inherited_opt_in() {
+        let mut value = serde_json::json!({"version":1,"enabled":true,"executable":"a","config_dir":"b","endpoint":"127.0.0.1:6742","expected_executable_sha256":"a".repeat(64)});
+        let legacy: Config = serde_json::from_value(value.clone()).unwrap();
+        assert!(!legacy.graceful_shutdown);
+        assert!(
+            command(&legacy)
+                .get_envs()
+                .any(|(key, value)| { key == "PRISMESTRA_PARENT_PIPE" && value.is_none() })
+        );
+        value["graceful_shutdown"] = true.into();
+        let enabled: Config = serde_json::from_value(value.clone()).unwrap();
+        assert!(enabled.graceful_shutdown);
+        assert!(command(&enabled).get_envs().any(|(key, value)| {
+            key == "PRISMESTRA_PARENT_PIPE" && value == Some(std::ffi::OsStr::new("1"))
+        }));
+        value["graceful_shutdown"] = "true".into();
+        assert!(serde_json::from_value::<Config>(value).is_err());
     }
 
     #[test]
@@ -1205,6 +1256,103 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "fixture process; launched only by owned_child EOF test"]
+    fn fake_child_exits_on_stdin_eof() {
+        fs::write(
+            std::env::var_os("PRISMESTRA_TEST_EOF_READY").unwrap(),
+            b"ready",
+        )
+        .unwrap();
+        let mut input = Vec::new();
+        std::io::stdin().read_to_end(&mut input).unwrap();
+        assert!(
+            input.is_empty(),
+            "parent must close the pipe, never send commands"
+        );
+        fs::write(
+            std::env::var_os("PRISMESTRA_TEST_EOF_EXIT").unwrap(),
+            b"clean EOF",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn owned_child_eof_exits_cleanly_and_uncooperative_child_is_bounded() {
+        use windows_sys::Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{OpenProcess, WaitForSingleObject},
+        };
+        let directory = std::env::temp_dir().join(format!(
+            "prismestra-eof-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let ready = directory.join("ready");
+        let exit = directory.join("exit");
+        let image = std::env::current_exe().unwrap();
+        let mut command = Command::new(&image);
+        command
+            .args([
+                "--exact",
+                "app::managed_backend::tests::fake_child_exits_on_stdin_eof",
+                "--ignored",
+            ])
+            .env("PRISMESTRA_TEST_EOF_READY", &ready)
+            .env("PRISMESTRA_TEST_EOF_EXIT", &exit)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let owned = spawn_owned(&mut command, regular_file(&image).unwrap()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "EOF fixture did not initialize");
+        let handle = unsafe { OpenProcess(0x0010_0000, 0, owned.child.id()) };
+        assert!(!handle.is_null());
+        let began = Instant::now();
+        drop(owned);
+        assert!(began.elapsed() < Duration::from_secs(2));
+        assert_eq!(fs::read(&exit).unwrap(), b"clean EOF");
+        assert_eq!(unsafe { WaitForSingleObject(handle, 0) }, 0);
+        unsafe {
+            CloseHandle(handle);
+        }
+        fs::remove_file(ready).unwrap();
+        fs::remove_file(exit).unwrap();
+
+        // This existing fixture deliberately ignores stdin and sleeps. The same
+        // retained process handle must signal after the three-second fallback.
+        let mut command = Command::new(&image);
+        command
+            .args([
+                "--exact",
+                "app::managed_backend::tests::fake_child_wait",
+                "--ignored",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let owned = spawn_owned(&mut command, regular_file(&image).unwrap()).unwrap();
+        let handle = unsafe { OpenProcess(0x0010_0000, 0, owned.child.id()) };
+        assert!(!handle.is_null());
+        let began = Instant::now();
+        drop(owned);
+        assert!(began.elapsed() >= Duration::from_secs(3));
+        assert!(began.elapsed() < Duration::from_secs(5));
+        assert_eq!(unsafe { WaitForSingleObject(handle, 0) }, 0);
+        unsafe {
+            CloseHandle(handle);
+        }
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
     #[cfg(windows)]
     #[ignore = "fixture owner; launched only by hard_owner_crash test"]
     fn fake_owner_wait() {
@@ -1216,7 +1364,9 @@ mod tests {
                 "app::managed_backend::tests::fake_child_wait",
                 "--ignored",
             ])
-            .stdin(Stdio::null())
+            // Even with the cooperative pipe open, owner TerminateProcess must
+            // still close the job and kill an uncooperative backend immediately.
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let owned = spawn_owned(&mut command, regular_file(&image).unwrap()).unwrap();
