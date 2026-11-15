@@ -3,7 +3,7 @@
   "repository": "https://github.com/hello-nexus/openrgb-headless",
   "revision": "6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43",
   "patch": "prismestra-pc.patch",
-  "patch_sha256": "cb5a4d785c0cd67d7995125a5314b4b791fc989017a53f8d7127b34406f89e3c",
+  "patch_sha256": "6475e50f76eb60a3cfcdc82423de15e63e4b91e9a41f06e8e42d3145f78249ee",
   "configuration": [
     "release",
     "prismestra_pc_backend"
@@ -18,10 +18,11 @@
     "mid-scan contention is Partial and requires explicit rescan",
     "synchronous driver IOCTLs cannot be cancelled by mutex timeout",
     "other hardware and clean Windows remain unverified",
-    "cooperative shutdown has a 3-second parent grace; hard crash or forced termination can still abandon shared mutexes"
+    "cooperative shutdown has a 30-second parent grace; hard crash or forced termination can still abandon shared mutexes"
   ],
   "optional_capabilities": [
-    "PRISMESTRA_PARENT_PIPE=1 cooperative shutdown; managed opt-in defaults false"
+    "PRISMESTRA_PARENT_PIPE=1 cooperative shutdown; managed opt-in defaults false",
+    "terminal managed-owner EOF cancels queued I2C discovery before shutdown wait"
   ],
   "timer_policy": {
     "resolution_ms": 1,

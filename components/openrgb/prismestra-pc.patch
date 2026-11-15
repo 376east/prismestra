@@ -131,10 +131,10 @@ index 0000000000000000000000000000000000000000..6b23c5f3864005da8cbe52adda0c735c
 +}
 +}
 diff --git a/DetectionManager.cpp b/DetectionManager.cpp
-index 4a5290a8ef3bd45b701d52e6436c854b6c308552..885dbe7914172df0334e8a4b6e1333bcec66f63a 100644
+index 4a5290a8ef3bd45b701d52e6436c854b6c308552..f8681e9384e36c01178c83489fccef9ba4170c06 100644
 --- a/DetectionManager.cpp
 +++ b/DetectionManager.cpp
-@@ -14,6 +14,7 @@
+@@ -14,10 +14,14 @@
  #include <cctype>
  #include <cstdio>
  #include <fstream>
@@ -142,7 +142,14 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..885dbe7914172df0334e8a4b6e1333bc
  #include <set>
  #include <system_error>
  #include <thread>
-@@ -25,6 +26,10 @@
+ #include "DetectionManager.h"
++#if defined(_WIN32) && defined(PRISMESTRA_PC_BACKEND)
++#include "startup/ParentPipe.h"
++#endif
+ #include "JsonUtils.h"
+ #include "LogManager.h"
+ #include "pci_ids.h"
+@@ -25,6 +29,10 @@
  #include "ResourceManager.h"
  #include "SettingsManager.h"
  #include "StringUtils.h"
@@ -153,7 +160,7 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..885dbe7914172df0334e8a4b6e1333bc
  
  #ifdef __linux__
  #include <unistd.h>
-@@ -42,7 +47,8 @@ using namespace std::chrono_literals;
+@@ -42,7 +50,8 @@ using namespace std::chrono_literals;
  const char* DETECTIONMANAGER = "DetectionManager";
  
  /*---------------------------------------------------------*\
@@ -163,7 +170,7 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..885dbe7914172df0334e8a4b6e1333bc
  \*---------------------------------------------------------*/
  #define DETECTION_WAIT_TIMEOUT_MS   60000
  
-@@ -182,6 +188,8 @@ DetectionManager::DetectionManager()
+@@ -182,6 +191,8 @@ DetectionManager::DetectionManager()
  
  DetectionManager::~DetectionManager()
  {
@@ -172,7 +179,7 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..885dbe7914172df0334e8a4b6e1333bc
      /*-----------------------------------------------------*\
      | Exit HID in background thread                         |
      \*-----------------------------------------------------*/
-@@ -232,9 +240,23 @@ std::vector<i2c_smbus_interface*>& DetectionManager::GetI2CBuses()
+@@ -232,9 +243,23 @@ std::vector<i2c_smbus_interface*>& DetectionManager::GetI2CBuses()
  void DetectionManager::Cleanup()
  {
      LOG_INFO("[%s] Cleaning up detected devices", DETECTIONMANAGER);
@@ -199,10 +206,22 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..885dbe7914172df0334e8a4b6e1333bc
  }
  
  std::vector<RGBController*>& DetectionManager::GetRGBControllers()
-@@ -559,33 +581,29 @@ void DetectionManager::AbortDetection()
+@@ -556,36 +581,42 @@ void DetectionManager::AbortDetection()
+ {
+     LOG_INFO("[%s] Detection abort requested", DETECTIONMANAGER);
+ 
++#if defined(_WIN32) && defined(PRISMESTRA_PC_BACKEND)
++    // EOF is terminal ownership loss, unlike a normal SDK detection abort.
++    // Keep it sticky so a queued BeginDetection cannot reopen discovery.
++    HANDLE owner = PrismestraParentPipe();
++    if(owner && PrismestraParentPipeClosed(owner)) stopping = true;
++#endif
++
      detection_in_progress   = false;
      detection_percent       = 100;
++#ifndef PRISMESTRA_PC_BACKEND
      detection_string        = "Stopping";
++#endif
 +    i2c_retry_cancelled = true;
 +    BackgroundThreadScheduledFunctionStart.notify_one();
  }
@@ -242,6 +261,7 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..885dbe7914172df0334e8a4b6e1333bc
 +        if(stopping.load()) { detection_in_progress = false; return; }
 +        i2c_phase.reset();
 +        i2c_retry_cancelled = false;
++        if(stopping.load()) { i2c_retry_cancelled = true; detection_in_progress = false; return; }
 +        try
 +        {
 +            if(ProcessPreDetection()) BackgroundDetectDevices();
@@ -252,7 +272,7 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..885dbe7914172df0334e8a4b6e1333bc
  }
  
  unsigned int DetectionManager::GetDetectionPercent()
-@@ -600,6 +618,9 @@ std::string DetectionManager::GetDetectionString()
+@@ -600,6 +631,9 @@ std::string DetectionManager::GetDetectionString()
  
  void DetectionManager::WaitForDetection()
  {
@@ -262,7 +282,7 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..885dbe7914172df0334e8a4b6e1333bc
      /*-----------------------------------------------------*\
      | Taking the mutex is not enough on its own: detection  |
      | runs in a background thread and there is a window     |
-@@ -653,33 +674,40 @@ void DetectionManager::BackgroundThreadFunction()
+@@ -653,33 +687,40 @@ void DetectionManager::BackgroundThreadFunction()
      \*-----------------------------------------------------*/
      std::unique_lock lock(BackgroundThreadStateMutex);
  
@@ -327,7 +347,7 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..885dbe7914172df0334e8a4b6e1333bc
      }
  }
  
-@@ -702,12 +730,9 @@ void DetectionManager::RunInBackgroundThread(std::function<void()> coroutine)
+@@ -702,12 +743,9 @@ void DetectionManager::RunInBackgroundThread(std::function<void()> coroutine)
          \*-------------------------------------------------*/
          BackgroundThreadStateMutex.lock();
  
@@ -343,16 +363,18 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..885dbe7914172df0334e8a4b6e1333bc
          BackgroundThreadStateMutex.unlock();
          BackgroundThreadScheduledFunctionStart.notify_one();
      }
-@@ -721,7 +746,7 @@ void DetectionManager::BackgroundDetectDevices()
+@@ -721,7 +759,9 @@ void DetectionManager::BackgroundDetectDevices()
      /*-----------------------------------------------------*\
      | Lock detection mutex                                  |
      \*-----------------------------------------------------*/
 -    DetectDevicesMutex.lock();
 +    std::unique_lock detection_lock(DetectDevicesMutex);
++
++    if(stopping.load()) { detection_in_progress = false; return; }
  
      /*-----------------------------------------------------*\
      | Set detection in progress flag                        |
-@@ -837,22 +862,7 @@ void DetectionManager::BackgroundDetectDevices()
+@@ -837,22 +877,7 @@ void DetectionManager::BackgroundDetectDevices()
      /*-----------------------------------------------------*\
      | Detect I2C interfaces                                 |
      \*-----------------------------------------------------*/
@@ -376,7 +398,7 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..885dbe7914172df0334e8a4b6e1333bc
  
      /*-----------------------------------------------------*\
      | Detect HID devices                                    |
-@@ -920,7 +930,7 @@ void DetectionManager::BackgroundDetectDevices()
+@@ -920,7 +945,7 @@ void DetectionManager::BackgroundDetectDevices()
      /*-----------------------------------------------------*\
      | Unlock detection mutex                                |
      \*-----------------------------------------------------*/
@@ -385,12 +407,13 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..885dbe7914172df0334e8a4b6e1333bc
  
  #ifdef __linux__
      /*-----------------------------------------------------*\
-@@ -995,6 +1005,62 @@ void DetectionManager::BackgroundDetectDevices()
+@@ -995,6 +1020,63 @@ void DetectionManager::BackgroundDetectDevices()
      }
  }
  
 +void DetectionManager::BackgroundDetectI2CPhase(json& detector_settings)
 +{
++    if(stopping.load()) { i2c_retry_cancelled = true; return; }
 +#ifdef _WIN32
 +    // Preflight precedes ALL bus creation; the guard in admit() is released
 +    // immediately. Holding it over detection would starve other applications.
@@ -448,7 +471,31 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..885dbe7914172df0334e8a4b6e1333bc
  void DetectionManager::BackgroundDetectI2CBuses()
  {
      LOG_INFO("------------------------------------------------------");
-@@ -1865,15 +1931,8 @@ void DetectionManager::ProcessDynamicDetectors()
+@@ -1010,6 +1092,7 @@ void DetectionManager::BackgroundDetectI2CBuses()
+ 
+     for(std::size_t i2c_bus_detector_idx = 0; i2c_bus_detector_idx < i2c_bus_detectors.size(); i2c_bus_detector_idx++)
+     {
++        if(stopping.load() || !detection_in_progress.load()) break;
+         if(i2c_bus_detectors[i2c_bus_detector_idx]() == false)
+         {
+             i2c_interface_fail = true;
+@@ -1040,6 +1123,7 @@ void DetectionManager::BackgroundDetectI2CDevices(json& detector_settings)
+ 
+     for(std::size_t i2c_detector_idx = 0; i2c_detector_idx < i2c_device_detectors.size(); i2c_detector_idx++)
+     {
++        if(stopping.load() || !detection_in_progress.load()) break;
+         /*-------------------------------------------------*\
+         | Update detection string                           |
+         \*-------------------------------------------------*/
+@@ -1096,6 +1180,7 @@ void DetectionManager::BackgroundDetectI2CDRAMDevices(json& detector_settings)
+ 
+     for(std::size_t bus = 0; bus < i2c_buses.size() && IsAnyDimmDetectorEnabled(detector_settings); bus++)
+     {
++        if(stopping.load() || !detection_in_progress.load()) break;
+         IF_DRAM_SMBUS(i2c_buses[bus]->info.pci_vendor, i2c_buses[bus]->info.pci_device)
+         {
+             std::vector<SPDWrapper> slots;
+@@ -1865,15 +1950,8 @@ void DetectionManager::ProcessDynamicDetectors()
  
  bool DetectionManager::ProcessPreDetection()
  {
@@ -1010,7 +1057,7 @@ index 0000000000000000000000000000000000000000..3d6fdb38a78608a35ecdeffb89395a81
 +    PcTimerResolution& operator=(const PcTimerResolution&) = delete;
 +};
 diff --git a/startup/main_Windows.cpp b/startup/main_Windows.cpp
-index dd6228967b72f9c818395e5a0fae76c8416d9604..d7606f5a7e7d37ca646db62c6e62dac9533e7f74 100644
+index dd6228967b72f9c818395e5a0fae76c8416d9604..6b0d2d49ed5b81d5fb37c80c8250d1d1e70c3c69 100644
 --- a/startup/main_Windows.cpp
 +++ b/startup/main_Windows.cpp
 @@ -10,6 +10,7 @@
@@ -1054,7 +1101,7 @@ index dd6228967b72f9c818395e5a0fae76c8416d9604..d7606f5a7e7d37ca646db62c6e62dac9
      {
          /*-------------------------------------------------*\
          | We are running under some terminal context;       |
-@@ -522,14 +532,26 @@ void InitializeTimerResolutionThreadFunction()
+@@ -522,14 +532,31 @@ void InitializeTimerResolutionThreadFunction()
  static void WaitWhileServerOnline(NetworkServer* srv)
  {
      std::unique_lock<std::mutex> lock(service_stop_mutex);
@@ -1071,6 +1118,11 @@ index dd6228967b72f9c818395e5a0fae76c8416d9604..d7606f5a7e7d37ca646db62c6e62dac9
 +        if(stop_requested)
          {
 +            LOG_INFO("Headless server stop requested; draining owned resources");
++#ifdef PRISMESTRA_PC_BACKEND
++            // Cancel before ServiceShutdown waits for discovery. Do not rely on
++            // Cleanup, which is reached only after that wait has completed.
++            DetectionManager::get()->AbortDetection();
++#endif
              srv->StopServer();
              break;
          }
@@ -1082,7 +1134,7 @@ index dd6228967b72f9c818395e5a0fae76c8416d9604..d7606f5a7e7d37ca646db62c6e62dac9
      };
  }
  
-@@ -581,9 +603,17 @@ static int common_main(int argc, char* argv[])
+@@ -581,9 +608,17 @@ static int common_main(int argc, char* argv[])
      /*-----------------------------------------------------*\
      | Start timer resolution correction thread              |
      \*-----------------------------------------------------*/

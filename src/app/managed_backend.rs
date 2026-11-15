@@ -18,6 +18,9 @@ use std::{
 
 const IO_LIMIT: Duration = Duration::from_millis(100);
 const POLL: Duration = Duration::from_millis(100);
+// Initial detector drain can exceed three seconds; give normal cleanup time
+// to finish before falling back to termination of the owned child only.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -354,6 +357,7 @@ impl Retry {
 struct OwnedChild {
     child: Child,
     running: bool,
+    shutdown_grace: Duration,
     _image: File,
     #[cfg(windows)]
     _job: JobHandle,
@@ -452,6 +456,7 @@ fn spawn_owned(command: &mut Command, image: File) -> Result<OwnedChild, String>
     let mut owned = OwnedChild {
         child: command.spawn().map_err(err)?,
         running: false,
+        shutdown_grace: SHUTDOWN_GRACE,
         _image: image,
         _job: job,
     };
@@ -514,7 +519,7 @@ impl Drop for OwnedChild {
         // normal StopServer/ServiceShutdown/Cleanup path; never write commands.
         drop(self.child.stdin.take());
         if cooperative {
-            let deadline = Instant::now() + Duration::from_secs(3);
+            let deadline = Instant::now() + self.shutdown_grace;
             while Instant::now() < deadline {
                 match self.child.try_wait() {
                     Ok(Some(_)) => return,
@@ -523,8 +528,9 @@ impl Drop for OwnedChild {
                 }
             }
             eprintln!(
-                "Managed OpenRGB child {}: cooperative shutdown did not finish within 3s; terminating owned process",
-                self.child.id()
+                "Managed OpenRGB child {}: cooperative shutdown did not finish within {:?}; terminating owned process",
+                self.child.id(),
+                self.shutdown_grace
             );
         }
         let _ = self.child.kill();
@@ -1269,6 +1275,9 @@ mod tests {
             input.is_empty(),
             "parent must close the pipe, never send commands"
         );
+        if let Ok(delay) = std::env::var("PRISMESTRA_TEST_EOF_DELAY_MS") {
+            thread::sleep(Duration::from_millis(delay.parse().unwrap()));
+        }
         fs::write(
             std::env::var_os("PRISMESTRA_TEST_EOF_EXIT").unwrap(),
             b"clean EOF",
@@ -1295,39 +1304,46 @@ mod tests {
         let ready = directory.join("ready");
         let exit = directory.join("exit");
         let image = std::env::current_exe().unwrap();
-        let mut command = Command::new(&image);
-        command
-            .args([
-                "--exact",
-                "app::managed_backend::tests::fake_child_exits_on_stdin_eof",
-                "--ignored",
-            ])
-            .env("PRISMESTRA_TEST_EOF_READY", &ready)
-            .env("PRISMESTRA_TEST_EOF_EXIT", &exit)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let owned = spawn_owned(&mut command, regular_file(&image).unwrap()).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !ready.exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
+        // A real child taking more than the old three-second budget must finish
+        // its EOF cleanup and exit normally, rather than being killed mid-drain.
+        for delay_ms in [0, 3_200] {
+            let mut command = Command::new(&image);
+            command
+                .args([
+                    "--exact",
+                    "app::managed_backend::tests::fake_child_exits_on_stdin_eof",
+                    "--ignored",
+                ])
+                .env("PRISMESTRA_TEST_EOF_READY", &ready)
+                .env("PRISMESTRA_TEST_EOF_EXIT", &exit)
+                .env("PRISMESTRA_TEST_EOF_DELAY_MS", delay_ms.to_string())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let owned = spawn_owned(&mut command, regular_file(&image).unwrap()).unwrap();
+            assert_eq!(owned.shutdown_grace, Duration::from_secs(30));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !ready.exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(ready.exists(), "EOF fixture did not initialize");
+            let handle = unsafe { OpenProcess(0x0010_0000, 0, owned.child.id()) };
+            assert!(!handle.is_null());
+            let began = Instant::now();
+            drop(owned);
+            assert!(began.elapsed() >= Duration::from_millis(delay_ms));
+            assert!(began.elapsed() < Duration::from_millis(delay_ms) + Duration::from_secs(2));
+            assert_eq!(fs::read(&exit).unwrap(), b"clean EOF");
+            assert_eq!(unsafe { WaitForSingleObject(handle, 0) }, 0);
+            unsafe {
+                CloseHandle(handle);
+            }
+            fs::remove_file(&ready).unwrap();
+            fs::remove_file(&exit).unwrap();
         }
-        assert!(ready.exists(), "EOF fixture did not initialize");
-        let handle = unsafe { OpenProcess(0x0010_0000, 0, owned.child.id()) };
-        assert!(!handle.is_null());
-        let began = Instant::now();
-        drop(owned);
-        assert!(began.elapsed() < Duration::from_secs(2));
-        assert_eq!(fs::read(&exit).unwrap(), b"clean EOF");
-        assert_eq!(unsafe { WaitForSingleObject(handle, 0) }, 0);
-        unsafe {
-            CloseHandle(handle);
-        }
-        fs::remove_file(ready).unwrap();
-        fs::remove_file(exit).unwrap();
 
         // This existing fixture deliberately ignores stdin and sleeps. The same
-        // retained process handle must signal after the three-second fallback.
+        // retained process handle must signal after the injected short fallback.
         let mut command = Command::new(&image);
         command
             .args([
@@ -1338,13 +1354,14 @@ mod tests {
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let owned = spawn_owned(&mut command, regular_file(&image).unwrap()).unwrap();
+        let mut owned = spawn_owned(&mut command, regular_file(&image).unwrap()).unwrap();
+        owned.shutdown_grace = Duration::from_millis(100);
         let handle = unsafe { OpenProcess(0x0010_0000, 0, owned.child.id()) };
         assert!(!handle.is_null());
         let began = Instant::now();
         drop(owned);
-        assert!(began.elapsed() >= Duration::from_secs(3));
-        assert!(began.elapsed() < Duration::from_secs(5));
+        assert!(began.elapsed() >= Duration::from_millis(100));
+        assert!(began.elapsed() < Duration::from_secs(2));
         assert_eq!(unsafe { WaitForSingleObject(handle, 0) }, 0);
         unsafe {
             CloseHandle(handle);
