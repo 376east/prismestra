@@ -14,6 +14,7 @@ import unittest
 
 PORTABLE = Path(__file__).with_name("portable")
 POWERSHELL = shutil.which("powershell.exe")
+PWSH = shutil.which("pwsh.exe")
 CSC = Path(os.environ.get("WINDIR", "C:/Windows")) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
 
 
@@ -65,6 +66,10 @@ class Recorder {
             if (mode == "nonce") nonce = new String('0', 32);
             if (mode == "pid") pid++;
             string json = "{\\\"version\\\":1,\\\"pid\\\":" + pid + ",\\\"nonce\\\":\\\"" + nonce + "\\\",\\\"stage\\\":\\\"" + (mode == "failed" ? "failed" : "core_ready") + "\\\",\\\"detail\\\":\\\"fixture\\\"}";
+            if (mode == "version_float") json = json.Replace("\\\"version\\\":1,", "\\\"version\\\":1.0,");
+            if (mode == "version_bool") json = json.Replace("\\\"version\\\":1,", "\\\"version\\\":true,");
+            if (mode == "pid_float") json = json.Replace("\\\"pid\\\":" + pid + ",", "\\\"pid\\\":" + pid + ".0,");
+            if (mode == "pid_bool") json = json.Replace("\\\"pid\\\":" + pid + ",", "\\\"pid\\\":true,");
             if (mode == "malformed") json = "{";
             if (mode == "stale") json = json.Replace("\\\"version\\\":1", "\\\"version\\\":0");
             File.WriteAllText(ackPath + ".tmp", json);
@@ -98,11 +103,11 @@ class Recorder {
         self.record = self.base / (self._testMethodName + ".args")
         self.env = dict(os.environ, PRISMESTRA_TEST_RECORD=str(self.record))
 
-    def run_launcher(self, *args, wrapper=None):
+    def run_launcher(self, *args, wrapper=None, powershell=POWERSHELL):
         if wrapper:
             command = f'"{os.environ["COMSPEC"]}" /d /s /c ""{self.package / wrapper}" {" ".join(args)}"'
         else:
-            command = [POWERSHELL, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(self.package / "Launch Prismestra.ps1"), *args]
+            command = [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(self.package / "Launch Prismestra.ps1"), *args]
         return subprocess.run(command, cwd=self.base, env=self.env, input="\n", capture_output=True, encoding="utf-8", errors="replace", timeout=30)
 
     def saved_profile(self, bindings=True):
@@ -222,7 +227,7 @@ class Recorder {
         self.assertIn("before acknowledging", result.stderr)
 
     def test_invalid_ack_is_rejected(self):
-        for mode in ("nonce", "pid", "stale", "malformed"):
+        for mode in ("nonce", "pid", "stale", "malformed", "version_float", "version_bool", "pid_float", "pid_bool"):
             with self.subTest(mode=mode):
                 self.env["PRISMESTRA_TEST_ACK"] = mode
                 result = self.run_launcher()
@@ -231,6 +236,19 @@ class Recorder {
                 ack_path = Path(Path(str(self.record) + ".ack-path").read_text())
                 self.assertFalse(ack_path.exists())
                 self.assertFalse(ack_path.parent.exists())
+
+    @unittest.skipUnless(PWSH, "Optional PowerShell 7 executable not available")
+    def test_powershell7_accepts_integer_ack_and_rejects_float_or_bool(self):
+        result = self.run_launcher(powershell=PWSH)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("native core ready", result.stdout)
+        self.assertEqual(self.recorded(), self.expected())
+        for mode in ("version_float", "version_bool", "pid_float", "pid_bool"):
+            with self.subTest(mode=mode):
+                self.env["PRISMESTRA_TEST_ACK"] = mode
+                result = self.run_launcher(powershell=PWSH)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("identity or schema mismatch", result.stderr)
 
     def test_failure_after_old_grace_period_while_process_alive(self):
         self.env["PRISMESTRA_TEST_ACK"] = "failed"

@@ -35,8 +35,9 @@ function Wait-CoreStartup($Process, [string]$Path, [string]$Nonce) {
             try { $ack = [System.IO.File]::ReadAllText($Path) | ConvertFrom-Json } catch {
                 throw 'Malformed startup acknowledgement.'
             }
-            if ($ack.version -isnot [int] -or $ack.version -ne 1 -or
-                $ack.pid -isnot [int] -or $ack.pid -ne $Process.Id -or
+            # ConvertFrom-Json uses Int32 in Windows PowerShell and Int64 in PowerShell 7.
+            if (($ack.version -isnot [int] -and $ack.version -isnot [long]) -or $ack.version -ne 1 -or
+                ($ack.pid -isnot [int] -and $ack.pid -isnot [long]) -or $ack.pid -ne $Process.Id -or
                 $ack.nonce -isnot [string] -or $ack.nonce -cne $Nonce -or
                 $ack.stage -isnot [string] -or
                 $ack.detail -isnot [string] -or $ack.detail.Length -gt 4096) {
