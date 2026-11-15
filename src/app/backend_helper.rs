@@ -486,15 +486,25 @@ fn supervise_helper(
     let mut status_write_failed = false;
     loop {
         if Instant::now() >= lease_deadline {
+            eprintln!("Managed helper stopping: parent heartbeat lease expired");
             break;
         }
-        if identity(request.parent.pid).ok().as_ref() != Some(&request.parent) {
-            break;
+        match identity(request.parent.pid) {
+            Ok(parent) if parent == request.parent => {}
+            Ok(_) => {
+                eprintln!("Managed helper stopping: parent identity changed");
+                break;
+            }
+            Err(error) => {
+                eprintln!("Managed helper stopping: parent identity query failed: {error}");
+                break;
+            }
         }
         if read_json::<Cancel>(&state_dir.join("owner-cancel.json"))
             .ok()
             .is_some_and(|c| c.version == 1 && c.nonce == request.nonce)
         {
+            eprintln!("Managed helper stopping: matching owner cancellation");
             break;
         }
         if read_json::<Cancel>(&state_dir.join("owner-pause.json"))
@@ -515,6 +525,10 @@ fn supervise_helper(
                     || current.parent != request.parent
                     || !live_request(&current, now_ms())
                 {
+                    eprintln!(
+                        "Managed helper stopping: owner request invalid/changed or expired (age_ms={})",
+                        now_ms().saturating_sub(current.timestamp_ms)
+                    );
                     break;
                 }
                 lease_deadline = Instant::now()

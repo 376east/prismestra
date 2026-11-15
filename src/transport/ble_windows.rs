@@ -2,12 +2,15 @@
 // Explicitly invoked Windows backend. Construction/import alone performs no WinRT/device calls.
 use super::ble::{self, Backend, Control, Event, Link};
 use std::{
+    future::{Future, IntoFuture},
     marker::PhantomData,
     rc::Rc,
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    task::{Context, Poll, Wake, Waker},
+    time::Duration,
 };
 use windows::{
     Devices::Bluetooth::{
@@ -54,30 +57,72 @@ fn receive_pixel_capacity(
     }
 }
 
-// Macro preserves each operation's concrete projected type without requiring windows-future publicly.
+#[derive(Default)]
+struct Completion {
+    signalled: Mutex<bool>,
+    changed: Condvar,
+}
+impl Wake for Completion {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        *self.signalled.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.changed.notify_one();
+    }
+}
+impl Completion {
+    fn wait(&self, duration: Duration) {
+        let guard = self.signalled.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut guard, _) = self
+            .changed
+            .wait_timeout_while(guard, duration, |signalled| !*signalled)
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = false;
+    }
+}
+
+fn wait_completion<F: Future>(
+    future: F,
+    control: &mut dyn Control,
+    started: Duration,
+) -> Result<F::Output, String> {
+    let completion = Arc::new(Completion::default());
+    let waker = Waker::from(completion.clone());
+    let mut context = Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let Poll::Ready(result) = future.as_mut().poll(&mut context) {
+            return Ok(result);
+        }
+        ble::check_wait(control, started)?;
+        let remaining = ble::TIMEOUT.saturating_sub(control.now().saturating_sub(started));
+        // Production invokes the event wait; fake controls advance their clock instead.
+        // A retained predicate handles completion between poll and entering the wait.
+        control.idle(&mut |duration| completion.wait(duration.min(ble::POLL).min(remaining)));
+    }
+}
+
+// windows-future 0.3.2's IntoFuture installs Completed once and handles registration races.
+// The callback retains only an Arc-owned waker, safe even after timeout/cancellation.
+// Poll/GetResults and all device ownership remain on the original MTA thread.
 macro_rules! bounded {
     ($operation:expr, $control:expr) => {{
         let started = $control.now();
         ble::check_wait($control, started)?;
         let operation = $operation.map_err(error)?;
-        loop {
-            let status = match operation.Status() {
-                Ok(s) => s,
-                Err(e) => {
+        match wait_completion(operation.clone().into_future(), $control, started) {
+            Ok(result) => {
+                if result.is_err() {
                     let _ = operation.Cancel();
-                    return Err(error(e));
                 }
-            };
-            if status.0 != 0 {
-                break;
+                result
             }
-            if let Err(e) = ble::check_wait($control, started) {
+            Err(e) => {
                 let _ = operation.Cancel();
                 return Err(e);
             }
-            $control.sleep(ble::POLL);
         }
-        operation.GetResults()
     }};
 }
 
@@ -585,23 +630,26 @@ mod tests {
             self.time += d;
         }
     }
-    struct Status(i32);
+    #[derive(Clone)]
     struct FakeOperation {
         cancelled: Arc<AtomicBool>,
         completed: bool,
     }
     #[allow(non_snake_case)]
     impl FakeOperation {
-        fn Status(&self) -> windows::core::Result<Status> {
-            Ok(Status(if self.completed { 1 } else { 0 }))
-        }
         fn Cancel(&self) -> windows::core::Result<()> {
             self.cancelled.store(true, Ordering::Release);
             Ok(())
         }
-        fn GetResults(&self) -> windows::core::Result<()> {
-            assert!(self.completed);
-            Ok(())
+    }
+    impl Future for FakeOperation {
+        type Output = windows::core::Result<()>;
+        fn poll(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.completed {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
         }
     }
     fn wait(operation: FakeOperation, control: &mut dyn Control) -> Result<(), String> {
@@ -670,6 +718,100 @@ mod tests {
         );
         assert_eq!(clock.0, ble::POLL);
         assert!(cancelled.load(Ordering::Acquire));
+    }
+    #[test]
+    fn completion_between_poll_and_wait_is_retained_without_control_sleep() {
+        struct CompleteOnPoll(bool);
+        impl Future for CompleteOnPoll {
+            type Output = ();
+            fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                if self.0 {
+                    Poll::Ready(())
+                } else {
+                    self.0 = true;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+        }
+        struct EventClock;
+        impl Control for EventClock {
+            fn now(&self) -> Duration {
+                Duration::ZERO
+            }
+            fn cancelled(&self) -> bool {
+                false
+            }
+            fn sleep(&mut self, _: Duration) {
+                panic!("completion must not use Control::sleep");
+            }
+            fn idle(&mut self, wait: &mut dyn FnMut(Duration)) {
+                // A pre-signalled event must return even with an infinite wait.
+                // The implementation additionally clamps this to a 25 ms slice.
+                wait(Duration::MAX);
+            }
+        }
+        wait_completion(CompleteOnPoll(false), &mut EventClock, Duration::ZERO).unwrap();
+    }
+    #[test]
+    fn event_wakes_immediately_when_signalled_before_or_during_wait() {
+        for before in [true, false] {
+            let completion = Arc::new(Completion::default());
+            let signal = completion.clone();
+            let sender = std::thread::spawn(move || {
+                if !before {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                signal.wake();
+            });
+            if before {
+                sender.join().unwrap();
+                let started = std::time::Instant::now();
+                completion.wait(Duration::from_secs(2));
+                assert!(started.elapsed() < Duration::from_secs(1));
+            } else {
+                let started = std::time::Instant::now();
+                completion.wait(Duration::from_secs(2));
+                assert!(started.elapsed() < Duration::from_secs(1));
+                sender.join().unwrap();
+            }
+        }
+    }
+    #[test]
+    fn completed_future_preserves_winrt_error_without_advancing_clock() {
+        let mut clock = Clock {
+            time: Duration::ZERO,
+            cancel: false,
+        };
+        let failure =
+            windows::core::Error::from_hresult(windows::core::HRESULT(0x80004005u32 as i32));
+        let result = wait_completion(
+            std::future::ready(Err::<(), _>(failure.clone())),
+            &mut clock,
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(result.unwrap_err().code(), failure.code());
+        assert_eq!(clock.time, Duration::ZERO);
+    }
+    #[test]
+    fn late_completion_waker_is_safe_after_waiter_has_timed_out() {
+        struct SaveWaker(Arc<Mutex<Option<Waker>>>);
+        impl Future for SaveWaker {
+            type Output = ();
+            fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                *self.0.lock().unwrap() = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+        let saved = Arc::new(Mutex::new(None));
+        let mut clock = Clock {
+            time: Duration::ZERO,
+            cancel: false,
+        };
+        assert!(wait_completion(SaveWaker(saved.clone()), &mut clock, Duration::ZERO).is_err());
+        assert_eq!(clock.time, ble::TIMEOUT);
+        saved.lock().unwrap().take().unwrap().wake();
     }
     #[test]
     fn null_projection_and_endpoint_uuid_are_source_verified_without_activation() {

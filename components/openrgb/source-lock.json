@@ -3,7 +3,7 @@
   "repository": "https://github.com/hello-nexus/openrgb-headless",
   "revision": "6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43",
   "patch": "prismestra-pc.patch",
-  "patch_sha256": "c1e5eaa79798ad5c4a6b676d174ddb91d7da30023413a879f192a6a63589358f",
+  "patch_sha256": "cb5a4d785c0cd67d7995125a5314b4b791fc989017a53f8d7127b34406f89e3c",
   "configuration": [
     "release",
     "prismestra_pc_backend"
@@ -22,5 +22,12 @@
   ],
   "optional_capabilities": [
     "PRISMESTRA_PARENT_PIPE=1 cooperative shutdown; managed opt-in defaults false"
-  ]
+  ],
+  "timer_policy": {
+    "resolution_ms": 1,
+    "minimum_windows_build": 19041,
+    "balanced_lifetime_request": true,
+    "background_repeated_request": false,
+    "no_detect_skipped": true
+  }
 }

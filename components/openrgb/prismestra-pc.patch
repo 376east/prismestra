@@ -513,10 +513,18 @@ index 3e334463b96a3eca23501c848f18c2a242d00180..0d3e5b83fc4d9f1979959b078eef524f
      void BackgroundDetectI2CDRAMDevices(json& detector_settings);
      void BackgroundDetectI2CPCIDevices(json& detector_settings);
 diff --git a/OpenRGB.pro b/OpenRGB.pro
-index e20d9f4a141332ea84d7e8c6061dcd2b29b21876..7be3a904a1ad16b212c5dabce0e0934df14034ee 100644
+index e20d9f4a141332ea84d7e8c6061dcd2b29b21876..718ee9cd45ac4a62f65d7b8e5e69eb7d6fd6ca78 100644
 --- a/OpenRGB.pro
 +++ b/OpenRGB.pro
-@@ -767,6 +767,18 @@ macx:contains(QMAKE_HOST.arch, x86_64) {
+@@ -18,6 +18,7 @@ DEFINES    += OPENRGB_HEADLESS
+ # GUI subsystem). Also link the Win32 libraries that the Qt config used to drag in
+ # transitively (CommandLineToArgvW, SHGetFolderPathA, registry, sockets, ws2_32 etc.)
+ win32: CONFIG += console
++win32:contains(CONFIG, prismestra_pc_backend): LIBS += -lwinmm
+ win32: LIBS   += -lshell32 -ladvapi32 -luser32 -lole32 -lws2_32 -liphlpapi -lsetupapi -lshlwapi
+ 
+ #-----------------------------------------------------------------------------------------------#
+@@ -767,6 +768,18 @@ macx:contains(QMAKE_HOST.arch, x86_64) {
  #-----------------------------------------------------------------------------------------------#
  # Print build configuration                                                                     #
  #-----------------------------------------------------------------------------------------------#
@@ -944,8 +952,65 @@ index 0000000000000000000000000000000000000000..2b22a43135822d0730b9fe0e3bc99592
 +    return !PeekNamedPipe(input, NULL, 0, NULL, &available, NULL);
 +}
 +#endif
+diff --git a/startup/PcTimerResolution.h b/startup/PcTimerResolution.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d6fdb38a78608a35ecdeffb89395a8192f399cf
+--- /dev/null
++++ b/startup/PcTimerResolution.h
+@@ -0,0 +1,51 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Preserve short protocol delays without the donor's repeating 0.5ms worker.
++#pragma once
++#include <windows.h>
++#include <timeapi.h>
++
++class PcTimerResolution
++{
++    bool active = false;
++    bool restore_policy = false;
++    PROCESS_POWER_THROTTLING_STATE previous = {};
++public:
++    DWORD error = ERROR_SUCCESS;
++    DWORD policy_error = ERROR_SUCCESS;
++    explicit PcTimerResolution(bool hardware_active)
++    {
++        if(!hardware_active) return;
++        // Older Windows uses a GLOBAL timer request. Do not opt into that.
++        using VersionFunction = LONG (WINAPI*)(OSVERSIONINFOW*);
++        auto version_fn = reinterpret_cast<VersionFunction>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
++        OSVERSIONINFOW version = {};
++        version.dwOSVersionInfoSize = sizeof(version);
++        if(!version_fn || version_fn(&version) != 0 || version.dwMajorVersion < 10 ||
++           (version.dwMajorVersion == 10 && version.dwBuildNumber < 19041))
++        {
++            error = ERROR_OLD_WIN_VERSION;
++            return;
++        }
++        previous.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
++        if(GetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &previous, sizeof(previous)))
++        {
++            auto policy = previous;
++            policy.ControlMask |= PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
++            policy.StateMask &= ~PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
++            restore_policy = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &policy, sizeof(policy)) != 0;
++            if(!restore_policy) policy_error = GetLastError();
++        }
++        else policy_error = GetLastError();
++        const MMRESULT result = timeBeginPeriod(1);
++        active = result == TIMERR_NOERROR;
++        if(!active) error = result;
++    }
++    ~PcTimerResolution()
++    {
++        if(active) timeEndPeriod(1);
++        if(restore_policy) SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &previous, sizeof(previous));
++    }
++    bool enabled() const { return active; }
++    PcTimerResolution(const PcTimerResolution&) = delete;
++    PcTimerResolution& operator=(const PcTimerResolution&) = delete;
++};
 diff --git a/startup/main_Windows.cpp b/startup/main_Windows.cpp
-index dd6228967b72f9c818395e5a0fae76c8416d9604..c85c4f6250a0f133ea41f5fd74211c8b3eadeab3 100644
+index dd6228967b72f9c818395e5a0fae76c8416d9604..d7606f5a7e7d37ca646db62c6e62dac9533e7f74 100644
 --- a/startup/main_Windows.cpp
 +++ b/startup/main_Windows.cpp
 @@ -10,6 +10,7 @@
@@ -956,15 +1021,18 @@ index dd6228967b72f9c818395e5a0fae76c8416d9604..c85c4f6250a0f133ea41f5fd74211c8b
  #include <condition_variable>
  #include <mutex>
  #include <stdio.h>
-@@ -24,6 +25,7 @@
+@@ -24,6 +25,10 @@
  #include "DetectionManager.h"
  #include "ResourceManager.h"
  #include "StringUtils.h"
 +#include "ParentPipe.h"
++#ifdef PRISMESTRA_PC_BACKEND
++#include "PcTimerResolution.h"
++#endif
  
  using namespace std::chrono_literals;
  
-@@ -39,7 +41,7 @@ static SERVICE_STATUS_HANDLE service_status_handle;
+@@ -39,7 +44,7 @@ static SERVICE_STATUS_HANDLE service_status_handle;
  static SERVICE_STATUS        service_status;
  
  static bool                  started_as_service;
@@ -973,7 +1041,7 @@ index dd6228967b72f9c818395e5a0fae76c8416d9604..c85c4f6250a0f133ea41f5fd74211c8b
  static std::mutex            service_stop_mutex;
  static std::condition_variable service_stop_cv;
  static bool                  have_console;
-@@ -448,7 +450,12 @@ int main(int argc, char* argv[])
+@@ -448,7 +453,12 @@ int main(int argc, char* argv[])
      /*-----------------------------------------------------*\
      | Attach console output                                 |
      \*-----------------------------------------------------*/
@@ -986,7 +1054,7 @@ index dd6228967b72f9c818395e5a0fae76c8416d9604..c85c4f6250a0f133ea41f5fd74211c8b
      {
          /*-------------------------------------------------*\
          | We are running under some terminal context;       |
-@@ -522,14 +529,26 @@ void InitializeTimerResolutionThreadFunction()
+@@ -522,14 +532,26 @@ void InitializeTimerResolutionThreadFunction()
  static void WaitWhileServerOnline(NetworkServer* srv)
  {
      std::unique_lock<std::mutex> lock(service_stop_mutex);
@@ -1014,11 +1082,17 @@ index dd6228967b72f9c818395e5a0fae76c8416d9604..c85c4f6250a0f133ea41f5fd74211c8b
      };
  }
  
-@@ -581,9 +600,11 @@ static int common_main(int argc, char* argv[])
+@@ -581,9 +603,17 @@ static int common_main(int argc, char* argv[])
      /*-----------------------------------------------------*\
      | Start timer resolution correction thread              |
      \*-----------------------------------------------------*/
-+#ifndef PRISMESTRA_PC_BACKEND
++#ifdef PRISMESTRA_PC_BACKEND
++    PcTimerResolution protocol_timing(!(ret_flags & RET_FLAG_NO_DETECT));
++    if(protocol_timing.error)
++        LOG_WARNING("PC protocol timer precision unavailable: %lu", protocol_timing.error);
++    if(protocol_timing.policy_error)
++        LOG_WARNING("PC timer throttling policy unavailable: %lu", protocol_timing.policy_error);
++#else
      std::thread * InitializeTimerResolutionThread;
      InitializeTimerResolutionThread = new std::thread(InitializeTimerResolutionThreadFunction);
      InitializeTimerResolutionThread->detach();

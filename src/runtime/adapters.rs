@@ -125,6 +125,9 @@ impl ble::Control for Control {
     fn sleep(&mut self, duration: Duration) {
         std::thread::sleep(duration.min(ble::POLL));
     }
+    fn idle(&mut self, wait: &mut dyn FnMut(Duration)) {
+        wait(ble::POLL);
+    }
 }
 pub struct Serial<L: serial::Link> {
     controller: serial::Controller<L>,
@@ -292,6 +295,14 @@ impl<L: ble::Link> RgbDriver for Ble<L> {
 mod ble_tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn native_control_uses_completion_wait_instead_of_poll_sleep() {
+        let mut control = Control::new(Cancellation::default());
+        let mut waits = Vec::new();
+        ble::Control::idle(&mut control, &mut |duration| waits.push(duration));
+        assert_eq!(waits, [ble::POLL]);
+    }
 
     #[derive(Default)]
     struct Record {
