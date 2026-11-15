@@ -1,0 +1,52 @@
+{
+  "scope": "Sanitized local evaluation; raw paths, process IDs and device identifiers omitted",
+  "code_commit": "eb4d81cb1f3353705c7d42f2e3db09e771869e8b",
+  "engine_revision": "6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43",
+  "engine_sha256": "6d92eafe145ca1e5832f12649cb1522b5170eaa886d243af138a1e39a149374e",
+  "patch_sha256": "0a6bbf70231e780b564e95c1b7d5e48310b52fb103f6d6234ea888679f27d6f9",
+  "software": {
+    "rust_passed": 630,
+    "rust_ignored": 6,
+    "sdk_opt_in_test_executed_separately": true,
+    "static_gate_tests_passed": 17,
+    "private_mutex_policy_fixture_runs_passed": 20,
+    "packaged_executable_software_stands_passed": 5,
+    "runtime_files_static_gate_passed": 14,
+    "independent_review_open_confirmed_P1_P2": 0
+  },
+  "native_initial_busy_bus": {
+    "result": "PASS",
+    "observed_owned_mutex_hold_seconds": 3.4003531000016665,
+    "hard_realtime_guarantee": false,
+    "watchdog_triggered": false,
+    "usb_hid_controllers_observed_while_held": 2,
+    "inventory_after_release": 5,
+    "bound_scene_sdk_connections_after_release": 4,
+    "ram_successful_write_counters_resumed": true,
+    "ram_write_failures_after_recovery": 0,
+    "recovery_after_release_seconds": 29.352,
+    "same_application_identity": true,
+    "same_new_backend_through_deferred_recovery": true,
+    "fan_control_process_image_and_settings_preserved": true,
+    "profile_bindings_sensors_and_draft_hashes_preserved": true
+  },
+  "repeated_startup": {
+    "same_app_helper_backend": true,
+    "existing_task_results": [0, 0],
+    "new_task_registration": false,
+    "new_uac_or_driver_install": false
+  },
+  "unverified_or_open": [
+    "New UI inspection: Computer Use app approval timed out",
+    "New optical/FPS acceptance and matched quality performance comparison",
+    "New real reboot/logon",
+    "Editor-closed native hardware recovery for this component",
+    "Other hardware and clean Windows installation",
+    "Mid-scan contention remains Partial and requires explicit rescan",
+    "Synchronous kernel IOCTLs are outside the mutex deadline",
+    "General privileged bundled installer and public binary redistribution review",
+    "Signing, bit reproducibility and fully offline component rebuild"
+  ],
+  "historical_140_second_native_failure_preserved": true,
+  "public_binary_release": false
+}

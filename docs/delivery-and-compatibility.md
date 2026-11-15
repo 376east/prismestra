@@ -1,6 +1,6 @@
 # Delivery and coexistence contract
 
-Status: proposed product delivery contract, 2026-11-15. This describes the intended release experience, not the capabilities of the current ZIP. The current package does not bundle OpenRGB or provision a general privileged helper. A physical run waited on a foreign SMBus owner beyond a 140-second acceptance limit; a later follow-up observed four recovered SDK output connections. This does not establish general coexistence or consistent recovery latency.
+Status: delivery contract, 2026-11-15. The public ZIP still does not bundle OpenRGB or provision a general privileged installer. A pinned headless PC component, source patch and build/verification recipes are now implemented and locally evaluated; see [component verification](openrgb-component-verification.md) and the [sanitized local validation summary](validation/headless-component-20261115.json). That evaluation does not establish universal coexistence or clean-Windows delivery. The earlier physical run beyond a 140-second SMBus wait remains valid historical evidence.
 
 ## The ordinary user's path
 
@@ -37,7 +37,7 @@ Separate installed software from active ownership of the same resource. Several 
 
 Keep OpenRGB as the current broad PC adapter, and retain direct BLE/LCD/serial/network adapters where implemented. Evaluate additional vendor adapters per measured gap. RGB.NET is a provider library, not a standalone hardware server; its providers can have vendor SDK/service dependencies. Artemis/Aurora are useful integration references, but their licenses and dependencies must be checked independently. [RGB.NET](https://github.com/DarthAffe/RGB.NET), [Artemis license](https://github.com/Artemis-RGB/Artemis/blob/master/LICENSE), [Aurora OpenRGB setup](https://project-aurora.com/Docs/devices/openrgb/).
 
-More direct candidates already exist: Nexus provides a [Qt-free OpenRGB component](https://github.com/hello-nexus/openrgb-headless/blob/6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43/MAINTAINING.md), MyRGB has a [pinned official-OpenRGB bundler](https://github.com/kylechrisking/MyRGB/blob/main/tools/build-installer.ps1) and [verified dependency/elevated-component setup](https://github.com/kylechrisking/MyRGB/blob/main/tools/setup-openrgb-admin.ps1), and TuxRGB has a [Rust application's component installer](https://github.com/aurelienchartier29-netizen/TuxRGB/blob/main/packaging/windows/tuxrgb.nsi). Inspect these before building equivalents. None has been adopted or physically validated here. Their licenses differ; copying code requires an explicit license-compatible integration decision. The Nexus component still waits indefinitely on the relevant SMBus mutex, so a ready headless build does not by itself close our coexistence gap.
+Nexus provides the [Qt-free OpenRGB basis](https://github.com/hello-nexus/openrgb-headless/blob/6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43/MAINTAINING.md) used by our evaluation component. Its original indefinite SMBus waits are changed by our reviewed PC patch; initial busy-bus deferral is tested separately from mid-scan contention and kernel hangs. MyRGB's [pinned bundler](https://github.com/kylechrisking/MyRGB/blob/main/tools/build-installer.ps1), [elevated-component setup](https://github.com/kylechrisking/MyRGB/blob/main/tools/setup-openrgb-admin.ps1) and TuxRGB's [component installer](https://github.com/aurelienchartier29-netizen/TuxRGB/blob/main/packaging/windows/tuxrgb.nsi) remain researched delivery references, not adopted installers. Their licenses and trust boundaries require separate integration decisions.
 
 ## Release gates for this path
 
@@ -47,4 +47,4 @@ More direct candidates already exist: Nexus provides a [Qt-free OpenRGB componen
 - Discovery held beyond output retry exhaustion, editor closed, backend loss/recovery: automated coverage plus native evidence where hardware is available.
 - Checked component provenance, redistribution material, versioned update/rollback and clean removal. Signing and clean-machine evidence stay explicitly unverified until performed.
 
-The current late-inventory fix covers only one gate. Safe isolation/deferred discovery in the hardware backend and the bundled installer remain work to do.
+The late-inventory implementation and the new native initial-busy-bus test cover distinct gates. Mid-scan recovery, fully bounded kernel calls, the general bundled installer and clean-machine acceptance remain open.
