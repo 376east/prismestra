@@ -54,6 +54,22 @@ class Recorder {
             lines[i + 1] = Convert.ToBase64String(Encoding.UTF8.GetBytes(args[i]));
         File.WriteAllLines(Environment.GetEnvironmentVariable("PRISMESTRA_TEST_RECORD"), lines);
         File.WriteAllText(Environment.GetEnvironmentVariable("PRISMESTRA_TEST_RECORD") + ".pid", System.Diagnostics.Process.GetCurrentProcess().Id.ToString());
+        string record = Environment.GetEnvironmentVariable("PRISMESTRA_TEST_RECORD");
+        string ackPath = Environment.GetEnvironmentVariable("PRISMESTRA_STARTUP_ACK_PATH");
+        File.WriteAllText(record + ".ack-path", ackPath ?? "");
+        string mode = Environment.GetEnvironmentVariable("PRISMESTRA_TEST_ACK") ?? "core_ready";
+        Thread.Sleep(Int32.Parse(Environment.GetEnvironmentVariable("PRISMESTRA_TEST_ACK_DELAY") ?? "0"));
+        if (mode != "missing" && (Environment.GetEnvironmentVariable("PRISMESTRA_TEST_EXIT") ?? "0") == "0") {
+            string nonce = Environment.GetEnvironmentVariable("PRISMESTRA_STARTUP_ACK_NONCE");
+            int pid = System.Diagnostics.Process.GetCurrentProcess().Id;
+            if (mode == "nonce") nonce = new String('0', 32);
+            if (mode == "pid") pid++;
+            string json = "{\\\"version\\\":1,\\\"pid\\\":" + pid + ",\\\"nonce\\\":\\\"" + nonce + "\\\",\\\"stage\\\":\\\"" + (mode == "failed" ? "failed" : "core_ready") + "\\\",\\\"detail\\\":\\\"fixture\\\"}";
+            if (mode == "malformed") json = "{";
+            if (mode == "stale") json = json.Replace("\\\"version\\\":1", "\\\"version\\\":0");
+            File.WriteAllText(ackPath + ".tmp", json);
+            File.Move(ackPath + ".tmp", ackPath);
+        }
         var timer = System.Diagnostics.Stopwatch.StartNew();
         int delay = Int32.Parse(Environment.GetEnvironmentVariable("PRISMESTRA_TEST_SLEEP") ?? "0");
         while (timer.ElapsedMilliseconds < delay && !File.Exists(Environment.GetEnvironmentVariable("PRISMESTRA_TEST_RECORD") + ".stop"))
@@ -74,6 +90,10 @@ class Recorder {
         self.package.mkdir()
         for source in PORTABLE.iterdir():
             shutil.copy2(source, self.package / source.name)
+        # Internal fixture-only edit: shipping launcher keeps its fixed 15 second limit.
+        launcher = self.package / "Launch Prismestra.ps1"
+        launcher.write_text(launcher.read_text(encoding="utf-8").replace(
+            "$startupTimeoutMs = 15000", "$startupTimeoutMs = 2500"), encoding="utf-8")
         shutil.copy2(self.fake, self.package / "Prismestra.exe")
         self.record = self.base / (self._testMethodName + ".args")
         self.env = dict(os.environ, PRISMESTRA_TEST_RECORD=str(self.record))
@@ -105,6 +125,8 @@ class Recorder {
     def test_preview_from_other_cwd_and_special_paths(self):
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("native core ready", result.stdout)
+        self.assertIn("Device/output readiness", result.stdout)
         self.assertEqual(self.recorded(), self.expected())
         self.assertFalse(list((self.package / "data/state").glob(".launcher-write-*")))
 
@@ -164,6 +186,8 @@ class Recorder {
         self.env["PRISMESTRA_TEST_EXIT"] = "23"
         result = self.run_launcher()
         self.assertEqual(result.returncode, 23, result.stdout + result.stderr)
+        ack_path = Path(Path(str(self.record) + ".ack-path").read_text())
+        self.assertFalse(ack_path.parent.exists())
 
     def test_unwritable_state_fails_before_connected_process(self):
         self.saved_profile()
@@ -181,6 +205,56 @@ class Recorder {
             self.assert_failure_without_process(self.run_launcher("-Connected"), "Cannot write portable state")
         finally:
             subprocess.run([str(self.fake), "--test-restore-acl", state, deny.stdout], capture_output=True, check=True)
+
+    def stop_fixture(self):
+        self.record.with_suffix(self.record.suffix + ".stop").touch()
+        exited = self.record.with_suffix(self.record.suffix + ".exited")
+        deadline = time.monotonic() + 5
+        while not exited.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(exited.exists(), "Fake application did not stop")
+        time.sleep(0.1)
+
+    def test_quick_zero_exit_without_ack_is_failure(self):
+        self.env["PRISMESTRA_TEST_ACK"] = "missing"
+        result = self.run_launcher()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("before acknowledging", result.stderr)
+
+    def test_invalid_ack_is_rejected(self):
+        for mode in ("nonce", "pid", "stale", "malformed"):
+            with self.subTest(mode=mode):
+                self.env["PRISMESTRA_TEST_ACK"] = mode
+                result = self.run_launcher()
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("acknowledgement", result.stderr)
+                ack_path = Path(Path(str(self.record) + ".ack-path").read_text())
+                self.assertFalse(ack_path.exists())
+                self.assertFalse(ack_path.parent.exists())
+
+    def test_failure_after_old_grace_period_while_process_alive(self):
+        self.env["PRISMESTRA_TEST_ACK"] = "failed"
+        self.env["PRISMESTRA_TEST_ACK_DELAY"] = "1750"
+        self.assert_live_fixture_failure("Native core startup failed")
+
+    def test_missing_ack_timeout_does_not_kill_child(self):
+        self.env["PRISMESTRA_TEST_ACK"] = "missing"
+        self.assert_live_fixture_failure("Timed out waiting")
+
+    def assert_live_fixture_failure(self, message):
+        self.env["PRISMESTRA_TEST_SLEEP"] = "10000"
+        command = [POWERSHELL, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(self.package / "Launch Prismestra.ps1")]
+        error_path = self.base / (self._testMethodName + ".stderr")
+        try:
+            with error_path.open("w", encoding="utf-8") as stderr:
+                result = subprocess.run(command, cwd=self.base, env=self.env, stdout=subprocess.DEVNULL, stderr=stderr, timeout=8)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(message, error_path.read_text(encoding="utf-8"))
+            self.assertFalse(Path(str(self.record) + ".exited").exists(), "Launcher killed its child")
+            ack_path = Path(Path(str(self.record) + ".ack-path").read_text())
+            self.assertFalse(ack_path.parent.exists())
+        finally:
+            self.stop_fixture()
 
     def test_launcher_returns_while_application_continues(self):
         self.env["PRISMESTRA_TEST_SLEEP"] = "10000"

@@ -45,6 +45,7 @@ mod runtime_client;
 mod web_shell;
 const MODERN_RETURN: i32 = 109;
 mod sources;
+mod startup_ack;
 use runtime_client::Client;
 const CLASS: &str = "PrismestraWindow";
 const NAV_SCENE: i32 = 101;
@@ -2185,6 +2186,7 @@ struct State {
     shell_window: Cell<HWND>,
     session_action: Cell<resident::Action>,
     tray_enabled: Cell<bool>,
+    tray_registration: Cell<resident::TrayRegistration>,
     pending_power: Cell<resident::PowerIntent>,
 }
 fn dialog(hwnd: HWND, save: bool) -> Result<Option<PathBuf>, String> {
@@ -2791,6 +2793,7 @@ pub fn run(args: Vec<OsString>) -> Result<(), String> {
         .map(|pair| PathBuf::from(&pair[1]));
     let result = run_inner(args);
     if !diagnostic && let Err(error) = &result {
+        startup_ack::failed(error);
         if let Some(dir) = error_dir {
             let _ = std::fs::write(dir.join("startup-error.txt"), error);
         }
@@ -2904,6 +2907,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         shell_window: Cell::new(null_mut()),
         session_action: Cell::new(resident::Action::None),
         tray_enabled: Cell::new(false),
+        tray_registration: Cell::new(resident::TrayRegistration::default()),
         pending_power: Cell::new(resident::PowerIntent::default()),
     });
     let instance = unsafe { GetModuleHandleW(null()) };
@@ -3224,6 +3228,9 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     unsafe {
         ShowWindow(raw, SW_SHOWNORMAL);
         UpdateWindow(raw);
+    }
+    if !o.selftest {
+        startup_ack::ready();
     }
     let mut msg = MSG::default();
     loop {

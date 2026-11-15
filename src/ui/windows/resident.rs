@@ -17,6 +17,89 @@ const OPEN: u32 = 1;
 const STOP: u32 = 2;
 const EXIT: u32 = 3;
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+
+// Microsoft documents retrying failed NIM_ADD on TaskbarCreated; PowerToys
+// additionally handles missed initial broadcasts. Reuse that API pattern with
+// our existing maintenance timer, not a dependency or an Explorer-window probe.
+// https://devblogs.microsoft.com/oldnewthing/20181213-00/?p=100475
+// https://github.com/microsoft/PowerToys/blob/main/src/runner/tray_icon.cpp
+// Behavioral reference only; no third-party implementation is copied.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct TrayRegistration {
+    registered: bool,
+    attempting: bool,
+    failures: usize,
+    retry_at_ms: u64,
+    epoch: u64,
+}
+impl TrayRegistration {
+    fn taskbar_created(&mut self, now_ms: u64) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.registered = false;
+        self.failures = 0;
+        self.retry_at_ms = now_ms;
+        // Preserve an in-flight guard: Shell_NotifyIcon may pump window messages.
+    }
+    fn begin(&mut self, now_ms: u64) -> Option<u64> {
+        if self.registered || self.attempting || now_ms < self.retry_at_ms {
+            return None;
+        }
+        self.attempting = true;
+        Some(self.epoch)
+    }
+    fn finish(&mut self, epoch: u64, now_ms: u64, succeeded: bool) -> bool {
+        self.attempting = false;
+        if self.epoch != epoch {
+            return false;
+        }
+        self.registered = succeeded;
+        if succeeded {
+            self.failures = 0;
+        } else {
+            let delay_ms = [1_000, 2_000, 5_000, 15_000, 30_000, 60_000][self.failures.min(5)];
+            self.retry_at_ms = now_ms.saturating_add(delay_ms);
+            self.failures = self.failures.saturating_add(1);
+        }
+        true
+    }
+}
+
+fn poll_tray(
+    registration: &Cell<TrayRegistration>,
+    now_ms: u64,
+    mut notify: impl FnMut(u32) -> bool,
+) -> Option<bool> {
+    let mut pending = registration.get();
+    let epoch = pending.begin(now_ms)?;
+    registration.set(pending);
+    // The same(hwnd,uID) is used for every operation. MODIFY accepts an existing
+    // icon after a duplicate TaskbarCreated without deleting/replacing it first.
+    let succeeded = notify(NIM_ADD) || notify(NIM_MODIFY);
+    let mut pending = registration.get();
+    let current = pending.finish(epoch, now_ms, succeeded);
+    registration.set(pending);
+    current.then_some(succeeded)
+}
+
+fn maintain_tray(state: &State) {
+    // Snapshot/selftest stands may inject registration state, never a real icon.
+    if !state.tray_enabled.get() || state.snapshot {
+        return;
+    }
+    let had_failures = state.tray_registration.get().failures != 0;
+    let data = tray_data(state.shell_window.get(), state.icon.handle());
+    match poll_tray(
+        &state.tray_registration,
+        crate::clock::monotonic_ms(),
+        |operation| unsafe { Shell_NotifyIconW(operation, &data) != 0 },
+    ) {
+        Some(false) if !had_failures => eprintln!(
+            "Windows did not accept the Prismestra tray icon; retry scheduled, session continues"
+        ),
+        Some(true) if had_failures => eprintln!("Prismestra tray icon registered after retry"),
+        _ => {}
+    }
+}
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub(super) enum Action {
     #[default]
@@ -137,13 +220,14 @@ impl Instance {
         Ok(Self { _file: file })
     }
 }
-pub(super) struct Shell {
+pub(super) struct Shell<'a> {
+    state: &'a State,
     hwnd: HWND,
     icon: HICON,
     tray: bool,
 }
-impl Shell {
-    pub(super) fn create(state: &State, tray: bool) -> Result<Self, String> {
+impl<'a> Shell<'a> {
+    pub(super) fn create(state: &'a State, tray: bool) -> Result<Self, String> {
         let instance = unsafe { GetModuleHandleW(null()) };
         let class = wide(CLASS);
         let wc = WNDCLASSEXW {
@@ -180,26 +264,36 @@ impl Shell {
         }
         state.shell_window.set(hwnd);
         state.tray_enabled.set(tray);
+        state.tray_registration.set(TrayRegistration::default());
         let shell = Self {
+            state,
             hwnd,
             tray,
             icon: state.icon.handle(),
         };
+        // Maintenance is essential; tray registration is optional and recoverable.
+        if unsafe { SetTimer(hwnd, 1, 50, None) } == 0 {
+            return Err(last("Start session maintenance"));
+        }
         if tray {
             TASKBAR_CREATED.store(
                 unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) },
                 Ordering::Relaxed,
             );
-            tray_add(hwnd, state.icon.handle())?;
-        }
-        if unsafe { SetTimer(hwnd, 1, 50, None) } == 0 {
-            return Err(last("Start session maintenance"));
+            maintain_tray(state);
         }
         Ok(shell)
     }
 }
-impl Drop for Shell {
+impl Drop for Shell<'_> {
     fn drop(&mut self) {
+        self.state.tray_enabled.set(false);
+        let mut registration = self.state.tray_registration.get();
+        registration.taskbar_created(crate::clock::monotonic_ms());
+        self.state.tray_registration.set(registration);
+        unsafe {
+            KillTimer(self.hwnd, 1);
+        }
         if self.tray {
             let data = tray_data(self.hwnd, self.icon);
             unsafe {
@@ -230,14 +324,6 @@ fn tray_data(hwnd: HWND, icon: HICON) -> NOTIFYICONDATAW {
     }
     data
 }
-fn tray_add(hwnd: HWND, icon: HICON) -> Result<(), String> {
-    let data = tray_data(hwnd, icon);
-    if unsafe { Shell_NotifyIconW(NIM_ADD, &data) } == 0 {
-        Err(last("Create tray icon"))
-    } else {
-        Ok(())
-    }
-}
 pub(super) fn report(state: &State, error: String) {
     if let Ok(mut slot) = state.app.try_borrow_mut()
         && let Some(a) = slot.as_mut()
@@ -255,6 +341,9 @@ pub(super) fn close_editor(state: &State) -> Result<(), String> {
     let hwnd = state.editor_window.get();
     if hwnd.is_null() {
         return Ok(());
+    }
+    if state.tray_enabled.get() && !state.tray_registration.get().registered {
+        return Err("Значок Prismestra пока недоступен. Приложение продолжает работу; редактор останется открытым, пока значок не появится.".into());
     }
     {
         let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
@@ -511,6 +600,7 @@ fn finish_stop(app: &mut App) -> Result<(), String> {
     Ok(())
 }
 fn maintain(state: &State) -> Result<(), String> {
+    maintain_tray(state);
     flush_power(state)?;
     let mut slot = state.app.try_borrow_mut().map_err(|_| "Сессия занята")?;
     let app = slot.as_mut().ok_or("Нет сессии")?;
@@ -619,15 +709,18 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
         return unsafe { DefWindowProcW(hwnd, msg, w, l) };
     }
     if msg == WM_DESTROY {
+        state.tray_enabled.set(false);
         unsafe {
             KillTimer(hwnd, 1);
         }
         return 0;
     }
     if msg == TASKBAR_CREATED.load(Ordering::Relaxed) && msg != 0 && state.tray_enabled.get() {
-        if let Err(e) = tray_add(hwnd, state.icon.handle()) {
-            report(state, e);
-        }
+        let mut registration = state.tray_registration.get();
+        registration.taskbar_created(crate::clock::monotonic_ms());
+        state.tray_registration.set(registration);
+        // Coalesce broadcasts onto the existing timer rather than issuing a
+        // Shell API call per notification, including reentrant notifications.
         return 0;
     }
     let result = match msg {
@@ -688,6 +781,64 @@ fn settle(state: &State, label: &str, done: impl Fn(&App) -> bool) -> Result<(),
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }
+
+fn exercise_tray_retry() -> Result<(), String> {
+    let registration = Cell::new(TrayRegistration::default());
+    let mut operations = Vec::new();
+    let first = poll_tray(&registration, 0, |op| {
+        operations.push(op);
+        false
+    });
+    if first != Some(false)
+        || registration.get().registered
+        || registration.get().retry_at_ms != 1_000
+    {
+        return Err("Tray stand: first failure must defer registration".into());
+    }
+    for now in [50, 100, 999] {
+        if poll_tray(&registration, now, |op| {
+            operations.push(op);
+            true
+        })
+        .is_some()
+        {
+            return Err("Tray stand: retry ran before backoff deadline".into());
+        }
+    }
+    if operations != [NIM_ADD, NIM_MODIFY] {
+        return Err("Tray stand: maintenance retried before its deadline".into());
+    }
+    if poll_tray(&registration, 1_000, |_| false) != Some(false)
+        || registration.get().retry_at_ms != 3_000
+    {
+        return Err("Tray stand: second failure did not increase backoff".into());
+    }
+    if poll_tray(&registration, 3_000, |_| true) != Some(true) || !registration.get().registered {
+        return Err("Tray stand: delayed registration did not recover".into());
+    }
+    if poll_tray(&registration, 600_000, |_| false).is_some() {
+        return Err("Tray stand: registered icon was added twice".into());
+    }
+    let mut pending = registration.get();
+    pending.taskbar_created(600_001);
+    registration.set(pending);
+    // The icon can survive TaskbarCreated; MODIFY confirms that same identity.
+    if poll_tray(&registration, 600_001, |op| op == NIM_MODIFY) != Some(true) {
+        return Err("Tray stand: surviving icon was not accepted without duplication".into());
+    }
+    let mut pending = registration.get();
+    pending.taskbar_created(600_002);
+    registration.set(pending);
+    if poll_tray(&registration, 600_002, |_| false) != Some(false)
+        || registration.get().retry_at_ms != 601_002
+    {
+        return Err("Tray stand: Explorer restart did not reset the retry budget".into());
+    }
+    if poll_tray(&registration, 601_002, |_| true) != Some(true) {
+        return Err("Tray stand: Explorer restart did not recover on a later timer".into());
+    }
+    Ok(())
+}
 pub(super) fn exercise(state: &State) -> Result<(), String> {
     use crate::app::{
         sensor_bindings::{Resolved, Scope, Target as SensorTarget},
@@ -720,6 +871,7 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     if !state.snapshot || state.resident.get() {
         return Err("Resident stand requires isolated diagnostic mode".into());
     }
+    exercise_tray_retry()?;
     let (original, prior_plan, plan, page, dirty, registry) = {
         let mut slot = state.app.borrow_mut();
         let a = slot.as_mut().unwrap();
@@ -837,6 +989,38 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
             rgb_id,
         )
     };
+    // A missing icon must not turn the only editor into an unreachable hidden
+    // session. Inject API outcomes; snapshot mode never calls the real tray.
+    let editor_before = state.editor_window.get();
+    state.tray_enabled.set(true);
+    state.tray_registration.set(TrayRegistration::default());
+    for (msg, w) in [(WM_SYSCOMMAND, SC_CLOSE as usize), (WM_CLOSE, 0)] {
+        unsafe {
+            SendMessageW(editor_before, msg, w, 0);
+        }
+        if state.editor_window.get() != editor_before || unsafe { IsWindow(editor_before) } == 0 {
+            return Err("Tray-pending close destroyed the only editor".into());
+        }
+        let slot = state.app.borrow();
+        let app = slot.as_ref().unwrap();
+        if !app.status.contains("Значок Prismestra пока недоступен")
+            || app.runtime.output_revision() != revision
+            || registry.lock().unwrap().status()[0].worker.generation != sensor_generation
+        {
+            return Err("Tray-pending close lost status or runtime ownership".into());
+        }
+    }
+    if poll_tray(&state.tray_registration, 0, |_| true) != Some(true) {
+        return Err("Injected tray registration did not succeed".into());
+    }
+    close_editor(state)?;
+    if !state.editor_window.get().is_null() {
+        return Err("Registered tray did not permit editor close".into());
+    }
+    state.tray_enabled.set(false);
+    state.tray_registration.set(TrayRegistration::default());
+    open_editor(state)?;
+
     for (msg, w) in [(WM_SYSCOMMAND, SC_CLOSE as usize), (WM_CLOSE, 0)] {
         let retained_status = "Resident diagnostic: preserve the last session status";
         state.app.borrow_mut().as_mut().unwrap().status = retained_status.into();
@@ -1180,7 +1364,7 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     state.tray_enabled.set(false);
     state.resident.set(false);
     eprintln!(
-        "Resident session stand PASS: owned hidden top-level shell, SC_CLOSE and WM_CLOSE editor destroy/reopen, same Runtime/output revision/Registry, one shared reader, live software RGB while editor absent, queued shell power under active borrow and absent App, Stop drain, failed Stop persistence then Exit upgrade/drain/quit; no tray icon, native hardware or OS power operations"
+        "Resident session stand PASS: owned hidden top-level shell, injected failed tray registration/retry/restart, editor retained until injected tray success, SC_CLOSE and WM_CLOSE editor destroy/reopen, same Runtime/output revision/Registry, one shared reader, live software RGB while editor absent, queued shell power under active borrow and absent App, Stop drain, failed Stop persistence then Exit upgrade/drain/quit; no tray icon, native hardware or OS power operations"
     );
     Ok(())
 }
@@ -1188,6 +1372,48 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tray_failure_retry_success_and_explorer_restart_use_no_shell_api() {
+        exercise_tray_retry().unwrap();
+    }
+    #[test]
+    fn tray_backoff_is_capped_and_repeated_timer_ticks_do_not_add_icons() {
+        let registration = Cell::new(TrayRegistration::default());
+        let mut now = 0;
+        for expected in [1_000, 2_000, 5_000, 15_000, 30_000, 60_000, 60_000, 60_000] {
+            assert_eq!(poll_tray(&registration, now, |_| false), Some(false));
+            assert_eq!(registration.get().retry_at_ms, now + expected);
+            assert_eq!(
+                poll_tray(&registration, now + expected - 1, |_| panic!(
+                    "early NIM_ADD"
+                )),
+                None
+            );
+            now += expected;
+        }
+    }
+    #[test]
+    fn reentrant_timer_and_taskbar_created_cannot_accept_a_stale_registration() {
+        let registration = Cell::new(TrayRegistration::default());
+        let result = poll_tray(&registration, 0, |_| {
+            assert_eq!(
+                poll_tray(&registration, 0, |_| panic!("duplicate NIM_ADD")),
+                None
+            );
+            let mut pending = registration.get();
+            pending.taskbar_created(5);
+            registration.set(pending);
+            assert_eq!(
+                poll_tray(&registration, 5, |_| panic!("reentrant NIM_ADD")),
+                None
+            );
+            true
+        });
+        assert_eq!(result, None);
+        assert!(!registration.get().registered);
+        assert_eq!(poll_tray(&registration, 5, |_| true), Some(true));
+        assert!(registration.get().registered);
+    }
     #[test]
     fn power_coalescing_preserves_suspend_before_latest_resume() {
         let mut pending = PowerIntent::default();

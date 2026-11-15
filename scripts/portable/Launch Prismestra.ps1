@@ -26,6 +26,35 @@ function ConvertTo-NativeArgument([string]$Value) {
     '"' + [regex]::Replace([regex]::Replace($Value, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1') + '"'
 }
 
+function Wait-CoreStartup($Process, [string]$Path, [string]$Nonce) {
+    $startupTimeoutMs = 15000
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($timer.ElapsedMilliseconds -lt $startupTimeoutMs) {
+        if ([System.IO.File]::Exists($Path)) {
+            if ((Get-Item -LiteralPath $Path).Length -gt 16384) { throw 'Startup acknowledgement exceeds limit.' }
+            try { $ack = [System.IO.File]::ReadAllText($Path) | ConvertFrom-Json } catch {
+                throw 'Malformed startup acknowledgement.'
+            }
+            if ($ack.version -isnot [int] -or $ack.version -ne 1 -or
+                $ack.pid -isnot [int] -or $ack.pid -ne $Process.Id -or
+                $ack.nonce -isnot [string] -or $ack.nonce -cne $Nonce -or
+                $ack.stage -isnot [string] -or
+                $ack.detail -isnot [string] -or $ack.detail.Length -gt 4096) {
+                throw 'Startup acknowledgement identity or schema mismatch.'
+            }
+            if ($ack.stage -ceq 'failed') { throw ("Native core startup failed: " + $ack.detail) }
+            if ($ack.stage -cne 'core_ready') { throw 'Unknown startup acknowledgement stage.' }
+            return
+        }
+        if ($Process.HasExited) {
+            if ($Process.ExitCode -ne 0) { exit $Process.ExitCode }
+            throw 'Prismestra exited before acknowledging native core startup.'
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    throw 'Timed out waiting for native core startup acknowledgement. The spawned process was left running; inspect it before retrying.'
+}
+
 $root = [System.IO.Path]::GetFullPath($PSScriptRoot)
 $exe = Join-Path $root 'Prismestra.exe'
 $profile = Join-Path $root 'data\profile.json'
@@ -84,15 +113,24 @@ try {
     $start.WorkingDirectory = $root
     $start.UseShellExecute = $false
     $start.Arguments = ($nativeArguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' '
-    $process = [System.Diagnostics.Process]::Start($start)
-    if (-not $process.WaitForExit(1500)) {
-        $process.Dispose()
-        exit 0
+    $ackDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('prismestra-startup-' + [guid]::NewGuid().ToString('N'))
+    [System.IO.Directory]::CreateDirectory($ackDirectory) | Out-Null
+    $ackPath = Join-Path $ackDirectory 'ack.json'
+    $nonce = [guid]::NewGuid().ToString('N')
+    $start.EnvironmentVariables['PRISMESTRA_STARTUP_ACK_PATH'] = $ackPath
+    $start.EnvironmentVariables['PRISMESTRA_STARTUP_ACK_NONCE'] = $nonce
+    $process = $null
+    try {
+        $process = [System.Diagnostics.Process]::Start($start)
+        Wait-CoreStartup $process $ackPath $nonce
+        [Console]::WriteLine('Prismestra native core ready. Device/output readiness is reported by the application.')
+    } finally {
+        if ($null -ne $process) { $process.Dispose() }
+        if ([System.IO.File]::Exists($ackPath)) { [System.IO.File]::Delete($ackPath) }
+        # Only our known file and empty directory; never recursively delete child data.
+        try { [System.IO.Directory]::Delete($ackDirectory) } catch { }
     }
-    $exitCode = $process.ExitCode
-    $process.Dispose()
-    if ($exitCode -ne 0) { [Console]::Error.WriteLine("Prismestra exited with code $exitCode. Review the application error above.") }
-    exit $exitCode
+    exit 0
 } catch {
     if ($Check) {
         $plan.ok = $false

@@ -13,6 +13,10 @@ Extract the complete Windows ZIP into a folder you can write to. The launchers u
 
 Closing the editor leaves the resident engine in the tray. Exit from its menu to stop the session. A repeated launch using the same state directory is handled by the application's single-instance guard; it does not switch a running preview into connected mode. Save changes and exit before restarting in the other mode.
 
+If Windows temporarily refuses the tray icon, the engine continues and registration retries with backoff. Until the icon is registered, closing the editor keeps the window accessible instead of hiding the only entry point. Explorer/taskbar recreation triggers a new registration attempt; restarting Explorer or another application is not an automatic recovery action.
+
+The launcher waits up to 15 seconds for an atomic, process-bound native-core acknowledgement. An explicit initialization failure is reported even if its error dialog keeps the process alive. A timeout leaves the spawned process running and tells you to inspect it before retrying. Core startup acknowledgement does not certify hardware/output readiness; check device statuses in the application. `-Check` remains a nonmutating preflight and does not start or acknowledge a session.
+
 ## What moves with the folder
 
 | Location | Contents |
