@@ -2174,6 +2174,25 @@ fn parse_time(s: &str) -> Result<u16, String> {
     }
     Ok(h * 60 + m)
 }
+// A receipt for rendering the final Stop view into an explicit print target.
+// Reset on every completed Stop so a previous editor/session cannot satisfy it.
+#[derive(Clone, Copy, Debug)]
+struct FinalStopRender {
+    epoch: u64,
+    hwnd: HWND,
+    invalidated: bool,
+    prints: u64,
+}
+impl Default for FinalStopRender {
+    fn default() -> Self {
+        Self {
+            epoch: 0,
+            hwnd: null_mut(),
+            invalidated: false,
+            prints: 0,
+        }
+    }
+}
 struct State {
     icon: brand_icon::Icon,
     modern_enabled: bool,
@@ -2188,6 +2207,7 @@ struct State {
     tray_enabled: Cell<bool>,
     tray_registration: Cell<resident::TrayRegistration>,
     pending_power: Cell<resident::PowerIntent>,
+    final_stop_render: Cell<FinalStopRender>,
 }
 fn dialog(hwnd: HWND, save: bool) -> Result<Option<PathBuf>, String> {
     profile_dialog(hwnd, save, false)
@@ -2492,6 +2512,14 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     }
     let state = unsafe { &*raw };
     if msg == WM_NCDESTROY {
+        let receipt = state.final_stop_render.get();
+        if receipt.hwnd == hwnd {
+            // HWND values can be reused; destruction revokes this window's receipt.
+            state.final_stop_render.set(FinalStopRender {
+                epoch: receipt.epoch,
+                ..FinalStopRender::default()
+            });
+        }
         if state.editor_window.get() == hwnd {
             state.editor_window.set(null_mut());
         }
@@ -2636,7 +2664,29 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
         if let Ok(slot) = state.app.try_borrow()
             && let Some(a) = slot.as_ref()
         {
-            let _ = a.painter.paint(w as HDC, a.width, a.height, &a.view());
+            let receipt = state.final_stop_render.get();
+            let rendered = a
+                .painter
+                .paint(w as HDC, a.width, a.height, &a.view())
+                .is_ok();
+            if rendered
+                && w != 0
+                && a.width > 0
+                && a.height > 0
+                && !a.web_mode
+                && receipt.epoch != 0
+                && receipt.hwnd == hwnd
+                && receipt.invalidated
+                && state.session_action.get() == resident::Action::None
+                && !a.shutdown.active()
+                && a.status.starts_with("Работа остановлена.")
+            {
+                let mut current = state.final_stop_render.get();
+                if current.epoch == receipt.epoch && current.hwnd == hwnd {
+                    current.prints = current.prints.wrapping_add(1).max(1);
+                    state.final_stop_render.set(current);
+                }
+            }
         }
         return 0;
     }
@@ -2909,6 +2959,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         tray_enabled: Cell::new(false),
         tray_registration: Cell::new(resident::TrayRegistration::default()),
         pending_power: Cell::new(resident::PowerIntent::default()),
+        final_stop_render: Cell::new(FinalStopRender::default()),
     });
     let instance = unsafe { GetModuleHandleW(null()) };
     let class = wide(CLASS);

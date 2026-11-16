@@ -270,51 +270,54 @@ fn run(shared: &Shared, wall: impl Fn() -> Result<i64, String>) -> Result<(), St
         #[cfg(windows)]
         {
             let desired = state.runtime.lcd_interface_targets();
-            drop(state);
-            let update = if desired != targets && std::time::Instant::now() >= notification_due {
-                let result = (|| -> Result<(), String> {
-                    if desired.is_empty() {
-                        notifications = None;
-                    } else {
-                        if notifications.is_none() {
-                            notifications = Some(crate::lcd::hid_notifications::Watch::new()?);
-                        }
-                        notifications
-                            .as_mut()
-                            .unwrap()
-                            .set_targets(desired.clone())?;
-                    }
-                    Ok(())
-                })();
-                match result {
-                    Ok(()) => {
-                        targets = desired;
-                        None
-                    }
-                    Err(error) => {
-                        notification_due = std::time::Instant::now() + Duration::from_secs(5);
-                        Some(format!("LCD arrival notifications unavailable: {error}"))
-                    }
-                }
-            } else {
-                None
-            };
-            let arrivals = notifications
-                .as_mut()
-                .map(|watch| watch.take_arrivals())
-                .unwrap_or_default();
-            state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(error) = update {
-                state.runtime.error = Some(message(error));
-            }
-            for arrival in arrivals {
-                state
-                    .runtime
-                    .lcd_interface_arrived(&arrival.path, arrival.reappeared);
-            }
-            if state.runtime.stopped {
+            if !desired.is_empty() || notifications.is_some() {
                 drop(state);
-                return Ok(());
+                let update = if desired != targets && std::time::Instant::now() >= notification_due
+                {
+                    let result = (|| -> Result<(), String> {
+                        if desired.is_empty() {
+                            notifications = None;
+                        } else {
+                            if notifications.is_none() {
+                                notifications = Some(crate::lcd::hid_notifications::Watch::new()?);
+                            }
+                            notifications
+                                .as_mut()
+                                .unwrap()
+                                .set_targets(desired.clone())?;
+                        }
+                        Ok(())
+                    })();
+                    match result {
+                        Ok(()) => {
+                            targets = desired;
+                            None
+                        }
+                        Err(error) => {
+                            notification_due = std::time::Instant::now() + Duration::from_secs(5);
+                            Some(format!("LCD arrival notifications unavailable: {error}"))
+                        }
+                    }
+                } else {
+                    None
+                };
+                let arrivals = notifications
+                    .as_mut()
+                    .map(|watch| watch.take_arrivals())
+                    .unwrap_or_default();
+                state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(error) = update {
+                    state.runtime.error = Some(message(error));
+                }
+                for arrival in arrivals {
+                    state
+                        .runtime
+                        .lcd_interface_arrived(&arrival.path, arrival.reappeared);
+                }
+                if state.runtime.stopped {
+                    drop(state);
+                    return Ok(());
+                }
             }
         }
         let revision = state.revision;

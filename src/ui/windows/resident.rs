@@ -632,9 +632,20 @@ fn maintain(state: &State) -> Result<(), String> {
         }
     }
     let editor = state.editor_window.get();
+    if stopped {
+        state.final_stop_render.set(FinalStopRender {
+            epoch: state.final_stop_render.get().epoch.wrapping_add(1).max(1),
+            hwnd: editor,
+            invalidated: false,
+            prints: 0,
+        });
+    }
     if !editor.is_null() && (stopped || state.session_action.get() != Action::None) {
-        unsafe {
-            InvalidateRect(editor, null(), 0);
+        let invalidated = unsafe { InvalidateRect(editor, null(), 0) } != 0;
+        if stopped {
+            let mut receipt = state.final_stop_render.get();
+            receipt.invalidated = invalidated;
+            state.final_stop_render.set(receipt);
         }
     }
     Ok(())
@@ -1181,6 +1192,7 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
         a.was_pending = true;
     }
     let stopped_editor = state.editor_window.get();
+    let stop_epoch_before = state.final_stop_render.get().epoch;
     request(state, Action::Stop, false)?;
     {
         let slot = state.app.borrow();
@@ -1218,8 +1230,12 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
             return Err("Stop retained the closing status".into());
         }
     }
-    if unsafe { GetUpdateRect(stopped_editor, null_mut(), 0) } == 0 {
-        return Err("Stop did not invalidate the open editor".into());
+    let receipt = state.final_stop_render.get();
+    if receipt.epoch == stop_epoch_before || receipt.hwnd != stopped_editor || !receipt.invalidated
+    {
+        return Err(format!(
+            "Stop did not invalidate the final open editor view: baseline={stop_epoch_before}, receipt={receipt:?}"
+        ));
     }
     let capture = {
         let slot = state.app.borrow();
@@ -1231,6 +1247,9 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
         )
     };
     let bitmap = Bitmap::new(capture.0, capture.1)?;
+    // The fixture window is deliberately off-screen. WM_PRINT must render its
+    // final stopped view into this bitmap, independently of visible update regions.
+    let print_before = state.final_stop_render.get();
     unsafe {
         SendMessageW(
             stopped_editor,
@@ -1238,6 +1257,17 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
             bitmap.dc as usize,
             (PRF_CLIENT | PRF_CHILDREN | PRF_ERASEBKGND) as isize,
         );
+    }
+    let printed = state.final_stop_render.get();
+    if print_before.epoch != receipt.epoch
+        || printed.epoch != print_before.epoch
+        || printed.hwnd != stopped_editor
+        || !printed.invalidated
+        || printed.prints == print_before.prints
+    {
+        return Err(format!(
+            "Stop final off-screen editor render failed: before={print_before:?}, after={printed:?}"
+        ));
     }
     bitmap.save(&capture.2)?;
     let idle_until = Instant::now() + std::time::Duration::from_millis(100);
