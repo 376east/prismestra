@@ -24,7 +24,7 @@ It checks SDK readiness and listener PID, refuses foreign occupied endpoints and
 
 Default management uses ordinary permissions. Some controller paths require elevation. An administrator may provision an authorized task/helper, selected through `backend-task.json` and setup's `-AuthorizedTaskName`. This is configurable, not a hardcoded personal task. The task launches the same Prismestra EXE with `--backend-helper <state-directory> <authorized-OpenRGB-executable> <authorized-SHA256>`, with pins supplied by the authorized action rather than scene data. The action must pin the helper EXE too. The administrator must trust/protect the action, binaries, dependencies and isolated configuration: EXE pinning alone does not protect a writable plugin tree. This preview does not ship a general elevated-task installer or claim to establish that trust automatically.
 
-The helper verifies the parent's PID, creation time and executable path. Nonce-bound heartbeat, status and cancel files reject stale sessions. Parent death, cancellation or heartbeat loss releases only its owned child. [Helper](../src/app/backend_helper.rs).
+The helper verifies the parent's PID, creation time and executable path. Nonce-bound heartbeat, status and cancel files reject stale sessions. The private controls use protocol2 and a boot-relative active-time clock, excluding sleep/hibernation and UTC corrections; deploy the helper launcher and application together. Parent death, cancellation or active heartbeat loss releases only its owned child. A bounded diagnostic history survives helper restarts. [Helper](../src/app/backend_helper.rs), [clock contract, diagnostics and actual boot gates](startup-recovery.md).
 
 ## Coexistence with other software
 

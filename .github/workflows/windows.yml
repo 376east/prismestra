@@ -31,6 +31,8 @@ jobs:
         run: python scripts/test_portable_launcher.py
       - name: Check local backend configuration without hardware
         run: python scripts/test_backend_setup.py
+      - name: Check helper clock contract without hardware
+        run: python scripts/test_helper_clock.py
       - name: Check component inventory gates without executing hardware code
         run: python scripts/components/test_verify_openrgb_component.py
       - name: Check embedded editor commands

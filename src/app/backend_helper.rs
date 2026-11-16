@@ -1,11 +1,13 @@
 //! Optional adapter for an installer-authorized elevated backend task.
 //! Task registration and elevation are deliberately outside this module.
 use super::managed_backend::{Config, Manager};
+mod clock;
+use clock::{ActiveClock, Clock};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::VecDeque,
     fs::{self, File},
-    io::Read,
+    io::{Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
@@ -13,7 +15,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 const LIMIT: usize = 16_384;
@@ -53,6 +55,7 @@ struct Identity {
 #[serde(deny_unknown_fields)]
 struct Request {
     version: u32,
+    clock_domain: String,
     nonce: String,
     parent: Identity,
     timestamp_ms: u64,
@@ -62,12 +65,14 @@ struct Request {
 #[serde(deny_unknown_fields)]
 struct Cancel {
     version: u32,
+    clock_domain: String,
     nonce: String,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Status {
     version: u32,
+    clock_domain: String,
     nonce: String,
     parent: Identity,
     helper: Identity,
@@ -150,7 +155,7 @@ impl Backend {
                     detail: value.detail,
                     ready: value.ready,
                     backend_pid: value.backend_pid,
-                    timestamp_ms: now_ms(),
+                    timestamp_ms: 0, // Direct Manager guards do not use the helper lease.
                 }
             }
             Inner::Task(proxy) => proxy
@@ -180,7 +185,8 @@ impl Backend {
                 let _ = write_json(
                     &proxy.state_dir.join("owner-pause.json"),
                     &Cancel {
-                        version: 1,
+                        version: clock::PROTOCOL,
+                        clock_domain: clock::DOMAIN.into(),
                         nonce: proxy.nonce.clone(),
                     },
                 );
@@ -198,14 +204,15 @@ impl Proxy {
         let nonce = format!(
             "{}-{}-{}",
             parent.pid,
-            now_ms(),
+            now_ms()?,
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
         let request = Request {
-            version: 1,
+            version: clock::PROTOCOL,
+            clock_domain: clock::DOMAIN.into(),
             nonce: nonce.clone(),
             parent,
-            timestamp_ms: now_ms(),
+            timestamp_ms: now_ms()?,
             restarting: true,
         };
         write_json(&state_dir.join("owner-request.json"), &request)?;
@@ -248,7 +255,8 @@ impl Drop for Proxy {
         let _ = write_json(
             &self.state_dir.join("owner-cancel.json"),
             &Cancel {
-                version: 1,
+                version: clock::PROTOCOL,
+                clock_domain: clock::DOMAIN.into(),
                 nonce: self.nonce.clone(),
             },
         );
@@ -296,12 +304,16 @@ fn proxy_loop(
             }
             heartbeat = Instant::now();
         }
-        let status = read_json::<Status>(&directory.join("helper-status.json"))
-            .ok()
-            .filter(|s| {
-                valid_status(s, request, now_ms())
-                    && identity(s.helper.pid).ok().as_ref() == Some(&s.helper)
-            });
+        let status = read_json::<Status>(&directory.join("helper-status.json")).ok();
+        // Read the clock after the file: a concurrent status publication must
+        // not appear to carry a future tick relative to a pre-read observation.
+        let now = match now_ms() {
+            Ok(now) => now,
+            Err(_) => break, // No readiness or task launch without a usable active clock.
+        };
+        let status = status.filter(|s| {
+            valid_status(s, request, now) && identity(s.helper.pid).ok().as_ref() == Some(&s.helper)
+        });
         let mut snapshot = Snapshot {
             ready_generation: generation,
             ready: false,
@@ -360,17 +372,31 @@ enum Heartbeat {
     Lost,
 }
 fn refresh_heartbeat(directory: &Path, request: &Request, restarting: bool) -> Heartbeat {
+    refresh_heartbeat_with_clock(directory, request, restarting, &ActiveClock)
+}
+fn refresh_heartbeat_with_clock(
+    directory: &Path,
+    request: &Request,
+    restarting: bool,
+    clock: &impl Clock,
+) -> Heartbeat {
+    let now = match clock.now_ms() {
+        Ok(now) => now,
+        Err(_) => return Heartbeat::Lost,
+    };
     let path = directory.join("owner-request.json");
     match read_json_typed::<Request>(&path) {
         Ok(current)
-            if current.version == 1
+            if current.version == clock::PROTOCOL
+                && current.clock_domain == clock::DOMAIN
+                && current.timestamp_ms <= now
                 && current.nonce == request.nonce
                 && current.parent == request.parent => {}
         Ok(_) | Err(ControlRead::Invalid(_)) => return Heartbeat::Lost,
         Err(ControlRead::Io(error)) => return Heartbeat::Retry(error.to_string()),
     }
     let mut current = request.clone();
-    current.timestamp_ms = now_ms();
+    current.timestamp_ms = now;
     current.restarting = restarting;
     match write_json(&path, &current) {
         Ok(()) => Heartbeat::Published,
@@ -379,12 +405,14 @@ fn refresh_heartbeat(directory: &Path, request: &Request, restarting: bool) -> H
 }
 
 fn valid_status(status: &Status, request: &Request, now: u64) -> bool {
-    status.version == 1
+    request.version == clock::PROTOCOL
+        && request.clock_domain == clock::DOMAIN
+        && status.version == clock::PROTOCOL
+        && status.clock_domain == clock::DOMAIN
         && status.nonce == request.nonce
         && status.parent == request.parent
         && status.helper.executable == request.parent.executable
-        && status.timestamp_ms <= now
-        && now - status.timestamp_ms <= FRESH_MS
+        && clock::fresh(status.timestamp_ms, now, FRESH_MS)
         && status.detail.len() <= 4096
         && (!status.ready || status.ready_generation != 0)
         && (!status.ready || status.backend_pid.is_some())
@@ -397,11 +425,10 @@ fn task_guard(
 ) -> Arc<dyn Fn() -> Result<(), String> + Send + Sync> {
     Arc::new(move || {
         let snapshot = snapshot.lock().unwrap_or_else(|p| p.into_inner());
-        let now = now_ms();
+        let now = now_ms()?;
         if stop.load(Ordering::SeqCst)
             || !snapshot.ready
-            || snapshot.timestamp_ms > now
-            || now - snapshot.timestamp_ms > FRESH_MS
+            || !clock::fresh(snapshot.timestamp_ms, now, FRESH_MS)
         {
             return Err("Managed backend helper is not ready or its status is stale".into());
         }
@@ -436,10 +463,11 @@ pub fn run_helper_pinned(
 fn run_helper_inner(state_dir: &Path, pin: Option<(&Path, &str)>) -> Result<(), String> {
     let request: Request = read_json(&state_dir.join("owner-request.json"))?;
     let helper = identity(std::process::id())?;
-    if request.version != 1
+    if request.version != clock::PROTOCOL
+        || request.clock_domain != clock::DOMAIN
         || request.nonce.is_empty()
         || request.nonce.len() > 128
-        || !live_request(&request, now_ms())
+        || !live_request(&request, now_ms()?)
         || request.parent.executable != helper.executable
         || identity(request.parent.pid)? != request.parent
     {
@@ -448,10 +476,10 @@ fn run_helper_inner(state_dir: &Path, pin: Option<(&Path, &str)>) -> Result<(), 
     if !request.restarting
         || read_json::<Cancel>(&state_dir.join("owner-pause.json"))
             .ok()
-            .is_some_and(|c| c.version == 1 && c.nonce == request.nonce)
+            .is_some_and(|c| matches_control(&c, &request))
         || read_json::<Cancel>(&state_dir.join("owner-cancel.json"))
             .ok()
-            .is_some_and(|c| c.version == 1 && c.nonce == request.nonce)
+            .is_some_and(|c| matches_control(&c, &request))
     {
         return Ok(());
     }
@@ -460,6 +488,13 @@ fn run_helper_inner(state_dir: &Path, pin: Option<(&Path, &str)>) -> Result<(), 
         config.require_identity(executable, sha)?;
     }
     let manager = Manager::start(config)?;
+    helper_note(
+        state_dir,
+        &request,
+        "helper_started",
+        None,
+        "Validated owner; managed backend worker started",
+    );
     let result = supervise_helper(
         state_dir,
         &request,
@@ -468,8 +503,36 @@ fn run_helper_inner(state_dir: &Path, pin: Option<(&Path, &str)>) -> Result<(), 
         || manager.stop_restarting(),
     );
     manager.stop_restarting();
+    helper_note(
+        state_dir,
+        &request,
+        "helper_draining",
+        manager.snapshot().backend_pid,
+        result
+            .as_ref()
+            .err()
+            .map_or("Supervisor ended; draining owned backend", String::as_str),
+    );
     drop(manager); // Owns and terminates only this helper's backend child.
     result
+}
+
+fn helper_note(
+    state_dir: &Path,
+    request: &Request,
+    event: &'static str,
+    backend_pid: Option<u32>,
+    detail: &str,
+) {
+    super::backend_diagnostics::record(
+        state_dir,
+        event,
+        Some(request.parent.pid),
+        backend_pid,
+        detail,
+    );
+    // Diagnostics must not panic if an optional launcher stderr handle is unavailable.
+    let _ = writeln!(std::io::stderr(), "{detail}");
 }
 
 fn supervise_helper(
@@ -479,95 +542,208 @@ fn supervise_helper(
     snapshot: impl Fn() -> super::managed_backend::Snapshot,
     stop_restarting: impl Fn(),
 ) -> Result<(), String> {
-    let mut lease_deadline = Instant::now()
-        + Duration::from_millis(
-            5_000u64.saturating_sub(now_ms().saturating_sub(request.timestamp_ms)),
+    supervise_helper_with_clock(
+        state_dir,
+        request,
+        helper,
+        snapshot,
+        stop_restarting,
+        &ActiveClock,
+    )
+}
+
+fn supervise_helper_with_clock(
+    state_dir: &Path,
+    request: &Request,
+    helper: &Identity,
+    snapshot: impl Fn() -> super::managed_backend::Snapshot,
+    stop_restarting: impl Fn(),
+    clock: &impl Clock,
+) -> Result<(), String> {
+    let now = clock.now_ms()?;
+    if !live_request(request, now) {
+        return Err(
+            "Backend helper owner request has an invalid clock domain or active tick".into(),
         );
+    }
+    let mut lease_deadline = clock::deadline(request.timestamp_ms, now)?;
     let mut status_write_failed = false;
+    let mut owner_read_failed = false;
+    let mut last_backend_state = None;
     loop {
-        if Instant::now() >= lease_deadline {
-            eprintln!("Managed helper stopping: parent heartbeat lease expired");
+        if clock.now_ms()? >= lease_deadline {
+            helper_note(
+                state_dir,
+                request,
+                "helper_stop",
+                None,
+                "Managed helper stopping: parent heartbeat lease expired",
+            );
             break;
         }
         match identity(request.parent.pid) {
             Ok(parent) if parent == request.parent => {}
             Ok(_) => {
-                eprintln!("Managed helper stopping: parent identity changed");
+                helper_note(
+                    state_dir,
+                    request,
+                    "helper_stop",
+                    None,
+                    "Managed helper stopping: parent identity changed",
+                );
                 break;
             }
             Err(error) => {
-                eprintln!("Managed helper stopping: parent identity query failed: {error}");
+                helper_note(
+                    state_dir,
+                    request,
+                    "helper_stop",
+                    None,
+                    &format!("Managed helper stopping: parent identity query failed: {error}"),
+                );
                 break;
             }
         }
         if read_json::<Cancel>(&state_dir.join("owner-cancel.json"))
             .ok()
-            .is_some_and(|c| c.version == 1 && c.nonce == request.nonce)
+            .is_some_and(|c| matches_control(&c, request))
         {
-            eprintln!("Managed helper stopping: matching owner cancellation");
+            helper_note(
+                state_dir,
+                request,
+                "helper_stop",
+                None,
+                "Managed helper stopping: matching owner cancellation",
+            );
             break;
         }
         if read_json::<Cancel>(&state_dir.join("owner-pause.json"))
             .ok()
-            .is_some_and(|c| c.version == 1 && c.nonce == request.nonce)
+            .is_some_and(|c| matches_control(&c, request))
         {
             stop_restarting();
         }
         match read_json_typed::<Request>(&state_dir.join("owner-request.json")) {
-            Err(ControlRead::Io(_)) => {
-                thread::sleep(POLL);
+            Err(ControlRead::Io(error)) => {
+                if !owner_read_failed {
+                    helper_note(
+                        state_dir,
+                        request,
+                        "owner_read_deferred",
+                        None,
+                        &error.to_string(),
+                    );
+                }
+                owner_read_failed = true;
+                clock.sleep(POLL);
                 continue;
             }
             Err(ControlRead::Invalid(error)) => return Err(error),
             Ok(current) => {
-                if current.version != 1
+                if owner_read_failed {
+                    helper_note(
+                        state_dir,
+                        request,
+                        "owner_read_recovered",
+                        None,
+                        "Owner request readable again",
+                    );
+                    owner_read_failed = false;
+                }
+                let now = clock.now_ms()?;
+                if current.version != clock::PROTOCOL
+                    || current.clock_domain != clock::DOMAIN
                     || current.nonce != request.nonce
                     || current.parent != request.parent
-                    || !live_request(&current, now_ms())
+                    || !live_request(&current, now)
                 {
-                    eprintln!(
-                        "Managed helper stopping: owner request invalid/changed or expired (age_ms={})",
-                        now_ms().saturating_sub(current.timestamp_ms)
+                    helper_note(
+                        state_dir,
+                        request,
+                        "helper_stop",
+                        None,
+                        &format!(
+                            "Managed helper stopping: owner request invalid/changed or expired (age_ms={})",
+                            now.saturating_sub(current.timestamp_ms)
+                        ),
                     );
                     break;
                 }
-                lease_deadline = Instant::now()
-                    + Duration::from_millis(
-                        5_000u64.saturating_sub(now_ms().saturating_sub(current.timestamp_ms)),
-                    );
+                lease_deadline = clock::deadline(current.timestamp_ms, now)?;
                 if !current.restarting {
                     stop_restarting();
                 }
                 if read_json::<Cancel>(&state_dir.join("owner-cancel.json"))
                     .ok()
-                    .is_some_and(|c| c.version == 1 && c.nonce == request.nonce)
+                    .is_some_and(|c| matches_control(&c, request))
                 {
+                    helper_note(
+                        state_dir,
+                        request,
+                        "helper_stop",
+                        None,
+                        "Managed helper stopping: matching owner cancellation",
+                    );
                     break;
                 }
                 let snapshot = snapshot();
+                let backend_state = (
+                    snapshot.backend_pid,
+                    snapshot.ready,
+                    snapshot.ready_generation,
+                    snapshot.detail.clone(),
+                );
+                if last_backend_state.as_ref() != Some(&backend_state) {
+                    super::backend_diagnostics::record(
+                        state_dir,
+                        "backend_state",
+                        Some(request.parent.pid),
+                        snapshot.backend_pid,
+                        &snapshot.detail,
+                    );
+                    last_backend_state = Some(backend_state);
+                }
                 let status = Status {
-                    version: 1,
+                    version: clock::PROTOCOL,
+                    clock_domain: clock::DOMAIN.into(),
                     nonce: request.nonce.clone(),
                     parent: request.parent.clone(),
                     helper: helper.clone(),
-                    timestamp_ms: now_ms(),
+                    timestamp_ms: clock.now_ms()?,
                     ready_generation: snapshot.ready_generation,
                     ready: snapshot.ready,
                     backend_pid: snapshot.backend_pid,
                     detail: snapshot.detail.chars().take(1000).collect(),
                 };
                 match write_json(&state_dir.join("helper-status.json"), &status) {
-                    Ok(()) => status_write_failed = false,
+                    Ok(()) => {
+                        if status_write_failed {
+                            helper_note(
+                                state_dir,
+                                request,
+                                "status_write_recovered",
+                                snapshot.backend_pid,
+                                "Backend helper status publication recovered",
+                            );
+                        }
+                        status_write_failed = false;
+                    }
                     Err(error) => {
                         if !status_write_failed {
-                            eprintln!("Backend helper status publication deferred: {error}");
+                            helper_note(
+                                state_dir,
+                                request,
+                                "status_write_deferred",
+                                snapshot.backend_pid,
+                                &format!("Backend helper status publication deferred: {error}"),
+                            );
                         }
                         status_write_failed = true;
                     }
                 }
             }
         }
-        thread::sleep(POLL);
+        clock.sleep(POLL);
     }
     Ok(())
 }
@@ -618,15 +794,18 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
     crate::storage::atomic_write(path, &bytes, LIMIT).map_err(|e| e.to_string())
 }
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u64::MAX as u128) as u64
+fn now_ms() -> Result<u64, String> {
+    ActiveClock.now_ms()
 }
 fn live_request(request: &Request, now: u64) -> bool {
-    request.timestamp_ms <= now && now - request.timestamp_ms <= 5_000
+    request.version == clock::PROTOCOL
+        && request.clock_domain == clock::DOMAIN
+        && clock::fresh(request.timestamp_ms, now, clock::LEASE_MS)
+}
+fn matches_control(control: &Cancel, request: &Request) -> bool {
+    control.version == clock::PROTOCOL
+        && control.clock_domain == clock::DOMAIN
+        && control.nonce == request.nonce
 }
 
 #[cfg(windows)]
@@ -776,6 +955,201 @@ fn identity(_: u32) -> Result<Identity, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    struct FakeClock {
+        active_ms: Cell<u64>,
+        utc_ms: Cell<i64>,
+        suspended_ms: Cell<u64>,
+        polls: Cell<u64>,
+        utc_step_ms: i64,
+        suspend_step_ms: u64,
+        fail_at_ms: Option<u64>,
+    }
+    impl FakeClock {
+        fn new(active_ms: u64) -> Self {
+            Self {
+                active_ms: Cell::new(active_ms),
+                utc_ms: Cell::new(1_700_000_000_000),
+                suspended_ms: Cell::new(0),
+                polls: Cell::new(0),
+                utc_step_ms: 0,
+                suspend_step_ms: 0,
+                fail_at_ms: None,
+            }
+        }
+    }
+    impl Clock for FakeClock {
+        fn now_ms(&self) -> Result<u64, String> {
+            if self.fail_at_ms.is_some_and(|at| self.active_ms.get() >= at) {
+                Err("injected QueryUnbiasedInterruptTime failure".into())
+            } else {
+                Ok(self.active_ms.get())
+            }
+        }
+        fn sleep(&self, duration: Duration) {
+            let millis = u64::try_from(duration.as_millis()).unwrap();
+            self.active_ms.set(self.active_ms.get() + millis);
+            self.utc_ms.set(self.utc_ms.get() + millis as i64);
+            if self.polls.get() == 0 {
+                self.utc_ms.set(self.utc_ms.get() + self.utc_step_ms);
+                self.suspended_ms.set(self.suspend_step_ms);
+            }
+            self.polls.set(self.polls.get() + 1);
+        }
+    }
+
+    #[test]
+    fn active_freshness_ignores_suspend_and_forward_or_backward_utc_steps() {
+        let (request, status) = fixture();
+        for utc_step_ms in [-86_400_000, 0, 86_400_000] {
+            let mut clock = FakeClock::new(request.timestamp_ms);
+            clock.utc_step_ms = utc_step_ms;
+            clock.suspend_step_ms = 3_600_000;
+            clock.sleep(POLL);
+            assert_eq!(clock.suspended_ms.get(), 3_600_000);
+            assert_eq!(clock.utc_ms.get(), 1_700_000_000_200 + utc_step_ms);
+            assert!(live_request(&request, clock.now_ms().unwrap()));
+            assert!(valid_status(&status, &request, clock.now_ms().unwrap()));
+            assert_eq!(
+                clock::deadline(request.timestamp_ms, clock.now_ms().unwrap()).unwrap(),
+                request.timestamp_ms + clock::LEASE_MS
+            );
+            clock.active_ms.set(request.timestamp_ms + FRESH_MS + 1);
+            assert!(!valid_status(&status, &request, clock.now_ms().unwrap()));
+            clock
+                .active_ms
+                .set(request.timestamp_ms + clock::LEASE_MS + 1);
+            assert!(!live_request(&request, clock.now_ms().unwrap()));
+        }
+    }
+
+    #[test]
+    fn mixed_protocol_future_ticks_and_deadline_overflow_fail_closed() {
+        let (mut request, mut status) = fixture();
+        let mut control = Cancel {
+            version: clock::PROTOCOL,
+            clock_domain: clock::DOMAIN.into(),
+            nonce: request.nonce.clone(),
+        };
+        assert!(matches_control(&control, &request));
+        control.version = 1;
+        assert!(!matches_control(&control, &request));
+        control.version = clock::PROTOCOL;
+        control.clock_domain = "utc-unix-ms".into();
+        assert!(!matches_control(&control, &request));
+        assert!(!live_request(&request, request.timestamp_ms - 1));
+        assert!(clock::deadline(request.timestamp_ms, request.timestamp_ms - 1).is_err());
+        assert!(clock::deadline(u64::MAX, u64::MAX).is_err());
+        status.version = 1;
+        assert!(!valid_status(&status, &request, 10_100));
+        status.version = clock::PROTOCOL;
+        status.clock_domain = "utc-unix-ms".into();
+        assert!(!valid_status(&status, &request, 10_100));
+        request.version = 1;
+        assert!(!live_request(&request, 10_100));
+        request.version = clock::PROTOCOL;
+        request.clock_domain = "utc-unix-ms".into();
+        assert!(!live_request(&request, 10_100));
+        let mut value = serde_json::to_value(request).unwrap();
+        value.as_object_mut().unwrap().remove("clock_domain");
+        assert!(serde_json::from_value::<Request>(value).is_err());
+    }
+
+    #[test]
+    fn heartbeat_clock_failure_and_future_tick_cannot_overwrite_owner_request() {
+        let directory = std::env::temp_dir().join(format!(
+            "backend-clock-publish-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&directory).unwrap();
+        let (request, _) = fixture();
+        let path = directory.join("owner-request.json");
+        write_json(&path, &request).unwrap();
+        let original = fs::read(&path).unwrap();
+        let mut clock = FakeClock::new(request.timestamp_ms);
+        clock.fail_at_ms = Some(request.timestamp_ms);
+        assert!(matches!(
+            refresh_heartbeat_with_clock(&directory, &request, true, &clock),
+            Heartbeat::Lost
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        clock.fail_at_ms = None;
+        clock.active_ms.set(request.timestamp_ms - 1);
+        assert!(matches!(
+            refresh_heartbeat_with_clock(&directory, &request, true, &clock),
+            Heartbeat::Lost
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        fs::remove_file(path).unwrap();
+        let _ = fs::remove_file(directory.join("backend-events.json"));
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn supervisor_old_heartbeat_cannot_renew_lease_across_suspend_or_utc_steps() {
+        for utc_step_ms in [-86_400_000, 0, 86_400_000] {
+            let (directory, mut request, helper) = sharing_fixture("active-lease");
+            request.timestamp_ms = 10_000;
+            write_json(&directory.join("owner-request.json"), &request).unwrap();
+            let mut clock = FakeClock::new(request.timestamp_ms);
+            clock.utc_step_ms = utc_step_ms;
+            clock.suspend_step_ms = 3_600_000;
+            let publications = Cell::new(0);
+            supervise_helper_with_clock(
+                &directory,
+                &request,
+                &helper,
+                || {
+                    publications.set(publications.get() + 1);
+                    super::super::managed_backend::Snapshot::default()
+                },
+                || {},
+                &clock,
+            )
+            .unwrap();
+            assert_eq!(publications.get(), 25);
+            assert_eq!(clock.active_ms.get(), 15_000);
+            assert_eq!(clock.suspended_ms.get(), 3_600_000);
+            fs::remove_file(directory.join("owner-request.json")).unwrap();
+            fs::remove_file(directory.join("helper-status.json")).unwrap();
+            let _ = fs::remove_file(directory.join("backend-events.json"));
+            fs::remove_dir(directory).unwrap();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn supervisor_active_clock_api_failure_stops_status_publication() {
+        let (directory, mut request, helper) = sharing_fixture("clock-failure");
+        request.timestamp_ms = 10_000;
+        write_json(&directory.join("owner-request.json"), &request).unwrap();
+        let mut clock = FakeClock::new(request.timestamp_ms);
+        clock.fail_at_ms = Some(10_200);
+        let publications = Cell::new(0);
+        assert!(
+            supervise_helper_with_clock(
+                &directory,
+                &request,
+                &helper,
+                || {
+                    publications.set(publications.get() + 1);
+                    super::super::managed_backend::Snapshot::default()
+                },
+                || {},
+                &clock,
+            )
+            .unwrap_err()
+            .contains("injected QueryUnbiasedInterruptTime failure")
+        );
+        assert_eq!(publications.get(), 1);
+        fs::remove_file(directory.join("owner-request.json")).unwrap();
+        fs::remove_file(directory.join("helper-status.json")).unwrap();
+        let _ = fs::remove_file(directory.join("backend-events.json"));
+        fs::remove_dir(directory).unwrap();
+    }
     #[cfg(windows)]
     fn sharing_fixture(label: &str) -> (PathBuf, Request, Identity) {
         let directory = std::env::temp_dir().join(format!(
@@ -786,10 +1160,11 @@ mod tests {
         fs::create_dir(&directory).unwrap();
         let helper = identity(std::process::id()).unwrap();
         let request = Request {
-            version: 1,
+            version: clock::PROTOCOL,
+            clock_domain: clock::DOMAIN.into(),
             nonce: label.into(),
             parent: helper.clone(),
-            timestamp_ms: now_ms(),
+            timestamp_ms: now_ms().unwrap(),
             restarting: true,
         };
         write_json(&directory.join("owner-request.json"), &request).unwrap();
@@ -844,7 +1219,8 @@ mod tests {
         write_json(
             &directory.join("owner-pause.json"),
             &Cancel {
-                version: 1,
+                version: clock::PROTOCOL,
+                clock_domain: clock::DOMAIN.into(),
                 nonce: "another-owner".into(),
             },
         )
@@ -854,7 +1230,8 @@ mod tests {
         write_json(
             &directory.join("owner-pause.json"),
             &Cancel {
-                version: 1,
+                version: clock::PROTOCOL,
+                clock_domain: clock::DOMAIN.into(),
                 nonce: "sharing-recovery".into(),
             },
         )
@@ -876,7 +1253,8 @@ mod tests {
         write_json(
             &directory.join("owner-cancel.json"),
             &Cancel {
-                version: 1,
+                version: clock::PROTOCOL,
+                clock_domain: clock::DOMAIN.into(),
                 nonce: "sharing-recovery".into(),
             },
         )
@@ -890,6 +1268,7 @@ mod tests {
         ] {
             fs::remove_file(directory.join(name)).unwrap();
         }
+        let _ = fs::remove_file(directory.join("backend-events.json"));
         fs::remove_dir(directory).unwrap();
     }
     #[cfg(windows)]
@@ -897,25 +1276,28 @@ mod tests {
     fn inaccessible_owner_cannot_extend_last_valid_lease() {
         use std::os::windows::fs::OpenOptionsExt;
         let (directory, mut request, helper) = sharing_fixture("sharing-expiry");
-        request.timestamp_ms = now_ms().saturating_sub(4_500);
+        request.timestamp_ms = 5_500;
         write_json(&directory.join("owner-request.json"), &request).unwrap();
         let reader = fs::OpenOptions::new()
             .read(true)
             .share_mode(0)
             .open(directory.join("owner-request.json"))
             .unwrap();
-        let start = Instant::now();
-        supervise_helper(
+        let clock = FakeClock::new(10_000);
+        supervise_helper_with_clock(
             &directory,
             &request,
             &helper,
             || panic!("Unreadable owner must not publish"),
             || {},
+            &clock,
         )
         .unwrap();
-        assert!(start.elapsed() < Duration::from_millis(1_000));
+        assert_eq!(clock.active_ms.get(), 10_600);
+        assert_eq!(clock.polls.get(), 3);
         drop(reader);
         fs::remove_file(directory.join("owner-request.json")).unwrap();
+        let _ = fs::remove_file(directory.join("backend-events.json"));
         fs::remove_dir(directory).unwrap();
     }
     #[cfg(windows)]
@@ -968,6 +1350,7 @@ mod tests {
         ));
         assert_eq!(read_json::<Request>(&path).unwrap().nonce, "new-owner");
         fs::remove_file(path).unwrap();
+        let _ = fs::remove_file(directory.join("backend-events.json"));
         fs::remove_dir(directory).unwrap();
     }
     fn fixture() -> (Request, Status) {
@@ -977,14 +1360,16 @@ mod tests {
             executable: PathBuf::from("product.exe"),
         };
         let request = Request {
-            version: 1,
+            version: clock::PROTOCOL,
+            clock_domain: clock::DOMAIN.into(),
             nonce: "new-session".into(),
             parent: parent.clone(),
             timestamp_ms: 10_000,
             restarting: true,
         };
         let status = Status {
-            version: 1,
+            version: clock::PROTOCOL,
+            clock_domain: clock::DOMAIN.into(),
             nonce: request.nonce.clone(),
             parent,
             helper: Identity {
@@ -1063,7 +1448,8 @@ mod tests {
         write_json(
             &cancel_path,
             &Cancel {
-                version: 1,
+                version: clock::PROTOCOL,
+                clock_domain: clock::DOMAIN.into(),
                 nonce: "old-session".into(),
             },
         )
@@ -1075,7 +1461,8 @@ mod tests {
         write_json(
             &cancel_path,
             &Cancel {
-                version: 1,
+                version: clock::PROTOCOL,
+                clock_domain: clock::DOMAIN.into(),
                 nonce: request.nonce.clone(),
             },
         )
@@ -1088,6 +1475,7 @@ mod tests {
         assert!(read_json::<Request>(&path).is_err());
         fs::remove_file(path).unwrap();
         fs::remove_file(cancel_path).unwrap();
+        let _ = fs::remove_file(directory.join("backend-events.json"));
         fs::remove_dir(directory).unwrap();
     }
     #[cfg(windows)]
@@ -1099,7 +1487,7 @@ mod tests {
             ready_generation: 1,
             ready: true,
             backend_pid: Some(std::process::id().wrapping_add(1)),
-            timestamp_ms: now_ms(),
+            timestamp_ms: now_ms().unwrap(),
             detail: "fixture".into(),
         }));
         let stop = Arc::new(AtomicBool::new(false));
@@ -1107,9 +1495,9 @@ mod tests {
         assert!(guard().unwrap_err().contains("not owned"));
         snapshot.lock().unwrap().backend_pid = Some(std::process::id());
         guard().unwrap();
-        snapshot.lock().unwrap().timestamp_ms = now_ms().saturating_sub(FRESH_MS + 1);
+        snapshot.lock().unwrap().timestamp_ms = now_ms().unwrap().saturating_sub(FRESH_MS + 1);
         assert!(guard().unwrap_err().contains("stale"));
-        snapshot.lock().unwrap().timestamp_ms = now_ms();
+        snapshot.lock().unwrap().timestamp_ms = now_ms().unwrap();
         let directory = std::env::temp_dir().join(format!(
             "backend-guard-test-{}-{}",
             std::process::id(),
@@ -1128,6 +1516,7 @@ mod tests {
         assert!(!snapshot.lock().unwrap().ready);
         assert!(guard().is_err());
         fs::remove_file(directory.join("owner-cancel.json")).unwrap();
+        let _ = fs::remove_file(directory.join("backend-events.json"));
         fs::remove_dir(directory).unwrap();
         drop(listener);
     }
@@ -1141,10 +1530,11 @@ mod tests {
         ));
         fs::create_dir(&directory).unwrap();
         let request = Request {
-            version: 1,
+            version: clock::PROTOCOL,
+            clock_domain: clock::DOMAIN.into(),
             nonce: "cancelled-owner".into(),
             parent: identity(std::process::id()).unwrap(),
-            timestamp_ms: now_ms(),
+            timestamp_ms: now_ms().unwrap(),
             restarting: true,
         };
         let path = directory.join("owner-request.json");
@@ -1153,7 +1543,8 @@ mod tests {
         write_json(
             &cancel_path,
             &Cancel {
-                version: 1,
+                version: clock::PROTOCOL,
+                clock_domain: clock::DOMAIN.into(),
                 nonce: "other-owner".into(),
             },
         )
@@ -1165,7 +1556,8 @@ mod tests {
         write_json(
             &cancel_path,
             &Cancel {
-                version: 1,
+                version: clock::PROTOCOL,
+                clock_domain: clock::DOMAIN.into(),
                 nonce: request.nonce.clone(),
             },
         )
@@ -1181,6 +1573,7 @@ mod tests {
         );
         fs::remove_file(path).unwrap();
         fs::remove_file(cancel_path).unwrap();
+        let _ = fs::remove_file(directory.join("backend-events.json"));
         fs::remove_dir(directory).unwrap();
     }
     #[cfg(windows)]

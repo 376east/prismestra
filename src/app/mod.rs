@@ -5,6 +5,8 @@ pub mod ambient;
 pub mod ambient_windows;
 pub mod assets;
 #[cfg(windows)]
+pub(crate) mod backend_diagnostics;
+#[cfg(windows)]
 pub mod backend_helper;
 pub mod bundle;
 pub mod capture_worker;
