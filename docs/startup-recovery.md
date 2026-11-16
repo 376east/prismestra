@@ -20,6 +20,14 @@ Only state changes and stop/drain reasons are recorded, not every render tick. R
 
 ## Acceptance gates
 
+### Late LCD availability
+
+The resident coordinator subscribes to Windows HID interface notifications independently of the editor window. It watches only whole interface paths from the committed LCD output plan. Subscription precedes the initial read-only interface enumeration; callbacks arriving during that enumeration take precedence over its snapshot. Target changes and enumeration run outside the coordinator lock. The callback only updates bounded notification state: it does not open devices, issue reports or reset USB ports. Registration is released outside the callback. [Microsoft notification contract](https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_register_notification).
+
+The return of a bound interface renews that LCD's finite 1/5/15-second recovery sequence. Other interfaces and duplicate arrivals do not renew it. An initial presence snapshot does not renew an already ready worker. A genuine removal/arrival retains one recovery credit if the old handle has not reported its I/O failure yet; the ready worker is not restarted just because a notification arrived. Stop, suspension, configuration transitions and the old owner's unreleased lease retain their existing guards. Reopening still verifies the exact target and HID descriptor; ASCII case differences in the same Windows symbolic path do not select a different device.
+
+This cannot repair a device that Windows cannot enumerate. A USB device-descriptor failure/code43 is a separate prerequisite failure, not a reason to reset a USB hub or interfere with cooling software. A native registration smoke test and simulated arrivals do not prove physical unplug/replug recovery; that needs a working LCD interface and separate acceptance.
+
 - Deterministic cases cover sleep and UTC changes independently from advancing active time, expired/unreadable heartbeats, failed clock APIs and mixed protocol controls. They do not certify an actual sleep/resume or reboot.
 - Existing discovery/late-inventory tests must keep independent outputs alive while an initially busy resource is deferred and later becomes available. Do not add a second competing discovery loop or change foreign startup order.
 - Install the final checked package with its matching launcher; preserve saved scene, bindings, sensors, draft and backend configuration. Restart only owned processes.

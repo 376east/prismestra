@@ -1,0 +1,32 @@
+{
+  "scope": "Configured-kit partial real-boot acceptance; RAM observation began after startup",
+  "installed_commit": "4c7d15d15a6c1aa78622194c95d30f178c428ccb",
+  "new_boot_confirmed": true,
+  "autostart_core_ready": true,
+  "ram_observation": {
+    "active_elapsed_ms": 301074,
+    "samples": 21,
+    "controllers": 2,
+    "write_counter_increases": [86608, 86593],
+    "write_failures": [0, 0],
+    "owned_process_identities_unchanged": true,
+    "foreign_cooling_process_and_config_unchanged": true
+  },
+  "active_scene_and_connection_hashes_match_preboot": true,
+  "editor_draft": "Changed from preboot; separately recorded expected SHA and unchanged during observation; never overwritten",
+  "user_visible_report": "All outputs working except LCD",
+  "lcd": {
+    "windows_interface_present": false,
+    "usb_problem": "Device descriptor request failed, code43, matched to historical LCD port",
+    "single_authorized_node_restart": "Command succeeded; enumeration still failed",
+    "physical_cause": "Unknown",
+    "no_hub_controller_reset_or_foreign_program_restart": true
+  },
+  "full_scene_gate": "INCOMPLETE",
+  "not_proven": [
+    "Continuous observation from the first second of logon",
+    "LCD physical reconnect after interface arrival changes",
+    "Actual sleep/resume",
+    "Universal hardware or software coexistence"
+  ]
+}

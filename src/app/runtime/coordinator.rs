@@ -253,10 +253,69 @@ impl Drop for Coordinator {
     }
 }
 fn run(shared: &Shared, wall: impl Fn() -> Result<i64, String>) -> Result<(), String> {
+    #[cfg(windows)]
+    let mut notifications: Option<crate::lcd::hid_notifications::Watch> = None;
+    #[cfg(windows)]
+    let mut targets = Vec::new();
+    #[cfg(windows)]
+    let mut notification_due = std::time::Instant::now();
     let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
     loop {
         if state.runtime.stopped {
+            // Unregistration waits for native callbacks. Never do that while
+            // holding the coordinator lock or from the callback itself.
+            drop(state);
             return Ok(());
+        }
+        #[cfg(windows)]
+        {
+            let desired = state.runtime.lcd_interface_targets();
+            drop(state);
+            let update = if desired != targets && std::time::Instant::now() >= notification_due {
+                let result = (|| -> Result<(), String> {
+                    if desired.is_empty() {
+                        notifications = None;
+                    } else {
+                        if notifications.is_none() {
+                            notifications = Some(crate::lcd::hid_notifications::Watch::new()?);
+                        }
+                        notifications
+                            .as_mut()
+                            .unwrap()
+                            .set_targets(desired.clone())?;
+                    }
+                    Ok(())
+                })();
+                match result {
+                    Ok(()) => {
+                        targets = desired;
+                        None
+                    }
+                    Err(error) => {
+                        notification_due = std::time::Instant::now() + Duration::from_secs(5);
+                        Some(format!("LCD arrival notifications unavailable: {error}"))
+                    }
+                }
+            } else {
+                None
+            };
+            let arrivals = notifications
+                .as_mut()
+                .map(|watch| watch.take_arrivals())
+                .unwrap_or_default();
+            state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(error) = update {
+                state.runtime.error = Some(message(error));
+            }
+            for arrival in arrivals {
+                state
+                    .runtime
+                    .lcd_interface_arrived(&arrival.path, arrival.reappeared);
+            }
+            if state.runtime.stopped {
+                drop(state);
+                return Ok(());
+            }
         }
         let revision = state.revision;
         let now = crate::clock::monotonic_us();

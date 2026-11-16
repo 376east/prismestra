@@ -132,13 +132,13 @@ pub fn select(
         if matches_hint(kind, &candidate.path) {
             validate(kind, candidate)?;
             eligible.push(candidate);
-        } else if target.is_some_and(|target| target == candidate.path) {
+        } else if target.is_some_and(|target| target.eq_ignore_ascii_case(&candidate.path)) {
             return Err(fail("Selected target is not the expected TT HID interface"));
         }
     }
     let mut selected = None;
     for candidate in eligible {
-        if target.is_none_or(|target| target == candidate.path)
+        if target.is_none_or(|target| target.eq_ignore_ascii_case(&candidate.path))
             && selected.replace(candidate).is_some()
         {
             return Err(fail("Ambiguous TT HID interface selection"));
@@ -272,6 +272,10 @@ mod tests {
             let candidates = vec![a.clone(), b.clone()];
             let before = candidates.clone();
             assert_eq!(select(kind, &candidates, Some(&a.path), false).unwrap(), a);
+            assert_eq!(
+                select(kind, &candidates, Some(&a.path.to_ascii_uppercase()), false).unwrap(),
+                a
+            );
             assert!(select(kind, &candidates, None, true).is_err());
             assert!(select(kind, std::slice::from_ref(&a), None, false).is_err());
             assert_eq!(
@@ -327,7 +331,18 @@ mod tests {
         assert!(select(Kind::Display, &[changed], Some(&good.path), true).is_err());
         let mut upper = good.clone();
         upper.path = upper.path.to_ascii_uppercase();
-        assert!(select(Kind::Display, &[upper], Some(&good.path), true).is_err());
+        assert_eq!(
+            select(
+                Kind::Display,
+                std::slice::from_ref(&upper),
+                Some(&good.path),
+                false
+            )
+            .unwrap(),
+            upper
+        );
+        let another = descriptor(Kind::Display, "another-instance");
+        assert!(select(Kind::Display, &[another], Some(&good.path), true).is_err());
     }
     #[test]
     fn process_prefix_case_insensitive() {

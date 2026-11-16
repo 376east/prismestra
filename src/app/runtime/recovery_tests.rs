@@ -512,6 +512,229 @@ impl crate::lcd::protocol::ReportTransport for Reports {
     }
 }
 
+fn arrival_lcd_runtime(name: &str, link: Arc<Link>) -> (Runtime, std::path::PathBuf) {
+    let mut runtime = runtime();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("work")
+        .join(format!("arrival-lcd-{}-{name}", std::process::id()));
+    let media = Assets::new(dir.clone())
+        .unwrap()
+        .put(
+            include_bytes!("../../lcd/fixtures/two-frame.apng"),
+            32 * 1024 * 1024,
+        )
+        .unwrap();
+    let mut document = runtime.document().clone();
+    document.lighting.setup.devices.push(Device {
+        id: "lcd".into(),
+        label: "LCD".into(),
+        role: Role::Lcd,
+        driver: Driver::TtLcd,
+        leds: 0,
+        rate_hz: 25,
+        enabled: true,
+    });
+    document.lighting.groups.pc.push("lcd".into());
+    document.lcd.push(Lcd {
+        device: "lcd".into(),
+        config: lcd::Config {
+            enabled: true,
+            media: Some(media),
+            ..lcd::Config::default()
+        },
+    });
+    runtime = Runtime::new(document, None).unwrap();
+    let root = dir.clone();
+    runtime
+        .attach_lcd(
+            "lcd",
+            vec!["hid:bound-interface".into()],
+            Arc::new(move |config, _| {
+                link.calls.fetch_add(1, Ordering::SeqCst);
+                if link.fail_open.load(Ordering::SeqCst) {
+                    return Err("LCD stand unavailable".into());
+                }
+                Ok((
+                    lcd::Controller::new(config, &Assets::new(root.clone())?)?,
+                    Box::new(Reports(link.clone())),
+                ))
+            }),
+        )
+        .unwrap();
+    runtime.enable_output_recovery("lcd").unwrap();
+    (runtime, dir)
+}
+
+fn remove_lcd_assets(runtime: Runtime, dir: std::path::PathBuf) {
+    drop(runtime);
+    let resolved = dir.canonicalize().unwrap();
+    let boundary = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("work")
+        .canonicalize()
+        .unwrap();
+    assert!(resolved.starts_with(&boundary) && resolved != boundary);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn bound_lcd_arrival_renews_exhausted_recovery_without_restarting_other_outputs() {
+    let link = Arc::new(Link::default());
+    link.fail_open.store(true, Ordering::SeqCst);
+    let (mut runtime, dir) = arrival_lcd_runtime("late", link.clone());
+    let other = Arc::new(Link::default());
+    runtime.attach_rgb("b", vec![], factory(&other)).unwrap();
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    let other_generation = runtime.host.status("b").unwrap().generation;
+    for delay in [1_000_000, 5_000_000, 15_000_000] {
+        wait(|| runtime.lcd_status("lcd").unwrap().phase == lcd_worker::Phase::Failed);
+        tick(&mut runtime, &mut now);
+        let old = runtime.lcd_status("lcd").unwrap().generation;
+        now += delay;
+        tick(&mut runtime, &mut now);
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            let s = runtime.lcd_status("lcd").unwrap();
+            s.generation != old && s.phase == lcd_worker::Phase::Failed
+        });
+    }
+    assert_eq!(link.calls.load(Ordering::SeqCst), 4);
+    runtime.lcd_interface_arrived("other-interface", true);
+    now += 100_000_000;
+    tick(&mut runtime, &mut now);
+    assert_eq!(link.calls.load(Ordering::SeqCst), 4);
+    link.fail_open.store(false, Ordering::SeqCst);
+    runtime.lcd_interface_arrived("BOUND-INTERFACE", true);
+    tick(&mut runtime, &mut now);
+    now += 1_000_000;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.lcd_status("lcd").unwrap().frames_sent > 0
+    });
+    assert_eq!(link.calls.load(Ordering::SeqCst), 5);
+    let lcd_generation = runtime.lcd_status("lcd").unwrap().generation;
+    runtime.lcd_interface_arrived("bound-interface", true);
+    tick(&mut runtime, &mut now);
+    now += 100_000_000;
+    tick(&mut runtime, &mut now);
+    assert_eq!(
+        runtime.lcd_status("lcd").unwrap().generation,
+        lcd_generation
+    );
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        other_generation
+    );
+    drain(&mut runtime);
+    runtime.lcd_interface_arrived("bound-interface", true);
+    assert!(runtime.lcd_arrivals.is_empty());
+    assert_eq!(link.calls.load(Ordering::SeqCst), 5);
+    remove_lcd_assets(runtime, dir);
+}
+
+#[test]
+fn genuine_lcd_rearrival_survives_ready_until_old_handle_reports_failure() {
+    let link = Arc::new(Link::default());
+    let (mut runtime, dir) = arrival_lcd_runtime("ready-race", link.clone());
+    let mut now = 0;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.lcd_status("lcd").unwrap().frames_sent > 0
+    });
+    for delay in [1_000_000, 5_000_000, 15_000_000] {
+        link.fail.store(true, Ordering::SeqCst);
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            runtime.lcd_status("lcd").unwrap().phase == lcd_worker::Phase::Failed
+        });
+        tick(&mut runtime, &mut now);
+        let old = runtime.lcd_status("lcd").unwrap().generation;
+        link.fail.store(false, Ordering::SeqCst);
+        now += delay;
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            let s = runtime.lcd_status("lcd").unwrap();
+            s.generation != old && s.frames_sent > 0
+        });
+    }
+    assert_eq!(link.calls.load(Ordering::SeqCst), 4);
+    runtime.lcd_interface_arrived("bound-interface", false); // Initial snapshot is not an unplug/replug credit.
+    assert!(runtime.lcd_arrivals.is_empty());
+    runtime.lcd_interface_arrived("bound-interface", true);
+    tick(&mut runtime, &mut now);
+    assert!(runtime.lcd_arrivals.contains("lcd"));
+    assert_eq!(link.calls.load(Ordering::SeqCst), 4); // Ready owner stays untouched.
+    let old = runtime.lcd_status("lcd").unwrap().generation;
+    link.fail.store(true, Ordering::SeqCst);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.lcd_status("lcd").unwrap().phase == lcd_worker::Phase::Failed
+    });
+    tick(&mut runtime, &mut now);
+    link.fail.store(false, Ordering::SeqCst);
+    now += 1_000_000;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        let s = runtime.lcd_status("lcd").unwrap();
+        s.generation != old && s.frames_sent > 0
+    });
+    assert_eq!(link.calls.load(Ordering::SeqCst), 5);
+    drain(&mut runtime);
+    remove_lcd_assets(runtime, dir);
+}
+
+#[test]
+fn lcd_arrivals_cannot_survive_stop_or_suspend_epochs() {
+    let link = Arc::new(Link::default());
+    link.fail_open.store(true, Ordering::SeqCst);
+    let (mut runtime, dir) = arrival_lcd_runtime("guards", link);
+    runtime.lcd_interface_arrived("bound-interface", true);
+    assert!(runtime.lcd_arrivals.contains("lcd"));
+    runtime.notify_power(true, 1).unwrap();
+    assert!(runtime.lcd_arrivals.is_empty());
+    runtime.lcd_interface_arrived("bound-interface", true);
+    assert!(runtime.lcd_arrivals.is_empty());
+    drain(&mut runtime);
+    runtime.lcd_interface_arrived("bound-interface", true);
+    assert!(runtime.lcd_arrivals.is_empty());
+    remove_lcd_assets(runtime, dir);
+}
+
+#[test]
+fn lcd_configuration_epoch_discards_old_arrivals_and_binding() {
+    let link = Arc::new(Link::default());
+    link.fail_open.store(true, Ordering::SeqCst);
+    let (mut runtime, dir) = arrival_lcd_runtime("configuration", link.clone());
+    runtime.lcd_interface_arrived("bound-interface", true);
+    assert!(runtime.lcd_arrivals.contains("lcd"));
+    let mut document = runtime.document().clone();
+    document
+        .lighting
+        .setup
+        .devices
+        .iter_mut()
+        .find(|d| d.id == "lcd")
+        .unwrap()
+        .enabled = false;
+    runtime.request_document(document).unwrap();
+    assert!(runtime.lcd_arrivals.is_empty());
+    runtime.lcd_interface_arrived("bound-interface", true);
+    assert!(runtime.lcd_arrivals.is_empty());
+    let mut now = 1;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        !runtime.pending_configuration()
+    });
+    let calls = link.calls.load(Ordering::SeqCst);
+    runtime.lcd_interface_arrived("bound-interface", true);
+    now += 100_000_000;
+    tick(&mut runtime, &mut now);
+    assert!(runtime.lcd_arrivals.is_empty());
+    assert_eq!(link.calls.load(Ordering::SeqCst), calls);
+    drain(&mut runtime);
+    remove_lcd_assets(runtime, dir);
+}
+
 #[test]
 fn recovery_lcd_reopens_after_real_frame_and_republishes_current_off() {
     let mut runtime = runtime();

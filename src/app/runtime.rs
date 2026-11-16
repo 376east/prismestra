@@ -231,6 +231,7 @@ pub struct Runtime {
     rgb_specs: BTreeMap<String, RgbSpec>,
     lcd_specs: BTreeMap<String, LcdSpec>,
     output_recovery: BTreeMap<String, recovery::Recovery>,
+    lcd_arrivals: BTreeSet<String>,
     capture_factory: Option<CaptureFactory>,
     samples: Arc<[lcd::Sample]>,
     revision: u64,
@@ -306,6 +307,7 @@ impl Runtime {
             rgb_specs: BTreeMap::new(),
             lcd_specs: BTreeMap::new(),
             output_recovery: BTreeMap::new(),
+            lcd_arrivals: BTreeSet::new(),
             capture_factory: None,
             samples: Arc::from([]),
             revision: 1,
@@ -1168,6 +1170,7 @@ impl Runtime {
         Ok(())
     }
     fn stop_channels(&mut self) {
+        self.lcd_arrivals.clear();
         for recovery in self.output_recovery.values_mut() {
             *recovery = recovery::Recovery::default();
         }

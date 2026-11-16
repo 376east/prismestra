@@ -29,9 +29,47 @@ impl Recovery {
 }
 
 impl Runtime {
+    /// Exact endpoint keys from the committed LCD plan, never a similar device.
+    #[cfg(windows)]
+    pub(super) fn lcd_interface_targets(&self) -> Vec<String> {
+        self.lcd_specs
+            .values()
+            .flat_map(|spec| &spec.keys)
+            .filter_map(|key| key.strip_prefix("hid:").map(str::to_owned))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// A resident native listener reports a real bound-interface arrival. Opening
+    /// still happens on the existing worker, with its descriptor/lease checks.
+    pub(super) fn lcd_interface_arrived(&mut self, path: &str, reappeared: bool) {
+        if self.stopped
+            || self.suspended
+            || self.pending.is_some()
+            || self.power.pending()
+            || self.power.error().is_some()
+            || self.refresh.is_some()
+        {
+            return;
+        }
+        let key = format!("hid:{}", path.to_ascii_lowercase());
+        for (id, spec) in &self.lcd_specs {
+            if spec.keys.contains(&key)
+                && self.output_recovery.contains_key(id)
+                && self.lcd.get(id).is_some_and(|worker| {
+                    reappeared || worker.snapshot().phase != lcd_worker::Phase::Ready
+                })
+            {
+                self.lcd_arrivals.insert(id.clone());
+            }
+        }
+    }
+
     /// Enable at most three reconnects (1/5/15s), including initial connection failures.
     /// Success does not replenish the budget. Budget is renewed only by
-    /// an explicit configuration/refresh/power epoch, never by a flapping light.
+    /// an explicit configuration/refresh/power epoch or the return of a bound
+    /// LCD interface, never by a successful factory or duplicate arrival.
     /// Errors are untyped, so even auth/topology failures use this finite budget.
     pub fn enable_output_recovery(&mut self, id: &str) -> Result<(), String> {
         if !self.rgb_specs.contains_key(id) && !self.lcd_specs.contains_key(id) {
@@ -49,6 +87,7 @@ impl Runtime {
     }
 
     pub(super) fn reset_output_recovery(&mut self, id: &str) {
+        self.lcd_arrivals.remove(id);
         if let Some(state) = self.output_recovery.get_mut(id) {
             *state = Recovery::default();
         }
@@ -79,6 +118,12 @@ impl Runtime {
             } else if let (Some(spec), Some(worker)) = (self.lcd_specs.get(id), self.lcd.get(id)) {
                 let snapshot = worker.snapshot();
                 let failed = snapshot.phase == lcd_worker::Phase::Failed;
+                // A removal/arrival can precede the I/O error on an old, idle
+                // handle. Keep its single credit while Ready/Connecting, and
+                // consume it only when that owner fails; never restart it here.
+                if failed && self.lcd_arrivals.remove(id) {
+                    *state = Recovery::default();
+                }
                 state.observe(snapshot.generation, failed, now);
                 if failed && state.take_attempt(now, worker.is_reaped()) {
                     lcd.push((id.clone(), spec.keys.clone(), spec.factory.clone()));
