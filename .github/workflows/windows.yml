@@ -35,6 +35,8 @@ jobs:
         run: python scripts/test_helper_clock.py
       - name: Check component inventory gates without executing hardware code
         run: python scripts/components/test_verify_openrgb_component.py
+      - name: Check component packaging without executing binaries
+        run: python scripts/components/test_package_openrgb_component.py
       - name: Check embedded editor commands
         run: |
           node --check src/ui/windows/web/app.js

@@ -1,6 +1,7 @@
 /target/
 /private/
 /work/
+/.local/
 /HANDOFF.md
 /PARITY.md
-scripts/components/__pycache__/
+__pycache__/

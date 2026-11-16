@@ -20,6 +20,8 @@ Prismestra is a local lighting orchestrator for Windows. Its goal is to bring PC
 
 **Source preview.** The scene engine, native editor and OpenRGB/WLED/Home Assistant setup paths are implemented and have software tests. Home Assistant tokens use Windows Credential Manager. A resident session keeps lighting and sensor subscriptions alive when the editor closes. The [local integration record](docs/validation/windows-local-kit.json) covers transport checks on one PC kit and identifies the tested source revision. Physical colors, firmware behavior and performance require separate checks. See the [compatibility table](docs/compatibility.md) before choosing a device.
 
+Start with [verified status](docs/status.md) for what has actually passed, and [repository layout and development commands](docs/development.md) for the source, component builds, packages and local-only artifacts. This repository is the single source of the current product; machine profiles and installed binaries belong outside version control.
+
 The desktop editor now embeds its local interface through WebView2 and sends validated commands to the same Rust session. Scene drafts and the RGB scene library are stored by Rust. Device, LCD, capture, sensor, connection and schedule forms reuse the existing native validators and activation paths. The previous Win32 editor remains available with `--classic-editor`. See [desktop editor behavior](docs/desktop-editor.md).
 
 ## What it does

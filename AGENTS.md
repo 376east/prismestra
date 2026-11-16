@@ -1,5 +1,13 @@
 # Prismestra project rules
 
+## One product repository
+
+- Read `README.md`, `docs/status.md` and `docs/development.md` before choosing a working path. Current product code, reusable build/package tools, component pins/notices and maintained documentation belong in this repository.
+- Use existing `scripts/` entrypoints. Promote a useful one-off tool by removing machine paths/PIDs/secrets and testing it; do not accumulate dated copies of the same installer or build script.
+- Keep personal profiles, credentials, installed releases, raw hardware captures and local acceptance receipts out of Git. `.local/` is reserved for ignored workstation pointers; `target/` and `work/` contain generated caches/fixtures, never the only authoritative source.
+- Preserve a tested revision's evidence as dated evidence. Update `docs/status.md` when a current gate changes; do not silently assign an old hardware result to a newer binary.
+- Preserved local/history refs are not automatically public. Push only the explicitly reviewed working branch; never use mirror/all-refs publication as a cleanup step.
+
 ## Research before a new mechanism
 
 When a bug, compatibility gap or architectural obstacle appears, first check existing solutions before adding another driver, workaround, dependency or fork.

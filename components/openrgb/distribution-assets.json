@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "description": "Pinned source archives and license files for the evaluated PC component; no runtime or machine state.",
+  "files": [
+    {
+      "path": "licenses/LGPL-2.1.txt",
+      "size": 26527,
+      "sha256": "a9bdde5616ecdd1e980b44f360600ee8783b1f99b8cc83a2beb163a0a390e861"
+    },
+    {
+      "path": "licenses/libusb-LGPL-2.1.txt",
+      "size": 26436,
+      "sha256": "5df07007198989c622f5d41de8d703e7bef3d0e79d62e24332ee739a452af62a"
+    },
+    {
+      "path": "licenses/LICENSE-bsd.txt",
+      "size": 1534,
+      "sha256": "30eb1bef29b46f8ba7ab8b416035dbd93cb034a45481dd97815b944284582cd2"
+    },
+    {
+      "path": "licenses/LICENSE-orig.txt",
+      "size": 264,
+      "sha256": "fb5436aa63d1b71a8dfbf74ecaf1a5b4e1ec4df7f80074d11fec99284f69ca5f"
+    },
+    {
+      "path": "licenses/LICENSE.txt",
+      "size": 530,
+      "sha256": "7d3b087c34f35d4d538e3bcddd1ff8f66e92f9ef336881999482800ddf840913"
+    },
+    {
+      "path": "licenses/OpenRGB-GPL-2.0.txt",
+      "size": 18381,
+      "sha256": "02953cd889069052ae9dd04babd3862508b06ed52531e4f383a2fde03341f594"
+    },
+    {
+      "path": "licenses/PawnIO-COPYING",
+      "size": 18092,
+      "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643"
+    },
+    {
+      "path": "licenses/PawnIO-Modules-LGPL-2.1.txt",
+      "size": 26530,
+      "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551"
+    },
+    {
+      "path": "source/hidapi-hotplug-238df449ecc0a56a70a3c8f4ebf46bb46857af27-source.zip",
+      "size": 485368,
+      "sha256": "d4197d1756dbb0f6d7ff167d1e92ec5b44d9d9ce6b87cb8ff3603272edcb1817"
+    },
+    {
+      "path": "source/libusb-1.0.27-source.tar.bz2",
+      "size": 643680,
+      "sha256": "ffaa41d741a8a3bee244ac8e54a72ea05bf2879663c098c82fc5757853441575"
+    },
+    {
+      "path": "source/openrgb-headless-6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43-source.zip",
+      "size": 16015548,
+      "sha256": "a2764813036e49f8627fdf84dafa81e0347717006b27091ef5609256bfb2a10d"
+    },
+    {
+      "path": "source/PawnIO-9d52965895588b0ffa3703b72eec75ba19f4ccc0-source.zip",
+      "size": 129963,
+      "sha256": "a595c331091d1173a6a9e337a81832c98155a57009a9f99f825e29073da4f704"
+    },
+    {
+      "path": "source/PawnIO.Modules-52a7e536dff3e53c96917a28caac5e0fa6510696-source.zip",
+      "size": 1048104,
+      "sha256": "3766588abec0a353aa8824a1f138a443a4e54c62a38eec30b2d44d770c59e62a"
+    }
+  ]
+}
