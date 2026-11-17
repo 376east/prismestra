@@ -1,22 +1,182 @@
 //! One native session owns the Runtime; editor HWNDs are disposable.
 use super::*;
+use crate::app::installed;
 use sha2::{Digest, Sha256};
 use std::{
     fs::OpenOptions,
-    os::windows::fs::OpenOptionsExt,
+    os::windows::{ffi::OsStringExt, fs::OpenOptionsExt},
     sync::atomic::{AtomicU32, Ordering},
+    time::Duration,
 };
 use windows_sys::Win32::{
     Security::*,
-    System::Threading::{GetCurrentProcess, OpenProcessToken},
+    System::Threading::{
+        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject,
+    },
     UI::Shell::*,
 };
 const CLASS: &str = "PrismestraSessionShell";
+const INSTALLED_EXIT: &str = "Prismestra.Installed.Exit.v1";
+const EXIT_ACCEPTED: usize = 1;
+const EXIT_BUSY: usize = 2;
 const CALLBACK: u32 = WM_APP + 31;
 const OPEN: u32 = 1;
 const STOP: u32 = 2;
 const EXIT: u32 = 3;
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+static INSTALLED_EXIT_MSG: AtomicU32 = AtomicU32::new(0);
+
+fn installed_exit_message() -> Result<u32, String> {
+    let message = unsafe { RegisterWindowMessageW(wide(INSTALLED_EXIT).as_ptr()) };
+    if message == 0 {
+        Err(last("Register installed shutdown message"))
+    } else {
+        Ok(message)
+    }
+}
+
+struct Process(HANDLE);
+impl Drop for Process {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+impl Process {
+    fn open(pid: u32) -> Result<Self, String> {
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                0,
+                pid,
+            )
+        };
+        if handle.is_null() {
+            Err(last("Open resident process"))
+        } else {
+            Ok(Self(handle))
+        }
+    }
+
+    fn image_path(&self) -> Result<PathBuf, String> {
+        let mut buffer = vec![0; 32_768];
+        let mut length = buffer.len() as u32;
+        if unsafe { QueryFullProcessImageNameW(self.0, 0, buffer.as_mut_ptr(), &mut length) } == 0 {
+            return Err(last("Read resident process executable"));
+        }
+        Ok(PathBuf::from(OsString::from_wide(
+            &buffer[..length as usize],
+        )))
+    }
+}
+
+fn shell_pid(hwnd: HWND) -> Option<u32> {
+    let mut name = [0u16; 64];
+    let length = unsafe { GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32) };
+    if length <= 0
+        || !name[..length as usize]
+            .iter()
+            .copied()
+            .eq(CLASS.encode_utf16())
+    {
+        return None;
+    }
+    let mut pid = 0;
+    if unsafe { GetWindowThreadProcessId(hwnd, &mut pid) } == 0 || pid == 0 {
+        return None;
+    }
+    Some(pid)
+}
+
+fn same_target(executable: &Path, image: &Path, pid: u32, owner: Option<u32>) -> bool {
+    executable == image && owner == Some(pid)
+}
+
+unsafe extern "system" fn collect_shell(hwnd: HWND, context: LPARAM) -> i32 {
+    if let Some(pid) = shell_pid(hwnd) {
+        let windows = unsafe { &mut *(context as *mut Vec<(HWND, u32)>) };
+        windows.push((hwnd, pid));
+    }
+    1
+}
+
+pub(crate) fn shutdown_installed(executable: &Path) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let message = installed_exit_message()?;
+    let mut windows: Vec<(HWND, u32)> = Vec::new();
+    if unsafe {
+        EnumWindows(
+            Some(collect_shell),
+            (&mut windows as *mut Vec<(HWND, u32)>) as LPARAM,
+        )
+    } == 0
+    {
+        return Err(last("Enumerate resident windows"));
+    }
+    let mut accepted = Vec::new();
+    for (hwnd, pid) in windows {
+        let process = match Process::open(pid) {
+            Ok(process) => process,
+            Err(_) if shell_pid(hwnd) != Some(pid) => continue,
+            Err(error) => return Err(error),
+        };
+        let image = match process.image_path() {
+            Ok(image) => image,
+            Err(_) if unsafe { WaitForSingleObject(process.0, 0) } == WAIT_OBJECT_0 => continue,
+            Err(error) => return Err(error),
+        };
+        // Keep the process handle open across the final window identity check,
+        // delivery, and the wait. The window disappearing alone isn't drain.
+        let Ok(image) = installed::checked_local_path(&image) else {
+            continue;
+        };
+        if !same_target(executable, &image, pid, shell_pid(hwnd))
+            || unsafe { WaitForSingleObject(process.0, 0) } != WAIT_TIMEOUT
+        {
+            continue;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("Timed out requesting Prismestra shutdown".into());
+        }
+        let mut response = 0;
+        let delivered = unsafe {
+            SendMessageTimeoutW(
+                hwnd,
+                message,
+                0,
+                0,
+                SMTO_BLOCK | SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
+                remaining.as_millis().clamp(1, 2_000) as u32,
+                &mut response,
+            )
+        };
+        if delivered == 0 || response != EXIT_ACCEPTED {
+            if unsafe { WaitForSingleObject(process.0, 0) } == WAIT_OBJECT_0 {
+                continue;
+            }
+            return Err(
+                "Installed Prismestra is busy. Finish pending edits and close it from the tray."
+                    .into(),
+            );
+        }
+        accepted.push(process);
+    }
+    for process in accepted {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match unsafe { WaitForSingleObject(process.0, remaining.as_millis() as u32) } {
+            WAIT_OBJECT_0 => {}
+            WAIT_TIMEOUT => {
+                return Err(
+                    "Prismestra is still running. Finish pending edits and close it from the tray."
+                        .into(),
+                );
+            }
+            _ => return Err(last("Wait for installed Prismestra to exit")),
+        }
+    }
+    Ok(())
+}
 
 // Microsoft documents retrying failed NIM_ADD on TaskbarCreated; PowerToys
 // additionally handles missed initial broadcasts. Reuse that API pattern with
@@ -228,6 +388,9 @@ pub(super) struct Shell<'a> {
 }
 impl<'a> Shell<'a> {
     pub(super) fn create(state: &'a State, tray: bool) -> Result<Self, String> {
+        if installed::session().is_some() {
+            INSTALLED_EXIT_MSG.store(installed_exit_message()?, Ordering::Relaxed);
+        }
         let instance = unsafe { GetModuleHandleW(null()) };
         let class = wide(CLASS);
         let wc = WNDCLASSEXW {
@@ -531,8 +694,12 @@ pub(super) fn request(state: &State, action: Action, confirm: bool) -> Result<()
             !app.widgets.is_empty()
                 && (app.editor_dirty
                     || app.guard_connections_close().is_err()
-                    || app.guard_sources_exit().is_err())
+                    || app.guard_sources_exit().is_err()
+                    || super::native_forms::guard_close(app).is_err())
         };
+        if unapplied && !confirm {
+            return Err("Примените или сбросьте правки перед выходом.".into());
+        }
         if confirm
             && unapplied
             && unsafe {
@@ -725,6 +892,26 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
             KillTimer(hwnd, 1);
         }
         return 0;
+    }
+    if msg != 0 && msg == INSTALLED_EXIT_MSG.load(Ordering::Relaxed) {
+        if w != 0 || l != 0 || state.app.try_borrow_mut().is_err() {
+            return EXIT_BUSY as LRESULT;
+        }
+        // request may start an asynchronous WebView draft flush. Only the
+        // retained process handle can confirm that the accepted request exited.
+        return match request(state, Action::Exit, false) {
+            Ok(())
+                if state.session_action.get() == Action::Exit
+                    || state.webview.borrow().is_some() =>
+            {
+                EXIT_ACCEPTED as LRESULT
+            }
+            Ok(()) => EXIT_BUSY as LRESULT,
+            Err(error) => {
+                report(state, error);
+                EXIT_BUSY as LRESULT
+            }
+        };
     }
     if msg == TASKBAR_CREATED.load(Ordering::Relaxed) && msg != 0 && state.tray_enabled.get() {
         let mut registration = state.tray_registration.get();
@@ -1402,6 +1589,15 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shutdown_target_requires_exact_executable_and_window_owner() {
+        let executable = Path::new(r"C:\Applications\Prismestra\Prismestra.exe");
+        let other = Path::new(r"C:\Portable\Prismestra.exe");
+        assert!(same_target(executable, executable, 12, Some(12)));
+        assert!(!same_target(executable, other, 12, Some(12)));
+        assert!(!same_target(executable, executable, 12, Some(13)));
+        assert!(!same_target(executable, executable, 12, None));
+    }
     #[test]
     fn tray_failure_retry_success_and_explorer_restart_use_no_shell_api() {
         exercise_tray_retry().unwrap();

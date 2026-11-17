@@ -41,6 +41,7 @@ mod connections;
 mod modern;
 mod native_forms;
 mod resident;
+pub(crate) use resident::shutdown_installed;
 mod runtime_client;
 mod web_shell;
 const MODERN_RETURN: i32 = 109;
@@ -287,7 +288,7 @@ fn rates(current: u32) -> Vec<u32> {
     }
     values
 }
-fn default_scene() -> Scene {
+pub(crate) fn default_scene() -> Scene {
     Scene {
         effect: Effect::NoiseMap,
         colors: vec![0x120100, 0x480500, 0x961801, 0xe64005, 0xff7814],
@@ -3264,21 +3265,27 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         drop(window);
         return Ok(());
     }
-    // WebView2 initialization pumps messages before ShowWindow. Keep the existing
-    // editor timer live so completion callbacks cannot strand the nested pump.
-    if unsafe { SetTimer(raw, 1, 16, None) } == 0 {
-        return Err(last("Start preview refresh"));
-    }
-    if let Err(error) = modern::open(&state)
-        && let Some(app) = state.app.borrow_mut().as_mut()
+    if crate::app::installed::session() == Some(crate::app::installed::Session::Autostart)
+        && let Err(error) = resident::close_editor(&state)
     {
-        app.web_mode = false;
-        app.status = format!("Новый интерфейс недоступен: {error}");
-        app.show_page();
+        resident::report(&state, error);
     }
-    unsafe {
-        ShowWindow(raw, SW_SHOWNORMAL);
-        UpdateWindow(raw);
+    if !state.editor_window.get().is_null() {
+        // WebView2 initializes in a nested message pump before ShowWindow.
+        if unsafe { SetTimer(raw, 1, 16, None) } == 0 {
+            return Err(last("Start preview refresh"));
+        }
+        if let Err(error) = modern::open(&state)
+            && let Some(app) = state.app.borrow_mut().as_mut()
+        {
+            app.web_mode = false;
+            app.status = format!("Новый интерфейс недоступен: {error}");
+            app.show_page();
+        }
+        unsafe {
+            ShowWindow(raw, SW_SHOWNORMAL);
+            UpdateWindow(raw);
+        }
     }
     if !o.selftest {
         startup_ack::ready();

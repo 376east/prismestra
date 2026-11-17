@@ -204,8 +204,42 @@ pub struct Manager {
     endpoint: SocketAddr,
 }
 
+struct InstalledLaunch {
+    windows: PathBuf,
+    system: PathBuf,
+    outbox: PathBuf,
+}
+
 impl Manager {
     pub fn start(config: Config) -> Result<Self, String> {
+        Self::start_inner(config, None)
+    }
+
+    #[cfg(windows)]
+    pub(super) fn start_installed(
+        policy: &super::installed_policy::InstalledPolicy,
+    ) -> Result<Self, String> {
+        let (windows, system) = super::installed_policy::windows_dirs()?;
+        let config = Config {
+            version: 1,
+            enabled: true,
+            executable: policy.backend.clone(),
+            config_dir: policy.config_dir.clone(),
+            endpoint: policy.endpoint,
+            expected_executable_sha256: policy.backend_sha256.clone(),
+            graceful_shutdown: true,
+        };
+        Self::start_inner(
+            config,
+            Some(InstalledLaunch {
+                windows,
+                system,
+                outbox: policy.outbox.clone(),
+            }),
+        )
+    }
+
+    fn start_inner(config: Config, installed: Option<InstalledLaunch>) -> Result<Self, String> {
         config.validate()?;
         if !config.enabled {
             return Err("Managed OpenRGB is disabled".into());
@@ -215,7 +249,10 @@ impl Manager {
         #[cfg(windows)]
         {
             use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-            let lock_path = config.config_dir.join("prismestra-manager.lock");
+            let lock_dir = installed
+                .as_ref()
+                .map_or(&config.config_dir, |authority| &authority.outbox);
+            let lock_path = lock_dir.join("prismestra-manager.lock");
             // A persistent file, but its exclusive open handle is the lock. Never delete it.
             let lock = OpenOptions::new()
                 .read(true)
@@ -251,7 +288,7 @@ impl Manager {
                 .name("managed-openrgb".into())
                 .spawn(move || {
                     let _lock = lock;
-                    run(config, &state);
+                    run(config, installed.as_ref(), &state);
                 })
                 .map_err(err)?;
             Ok(Self {
@@ -604,7 +641,30 @@ fn command(config: &Config) -> Command {
     command
 }
 
-fn run(config: Config, state: &Shared) {
+fn installed_command(command: &mut Command, config: &Config, launch: &InstalledLaunch) {
+    // Qt and OpenRGB must not inherit the interactive account's search paths,
+    // configuration, temporary directory or plugin environment.
+    command
+        .arg("--lighting-only")
+        .current_dir(
+            config
+                .executable
+                .parent()
+                .expect("verified backend directory"),
+        )
+        .env_clear()
+        .env("SystemRoot", &launch.windows)
+        .env("WINDIR", &launch.windows)
+        .env("PATH", &launch.system)
+        .env("APPDATA", &config.config_dir)
+        .env("LOCALAPPDATA", &config.config_dir)
+        .env("USERPROFILE", &config.config_dir)
+        .env("TEMP", &config.config_dir)
+        .env("TMP", &config.config_dir)
+        .env("PRISMESTRA_PARENT_PIPE", "1");
+}
+
+fn run(config: Config, installed: Option<&InstalledLaunch>, state: &Shared) {
     let mut retry = Retry::default();
     while !state.cancel.load(Ordering::SeqCst) {
         if !state.restarting.load(Ordering::SeqCst) {
@@ -643,7 +703,11 @@ fn run(config: Config, state: &Shared) {
             if state.cancel.load(Ordering::SeqCst) || !state.restarting.load(Ordering::SeqCst) {
                 continue;
             }
-            spawn_owned(&mut command(&config), image)
+            let mut command = command(&config);
+            if let Some(launch) = installed {
+                installed_command(&mut command, &config, launch);
+            }
+            spawn_owned(&mut command, image)
         };
         let mut owned = match launch {
             Ok(child) => child,
@@ -1010,6 +1074,32 @@ mod tests {
         assert!(command.get_envs().any(|(key, value)| {
             key == "APPDATA" && value == Some(config.config_dir.as_os_str())
         }));
+    }
+
+    #[test]
+    fn installed_command_sets_lighting_only_and_protected_runtime_environment() {
+        let config = fixture();
+        let launch = InstalledLaunch {
+            windows: PathBuf::from("windows"),
+            system: PathBuf::from("system"),
+            outbox: PathBuf::from("outbox"),
+        };
+        let mut command = command(&config);
+        installed_command(&mut command, &config, &launch);
+        assert_eq!(command.get_args().last().unwrap(), "--lighting-only");
+        assert_eq!(command.get_current_dir(), config.executable.parent());
+        let env: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+        for key in ["APPDATA", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP"] {
+            assert_eq!(
+                env[std::ffi::OsStr::new(key)],
+                Some(config.config_dir.as_os_str())
+            );
+        }
+        assert_eq!(
+            env[std::ffi::OsStr::new("PATH")],
+            Some(launch.system.as_os_str())
+        );
+        assert_eq!(env.len(), 9);
     }
 
     #[test]

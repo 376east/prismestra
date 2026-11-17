@@ -13,6 +13,10 @@ pub mod capture_worker;
 pub mod config;
 pub mod device_setup;
 pub mod document;
+#[cfg(windows)]
+pub mod installed;
+#[cfg(windows)]
+pub(crate) mod installed_policy;
 pub mod lcd;
 pub mod lcd_worker;
 #[cfg(windows)]

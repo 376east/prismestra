@@ -1,5 +1,7 @@
 //! Optional adapter for an installer-authorized elevated backend task.
 //! Task registration and elevation are deliberately outside this module.
+#[cfg(windows)]
+use super::installed_policy::{HelperAuthority, InstalledPolicy};
 use super::managed_backend::{Config, Manager};
 mod clock;
 use clock::{ActiveClock, Clock};
@@ -23,7 +25,7 @@ const POLL: Duration = Duration::from_millis(200);
 const FRESH_MS: u64 = 2_000;
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TaskConfig {
     version: u32,
@@ -31,14 +33,15 @@ struct TaskConfig {
 }
 impl TaskConfig {
     fn validate(&self) -> Result<(), String> {
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
             || self.task_name.trim().is_empty()
             || self.task_name.len() > 238
             || self.task_name.chars().any(char::is_control)
             || self.task_name.starts_with('-')
             || self.task_name.starts_with('/')
+            || (self.version == 2 && !self.task_name.starts_with("\\Prismestra-Backend-S-1-"))
         {
-            return Err("backend-task.json requires version 1 and a bounded task_name".into());
+            return Err("backend-task.json requires a supported version and task_name".into());
         }
         Ok(())
     }
@@ -137,8 +140,22 @@ impl Backend {
             Ok(_) => {
                 let task: TaskConfig = read_json(&task_path)?;
                 task.validate()?;
-                // No Manager/child ownership lock is acquired by the ordinary client.
-                Inner::Task(Proxy::start(state_dir, task)?)
+                if task.version == 1 {
+                    Inner::Task(Proxy::start(state_dir, state_dir, task.task_name)?)
+                } else {
+                    #[cfg(windows)]
+                    if let Some(policy) = resolve_installed_task(state_dir, &config, &task) {
+                        return Ok(Some(Self {
+                            endpoint,
+                            inner: Inner::Task(Proxy::start(
+                                state_dir,
+                                &policy.outbox,
+                                policy.task_name,
+                            )?),
+                        }));
+                    }
+                    Inner::Direct(Manager::start(config)?)
+                }
             }
         };
         Ok(Some(Self { endpoint, inner }))
@@ -198,7 +215,7 @@ impl Backend {
 }
 
 impl Proxy {
-    fn start(state_dir: &Path, task: TaskConfig) -> Result<Self, String> {
+    fn start(state_dir: &Path, status_dir: &Path, task_name: String) -> Result<Self, String> {
         let client_lock = client_lock(state_dir)?;
         let parent = identity(std::process::id())?;
         let nonce = format!(
@@ -222,17 +239,26 @@ impl Proxy {
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let restarting = Arc::new(AtomicBool::new(true));
-        let (output, cancel, restart, directory) = (
+        let (output, cancel, restart, directory, status_dir) = (
             snapshot.clone(),
             stop.clone(),
             restarting.clone(),
             state_dir.to_owned(),
+            status_dir.to_owned(),
         );
         let worker = thread::Builder::new()
             .name("backend-helper-client".into())
             .spawn(move || {
                 let _client_lock = client_lock;
-                proxy_loop(&directory, &task, &request, &output, &cancel, &restart);
+                proxy_loop(
+                    &directory,
+                    &status_dir,
+                    &task_name,
+                    &request,
+                    &output,
+                    &cancel,
+                    &restart,
+                );
             })
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -274,7 +300,8 @@ impl Drop for Proxy {
 
 fn proxy_loop(
     directory: &Path,
-    task: &TaskConfig,
+    status_dir: &Path,
+    task_name: &str,
     request: &Request,
     output: &Mutex<Snapshot>,
     stop: &AtomicBool,
@@ -304,7 +331,9 @@ fn proxy_loop(
             }
             heartbeat = Instant::now();
         }
-        let status = read_json::<Status>(&directory.join("helper-status.json")).ok();
+        let status_path = status_dir.join("helper-status.json");
+        let installed = status_dir != directory;
+        let status = read_status(&status_path, installed);
         // Read the clock after the file: a concurrent status publication must
         // not appear to carry a future tick relative to a pre-read observation.
         let now = match now_ms() {
@@ -312,7 +341,10 @@ fn proxy_loop(
             Err(_) => break, // No readiness or task launch without a usable active clock.
         };
         let status = status.filter(|s| {
-            valid_status(s, request, now) && identity(s.helper.pid).ok().as_ref() == Some(&s.helper)
+            // The installed outbox has a verified ACL. Reading status does not
+            // require a process handle to the elevated writer from the client.
+            valid_status(s, request, now)
+                && (installed || identity(s.helper.pid).ok().as_ref() == Some(&s.helper))
         });
         let mut snapshot = Snapshot {
             ready_generation: generation,
@@ -347,7 +379,7 @@ fn proxy_loop(
             }
             if attempts.len() < 6 {
                 attempts.push_back(now);
-                failure_detail = launch_task(&task.task_name, stop).err().unwrap_or_default();
+                failure_detail = launch_task(task_name, stop).err().unwrap_or_default();
                 next_attempt = now + Duration::from_secs((1u64 << attempts.len().min(5)).max(3));
             } else {
                 failure_detail =
@@ -364,6 +396,80 @@ fn proxy_loop(
     let mut snapshot = output.lock().unwrap_or_else(|p| p.into_inner());
     snapshot.ready = false;
     snapshot.detail = "Backend helper client ownership ended".into();
+}
+
+fn read_status(path: &Path, installed: bool) -> Option<Status> {
+    if installed {
+        #[cfg(windows)]
+        super::installed_policy::verify_status(path).ok()?;
+        #[cfg(not(windows))]
+        return None;
+    }
+    read_json(path).ok()
+}
+
+#[cfg(windows)]
+fn resolve_installed_task(
+    state_dir: &Path,
+    config: &Config,
+    task: &TaskConfig,
+) -> Option<InstalledPolicy> {
+    let executable = std::env::current_exe().ok()?;
+    let policy = installed_client_policy(state_dir, executable.parent()?, config).ok()??;
+    (task.task_name == policy.task_name).then_some(policy)
+}
+
+#[cfg(windows)]
+fn installed_client_policy(
+    state_dir: &Path,
+    install_dir: &Path,
+    config: &Config,
+) -> Result<Option<InstalledPolicy>, String> {
+    if !super::installed::backend_default_owned(state_dir)? {
+        return Ok(None);
+    }
+    let Some(policy) = InstalledPolicy::client(state_dir, install_dir)? else {
+        return Ok(None);
+    };
+    if config.endpoint() != policy.endpoint {
+        return Ok(None);
+    }
+    config.require_identity(&policy.backend, &policy.backend_sha256)?;
+    Ok(Some(policy))
+}
+
+/// Register the ordinary client's fixed task selection for the installer-owned default.
+/// Custom backends and legacy task selections are preserved.
+#[cfg(windows)]
+pub fn configure_installed_client(state_dir: &Path, install_dir: &Path) -> Result<bool, String> {
+    let task_path = state_dir.join("backend-task.json");
+    let existing = match fs::symlink_metadata(&task_path) {
+        Ok(_) => Some(read_json::<TaskConfig>(&task_path)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.to_string()),
+    };
+    if existing.as_ref().is_some_and(|task| task.version != 2) {
+        return Ok(false);
+    }
+    let Some(config) = Config::read_optional(state_dir)? else {
+        return Ok(false);
+    };
+    let Some(policy) = installed_client_policy(state_dir, install_dir, &config)? else {
+        return Ok(false);
+    };
+    if existing
+        .as_ref()
+        .is_none_or(|task| task.task_name != policy.task_name)
+    {
+        write_json(
+            &task_path,
+            &TaskConfig {
+                version: 2,
+                task_name: policy.task_name,
+            },
+        )?;
+    }
+    Ok(true)
 }
 
 enum Heartbeat {
@@ -461,51 +567,124 @@ pub fn run_helper_pinned(
 }
 
 fn run_helper_inner(state_dir: &Path, pin: Option<(&Path, &str)>) -> Result<(), String> {
-    let request: Request = read_json(&state_dir.join("owner-request.json"))?;
-    let helper = identity(std::process::id())?;
-    if request.version != clock::PROTOCOL
-        || request.clock_domain != clock::DOMAIN
-        || request.nonce.is_empty()
-        || request.nonce.len() > 128
-        || !live_request(&request, now_ms()?)
-        || request.parent.executable != helper.executable
-        || identity(request.parent.pid)? != request.parent
-    {
-        return Err("Backend helper owner identity is invalid".into());
-    }
-    if !request.restarting
-        || read_json::<Cancel>(&state_dir.join("owner-pause.json"))
-            .ok()
-            .is_some_and(|c| matches_control(&c, &request))
-        || read_json::<Cancel>(&state_dir.join("owner-cancel.json"))
-            .ok()
-            .is_some_and(|c| matches_control(&c, &request))
-    {
+    let channels = HelperChannels::private(state_dir);
+    let Some((request, helper)) = helper_owner(&channels)? else {
         return Ok(());
-    }
+    };
     let config = Config::read_optional(state_dir)?.ok_or("Managed backend is disabled")?;
     if let Some((executable, sha)) = pin {
         config.require_identity(executable, sha)?;
     }
-    let manager = Manager::start(config)?;
-    helper_note(
-        state_dir,
+    own_backend(&channels, &request, &helper, Manager::start(config)?)
+}
+
+/// Task Scheduler action. All paths and the endpoint are resolved by trusted policy.
+#[cfg(windows)]
+pub fn run_installed_helper() -> Result<(), String> {
+    let (policy, authority) = InstalledPolicy::helper()?;
+    let channels = HelperChannels {
+        input: &policy.state,
+        output: &policy.outbox,
+        authority: Some(&authority),
+    };
+    let Some((request, helper)) = helper_owner(&channels)? else {
+        return Ok(());
+    };
+    own_backend(
+        &channels,
         &request,
+        &helper,
+        Manager::start_installed(&policy)?,
+    )
+}
+
+struct HelperChannels<'a> {
+    input: &'a Path,
+    output: &'a Path,
+    #[cfg(windows)]
+    authority: Option<&'a HelperAuthority>,
+}
+
+impl<'a> HelperChannels<'a> {
+    fn private(state: &'a Path) -> Self {
+        Self {
+            input: state,
+            output: state,
+            #[cfg(windows)]
+            authority: None,
+        }
+    }
+
+    fn read<T: DeserializeOwned>(&self, name: &str) -> Result<T, ControlRead> {
+        let path = self.input.join(name);
+        #[cfg(windows)]
+        if let Some(authority) = self.authority {
+            return authority
+                .with_limited(|| read_json_typed(&path))
+                .map_err(ControlRead::Invalid)?;
+        }
+        read_json_typed(&path)
+    }
+
+    fn control(&self, name: &str, request: &Request) -> bool {
+        self.read::<Cancel>(name)
+            .is_ok_and(|value| matches_control(&value, request))
+    }
+
+    fn parent_identity(&self, pid: u32) -> Result<Identity, String> {
+        #[cfg(windows)]
+        if let Some(authority) = self.authority {
+            return identity_checked(pid, |handle, path| authority.validate_parent(handle, path));
+        }
+        identity(pid)
+    }
+}
+
+fn helper_owner(channels: &HelperChannels<'_>) -> Result<Option<(Request, Identity)>, String> {
+    let request: Request = channels.read("owner-request.json").map_err(control_error)?;
+    let helper = identity(std::process::id())?;
+    if request.nonce.is_empty()
+        || request.nonce.len() > 128
+        || !live_request(&request, now_ms()?)
+        || request.parent.executable != helper.executable
+        || channels.parent_identity(request.parent.pid)? != request.parent
+    {
+        return Err("Backend helper owner identity is invalid".into());
+    }
+    if !request.restarting
+        || channels.control("owner-pause.json", &request)
+        || channels.control("owner-cancel.json", &request)
+    {
+        return Ok(None);
+    }
+    Ok(Some((request, helper)))
+}
+
+fn own_backend(
+    channels: &HelperChannels<'_>,
+    request: &Request,
+    helper: &Identity,
+    manager: Manager,
+) -> Result<(), String> {
+    helper_note(
+        channels.output,
+        request,
         "helper_started",
         None,
         "Validated owner; managed backend worker started",
     );
-    let result = supervise_helper(
-        state_dir,
-        &request,
-        &helper,
+    let result = supervise_channels(
+        channels,
+        request,
+        helper,
         || manager.snapshot(),
         || manager.stop_restarting(),
+        &ActiveClock,
     );
     manager.stop_restarting();
     helper_note(
-        state_dir,
-        &request,
+        channels.output,
+        request,
         "helper_draining",
         manager.snapshot().backend_pid,
         result
@@ -535,6 +714,7 @@ fn helper_note(
     let _ = writeln!(std::io::stderr(), "{detail}");
 }
 
+#[cfg(test)]
 fn supervise_helper(
     state_dir: &Path,
     request: &Request,
@@ -552,6 +732,7 @@ fn supervise_helper(
     )
 }
 
+#[cfg(test)]
 fn supervise_helper_with_clock(
     state_dir: &Path,
     request: &Request,
@@ -560,6 +741,25 @@ fn supervise_helper_with_clock(
     stop_restarting: impl Fn(),
     clock: &impl Clock,
 ) -> Result<(), String> {
+    supervise_channels(
+        &HelperChannels::private(state_dir),
+        request,
+        helper,
+        snapshot,
+        stop_restarting,
+        clock,
+    )
+}
+
+fn supervise_channels(
+    channels: &HelperChannels<'_>,
+    request: &Request,
+    helper: &Identity,
+    snapshot: impl Fn() -> super::managed_backend::Snapshot,
+    stop_restarting: impl Fn(),
+    clock: &impl Clock,
+) -> Result<(), String> {
+    let output = channels.output;
     let now = clock.now_ms()?;
     if !live_request(request, now) {
         return Err(
@@ -573,7 +773,7 @@ fn supervise_helper_with_clock(
     loop {
         if clock.now_ms()? >= lease_deadline {
             helper_note(
-                state_dir,
+                output,
                 request,
                 "helper_stop",
                 None,
@@ -581,11 +781,11 @@ fn supervise_helper_with_clock(
             );
             break;
         }
-        match identity(request.parent.pid) {
+        match channels.parent_identity(request.parent.pid) {
             Ok(parent) if parent == request.parent => {}
             Ok(_) => {
                 helper_note(
-                    state_dir,
+                    output,
                     request,
                     "helper_stop",
                     None,
@@ -595,7 +795,7 @@ fn supervise_helper_with_clock(
             }
             Err(error) => {
                 helper_note(
-                    state_dir,
+                    output,
                     request,
                     "helper_stop",
                     None,
@@ -604,12 +804,9 @@ fn supervise_helper_with_clock(
                 break;
             }
         }
-        if read_json::<Cancel>(&state_dir.join("owner-cancel.json"))
-            .ok()
-            .is_some_and(|c| matches_control(&c, request))
-        {
+        if channels.control("owner-cancel.json", request) {
             helper_note(
-                state_dir,
+                output,
                 request,
                 "helper_stop",
                 None,
@@ -617,17 +814,14 @@ fn supervise_helper_with_clock(
             );
             break;
         }
-        if read_json::<Cancel>(&state_dir.join("owner-pause.json"))
-            .ok()
-            .is_some_and(|c| matches_control(&c, request))
-        {
+        if channels.control("owner-pause.json", request) {
             stop_restarting();
         }
-        match read_json_typed::<Request>(&state_dir.join("owner-request.json")) {
+        match channels.read::<Request>("owner-request.json") {
             Err(ControlRead::Io(error)) => {
                 if !owner_read_failed {
                     helper_note(
-                        state_dir,
+                        output,
                         request,
                         "owner_read_deferred",
                         None,
@@ -642,7 +836,7 @@ fn supervise_helper_with_clock(
             Ok(current) => {
                 if owner_read_failed {
                     helper_note(
-                        state_dir,
+                        output,
                         request,
                         "owner_read_recovered",
                         None,
@@ -658,7 +852,7 @@ fn supervise_helper_with_clock(
                     || !live_request(&current, now)
                 {
                     helper_note(
-                        state_dir,
+                        output,
                         request,
                         "helper_stop",
                         None,
@@ -673,12 +867,9 @@ fn supervise_helper_with_clock(
                 if !current.restarting {
                     stop_restarting();
                 }
-                if read_json::<Cancel>(&state_dir.join("owner-cancel.json"))
-                    .ok()
-                    .is_some_and(|c| matches_control(&c, request))
-                {
+                if channels.control("owner-cancel.json", request) {
                     helper_note(
-                        state_dir,
+                        output,
                         request,
                         "helper_stop",
                         None,
@@ -695,7 +886,7 @@ fn supervise_helper_with_clock(
                 );
                 if last_backend_state.as_ref() != Some(&backend_state) {
                     super::backend_diagnostics::record(
-                        state_dir,
+                        output,
                         "backend_state",
                         Some(request.parent.pid),
                         snapshot.backend_pid,
@@ -715,11 +906,11 @@ fn supervise_helper_with_clock(
                     backend_pid: snapshot.backend_pid,
                     detail: snapshot.detail.chars().take(1000).collect(),
                 };
-                match write_json(&state_dir.join("helper-status.json"), &status) {
+                match write_json(&output.join("helper-status.json"), &status) {
                     Ok(()) => {
                         if status_write_failed {
                             helper_note(
-                                state_dir,
+                                output,
                                 request,
                                 "status_write_recovered",
                                 snapshot.backend_pid,
@@ -731,7 +922,7 @@ fn supervise_helper_with_clock(
                     Err(error) => {
                         if !status_write_failed {
                             helper_note(
-                                state_dir,
+                                output,
                                 request,
                                 "status_write_deferred",
                                 snapshot.backend_pid,
@@ -749,10 +940,13 @@ fn supervise_helper_with_clock(
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
-    read_json_typed(path).map_err(|e| match e {
+    read_json_typed(path).map_err(control_error)
+}
+fn control_error(error: ControlRead) -> String {
+    match error {
         ControlRead::Io(e) => e.to_string(),
         ControlRead::Invalid(e) => e,
-    })
+    }
 }
 enum ControlRead {
     Io(std::io::Error),
@@ -781,10 +975,31 @@ fn read_json_typed<T: DeserializeOwned>(path: &Path) -> Result<T, ControlRead> {
             }
         }
     }
+    let mut open = fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        open.custom_flags(0x0020_0000); // OPEN_REPARSE_POINT
+    }
+    let file = open.open(path).map_err(ControlRead::Io)?;
+    let metadata = file.metadata().map_err(ControlRead::Io)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err(ControlRead::Invalid(
+                "Backend control reparse file is forbidden".into(),
+            ));
+        }
+    }
+    if !metadata.is_file() {
+        return Err(ControlRead::Invalid(
+            "Backend control path is not a file".into(),
+        ));
+    }
     let mut bytes = Vec::new();
-    File::open(path)
-        .map_err(ControlRead::Io)?
-        .take(LIMIT as u64 + 1)
+    file.take(LIMIT as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(ControlRead::Io)?;
     let value = super::strict_json::unique_json(&bytes, LIMIT).map_err(ControlRead::Invalid)?;
@@ -897,6 +1112,14 @@ fn launch_task(_: &str, _: &AtomicBool) -> Result<(), String> {
 
 #[cfg(windows)]
 fn identity(pid: u32) -> Result<Identity, String> {
+    identity_checked(pid, |_, _| Ok(()))
+}
+
+#[cfg(windows)]
+fn identity_checked(
+    pid: u32,
+    validate: impl FnOnce(windows_sys::Win32::Foundation::HANDLE, &Path) -> Result<(), String>,
+) -> Result<Identity, String> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::{
         Foundation::{CloseHandle, FILETIME, WAIT_TIMEOUT},
@@ -933,9 +1156,12 @@ fn identity(pid: u32) -> Result<Identity, String> {
         if unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) } == 0 {
             return Err(std::io::Error::last_os_error().to_string());
         }
-        let executable = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]))
-            .canonicalize()
-            .map_err(|e| e.to_string())?;
+        let image = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
+        validate(handle, &image)?;
+        let executable = image.canonicalize().map_err(|e| e.to_string())?;
+        if unsafe { WaitForSingleObject(handle, 0) } != WAIT_TIMEOUT {
+            return Err("Backend owner/helper has exited".into());
+        }
         Ok(Identity {
             pid,
             created,
@@ -1149,6 +1375,47 @@ mod tests {
         fs::remove_file(directory.join("helper-status.json")).unwrap();
         let _ = fs::remove_file(directory.join("backend-events.json"));
         fs::remove_dir(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn split_channels_only_consume_owner_in_input_and_publish_in_outbox() {
+        let (input, mut request, helper) = sharing_fixture("split-control");
+        let outbox = input.join("outbox");
+        fs::create_dir(&outbox).unwrap();
+        request.timestamp_ms = 10_000;
+        let owner_path = input.join("owner-request.json");
+        write_json(&owner_path, &request).unwrap();
+        let owner = fs::read(&owner_path).unwrap();
+        let channels = HelperChannels {
+            input: &input,
+            output: &outbox,
+            authority: None,
+        };
+        let mut clock = FakeClock::new(request.timestamp_ms);
+        clock.fail_at_ms = Some(request.timestamp_ms + 200);
+        assert!(
+            supervise_channels(
+                &channels,
+                &request,
+                &helper,
+                super::super::managed_backend::Snapshot::default,
+                || {},
+                &clock,
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&owner_path).unwrap(), owner);
+        assert!(!input.join("helper-status.json").exists());
+        assert!(!input.join("backend-events.json").exists());
+        assert!(!outbox.join("owner-request.json").exists());
+        let status: Status = read_json(&outbox.join("helper-status.json")).unwrap();
+        assert_eq!(status.nonce, request.nonce);
+        fs::remove_file(outbox.join("helper-status.json")).unwrap();
+        fs::remove_file(outbox.join("backend-events.json")).unwrap();
+        fs::remove_file(owner_path).unwrap();
+        fs::remove_dir(outbox).unwrap();
+        fs::remove_dir(input).unwrap();
     }
     #[cfg(windows)]
     fn sharing_fixture(label: &str) -> (PathBuf, Request, Identity) {
@@ -1404,6 +1671,14 @@ mod tests {
     }
     #[test]
     fn task_schema_and_duplicate_keys_fail_closed() {
+        assert!(
+            TaskConfig {
+                version: 2,
+                task_name: "\\Prismestra-Backend-S-1-5-21-42".into()
+            }
+            .validate()
+            .is_ok()
+        );
         assert!(
             TaskConfig {
                 version: 2,
