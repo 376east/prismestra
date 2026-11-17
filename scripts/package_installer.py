@@ -96,7 +96,8 @@ def extract_component(source, destination, expected):
             if key in folded or item.is_dir() or stat.S_ISLNK(item.external_attr >> 16):
                 raise ValueError(f"Unsafe or repeated component file: {path}")
             if str(path) != "component-manifest.json" and (
-                len(path.parts) != 2 or path.parts[0] not in {"runtime", "licenses", "source", "build"}
+                not ((len(path.parts) == 2 and path.parts[0] in {"runtime", "licenses", "source", "build"})
+                     or (2 < len(path.parts) <= 4 and path.parts[0] == "build"))
             ):
                 raise ValueError(f"Unexpected component directory: {path}")
             folded.add(key)
@@ -123,7 +124,7 @@ def extract_component(source, destination, expected):
             path = destination.joinpath(*safe_archive_name(name).parts)
             if row["size"] != infos[name].file_size:
                 raise ValueError(f"Component file size mismatch: {name}")
-            path.parent.mkdir(exist_ok=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(infos[name]) as reader, path.open("xb") as writer:
                 shutil.copyfileobj(reader, writer)
             file_pin(path, row["sha256"])

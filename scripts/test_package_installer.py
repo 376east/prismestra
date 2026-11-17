@@ -30,7 +30,7 @@ class InstallerPackaging(unittest.TestCase):
         self.app.write_bytes(amd64_fixture())
         self.namespace = "bf65d1de-875d-40de-8dbc-f6799d222115"
 
-    def component(self, extra=(), incorrect_pin=False):
+    def component(self, extra=(), incorrect_pin=False, listed=()):
         source = self.root / "component.zip"
         name = "runtime/OpenRGB.exe"
         image = amd64_fixture()
@@ -40,12 +40,26 @@ class InstallerPackaging(unittest.TestCase):
             "engine_sha256": pinned,
             "files": [{"path": name, "sha256": pinned, "size": len(image)}],
         }
+        for item in listed:
+            manifest["files"].append({"path": item, "sha256": fingerprint(b"fixture"), "size": 7})
         with zipfile.ZipFile(source, "w") as archive:
+            for item in listed:
+                archive.writestr(item, b"fixture")
             archive.writestr(name, image)
             archive.writestr("component-manifest.json", json.dumps(manifest))
             for path in extra:
                 archive.writestr(path, b"fixture")
         return source
+
+    def test_nested_build_recipe_is_preserved_but_nested_runtime_is_rejected(self):
+        recipe = "build/pawniolib/CMakeLists.txt"
+        archive = self.component(listed=(recipe,))
+        destination = self.root / "component"
+        installer.extract_component(archive, destination, installer.sha256(archive))
+        self.assertEqual((destination / recipe).read_bytes(), b"fixture")
+        archive = self.component(listed=("runtime/unknown/child.dll",))
+        with self.assertRaisesRegex(ValueError, "Unexpected component directory"):
+            installer.extract_component(archive, self.root / "bad", installer.sha256(archive))
 
     def test_component_rejects_traversal_and_windows_reserved_names(self):
         for name in ("../escape.exe", "runtime/../escape.exe", "runtime/COM1.exe", "runtime/x.dll:stream"):
