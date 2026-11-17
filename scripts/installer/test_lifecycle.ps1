@@ -49,7 +49,7 @@ function Read-TestInstaller($BuildDirectory) {
     [pscustomobject]@{ Path = $exe; Manifest = $manifest }
 }
 function Run-Setup($Path, $Options, $Log) {
-    $process = Start-Process -FilePath $Path -Wait -PassThru -ArgumentList (
+    $process = Start-Process -WindowStyle Hidden -FilePath $Path -Wait -PassThru -ArgumentList (
         '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART ' + $Options + ' /LOG="' + $Log + '"')
     Assert-Expected ($process.ExitCode -eq 0) ("Setup exited with code " + $process.ExitCode + ". See $Log")
 }
@@ -103,7 +103,7 @@ public static class PrismestraLifecycleWindow {
 }
 '@
 function Start-TestSession {
-    $process = Start-Process -FilePath $image -ArgumentList '--installed', '--autostart' -PassThru
+    $process = Start-Process -WindowStyle Hidden -FilePath $image -ArgumentList '--installed', '--autostart' -PassThru
     $until = [DateTime]::UtcNow.AddSeconds(30)
     while ([DateTime]::UtcNow -lt $until) {
         $process.Refresh()
@@ -114,7 +114,7 @@ function Start-TestSession {
     throw 'Timed out waiting for the installed resident shell.'
 }
 function Stop-TestSession($Process) {
-    $stop = Start-Process -FilePath $image -ArgumentList '--shutdown-installed' -PassThru -Wait
+    $stop = Start-Process -WindowStyle Hidden -FilePath $image -ArgumentList '--shutdown-installed' -PassThru -Wait
     Assert-Expected ($stop.ExitCode -eq 0 -and $Process.WaitForExit(5000)) 'Graceful installed shutdown failed.'
 }
 

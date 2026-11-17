@@ -415,7 +415,7 @@ impl App {
             Some(BindingTarget::Monitor(_)) => r"Экран Windows (например, \\.\DISPLAY1)",
             Some(BindingTarget::Device(d)) => match d.driver {
                 crate::devices::Driver::HomeAssistant => "Адрес Home Assistant (http://IP:8123)",
-                crate::devices::Driver::OpenRgb => "SDK-сервер OpenRGB (127.0.0.1:6742)",
+                crate::devices::Driver::OpenRgb => "SDK-сервер OpenRGB",
                 crate::devices::Driver::WledDdp => "IP:порт WLED DDP (обычно 4048)",
                 crate::devices::Driver::DoorBle | crate::devices::Driver::SurplifeE1Pixels => {
                     "MAC Bluetooth-контроллера"
@@ -756,9 +756,11 @@ impl App {
                         discovery::wled_factory(endpoint, http)
                     } else {
                         let endpoint = if endpoint.trim().is_empty() {
-                            "127.0.0.1:6742"
+                            crate::app::managed_backend::Config::read_optional(&self.state_dir)?
+                                .map(|config| config.endpoint().to_string())
+                                .unwrap_or_else(|| "127.0.0.1:6742".into())
                         } else {
-                            endpoint.trim()
+                            endpoint.trim().to_owned()
                         };
                         let endpoint = crate::devices::canonical_endpoint(
                             endpoint

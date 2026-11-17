@@ -70,10 +70,17 @@ jobs:
         run: |
           $metadata = Get-Content fixture/inputs/test.json -Raw | ConvertFrom-Json
           ./scripts/installer/test_lifecycle.ps1 -Namespace $metadata.namespace -FirstBuild fixture/inputs/first -UpgradeBuild fixture/inputs/upgrade -ReportDirectory lifecycle-result -ElevatedFilesOnly
+      - name: Exercise a fresh standard Windows account
+        shell: pwsh
+        run: |
+          $metadata = Get-Content fixture/inputs/test.json -Raw | ConvertFrom-Json
+          ./scripts/installer/test_standard_user.ps1 -Namespace $metadata.namespace -FirstBuild fixture/inputs/first -ReportDirectory standard-user-result -DisposableRunner
       - name: Retain lifecycle evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: installer-lifecycle-evidence
-          path: lifecycle-result/
+          path: |
+            lifecycle-result/
+            standard-user-result/
           retention-days: 14

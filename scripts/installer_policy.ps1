@@ -424,7 +424,7 @@ try {
         $registered = $folder.RegisterTaskDefinition($name, $definition, $flags, $sid, $null, 3, $taskAcl)
         Assert-Task $registered $sid $image $root
         Write-ProtectedJson $policyHome.FullName 'policy.json' @{
-            version = 1; sid = $sid; endpoint = '127.0.0.1:6742'
+            version = 1; sid = $sid; endpoint = '127.0.0.1:17422'
             app_sha256 = $manifest.app_sha256; runtime_sha256 = $pins
         } $sid
     } catch {

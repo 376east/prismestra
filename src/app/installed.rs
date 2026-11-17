@@ -442,7 +442,7 @@ fn configure_default_backend(
         "enabled": true,
         "executable": backend,
         "config_dir": dir,
-        "endpoint": "127.0.0.1:6742",
+        "endpoint": "127.0.0.1:17422",
         "expected_executable_sha256": hash,
         "graceful_shutdown": true,
     }))
@@ -604,7 +604,7 @@ mod tests {
         let config = super::super::managed_backend::Config::read_optional(&state)
             .unwrap()
             .unwrap();
-        assert_eq!(config.endpoint().to_string(), "127.0.0.1:6742");
+        assert_eq!(config.endpoint().to_string(), "127.0.0.1:17422");
         config
             .require_identity(&fixture.0.join(BACKEND_PATH), &manifest.backend.sha256)
             .unwrap();
