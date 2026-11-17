@@ -64,6 +64,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Download unpublished lifecycle fixtures
+        id: fixtures
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -79,11 +80,13 @@ jobs:
           $metadata = Get-Content fixture/inputs/test.json -Raw | ConvertFrom-Json
           ./scripts/installer/test_offline_setup.ps1 -Installer fixture/Prismestra-Setup-0.1.0.5-x64.exe -Sha256 $metadata.production_sha256 -ReportDirectory offline-setup-result -DisposableRunner
       - name: Exercise installation, repair, upgrade and uninstall
+        if: always() && steps.fixtures.outcome == 'success'
         shell: pwsh
         run: |
           $metadata = Get-Content fixture/inputs/test.json -Raw | ConvertFrom-Json
           ./scripts/installer/test_lifecycle.ps1 -Namespace $metadata.namespace -FirstBuild fixture/inputs/first -UpgradeBuild fixture/inputs/upgrade -ReportDirectory lifecycle-result -ElevatedFilesOnly
       - name: Exercise a fresh standard Windows account
+        if: always() && steps.fixtures.outcome == 'success'
         shell: pwsh
         run: |
           $metadata = Get-Content fixture/inputs/test.json -Raw | ConvertFrom-Json

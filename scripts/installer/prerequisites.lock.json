@@ -1,5 +1,6 @@
 {
   "architecture": "x64",
+  "minimum_vc_runtime": "14.51.36247.0",
   "packages": {
     "pawnio": {
       "file": "PawnIO_setup.exe",

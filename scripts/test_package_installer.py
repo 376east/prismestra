@@ -17,8 +17,12 @@ def fingerprint(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def amd64_fixture():
-    return b"MZ" + bytes(58) + struct.pack("<I", 64) + b"PE\0\0\x64\x86"
+def amd64_fixture(linker=(14, 51)):
+    pe = bytearray(28)
+    pe[:6] = b"PE\0\0\x64\x86"
+    struct.pack_into("<H", pe, 20, 240)
+    struct.pack_into("<HBB", pe, 24, 0x20B, *linker)
+    return b"MZ" + bytes(58) + struct.pack("<I", 64) + pe
 
 
 class InstallerPackaging(unittest.TestCase):
@@ -30,10 +34,10 @@ class InstallerPackaging(unittest.TestCase):
         self.app.write_bytes(amd64_fixture())
         self.namespace = "bf65d1de-875d-40de-8dbc-f6799d222115"
 
-    def component(self, extra=(), incorrect_pin=False, listed=()):
+    def component(self, extra=(), incorrect_pin=False, listed=(), linker=(14, 44)):
         source = self.root / "component.zip"
         name = "runtime/OpenRGB.exe"
-        image = amd64_fixture()
+        image = amd64_fixture(linker)
         pinned = fingerprint(b"wrong") if incorrect_pin else fingerprint(image)
         manifest = {
             "version": 1, "scope": "packaging_only", "engine_revision": "b" * 40,
@@ -91,6 +95,37 @@ class InstallerPackaging(unittest.TestCase):
         lock["packages"].pop("pawnio")
         return lock
 
+    def test_runtime_floor_rejects_malformed_and_newer_than_bundle(self):
+        lock = self.prerequisite_lock()
+        path = self.root / "prerequisites.json"
+        installer.write_json(path, lock)
+        _, floor = installer.read_prerequisite_lock(path)
+        self.assertEqual(floor, (14, 51, 36247, 0))
+        for value in (None, "14.51", "14.51.65536.0", "14.53.0.0"):
+            with self.subTest(floor=value):
+                lock["minimum_vc_runtime"] = value
+                installer.write_json(path, lock)
+                with self.assertRaisesRegex(ValueError, "minimum_vc_runtime"):
+                    installer.read_prerequisite_lock(path)
+
+    def test_linker_above_runtime_floor_is_rejected_before_copy(self):
+        lock = self.root / "prerequisites.json"
+        installer.write_json(lock, self.prerequisite_lock())
+        _, floor = installer.read_prerequisite_lock(lock)
+        archive = self.component(linker=(14, 52))
+        backend = self.root / "staged-backend"
+        with self.assertRaisesRegex(ValueError, r"OpenRGB.exe linker 14\.52"):
+            installer.extract_component(archive, backend, installer.sha256(archive), floor)
+        self.assertFalse(backend.exists())
+
+        self.app.write_bytes(amd64_fixture((14, 52)))
+        args = self.arguments(
+            test_namespace=None, prerequisite_lock=lock, prerequisite_dir=self.root, release_dir=self.root,
+        )
+        with self.assertRaisesRegex(ValueError, r"Prismestra.exe linker 14\.52"):
+            installer.package(args)
+        self.assertFalse(args.output.exists())
+
     def test_prerequisite_rejects_bootstrapper_metadata_before_authenticode(self):
         lock = self.prerequisite_lock()
         lock["packages"]["vc_redist_x64"]["file"] = "download-vc.exe"
@@ -98,7 +133,8 @@ class InstallerPackaging(unittest.TestCase):
         installer.write_json(path, lock)
         with patch.object(installer, "authenticode") as verify:
             with self.assertRaisesRegex(ValueError, "Invalid offline prerequisite pin"):
-                installer.stage_prerequisites(path, self.root, self.root / "staged")
+                packages, _ = installer.read_prerequisite_lock(path)
+                installer.stage_prerequisites(packages, self.root, self.root / "staged")
         verify.assert_not_called()
 
     def test_unsigned_prerequisite_is_delegated_to_authenticode_and_rejected(self):
@@ -118,7 +154,8 @@ class InstallerPackaging(unittest.TestCase):
             returncode=1, stderr="not signed", stdout=""
         )) as execute:
             with self.assertRaisesRegex(ValueError, "Authenticode validation failed"):
-                installer.stage_prerequisites(path, self.root, self.root / "staged")
+                packages, _ = installer.read_prerequisite_lock(path)
+                installer.stage_prerequisites(packages, self.root, self.root / "staged")
         self.assertEqual(Path(execute.call_args.args[0][0]).name, "powershell.exe")
         self.assertNotIn(str(payload), execute.call_args.args[0])
 

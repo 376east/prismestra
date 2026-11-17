@@ -225,21 +225,21 @@ begin
   if not VcRuntimeReady then begin
     if not InstallPrerequisite('vc_redist.x64.exe', '/install /quiet /norestart', Code) then
       Result := 'Could not start the offline Visual C++ installer.'
-    else if (Code = 3010) or (Code = 1641) then begin
-      NeedsRestart := True;
-      Result := 'Restart Windows to complete Visual C++ installation, then run Setup again.';
-    end else if ((Code <> 0) and (Code <> 1638)) or not VcRuntimeReady then
-      Result := 'The required x64 Visual C++ runtime could not be installed.';
+    else if (Code = 3010) or (Code = 1641) then RebootRequired := True
+    else if (Code <> 0) and (Code <> 1638) then
+      Result := 'The required x64 Visual C++ runtime could not be installed.'
+    else if not VcRuntimeReady then
+      Result := 'Setup could not verify the minimum x64 Visual C++ runtime version.';
     if Result <> '' then Exit;
   end;
   if not WebViewReady then begin
     if not InstallPrerequisite('MicrosoftEdgeWebView2RuntimeInstallerX64.exe', '/silent /install', Code) then
       Result := 'Could not start the offline WebView2 installer.'
-    else if (Code = 3010) or (Code = 1641) then begin
-      NeedsRestart := True;
-      Result := 'Restart Windows to complete WebView2 installation, then run Setup again.';
-    end else if (Code <> 0) or not WebViewReady then
-      Result := 'The required WebView2 Runtime could not be installed.';
+    else if (Code = 3010) or (Code = 1641) then RebootRequired := True
+    else if (Code <> 0) and (Code <> 1638) then
+      Result := 'The required WebView2 Runtime could not be installed.'
+    else if not WebViewReady then
+      Result := 'Setup could not verify the required WebView2 Runtime.';
     if Result <> '' then Exit;
   end;
 #ifdef IncludePawnIO

@@ -138,7 +138,10 @@ function Assert-RuntimesRetained($Before, $After) {
 }
 
 function Read-Startup {
-    Get-ItemPropertyValue -LiteralPath $startupKey -Name 'Prismestra' -ErrorAction SilentlyContinue
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
+    if ($null -eq $key) { return $null }
+    try { $key.GetValue('Prismestra', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+    finally { $key.Dispose() }
 }
 
 function Assert-ProductAbsent {
@@ -265,7 +268,7 @@ try {
     Assert-Expected ($receipt.app_sha256 -ceq $manifest.app_sha256 -and
         $receipt.backend_sha256 -ceq $manifest.backend.sha256 -and $manifest.backend.relative_executable -ceq $backend) (
         'Installed app or OpenRGB differs from the package SHA-256 pins.')
-    $minimumVc = [version]$manifest.prerequisites.vc_redist_x64.version
+    $minimumVc = [version]$manifest.minimum_vc_runtime
     Assert-Expected (Test-RuntimesReady $receipt.runtimes_installed $minimumVc) (
         'Installed shared runtime registration or runtime binaries are missing.')
     $null = Get-RegisteredUninstaller
@@ -303,15 +306,15 @@ try {
         } catch { $failures.Add($_.Exception.Message) }
         try { Copy-PrerequisiteLogs $started $report } catch { $failures.Add($_.Exception.Message) }
     }
-    if ($receipt.reboot_required) {
-        $receipt.result = 'reboot_required'
-    } elseif ($failures.Count -eq 0 -and $receipt.install_verified -and $receipt.uninstall_verified) {
-        $receipt.result = 'passed'
+    if ($failures.Count -eq 0 -and $receipt.install_verified -and $receipt.uninstall_verified) {
+        $receipt.result = if ($receipt.reboot_required) { 'passed_with_restart_pending' } else { 'passed' }
+    } elseif ($receipt.reboot_required) {
+        $receipt.result = 'reboot_required_incomplete'
     }
     $receipt.errors = $failures.ToArray()
     $receipt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $report 'offline-setup.json') -Encoding UTF8
 }
 
-if ($receipt.result -ne 'passed') {
+if ($receipt.result -notin @('passed', 'passed_with_restart_pending')) {
     throw "Offline Setup lifecycle result: $($receipt.result). See offline-setup.json and logs in $report."
 }

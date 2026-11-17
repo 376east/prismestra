@@ -57,15 +57,24 @@ def file_pin(path, expected):
         raise ValueError(f"Missing, unsafe, or unpinned file: {path.name}")
 
 
-def amd64_executable(path):
-    with path.open("rb") as stream:
-        header = stream.read(64)
-        if len(header) != 64 or header[:2] != b"MZ":
-            raise ValueError(f"Missing PE header: {path.name}")
-        offset, = struct.unpack_from("<I", header, 60)
-        stream.seek(offset)
-        if stream.read(6) != b"PE\0\0\x64\x86":
-            raise ValueError(f"Expected an AMD64 executable: {path.name}")
+def check_amd64_executable(stream, name, runtime_floor=None):
+    header = stream.read(64)
+    if len(header) != 64 or header[:2] != b"MZ":
+        raise ValueError(f"Missing PE header: {name}")
+    offset, = struct.unpack_from("<I", header, 60)
+    stream.seek(offset)
+    pe = stream.read(28)
+    if pe[:6] != b"PE\0\0\x64\x86":
+        raise ValueError(f"Expected an AMD64 executable: {name}")
+    if runtime_floor is not None:
+        # PE signature + 20-byte COFF header precede the PE32+ optional
+        # header's magic and MajorLinkerVersion / MinorLinkerVersion bytes.
+        if len(pe) < 28 or struct.unpack_from("<H", pe, 20)[0] < 4 or pe[24:26] != b"\x0b\x02":
+            raise ValueError(f"Missing PE32+ linker version: {name}")
+        linker = tuple(pe[26:28])
+        if linker > runtime_floor[:2]:
+            raise ValueError(f"{name} linker {linker[0]}.{linker[1]} exceeds minimum VC runtime "
+                             f"{runtime_floor[0]}.{runtime_floor[1]}")
 
 
 def safe_archive_name(name):
@@ -85,7 +94,7 @@ def safe_archive_name(name):
     return path
 
 
-def extract_component(source, destination, expected):
+def extract_component(source, destination, expected, runtime_floor=None):
     file_pin(source, expected)
     with zipfile.ZipFile(source) as archive:
         infos = {}
@@ -119,6 +128,8 @@ def extract_component(source, destination, expected):
             raise ValueError("OpenRGB executable pin differs from the component manifest")
         if not re.fullmatch(r"[0-9a-f]{40}", manifest["engine_revision"]):
             raise ValueError("Expected a full OpenRGB source revision")
+        with archive.open(infos["runtime/OpenRGB.exe"]) as image:
+            check_amd64_executable(image, "OpenRGB.exe", runtime_floor)
         destination.mkdir(parents=True)
         for name, row in sorted(entries.items()):
             path = destination.joinpath(*safe_archive_name(name).parts)
@@ -129,7 +140,6 @@ def extract_component(source, destination, expected):
                 shutil.copyfileobj(reader, writer)
             file_pin(path, row["sha256"])
         (destination / "component-manifest.json").write_bytes(manifest_raw)
-    amd64_executable(destination / "runtime" / "OpenRGB.exe")
     return {
         "relative_executable": BACKEND,
         "sha256": manifest["engine_sha256"],
@@ -158,13 +168,31 @@ def authenticode(path, publisher):
         raise ValueError(f"Unexpected prerequisite publisher for {path.name}: {signature}")
 
 
-def stage_prerequisites(lock_path, source, destination):
+def read_prerequisite_lock(lock_path):
     lock = json_object(lock_path.read_bytes())
     packages = lock["packages"]
     if (lock["version"] != 1 or lock["architecture"] != "x64" or not isinstance(packages, dict)
             or not {"vc_redist_x64", "webview2_x64"} <= packages.keys()
             or not packages.keys() <= PREREQUISITES.keys()):
         raise ValueError("The prerequisite lock must pin x64 VC and WebView2 standalone installers")
+    floor = parse_vc_version(lock.get("minimum_vc_runtime"), "minimum_vc_runtime")
+    vc = packages["vc_redist_x64"]
+    bundled = parse_vc_version(vc.get("version") if isinstance(vc, dict) else None, "bundled VC installer version")
+    if floor > bundled:
+        raise ValueError("minimum_vc_runtime exceeds the bundled VC installer version")
+    return packages, floor
+
+
+def parse_vc_version(value, label):
+    if not isinstance(value, str) or not re.fullmatch(r"14(?:\.[0-9]{1,5}){3}", value):
+        raise ValueError(f"{label} must be a four-part VC 14 runtime version")
+    parts = tuple(map(int, value.split(".")))
+    if any(part > 65535 for part in parts):
+        raise ValueError(f"{label} contains a component above 65535")
+    return parts
+
+
+def stage_prerequisites(packages, source, destination):
     destination.mkdir()
     for key, package in sorted(packages.items()):
         filename, min_size, publisher, hosts = PREREQUISITES[key]
@@ -187,7 +215,6 @@ def stage_prerequisites(lock_path, source, destination):
         shutil.copyfile(pinned, staged)
         file_pin(staged, package["sha256"])
         authenticode(staged, publisher)
-    return packages
 
 
 def stage_app_notices(release_dir, payload, app_sha, commit):
@@ -235,22 +262,25 @@ def package(args):
         raise ValueError("Production requires the offline prerequisite lock, its files and the release notices")
     if not args.stage_only and not args.iscc:
         raise ValueError("Provide --iscc or choose --stage-only")
+    packages, runtime_floor = ({}, None) if test_mode else read_prerequisite_lock(args.prerequisite_lock)
     file_pin(args.app_exe, args.app_sha256)
+    with args.app_exe.open("rb") as image:
+        check_amd64_executable(image, "Prismestra.exe", runtime_floor)
 
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     stage = output / "stage"
     payload = stage / "payload"
     payload.mkdir(parents=True)
+    backend = extract_component(
+        args.component_zip, payload / "components/openrgb", args.component_sha256, runtime_floor
+    )
     app = payload / "Prismestra.exe"
     shutil.copyfile(args.app_exe, app)
     file_pin(app, args.app_sha256)
-    amd64_executable(app)
-    backend = extract_component(args.component_zip, payload / "components/openrgb", args.component_sha256)
     release_source = stage_app_notices(args.release_dir, payload, args.app_sha256, args.expected_commit) if args.release_dir else None
-    packages = {}
     if not test_mode:
-        packages = stage_prerequisites(args.prerequisite_lock, args.prerequisite_dir, stage / "prerequisites")
+        stage_prerequisites(packages, args.prerequisite_dir, stage / "prerequisites")
         policy = ROOT / "installer_policy.ps1"
         if policy.is_symlink() or not policy.is_file():
             raise ValueError("Missing maintained installer policy provisioner")
@@ -261,6 +291,8 @@ def package(args):
         "backend": backend, "prerequisites": packages,
         "installer_version": args.version, "data_namespace": args.test_namespace,
     }
+    if runtime_floor is not None:
+        manifest["minimum_vc_runtime"] = ".".join(map(str, runtime_floor))
     write_json(payload / "install-manifest.json", manifest)
     app_name = "Prismestra Lifecycle Test" if test_mode else "Prismestra"
     app_dir = f"{app_name}\\{args.test_namespace}" if test_mode else app_name
@@ -283,10 +315,9 @@ def package(args):
         defs.append("#define LifecycleTest")
     if "pawnio" in packages:
         defs.append("#define IncludePawnIO")
-    if "vc_redist_x64" in packages:
-        version = packages["vc_redist_x64"]["version"].split(".")
-        for name, part in zip(("VcMajor", "VcMinor", "VcBuild", "VcRevision"), (version + ["0"])[:4]):
-            defs.append(f"#define {name} {int(part)}")
+    if runtime_floor is not None:
+        for name, part in zip(("VcMajor", "VcMinor", "VcBuild", "VcRevision"), runtime_floor):
+            defs.append(f"#define {name} {part}")
     (stage / "generated.iss").write_bytes(("\n".join(defs) + "\n").encode("utf-8"))
     shutil.copyfile(ROOT / "installer/Prismestra.iss", stage / "Prismestra.iss")
 
