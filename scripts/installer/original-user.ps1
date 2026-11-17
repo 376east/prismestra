@@ -3,7 +3,6 @@ $ErrorActionPreference = 'Stop'
 try {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-    if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { exit 1 }
     if ($Action -eq 'Probe') {
         if ($identity.User.Value -eq $ExpectedSid) { exit 0 }
         exit 1
@@ -16,6 +15,7 @@ try {
     }
     $image = Join-Path $InstallRoot 'Prismestra.exe'
     if ($Action -eq 'Launch') {
+        if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { exit 1 }
         Start-Process -FilePath $image -ArgumentList '--installed' -WorkingDirectory $InstallRoot
         exit 0
     }
