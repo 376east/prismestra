@@ -18,17 +18,17 @@
 
 Prismestra is a local lighting orchestrator for Windows. Its goal is to bring PC RGB, unusual Bluetooth lights, LCD displays and home lighting into one spatial scene, with explicit device support and a small resident engine.
 
-**Source preview.** The scene engine, native editor and OpenRGB/WLED/Home Assistant setup paths are implemented and have software tests. Home Assistant tokens use Windows Credential Manager. A resident session keeps lighting and sensor subscriptions alive when the editor closes. The [local integration record](docs/validation/windows-local-kit.json) covers transport checks on one PC kit and identifies the tested source revision. Physical colors, firmware behavior and performance require separate checks. See the [compatibility table](docs/compatibility.md) before choosing a device.
-
-Start with [verified status](docs/status.md) for what has actually passed, and [repository layout and development commands](docs/development.md) for the source, component builds, packages and local-only artifacts. This repository is the single source of the current product; machine profiles and installed binaries belong outside version control.
-
-The desktop editor now embeds its local interface through WebView2 and sends validated commands to the same Rust session. Scene drafts and the RGB scene library are stored by Rust. Device, LCD, capture, sensor, connection and schedule forms reuse the existing native validators and activation paths. The previous Win32 editor remains available with `--classic-editor`. See [desktop editor behavior](docs/desktop-editor.md).
-
 ## Download for Windows
 
 Download **[Prismestra Setup for Windows x64](https://github.com/malyarq/prismestra/releases/download/v0.1.0-preview.5/Prismestra-Setup-0.1.0.5-x64.exe)** from the [latest preview release](https://github.com/malyarq/prismestra/releases/tag/v0.1.0-preview.5). Run Setup, choose sign-in startup, then connect your devices in the app. A fresh installation starts with an empty profile.
 
 The offline installer includes the application, its private headless OpenRGB backend, Visual C++ and WebView2 installers, and the optional signed PawnIO installer for supported PC lighting. You do not need a separate OpenRGB installation. Updates preserve scenes; uninstall is available in Windows Settings and preserves your data. See [installation and permissions](docs/windows-installer.md) for details and the recorded test scope. Developer source downloads are not installers.
+
+**Early preview.** The scene engine, native editor and OpenRGB/WLED/Home Assistant setup paths are implemented and have software tests. Home Assistant tokens use Windows Credential Manager. A resident session keeps lighting and sensor subscriptions alive when the editor closes. The [local integration record](docs/validation/windows-local-kit.json) covers transport checks on one PC kit and identifies the tested source revision. Physical colors, firmware behavior and performance require separate checks. See the [compatibility table](docs/compatibility.md) before choosing a device.
+
+Start with [verified status](docs/status.md) for what has actually passed, and [repository layout and development commands](docs/development.md) for the source, component builds, packages and local-only artifacts. This repository is the single source of the current product; machine profiles and installed binaries belong outside version control.
+
+The desktop editor now embeds its local interface through WebView2 and sends validated commands to the same Rust session. Scene drafts and the RGB scene library are stored by Rust. Device, LCD, capture, sensor, connection and schedule forms reuse the existing native validators and activation paths. The previous Win32 editor remains available with `--classic-editor`. See [desktop editor behavior](docs/desktop-editor.md).
 
 ## What it does
 

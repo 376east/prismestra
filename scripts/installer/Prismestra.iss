@@ -48,6 +48,9 @@ Source: "prerequisites\PawnIO_setup.exe"; Flags: dontcopy solidbreak
 [Icons]
 Name: "{commonprograms}\{#ShortcutName}"; Filename: "{app}\Prismestra.exe"; Parameters: "--installed"; WorkingDir: "{app}"
 
+[UninstallDelete]
+Type: dirifempty; Name: "{app}"
+
 [Code]
 const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';

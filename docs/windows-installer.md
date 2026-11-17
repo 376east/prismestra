@@ -6,9 +6,13 @@ The supported entry point is `Prismestra-Setup-0.1.0.5-x64.exe` on the [Preview 
 
 Run Setup from your ordinary Windows account and approve Windows elevation for installation. Setup places protected application files under Program Files and adds a Start-menu entry and Windows uninstall registration. The sign-in startup option starts one resident session; closing its editor keeps the saved scene running. A fresh profile is empty: discover supported devices, configure connections and save a scene. Subsequent sign-ins restore that saved configuration.
 
+Compatible existing runtimes are reused. The current build needs Visual C++ 14.51.36247.0 or newer and WebView2 105 or newer; the bundled installers can update an older installation. When Windows requests a restart, Setup finishes installing and defers opening the editor until after that restart.
+
 Each Windows account stores its own scenes, local bindings, assets and editor state under `%LOCALAPPDATA%/Prismestra`. An update replaces application files and the private backend while preserving that data. The installer asks a running resident session to exit normally and respects unsaved changes. Finish those changes if Setup asks you to close the app.
 
 Uninstall through Windows Settings. It removes its own startup command, application and managed backend task. Saved user data remains available for reinstallation. Shared Visual C++, WebView2 and PawnIO installations remain available to other programs. Setup never stops FanControl or other vendor software.
+
+Earlier portable previews use a separate profile and startup arrangement. Close their resident session before activating the same devices in the installed app. Import the portable scene, then configure its local device connections. Setup does not remove an unregistered portable installation.
 
 ## Bundled components and permissions
 
