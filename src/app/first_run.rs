@@ -317,6 +317,57 @@ struct Mapped {
     target: crate::schedule::Target,
 }
 
+fn reconcile_skydimo(
+    device: &mut Device,
+    current: &mut Binding,
+    controller: &ControllerInfo,
+    port: &str,
+    sdk: Binding,
+) -> Result<bool, String> {
+    let devices::Driver::SkydimoSerial { model } = &device.driver else {
+        return Ok(false);
+    };
+    let Binding::Serial {
+        port: saved_port,
+        serial,
+        ..
+    } = current
+    else {
+        return Ok(false);
+    };
+    if !device.enabled || saved_port != port {
+        return Ok(false);
+    }
+    // The bundled detector reports the COM port, model and serial from its
+    // identification handshake after opening the port. Its missing-serial
+    // placeholder cannot prove that this is the saved physical controller.
+    if controller.vendor != "Skydimo"
+        || controller.name.strip_prefix("Skydimo ") != Some(model.as_str())
+        || serial.bytes().all(|byte| byte == b'0')
+        || !controller.serial.eq_ignore_ascii_case(serial)
+    {
+        return Err(format!(
+            "{}: OpenRGB не подтвердил сохранённую модель и серийный номер на {port}.",
+            device.label
+        ));
+    }
+    if controller.leds != device.leds {
+        return Err(format!(
+            "{}: на {port} OpenRGB сообщает {} светодиодов, в сохранённой карте {}.",
+            device.label, controller.leds, device.leds
+        ));
+    }
+    let mut replacement = device.clone();
+    replacement.driver = devices::Driver::OpenRgb;
+    sdk.validate(&replacement)
+        .map_err(|error| format!("{}: {error}", device.label))?;
+    // Keep the saved ordering and geometry. The detector sends whole frames
+    // in physical LED index order regardless of its own matrix description.
+    *device = replacement;
+    *current = sdk;
+    Ok(true)
+}
+
 fn assemble(
     mut document: Document,
     mut local: Local,
@@ -356,6 +407,7 @@ fn assemble(
             .push(controller);
     }
     let setup = &mut document.lighting.setup;
+    let mut reconciled = false;
     let mut mapped = Vec::new();
     let mut remaining_points = MAX_POINTS.saturating_sub(setup.canvas.points.len());
     for (identity, rows) in by_identity {
@@ -373,16 +425,34 @@ fn assemble(
             continue;
         }
         let route = native_route(&controller);
-        if let Some(route) = &route {
-            if local_routes.contains(route) {
-                continue;
+        if route.as_ref().is_some_and(|route| route_counts[route] > 1) {
+            issues.push("Пропущен OpenRGB-контроллер с неоднозначным HID/COM-подключением.".into());
+            continue;
+        }
+        let sdk_binding = || Binding::OpenRgb {
+            endpoint: devices::canonical_endpoint(endpoint),
+            identity: identity.clone(),
+            topology: devices::openrgb::topology(&controller),
+        };
+        if let Some(route) = &route
+            && local_routes.contains(route)
+        {
+            if let Some(port) = route.strip_prefix("serial:")
+                && endpoint.ip().is_loopback()
+                && let Some(device) = setup.devices.iter_mut().find(|device| {
+                    matches!(
+                        local.devices.get(&device.id),
+                        Some(Binding::Serial { port: saved, .. }) if saved == port
+                    )
+                })
+            {
+                let current = local.devices.get_mut(&device.id).unwrap();
+                match reconcile_skydimo(device, current, &controller, port, sdk_binding()) {
+                    Ok(changed) => reconciled |= changed,
+                    Err(error) => issues.push(error),
+                }
             }
-            if route_counts[route] > 1 {
-                issues.push(
-                    "Пропущен OpenRGB-контроллер с неоднозначным HID/COM-подключением.".into(),
-                );
-                continue;
-            }
+            continue;
         }
         let label = controller_label(&controller);
         let id = logical_id("auto-rgb", &identity);
@@ -406,11 +476,7 @@ fn assemble(
             device_setup::preset("openrgb-controller")?.device_with_leds(&id, points.len())?;
         device.label = label;
         device.enabled = true;
-        let binding = Binding::OpenRgb {
-            endpoint: devices::canonical_endpoint(endpoint),
-            identity,
-            topology: devices::openrgb::topology(&controller),
-        };
+        let binding = sdk_binding();
         binding.validate(&device)?;
         remaining_points -= points.len();
         mapped.push(Mapped {
@@ -523,7 +589,7 @@ fn assemble(
         ids.insert(id);
         setup.devices.push(device);
     }
-    let changed = setup.devices.len() != initial_devices;
+    let changed = reconciled || setup.devices.len() != initial_devices;
     local.validate(&document)?;
     if changed {
         // The caller persists both parts. Reject an oversized proposal before
@@ -1405,10 +1471,11 @@ mod tests {
     #[test]
     fn known_skydimo_com_binding_keeps_ownership_when_openrgb_reports_the_port() {
         let (document, mut local) = empty();
-        let device = device_setup::preset("SK0410")
+        let mut device = device_setup::preset("SK0410")
             .unwrap()
             .device_with_leds("saved-strip", 3)
             .unwrap();
+        device.enabled = true;
         let document = device_setup::add(
             &document,
             device,
@@ -1444,6 +1511,184 @@ mod tests {
         .unwrap();
         assert!(!plan.changed);
         assert_eq!(plan.document, document);
+        assert!(matches!(
+            plan.local.devices["saved-strip"],
+            Binding::Serial { .. }
+        ));
+    }
+
+    fn saved_skydimo_ambient() -> (Document, Local, ControllerInfo) {
+        use crate::app::{ambient, ambient_windows};
+        use crate::capture::ambient::{Mode, Zone};
+        use crate::schedule::Target;
+
+        let (document, mut local) = empty();
+        let mut strip = device_setup::preset("SK0132")
+            .unwrap()
+            .device("ambient-strip")
+            .unwrap();
+        strip.role = devices::Role::Ambient;
+        strip.enabled = false;
+        strip.label = "Monitor backlight".into();
+        strip.rate_hz = 48;
+        let leds = strip.leds;
+        let document = device_setup::add(&document, strip, Target::Pc, None).unwrap();
+        let mut canvas = device_setup::preset("openrgb-controller")
+            .unwrap()
+            .device_with_leds("saved-canvas", 2)
+            .unwrap();
+        canvas.enabled = false;
+        let mut document = device_setup::add(
+            &document,
+            canvas,
+            Target::Door,
+            Some(device_setup::Layout::Line {
+                x0: 2,
+                y0: 3,
+                x1: 8,
+                y1: 3,
+            }),
+        )
+        .unwrap();
+        let mut zone = Zone::linear(leds, true, Mode::ScreenCopy).unwrap();
+        zone.map.swap(0, 4);
+        document.ambient = ambient::Config {
+            sources: vec![ambient::Source {
+                key: "saved-source".into(),
+                rate_hz: 29,
+                crop: None,
+                stale_after_ms: 700,
+            }],
+            routes: vec![ambient::Route {
+                device: "ambient-strip".into(),
+                source: "saved-source".into(),
+                enabled: true,
+                zone,
+                processing: Default::default(),
+                output: Default::default(),
+            }],
+        };
+        document.lighting.setup.devices[0].enabled = true;
+        local.devices.insert(
+            "ambient-strip".into(),
+            Binding::Serial {
+                port: "COM4".into(),
+                instance_id: r"USB\VID_1A86&PID_7523\fixture".into(),
+                serial: "00A1B2".into(),
+            },
+        );
+        local.monitors.monitors.push(ambient_windows::Binding {
+            source: "saved-source".into(),
+            device_name: r"\\.\DISPLAY2".into(),
+        });
+        let mut row = controller("Skydimo SK0132");
+        row.vendor = "Skydimo".into();
+        row.kind = "ledstrip".into();
+        row.location = r"Serial: \\.\com4".into();
+        row.serial = "00a1b2".into();
+        row.leds = leds;
+        row.led_names = (1..=leds)
+            .map(|index| format!("Output 1, LED {index}"))
+            .collect();
+        row.zones[0].name = "Output 1".into();
+        row.zones[0].kind = "linear".into();
+        row.zones[0].leds = leds;
+        row.zones[0].reported_leds = leds;
+        row.zones[0].matrix = None;
+        (document, local, row)
+    }
+
+    #[test]
+    fn sdk_owned_skydimo_switches_transport_without_changing_saved_ambient_or_canvas() {
+        let (mut expected_document, mut expected_local, row) = saved_skydimo_ambient();
+        let plan = assemble(
+            expected_document.clone(),
+            expected_local.clone(),
+            endpoint(),
+            Discovery {
+                controllers: vec![row.clone()],
+                ..Default::default()
+            },
+            || unreachable!(),
+        )
+        .unwrap();
+        expected_document.lighting.setup.devices[0].driver = devices::Driver::OpenRgb;
+        expected_local.devices.insert(
+            "ambient-strip".into(),
+            Binding::OpenRgb {
+                endpoint: endpoint(),
+                identity: devices::openrgb::identity(&row),
+                topology: devices::openrgb::topology(&row),
+            },
+        );
+        assert!(plan.changed);
+        assert!(plan.issues.is_empty());
+        assert_eq!(plan.document, expected_document);
+        assert_eq!(
+            serde_json::to_value(plan.local).unwrap(),
+            serde_json::to_value(expected_local).unwrap()
+        );
+    }
+
+    #[test]
+    fn sdk_skydimo_requires_matching_model_serial_count_and_unique_com() {
+        let (document, local, row) = saved_skydimo_ambient();
+        let mut model = row.clone();
+        model.name = "Skydimo SK0133".into();
+        let mut count = row.clone();
+        count.leds -= 1;
+        let mut serial = row.clone();
+        serial.serial = "00A1B3".into();
+        let mut competing = row.clone();
+        competing.name = "Other controller".into();
+        for controllers in [vec![model], vec![count], vec![serial], vec![row, competing]] {
+            let plan = assemble(
+                document.clone(),
+                local.clone(),
+                endpoint(),
+                Discovery {
+                    controllers,
+                    ..Default::default()
+                },
+                || unreachable!(),
+            )
+            .unwrap();
+            assert!(!plan.changed);
+            assert!(!plan.issues.is_empty());
+            assert_eq!(plan.document, document);
+            assert_eq!(
+                serde_json::to_value(plan.local).unwrap(),
+                serde_json::to_value(&local).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn absent_sdk_controller_and_disabled_skydimo_keep_the_native_binding() {
+        let (mut document, local, row) = saved_skydimo_ambient();
+        for controllers in [vec![], vec![row]] {
+            if !controllers.is_empty() {
+                document.lighting.setup.devices[0].enabled = false;
+            }
+            let plan = assemble(
+                document.clone(),
+                local.clone(),
+                endpoint(),
+                Discovery {
+                    controllers,
+                    ..Default::default()
+                },
+                || unreachable!(),
+            )
+            .unwrap();
+            assert!(!plan.changed);
+            assert!(plan.issues.is_empty());
+            assert_eq!(plan.document, document);
+            assert_eq!(
+                serde_json::to_value(plan.local).unwrap(),
+                serde_json::to_value(&local).unwrap()
+            );
+        }
     }
 
     #[test]
