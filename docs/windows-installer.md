@@ -31,7 +31,7 @@ Profile and local binding updates use a paired recovery journal. Interrupted kno
 - Prismestra's Rust application and local WebView2 editor.
 - A private, pinned OpenRGB-derived headless backend, with matching sources, patch, licenses and build recipes. It is not an independently installed OpenRGB GUI and has no second tray icon.
 - Microsoft's full offline x64 Visual C++ and WebView2 installers, used only when the required runtime is missing. [Microsoft documents offline WebView2 redistribution](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution#offline-deployment).
-- The optional official signed [PawnIO](https://pawnio.eu/) installer for supported low-level PC lighting. Installing it does not guarantee a particular RAM/controller model is supported. The driver is shared; Prismestra does not remove it on uninstall.
+- The official signed [PawnIO](https://pawnio.eu/) installer for supported low-level PC lighting, selected by default and optional in Setup. Installing it does not guarantee a particular RAM/controller model is supported. The driver is shared; Prismestra does not remove it on uninstall.
 
 The private backend uses loopback port 17422 rather than OpenRGB’s usual 6742, so a separate installation can keep its SDK listener. The editor discovers through the configured managed endpoint when no custom address is entered. A collision still fails safely instead of stopping another program.
 
