@@ -305,13 +305,24 @@ try {
     [IO.File]::WriteAllText($workerFile, $worker, [Text.UTF8Encoding]::new($true))
     $powershell = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
     $workerLog = Join-Path $scratch 'worker-output.log'
-    $quote = { param([string]$Value) "'" + $Value.Replace("'", "''") + "'" }
-    $command = '$ErrorActionPreference=''Stop''; try { & ' + (& $quote $workerFile) + ' ' +
-        (& $quote $install) + ' ' + (& $quote $id) + ' ' + (& $quote $sid) + ' *> ' +
-        (& $quote $workerLog) + '; exit $LASTEXITCODE } catch { $_ | Out-String | Add-Content -LiteralPath ' +
-        (& $quote $workerLog) + ' -Encoding UTF8; exit 1 }'
-    $workerArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' +
-        [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $wrapperFile = Join-Path $scratch 'invoke-worker.ps1'
+    $wrapper = @'
+param($Install, $Id, $ExpectedSid)
+$ErrorActionPreference = 'Stop'
+$log = Join-Path $PSScriptRoot 'worker-output.log'
+try {
+    & (Join-Path $PSScriptRoot 'worker.ps1') $Install $Id $ExpectedSid *> $log
+    exit $LASTEXITCODE
+} catch {
+    $_ | Out-String | Add-Content -LiteralPath $log -Encoding UTF8
+    exit 1
+}
+'@
+    [IO.File]::WriteAllText($wrapperFile, $wrapper, [Text.UTF8Encoding]::new($true))
+    # CreateProcessWithLogonW has a 1024-character command-line limit.
+    # https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw
+    $workerArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $wrapperFile + '" "' + $install + '" ' + $id + ' ' + $sid
+    Assert-Expected (($powershell.Length + $workerArguments.Length + 4) -lt 1024) 'Fixture logon command line exceeds the Windows limit.'
     $status = [PrismestraCiLogon]::Run($username, $password, $sid, $powershell, $workerArguments, $scratch)
     if (Test-Path -LiteralPath $workerLog) {
         Copy-Item -LiteralPath $workerLog -Destination (Join-Path $report 'worker-output.log')
@@ -353,7 +364,7 @@ try {
         }
         if ($password) { $password.Dispose() }
         if (Test-Path -LiteralPath $scratch) {
-            foreach ($name in @('worker.ps1', 'original-user.ps1', 'worker-output.log')) {
+            foreach ($name in @('worker.ps1', 'original-user.ps1', 'invoke-worker.ps1', 'worker-output.log')) {
                 $file = Join-Path $scratch $name
                 if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
             }

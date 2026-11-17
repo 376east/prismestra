@@ -205,6 +205,31 @@ if ($bytes.Length -lt 3 -or $bytes[0] -ne 239 -or $bytes[1] -ne 187 -or $bytes[2
 }
 [void][Management.Automation.Language.Parser]::ParseFile($workerFile, [ref]$tokens, [ref]$errors)
 if ($errors) { throw ($errors | Out-String) }
+$assignment = $ast.Find({param($a) $a -is [Management.Automation.Language.AssignmentStatementAst] -and $a.Left.Extent.Text -ceq '$wrapper'}, $true)
+$literal = $assignment.Find({param($a) $a -is [Management.Automation.Language.StringConstantExpressionAst] -and $a.StringConstantType.ToString() -ceq 'SingleQuotedHereString'}, $true)
+$wrapper = $literal.Value
+$wrapperFile = Join-Path (Split-Path $workerFile) 'invoke-worker.ps1'
+$writer = $ast.Find({param($a) $a -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $a.Member.Value -ceq 'WriteAllText' -and $a.Arguments[0].Extent.Text -ceq '$wrapperFile'}, $true)
+& ([scriptblock]::Create($writer.Extent.Text))
+[void][Management.Automation.Language.Parser]::ParseFile($wrapperFile, [ref]$tokens, [ref]$errors)
+if ($errors) { throw ($errors | Out-String) }
+$id = '01234567-89ab-cdef-0123-456789abcdef'
+$install = 'C:\Program Files\Prismestra Lifecycle Test\' + $id
+$sid = 'S-1-5-21-1234567890-1234567890-1234567890-1001'
+$powershell = Join-Path $PSHOME 'powershell.exe'
+$arguments = $ast.Find({param($a) $a -is [Management.Automation.Language.AssignmentStatementAst] -and $a.Left.Extent.Text -ceq '$workerArguments'}, $true)
+$workerArguments = & ([scriptblock]::Create($arguments.Right.Extent.Text))
+if (($powershell.Length + $workerArguments.Length + 4) -ge 1024) { throw 'Fixture exceeds CreateProcessWithLogonW command-line limit' }
+# Exercise the real wrapper with harmless scripts, never the account/installer worker.
+[IO.File]::WriteAllText($workerFile, 'Write-Output "fixture success"; exit 0', [Text.UTF8Encoding]::new($true))
+& $powershell -NoProfile -NonInteractive -File $wrapperFile $install $id $sid
+if ($LASTEXITCODE -ne 0) { throw 'Wrapper failed to return successful status' }
+$log = Join-Path (Split-Path $workerFile) 'worker-output.log'
+if ([IO.File]::ReadAllText($log) -notmatch 'fixture success') { throw 'Wrapper lost output' }
+[IO.File]::WriteAllText($workerFile, 'throw "fixture failure"', [Text.UTF8Encoding]::new($true))
+& $powershell -NoProfile -NonInteractive -File $wrapperFile $install $id $sid
+if ($LASTEXITCODE -ne 1 -or [IO.File]::ReadAllText($log) -notmatch 'fixture failure') { throw 'Wrapper lost failure status or diagnostic' }
+exit 0
 '''
         import base64
         powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
