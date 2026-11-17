@@ -1,5 +1,7 @@
 /target/
 /private/
 /work/
+/.local/
 /HANDOFF.md
 /PARITY.md
+__pycache__/

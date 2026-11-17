@@ -18,7 +18,17 @@
 
 Prismestra is a local lighting orchestrator for Windows. Its goal is to bring PC RGB, unusual Bluetooth lights, LCD displays and home lighting into one spatial scene, with explicit device support and a small resident engine.
 
-**Source preview.** The scene engine, native editor and OpenRGB/WLED/Home Assistant setup paths are implemented and have software tests. Home Assistant tokens use Windows Credential Manager. A resident session keeps lighting and sensor subscriptions alive when the editor closes. The [local integration record](docs/validation/windows-local-kit.json) covers transport checks on one PC kit and identifies the tested source revision. Physical colors, firmware behavior and performance require separate checks. See the [compatibility table](docs/compatibility.md) before choosing a device.
+## Download for Windows
+
+Download **[Prismestra Setup for Windows x64](https://github.com/malyarq/prismestra/releases/download/v0.1.0-preview.5/Prismestra-Setup-0.1.0.5-x64.exe)** from the [latest preview release](https://github.com/malyarq/prismestra/releases/tag/v0.1.0-preview.5). Run Setup, choose sign-in startup, then connect your devices in the app. A fresh installation starts with an empty profile.
+
+The offline installer includes the application, its private headless OpenRGB backend, Visual C++ and WebView2 installers, and the optional signed PawnIO installer for supported PC lighting. You do not need a separate OpenRGB installation. Updates preserve scenes; uninstall is available in Windows Settings and preserves your data. See [installation and permissions](docs/windows-installer.md) for details and the recorded test scope. Developer source downloads are not installers.
+
+**Early preview.** The scene engine, native editor and OpenRGB/WLED/Home Assistant setup paths are implemented and have software tests. Home Assistant tokens use Windows Credential Manager. A resident session keeps lighting and sensor subscriptions alive when the editor closes. The [local integration record](docs/validation/windows-local-kit.json) covers transport checks on one PC kit and identifies the tested source revision. Physical colors, firmware behavior and performance require separate checks. See the [compatibility table](docs/compatibility.md) before choosing a device.
+
+Start with [verified status](docs/status.md) for what has actually passed, and [repository layout and development commands](docs/development.md) for the source, component builds, packages and local-only artifacts. This repository is the single source of the current product; machine profiles and installed binaries belong outside version control.
+
+The desktop editor now embeds its local interface through WebView2 and sends validated commands to the same Rust session. Scene drafts and the RGB scene library are stored by Rust. Device, LCD, capture, sensor, connection and schedule forms reuse the existing native validators and activation paths. The previous Win32 editor remains available with `--classic-editor`. See [desktop editor behavior](docs/desktop-editor.md).
 
 ## What it does
 
@@ -32,7 +42,7 @@ Prismestra does not control fans or pumps. Keep your existing cooling software. 
 
 ## Build and run
 
-Packaged Windows x64 builds require the x64 Visual C++ v14 runtime. Get it from [Microsoft's supported runtime downloads](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist#latest-supported-redistributable-version) if needed; it is not bundled.
+Packaged Windows x64 builds require Microsoft Edge WebView2 Runtime 105 or newer for the new editor and the x64 Visual C++ v14 runtime. The Setup EXE bundles their offline installers; the older portable ZIPs require a separate runtime installation. See Microsoft's [WebView2 distribution information](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution) and [Visual C++ runtime downloads](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist#latest-supported-redistributable-version). The classic editor does not need WebView2.
 
 Install a current stable [Rust toolchain](https://www.rust-lang.org/tools/install) with the Windows MSVC build tools, then:
 
@@ -47,6 +57,12 @@ The internal crate and executable still use `pc-control` and `pc-control-ui`. Th
 
 First launch opens a preview. Set up and inspect a supported connection before applying it. When using an external backend, configure its server separately; Prismestra does not install or silently take over another controller.
 
+For one-program operation, configure a [managed local OpenRGB backend](docs/managed-openrgb.md) once. Prismestra runs its headless server, verifies ownership/readiness, recovers failures and releases it on exit. Default management uses ordinary permissions; equipment requiring administrator access uses a separately authorized helper.
+
+The current ZIP requires an existing OpenRGB executable. A bundled component and fresh-machine installation are part of the proposed [delivery and coexistence contract](docs/delivery-and-compatibility.md), not shipped capabilities. Research and reuse requirements for future changes are recorded in [project rules](AGENTS.md).
+
+The Windows ZIP includes separate portable launchers: `Open Prismestra.cmd` opens a preview, and `Start saved scene.cmd` activates your saved `data/profile.json` with local connections from `data/state`. See [portable setup and launch](docs/portable-launch.md). Personal profiles, bindings and credentials are not bundled. Running the executable directly retains its existing per-user settings behavior.
+
 Closing the editor leaves the session in the tray. Its menu can reopen the editor, stop outputs or exit. Starting again with the same settings directory shows a tray hint and prevents a duplicate runtime.
 
 ## Compatibility is a testable claim
@@ -56,6 +72,8 @@ USB, a wireless dongle and Bluetooth on the same keyboard can expose different p
 We distinguish protocol implementation, software tests, an available setup path and testing on a particular physical device. Fake TCP/HTTP servers and UDP receivers validate packets and failure handling. They cannot validate colors, firmware behavior or radio stability. Device-specific details belong in the [compatibility table](docs/compatibility.md).
 
 The immediate focus is RGB, BLE, LCD and local home lighting. Native Windows Dynamic Lighting/LampArray support and additional protocols remain future work. There is no claim of universal Bluetooth or LCD support.
+
+The [product roadmap](docs/roadmap.md) records the next setup, measurement and distribution stages.
 
 ## Development
 

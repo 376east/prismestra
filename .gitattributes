@@ -2,3 +2,7 @@
 src/transport/fixtures/skydimo-native.tsv -text whitespace=-blank-at-eol
 # CPU oracle JSON is byte-pinned, including its final LF, on every checkout.
 src/cooling/fixtures/nvapi-cooler*-native.json -text
+# Preserve upstream notice bytes, including their original CRLF/whitespace.
+components/openrgb/licenses/* -text -whitespace
+# Preserve unified patch bytes (including context-only space lines) and hashes.
+components/openrgb/*.patch -text -whitespace

@@ -25,7 +25,10 @@ const LIMIT: usize = 1024 * 1024;
 const SCOPE: &str = "pc-control.runtime-desired";
 const ACCEPTED: &str = "Desired state persisted; transport completion is tracked separately";
 pub mod coordinator;
+#[cfg(windows)]
+mod managed_backend;
 mod outputs;
+mod recovery;
 mod registry_input;
 pub use outputs::{LcdOutput, OutputPlan, RgbOutput};
 mod temperature_stream;
@@ -227,6 +230,8 @@ pub struct Runtime {
     output_revision: u64,
     rgb_specs: BTreeMap<String, RgbSpec>,
     lcd_specs: BTreeMap<String, LcdSpec>,
+    output_recovery: BTreeMap<String, recovery::Recovery>,
+    lcd_arrivals: BTreeSet<String>,
     capture_factory: Option<CaptureFactory>,
     samples: Arc<[lcd::Sample]>,
     revision: u64,
@@ -249,6 +254,14 @@ pub struct Runtime {
     capture_view: Option<CaptureView>,
     view_error: Option<String>,
     sample_freshness: Vec<bool>,
+    #[cfg(windows)]
+    managed_backend: Option<super::backend_helper::Backend>,
+    #[cfg(windows)]
+    managed_backend_ids: BTreeSet<String>,
+    #[cfg(windows)]
+    managed_backend_generation: u64,
+    #[cfg(windows)]
+    managed_backend_detail: Option<String>,
 }
 impl Runtime {
     pub fn new(document: Document, journal: Option<PathBuf>) -> Result<Self, String> {
@@ -293,6 +306,8 @@ impl Runtime {
             output_revision: 0,
             rgb_specs: BTreeMap::new(),
             lcd_specs: BTreeMap::new(),
+            output_recovery: BTreeMap::new(),
+            lcd_arrivals: BTreeSet::new(),
             capture_factory: None,
             samples: Arc::from([]),
             revision: 1,
@@ -315,6 +330,14 @@ impl Runtime {
             capture_view: None,
             view_error: None,
             sample_freshness: vec![],
+            #[cfg(windows)]
+            managed_backend: None,
+            #[cfg(windows)]
+            managed_backend_ids: BTreeSet::new(),
+            #[cfg(windows)]
+            managed_backend_generation: 0,
+            #[cfg(windows)]
+            managed_backend_detail: None,
         };
         value.apply_mutes()?;
         Ok(value)
@@ -742,6 +765,8 @@ impl Runtime {
                 self.capture_factory = outputs.capture;
                 self.output_revision += 1;
             }
+            self.output_recovery
+                .retain(|id, _| self.rgb_specs.contains_key(id) || self.lcd_specs.contains_key(id));
             self.document = proposal;
             self.document_revision = self.document_revision.wrapping_add(1);
             self.host = host;
@@ -1057,9 +1082,12 @@ impl Runtime {
         factory: RgbFactory,
     ) -> Result<(), String> {
         self.usable()?;
+        #[cfg(windows)]
+        let factory = self.guard_managed_rgb(id, factory);
         let f = factory.clone();
         self.host.attach_claimed(id, keys.clone(), move |c| f(c))?;
         self.rgb_specs.insert(id.into(), RgbSpec { keys, factory });
+        self.reset_output_recovery(id);
         self.bump_view();
         Ok(())
     }
@@ -1104,6 +1132,7 @@ impl Runtime {
         })?;
         self.lcd.insert(id.into(), worker);
         self.lcd_specs.insert(id.into(), LcdSpec { keys, factory });
+        self.reset_output_recovery(id);
         self.bump_view();
         self.bump()
     }
@@ -1141,6 +1170,10 @@ impl Runtime {
         Ok(())
     }
     fn stop_channels(&mut self) {
+        self.lcd_arrivals.clear();
+        for recovery in self.output_recovery.values_mut() {
+            *recovery = recovery::Recovery::default();
+        }
         self.injected_inputs.clear();
         self.samples = Arc::from([]);
         self.sensor_stamps.clear();
@@ -1159,6 +1192,10 @@ impl Runtime {
     }
     pub fn stop(&mut self) {
         self.stopped = true;
+        #[cfg(windows)]
+        if let Some(backend) = &self.managed_backend {
+            backend.stop_restarting();
+        }
         if let Err(error) = self.release_registry_input(crate::clock::monotonic_us()) {
             self.error = Some(error);
         }
@@ -1480,6 +1517,8 @@ impl Runtime {
             return Err("Invalid runtime wall clock".into());
         }
         self.observe(now_us)?;
+        #[cfg(windows)]
+        self.poll_managed_backend();
         let registry_result = self.registry_tick(now_us);
         let result: Result<(), String> = (|| {
             registry_result?;
@@ -1511,6 +1550,7 @@ impl Runtime {
                 self.schedule_tick(unix_seconds)?;
                 self.last_wall = Some(unix_seconds);
             }
+            self.recover_failed_outputs(now_us)?;
             self.publish()?;
             self.host.tick(now_us)?;
             Ok(())
@@ -1530,5 +1570,8 @@ impl Drop for Runtime {
     }
 }
 
+#[cfg(test)]
+#[path = "runtime/recovery_tests.rs"]
+mod recovery_tests;
 #[cfg(test)]
 mod tests;

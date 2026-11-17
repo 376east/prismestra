@@ -56,6 +56,281 @@ fn setup() -> Setup {
         },
     }
 }
+
+fn metadata_headers(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    // Windows accepted sockets can retain the listener's nonblocking mode.
+    // The fixture polls accept(), but header reads must wait for the client;
+    // a read timeout alone does not switch the socket back to blocking I/O.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let mut request = Vec::new();
+    while !request.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        stream.read_exact(&mut byte)?;
+        request.push(byte[0]);
+        if request.len() >= 8192 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "metadata request headers exceed fixture limit",
+            ));
+        }
+    }
+    Ok(request)
+}
+
+#[test]
+fn metadata_fixture_waits_for_delayed_fragmented_headers_on_accepted_socket() {
+    use std::{
+        io::Write,
+        net::{TcpListener, TcpStream},
+        sync::mpsc,
+    };
+    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = tcp.local_addr().unwrap();
+    let (accepted, ready) = mpsc::channel();
+    let (finished, result) = mpsc::channel();
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = tcp.accept().unwrap();
+        // Reproduce the socket mode seen after accepting from the nonblocking
+        // listener in the identity test, independently of platform inheritance.
+        stream.set_nonblocking(true).unwrap();
+        accepted.send(()).unwrap();
+        finished.send(metadata_headers(&mut stream)).unwrap();
+    });
+    let mut client = TcpStream::connect(endpoint).unwrap();
+    ready.recv_timeout(Duration::from_secs(2)).unwrap();
+    // A correct fixture waits for bytes, rather than interpreting WouldBlock as
+    // an HTTP failure before the connected client gets scheduled to send.
+    assert!(
+        matches!(
+            result.recv_timeout(Duration::from_millis(30)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "fixture completed before the client sent any headers"
+    );
+    client
+        .write_all(b"GET /json/info HTTP/1.1\r\nHost: fixture\r\n")
+        .unwrap();
+    assert!(
+        matches!(
+            result.recv_timeout(Duration::from_millis(30)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "fixture completed before the final header delimiter"
+    );
+    client.write_all(b"\r\n").unwrap();
+    let request = result
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(request, b"GET /json/info HTTP/1.1\r\nHost: fixture\r\n\r\n");
+    drop(client);
+    peer.join().unwrap();
+}
+#[test]
+fn verified_wled_checks_identity_before_any_udp_output_and_adopts_geometry() {
+    use pc_control::app::{
+        config::{Groups, Project},
+        device_setup,
+        document::Document,
+        lighting_bindings::discovery,
+    };
+    use pc_control::runtime::output::Cancellation;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    let http = format!("http://{}", tcp.local_addr().unwrap());
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    udp.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let ddp = udp.local_addr().unwrap();
+    let peer = std::thread::spawn(move || {
+        for count in [3, 4] {
+            let (mut stream, _) = tcp.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            while !bytes.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                bytes.push(byte[0]);
+                assert!(bytes.len() < 8192);
+            }
+            assert!(bytes.starts_with(b"GET /json/info HTTP/1.1"));
+            let body =
+                format!(r#"{{"mac":"02aabbccddee","name":"Fixture","leds":{{"count":{count}}}}}"#);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+    });
+    let before = Document::from_lighting(Project {
+        version: 1,
+        schedule: Default::default(),
+        setup: setup(),
+        scene: scene(),
+        groups: Groups {
+            pc: vec!["wled".into()],
+            door: vec![],
+        },
+    })
+    .unwrap();
+    let target = discovery::Target::Device(before.lighting.setup.devices[0].clone());
+    let inventory = discovery::wled_factory(ddp, http)(target, Cancellation::default()).unwrap();
+    let candidate = &inventory.candidates[0];
+    let after =
+        device_setup::adopt_wled(&before, "wled", candidate.wled.as_ref().unwrap()).unwrap();
+    assert_eq!(before.lighting.setup.devices[0].leds, 2);
+    assert_eq!(after.lighting.setup.devices[0].leds, 3);
+    assert_eq!(after.lighting.setup.canvas.points.len(), 3);
+    let same = device_setup::adopt_wled(&after, "wled", candidate.wled.as_ref().unwrap()).unwrap();
+    assert_eq!(same, after);
+    let binding = candidate
+        .draft
+        .binding(&after.lighting.setup.devices[0])
+        .unwrap();
+    let bindings = [("wled".into(), binding)].into();
+    let (_, factory) = native::bound_factory(&after.lighting.setup, "wled", &bindings, 15).unwrap();
+    assert!(
+        factory(Cancellation::default()).is_err(),
+        "changed count must reject activation"
+    );
+    let mut packet = [0; 64];
+    assert!(
+        udp.recv(&mut packet).is_err(),
+        "metadata queries or failed activation must not send RGB"
+    );
+    peer.join().unwrap();
+}
+#[test]
+fn discovered_identity_survives_save_output_and_rejects_a_replaced_controller() {
+    use pc_control::app::{
+        config::{Groups, Project},
+        device_setup,
+        document::Document,
+        lighting_bindings::discovery,
+    };
+    use pc_control::runtime::output::{Cancellation, Phase};
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    tcp.set_nonblocking(true).unwrap();
+    let http = format!("http://{}", tcp.local_addr().unwrap());
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    udp.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let ddp = udp.local_addr().unwrap();
+    let peer = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        for mac in ["02aabbccddee", "02aabbccddee", "02aabbccddff"] {
+            let mut stream = loop {
+                match tcp.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "missing metadata request");
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("metadata fixture: {error}"),
+                }
+            };
+            let request = metadata_headers(&mut stream).expect("metadata fixture request headers");
+            assert!(request.starts_with(b"GET /json/info HTTP/1.1"));
+            let body = format!(r#"{{"mac":"{mac}","leds":{{"count":3}}}}"#);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+    });
+    let before = Document::from_lighting(Project {
+        version: 1,
+        setup: setup(),
+        scene: scene(),
+        schedule: Default::default(),
+        groups: Groups {
+            pc: vec!["wled".into()],
+            door: vec![],
+        },
+    })
+    .unwrap();
+    let inventory = discovery::wled_factory(ddp, http)(
+        discovery::Target::Device(before.lighting.setup.devices[0].clone()),
+        Cancellation::default(),
+    )
+    .unwrap();
+    let candidate = &inventory.candidates[0];
+    let adopted =
+        device_setup::adopt_wled(&before, "wled", candidate.wled.as_ref().unwrap()).unwrap();
+    let document = Document::decode(&adopted.encode().unwrap()).unwrap();
+    let setup = &document.lighting.setup;
+    let bindings = [(
+        "wled".into(),
+        candidate.draft.binding(&setup.devices[0]).unwrap(),
+    )]
+    .into();
+    let saved = pc_control::devices::encode_bindings(setup, &bindings).unwrap();
+    let bindings = pc_control::devices::decode_bindings(setup, &saved).unwrap();
+    let mut host = Host::new(setup.clone(), document.lighting.scene.clone()).unwrap();
+    native::attach_bound(&mut host, "wled", &bindings, 15).unwrap();
+    host.tick(0).unwrap();
+    let mut packet = [0; 64];
+    udp.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let size = udp.recv(&mut packet).unwrap();
+    let expected = host
+        .frame("wled")
+        .unwrap()
+        .iter()
+        .flat_map(|c| [c.r, c.g, c.b])
+        .collect::<Vec<_>>();
+    assert_eq!(size, 19);
+    assert_eq!(&packet[10..size], expected);
+
+    // Another address for the same MAC cannot create a second physical owner.
+    let mut alias = bindings.clone();
+    let other = UdpSocket::bind("127.0.0.1:0").unwrap();
+    if let Binding::WledDdp { endpoint, .. } = alias.get_mut("wled").unwrap() {
+        *endpoint = other.local_addr().unwrap();
+    }
+    let mut second = Host::new(setup.clone(), scene()).unwrap();
+    assert!(native::attach_bound(&mut second, "wled", &alias, 15).is_err());
+    host.stop();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !host.drained() {
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    // Reopening uses saved identity, not just the old IP or unchanged LED count.
+    native::attach_bound(&mut second, "wled", &bindings, 15).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while second.status("wled").unwrap().phase != Phase::Failed {
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    let status = second.status("wled").unwrap();
+    assert_eq!(status.submitted, 0);
+    assert!(status.error.unwrap().contains("identity changed"));
+    udp.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    assert!(
+        udp.recv(&mut packet).is_err(),
+        "replacement must receive no RGB"
+    );
+    second.stop();
+    while !second.drained() {
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    peer.join().unwrap();
+}
+
 #[test]
 fn private_binding_apply_scene_udp_black_and_lease_drain_use_the_ordinary_factory() {
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -150,12 +425,14 @@ fn invalid_capacity_rate_and_duplicate_canonical_endpoint_cannot_activate() {
         (
             "wled".into(),
             Binding::WledDdp {
+                controller: None,
                 endpoint: "127.0.0.1:4048".parse().unwrap(),
             },
         ),
         (
             "second".into(),
             Binding::WledDdp {
+                controller: None,
                 endpoint: "[::ffff:127.0.0.1]:4048".parse().unwrap(),
             },
         ),
@@ -170,6 +447,7 @@ fn invalid_capacity_rate_and_duplicate_canonical_endpoint_cannot_activate() {
     ] {
         assert!(
             Binding::WledDdp {
+                controller: None,
                 endpoint: address.parse().unwrap()
             }
             .validate(&setup.devices[0])

@@ -1,22 +1,265 @@
 //! One native session owns the Runtime; editor HWNDs are disposable.
 use super::*;
+use crate::app::installed;
 use sha2::{Digest, Sha256};
 use std::{
     fs::OpenOptions,
-    os::windows::fs::OpenOptionsExt,
+    os::windows::{ffi::OsStringExt, fs::OpenOptionsExt},
     sync::atomic::{AtomicU32, Ordering},
+    time::Duration,
 };
 use windows_sys::Win32::{
     Security::*,
-    System::Threading::{GetCurrentProcess, OpenProcessToken},
+    System::Threading::{
+        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject,
+    },
     UI::Shell::*,
 };
 const CLASS: &str = "PrismestraSessionShell";
+const INSTALLED_EXIT: &str = "Prismestra.Installed.Exit.v1";
+const EXIT_ACCEPTED: usize = 1;
+const EXIT_BUSY: usize = 2;
 const CALLBACK: u32 = WM_APP + 31;
 const OPEN: u32 = 1;
 const STOP: u32 = 2;
 const EXIT: u32 = 3;
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+static INSTALLED_EXIT_MSG: AtomicU32 = AtomicU32::new(0);
+
+fn installed_exit_message() -> Result<u32, String> {
+    let message = unsafe { RegisterWindowMessageW(wide(INSTALLED_EXIT).as_ptr()) };
+    if message == 0 {
+        Err(last("Register installed shutdown message"))
+    } else {
+        Ok(message)
+    }
+}
+
+struct Process(HANDLE);
+impl Drop for Process {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+impl Process {
+    fn open(pid: u32) -> Result<Self, String> {
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                0,
+                pid,
+            )
+        };
+        if handle.is_null() {
+            Err(last("Open resident process"))
+        } else {
+            Ok(Self(handle))
+        }
+    }
+
+    fn image_path(&self) -> Result<PathBuf, String> {
+        let mut buffer = vec![0; 32_768];
+        let mut length = buffer.len() as u32;
+        if unsafe { QueryFullProcessImageNameW(self.0, 0, buffer.as_mut_ptr(), &mut length) } == 0 {
+            return Err(last("Read resident process executable"));
+        }
+        Ok(PathBuf::from(OsString::from_wide(
+            &buffer[..length as usize],
+        )))
+    }
+}
+
+fn shell_pid(hwnd: HWND) -> Option<u32> {
+    let mut name = [0u16; 64];
+    let length = unsafe { GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32) };
+    if length <= 0
+        || !name[..length as usize]
+            .iter()
+            .copied()
+            .eq(CLASS.encode_utf16())
+    {
+        return None;
+    }
+    let mut pid = 0;
+    if unsafe { GetWindowThreadProcessId(hwnd, &mut pid) } == 0 || pid == 0 {
+        return None;
+    }
+    Some(pid)
+}
+
+fn same_target(executable: &Path, image: &Path, pid: u32, owner: Option<u32>) -> bool {
+    executable == image && owner == Some(pid)
+}
+
+unsafe extern "system" fn collect_shell(hwnd: HWND, context: LPARAM) -> i32 {
+    if let Some(pid) = shell_pid(hwnd) {
+        let windows = unsafe { &mut *(context as *mut Vec<(HWND, u32)>) };
+        windows.push((hwnd, pid));
+    }
+    1
+}
+
+pub(crate) fn shutdown_installed(executable: &Path) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let message = installed_exit_message()?;
+    let mut windows: Vec<(HWND, u32)> = Vec::new();
+    if unsafe {
+        EnumWindows(
+            Some(collect_shell),
+            (&mut windows as *mut Vec<(HWND, u32)>) as LPARAM,
+        )
+    } == 0
+    {
+        return Err(last("Enumerate resident windows"));
+    }
+    let mut accepted = Vec::new();
+    for (hwnd, pid) in windows {
+        let process = match Process::open(pid) {
+            Ok(process) => process,
+            Err(_) if shell_pid(hwnd) != Some(pid) => continue,
+            Err(error) => return Err(error),
+        };
+        let image = match process.image_path() {
+            Ok(image) => image,
+            Err(_) if unsafe { WaitForSingleObject(process.0, 0) } == WAIT_OBJECT_0 => continue,
+            Err(error) => return Err(error),
+        };
+        // Keep the process handle open across the final window identity check,
+        // delivery, and the wait. The window disappearing alone isn't drain.
+        let Ok(image) = installed::checked_local_path(&image) else {
+            continue;
+        };
+        if !same_target(executable, &image, pid, shell_pid(hwnd))
+            || unsafe { WaitForSingleObject(process.0, 0) } != WAIT_TIMEOUT
+        {
+            continue;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("Timed out requesting Prismestra shutdown".into());
+        }
+        let mut response = 0;
+        let delivered = unsafe {
+            SendMessageTimeoutW(
+                hwnd,
+                message,
+                0,
+                0,
+                SMTO_BLOCK | SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
+                remaining.as_millis().clamp(1, 2_000) as u32,
+                &mut response,
+            )
+        };
+        if delivered == 0 || response != EXIT_ACCEPTED {
+            if unsafe { WaitForSingleObject(process.0, 0) } == WAIT_OBJECT_0 {
+                continue;
+            }
+            return Err(
+                "Installed Prismestra is busy. Finish pending edits and close it from the tray."
+                    .into(),
+            );
+        }
+        accepted.push(process);
+    }
+    for process in accepted {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match unsafe { WaitForSingleObject(process.0, remaining.as_millis() as u32) } {
+            WAIT_OBJECT_0 => {}
+            WAIT_TIMEOUT => {
+                return Err(
+                    "Prismestra is still running. Finish pending edits and close it from the tray."
+                        .into(),
+                );
+            }
+            _ => return Err(last("Wait for installed Prismestra to exit")),
+        }
+    }
+    Ok(())
+}
+
+// Microsoft documents retrying failed NIM_ADD on TaskbarCreated; PowerToys
+// additionally handles missed initial broadcasts. Reuse that API pattern with
+// our existing maintenance timer, not a dependency or an Explorer-window probe.
+// https://devblogs.microsoft.com/oldnewthing/20181213-00/?p=100475
+// https://github.com/microsoft/PowerToys/blob/main/src/runner/tray_icon.cpp
+// Behavioral reference only; no third-party implementation is copied.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct TrayRegistration {
+    registered: bool,
+    attempting: bool,
+    failures: usize,
+    retry_at_ms: u64,
+    epoch: u64,
+}
+impl TrayRegistration {
+    fn taskbar_created(&mut self, now_ms: u64) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.registered = false;
+        self.failures = 0;
+        self.retry_at_ms = now_ms;
+        // Preserve an in-flight guard: Shell_NotifyIcon may pump window messages.
+    }
+    fn begin(&mut self, now_ms: u64) -> Option<u64> {
+        if self.registered || self.attempting || now_ms < self.retry_at_ms {
+            return None;
+        }
+        self.attempting = true;
+        Some(self.epoch)
+    }
+    fn finish(&mut self, epoch: u64, now_ms: u64, succeeded: bool) -> bool {
+        self.attempting = false;
+        if self.epoch != epoch {
+            return false;
+        }
+        self.registered = succeeded;
+        if succeeded {
+            self.failures = 0;
+        } else {
+            let delay_ms = [1_000, 2_000, 5_000, 15_000, 30_000, 60_000][self.failures.min(5)];
+            self.retry_at_ms = now_ms.saturating_add(delay_ms);
+            self.failures = self.failures.saturating_add(1);
+        }
+        true
+    }
+}
+
+fn poll_tray(
+    registration: &Cell<TrayRegistration>,
+    now_ms: u64,
+    mut notify: impl FnMut(u32) -> bool,
+) -> Option<bool> {
+    let mut pending = registration.get();
+    let epoch = pending.begin(now_ms)?;
+    registration.set(pending);
+    // The same(hwnd,uID) is used for every operation. MODIFY accepts an existing
+    // icon after a duplicate TaskbarCreated without deleting/replacing it first.
+    let succeeded = notify(NIM_ADD) || notify(NIM_MODIFY);
+    let mut pending = registration.get();
+    let current = pending.finish(epoch, now_ms, succeeded);
+    registration.set(pending);
+    current.then_some(succeeded)
+}
+
+fn maintain_tray(state: &State) {
+    // Snapshot/selftest stands may inject registration state, never a real icon.
+    if !state.tray_enabled.get() || state.snapshot {
+        return;
+    }
+    let had_failures = state.tray_registration.get().failures != 0;
+    let data = tray_data(state.shell_window.get(), state.icon.handle());
+    match poll_tray(
+        &state.tray_registration,
+        crate::clock::monotonic_ms(),
+        |operation| unsafe { Shell_NotifyIconW(operation, &data) != 0 },
+    ) {
+        Some(false) if !had_failures => eprintln!(
+            "Windows did not accept the Prismestra tray icon; retry scheduled, session continues"
+        ),
+        Some(true) if had_failures => eprintln!("Prismestra tray icon registered after retry"),
+        _ => {}
+    }
+}
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub(super) enum Action {
     #[default]
@@ -137,12 +380,17 @@ impl Instance {
         Ok(Self { _file: file })
     }
 }
-pub(super) struct Shell {
+pub(super) struct Shell<'a> {
+    state: &'a State,
     hwnd: HWND,
+    icon: HICON,
     tray: bool,
 }
-impl Shell {
-    pub(super) fn create(state: &State, tray: bool) -> Result<Self, String> {
+impl<'a> Shell<'a> {
+    pub(super) fn create(state: &'a State, tray: bool) -> Result<Self, String> {
+        if installed::session().is_some() {
+            INSTALLED_EXIT_MSG.store(installed_exit_message()?, Ordering::Relaxed);
+        }
         let instance = unsafe { GetModuleHandleW(null()) };
         let class = wide(CLASS);
         let wc = WNDCLASSEXW {
@@ -179,24 +427,38 @@ impl Shell {
         }
         state.shell_window.set(hwnd);
         state.tray_enabled.set(tray);
-        let shell = Self { hwnd, tray };
+        state.tray_registration.set(TrayRegistration::default());
+        let shell = Self {
+            state,
+            hwnd,
+            tray,
+            icon: state.icon.handle(),
+        };
+        // Maintenance is essential; tray registration is optional and recoverable.
+        if unsafe { SetTimer(hwnd, 1, 50, None) } == 0 {
+            return Err(last("Start session maintenance"));
+        }
         if tray {
             TASKBAR_CREATED.store(
                 unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) },
                 Ordering::Relaxed,
             );
-            tray_add(hwnd)?;
-        }
-        if unsafe { SetTimer(hwnd, 1, 50, None) } == 0 {
-            return Err(last("Start session maintenance"));
+            maintain_tray(state);
         }
         Ok(shell)
     }
 }
-impl Drop for Shell {
+impl Drop for Shell<'_> {
     fn drop(&mut self) {
+        self.state.tray_enabled.set(false);
+        let mut registration = self.state.tray_registration.get();
+        registration.taskbar_created(crate::clock::monotonic_ms());
+        self.state.tray_registration.set(registration);
+        unsafe {
+            KillTimer(self.hwnd, 1);
+        }
         if self.tray {
-            let data = tray_data(self.hwnd);
+            let data = tray_data(self.hwnd, self.icon);
             unsafe {
                 Shell_NotifyIconW(NIM_DELETE, &data);
             }
@@ -206,14 +468,14 @@ impl Drop for Shell {
         }
     }
 }
-fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
+fn tray_data(hwnd: HWND, icon: HICON) -> NOTIFYICONDATAW {
     let mut data = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
         uID: 1,
         uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
         uCallbackMessage: CALLBACK,
-        hIcon: unsafe { LoadIconW(null_mut(), IDI_APPLICATION) },
+        hIcon: icon,
         ..Default::default()
     };
     for (out, input) in data
@@ -224,14 +486,6 @@ fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
         *out = input;
     }
     data
-}
-fn tray_add(hwnd: HWND) -> Result<(), String> {
-    let data = tray_data(hwnd);
-    if unsafe { Shell_NotifyIconW(NIM_ADD, &data) } == 0 {
-        Err(last("Create tray icon"))
-    } else {
-        Ok(())
-    }
 }
 pub(super) fn report(state: &State, error: String) {
     if let Ok(mut slot) = state.app.try_borrow_mut()
@@ -251,19 +505,27 @@ pub(super) fn close_editor(state: &State) -> Result<(), String> {
     if hwnd.is_null() {
         return Ok(());
     }
+    if state.tray_enabled.get() && !state.tray_registration.get().registered {
+        return Err("Значок Prismestra пока недоступен. Приложение продолжает работу; редактор останется открытым, пока значок не появится.".into());
+    }
     {
         let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
         let a = slot.as_ref().ok_or("Нет сессии")?;
         a.guard_connections_close()?;
         a.guard_sources_exit()?;
+        super::native_forms::guard_close(a)?;
         if a.editor_dirty {
             return Err(
                 "Примените или сбросьте правки параметров перед закрытием редактора.".into(),
             );
         }
     }
+    if !super::modern::prepare_close(state, false, false)? {
+        return Ok(());
+    }
     // Native teardown can reenter the window procedure; do not retain a RefCell borrow.
     let mut app = state.app.borrow_mut().take().ok_or("Нет сессии")?;
+    super::modern::close(state);
     let destroyed = unsafe { DestroyWindow(hwnd) };
     if destroyed != 0 {
         app.widgets.clear();
@@ -388,6 +650,13 @@ pub(super) fn open_editor(state: &State) -> Result<(), String> {
     })();
     state.app.replace(Some(app));
     let hwnd = result?;
+    if let Err(error) = super::modern::open(state)
+        && let Some(app) = state.app.borrow_mut().as_mut()
+    {
+        app.web_mode = false;
+        app.status = format!("Новый интерфейс недоступен: {error}");
+        app.show_page();
+    }
     unsafe {
         if state.snapshot {
             SetWindowPos(
@@ -406,7 +675,10 @@ pub(super) fn open_editor(state: &State) -> Result<(), String> {
     }
     Ok(())
 }
-fn request(state: &State, action: Action, confirm: bool) -> Result<(), String> {
+pub(super) fn request(state: &State, action: Action, confirm: bool) -> Result<(), String> {
+    if action == Action::Exit && !super::modern::prepare_close(state, true, confirm)? {
+        return Ok(());
+    }
     let current = state.session_action.get();
     let upgrade = current == Action::Stop && action == Action::Exit;
     if current != Action::None && !upgrade {
@@ -422,8 +694,12 @@ fn request(state: &State, action: Action, confirm: bool) -> Result<(), String> {
             !app.widgets.is_empty()
                 && (app.editor_dirty
                     || app.guard_connections_close().is_err()
-                    || app.guard_sources_exit().is_err())
+                    || app.guard_sources_exit().is_err()
+                    || super::native_forms::guard_close(app).is_err())
         };
+        if unapplied && !confirm {
+            return Err("Примените или сбросьте правки перед выходом.".into());
+        }
         if confirm
             && unapplied
             && unsafe {
@@ -446,6 +722,7 @@ fn request(state: &State, action: Action, confirm: bool) -> Result<(), String> {
     if action == Action::Exit && !app.widgets.is_empty() {
         app.guard_connections_close()?;
         app.guard_sources_exit()?;
+        super::native_forms::guard_close(app)?;
         if app.editor_dirty {
             return Err("Примените или сбросьте правки перед выходом.".into());
         }
@@ -490,6 +767,7 @@ fn finish_stop(app: &mut App) -> Result<(), String> {
     Ok(())
 }
 fn maintain(state: &State) -> Result<(), String> {
+    maintain_tray(state);
     flush_power(state)?;
     let mut slot = state.app.try_borrow_mut().map_err(|_| "Сессия занята")?;
     let app = slot.as_mut().ok_or("Нет сессии")?;
@@ -521,9 +799,20 @@ fn maintain(state: &State) -> Result<(), String> {
         }
     }
     let editor = state.editor_window.get();
+    if stopped {
+        state.final_stop_render.set(FinalStopRender {
+            epoch: state.final_stop_render.get().epoch.wrapping_add(1).max(1),
+            hwnd: editor,
+            invalidated: false,
+            prints: 0,
+        });
+    }
     if !editor.is_null() && (stopped || state.session_action.get() != Action::None) {
-        unsafe {
-            InvalidateRect(editor, null(), 0);
+        let invalidated = unsafe { InvalidateRect(editor, null(), 0) } != 0;
+        if stopped {
+            let mut receipt = state.final_stop_render.get();
+            receipt.invalidated = invalidated;
+            state.final_stop_render.set(receipt);
         }
     }
     Ok(())
@@ -598,15 +887,38 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
         return unsafe { DefWindowProcW(hwnd, msg, w, l) };
     }
     if msg == WM_DESTROY {
+        state.tray_enabled.set(false);
         unsafe {
             KillTimer(hwnd, 1);
         }
         return 0;
     }
-    if msg == TASKBAR_CREATED.load(Ordering::Relaxed) && msg != 0 && state.tray_enabled.get() {
-        if let Err(e) = tray_add(hwnd) {
-            report(state, e);
+    if msg != 0 && msg == INSTALLED_EXIT_MSG.load(Ordering::Relaxed) {
+        if w != 0 || l != 0 || state.app.try_borrow_mut().is_err() {
+            return EXIT_BUSY as LRESULT;
         }
+        // request may start an asynchronous WebView draft flush. Only the
+        // retained process handle can confirm that the accepted request exited.
+        return match request(state, Action::Exit, false) {
+            Ok(())
+                if state.session_action.get() == Action::Exit
+                    || state.webview.borrow().is_some() =>
+            {
+                EXIT_ACCEPTED as LRESULT
+            }
+            Ok(()) => EXIT_BUSY as LRESULT,
+            Err(error) => {
+                report(state, error);
+                EXIT_BUSY as LRESULT
+            }
+        };
+    }
+    if msg == TASKBAR_CREATED.load(Ordering::Relaxed) && msg != 0 && state.tray_enabled.get() {
+        let mut registration = state.tray_registration.get();
+        registration.taskbar_created(crate::clock::monotonic_ms());
+        state.tray_registration.set(registration);
+        // Coalesce broadcasts onto the existing timer rather than issuing a
+        // Shell API call per notification, including reentrant notifications.
         return 0;
     }
     let result = match msg {
@@ -667,6 +979,64 @@ fn settle(state: &State, label: &str, done: impl Fn(&App) -> bool) -> Result<(),
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }
+
+fn exercise_tray_retry() -> Result<(), String> {
+    let registration = Cell::new(TrayRegistration::default());
+    let mut operations = Vec::new();
+    let first = poll_tray(&registration, 0, |op| {
+        operations.push(op);
+        false
+    });
+    if first != Some(false)
+        || registration.get().registered
+        || registration.get().retry_at_ms != 1_000
+    {
+        return Err("Tray stand: first failure must defer registration".into());
+    }
+    for now in [50, 100, 999] {
+        if poll_tray(&registration, now, |op| {
+            operations.push(op);
+            true
+        })
+        .is_some()
+        {
+            return Err("Tray stand: retry ran before backoff deadline".into());
+        }
+    }
+    if operations != [NIM_ADD, NIM_MODIFY] {
+        return Err("Tray stand: maintenance retried before its deadline".into());
+    }
+    if poll_tray(&registration, 1_000, |_| false) != Some(false)
+        || registration.get().retry_at_ms != 3_000
+    {
+        return Err("Tray stand: second failure did not increase backoff".into());
+    }
+    if poll_tray(&registration, 3_000, |_| true) != Some(true) || !registration.get().registered {
+        return Err("Tray stand: delayed registration did not recover".into());
+    }
+    if poll_tray(&registration, 600_000, |_| false).is_some() {
+        return Err("Tray stand: registered icon was added twice".into());
+    }
+    let mut pending = registration.get();
+    pending.taskbar_created(600_001);
+    registration.set(pending);
+    // The icon can survive TaskbarCreated; MODIFY confirms that same identity.
+    if poll_tray(&registration, 600_001, |op| op == NIM_MODIFY) != Some(true) {
+        return Err("Tray stand: surviving icon was not accepted without duplication".into());
+    }
+    let mut pending = registration.get();
+    pending.taskbar_created(600_002);
+    registration.set(pending);
+    if poll_tray(&registration, 600_002, |_| false) != Some(false)
+        || registration.get().retry_at_ms != 601_002
+    {
+        return Err("Tray stand: Explorer restart did not reset the retry budget".into());
+    }
+    if poll_tray(&registration, 601_002, |_| true) != Some(true) {
+        return Err("Tray stand: Explorer restart did not recover on a later timer".into());
+    }
+    Ok(())
+}
 pub(super) fn exercise(state: &State) -> Result<(), String> {
     use crate::app::{
         sensor_bindings::{Resolved, Scope, Target as SensorTarget},
@@ -699,6 +1069,7 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     if !state.snapshot || state.resident.get() {
         return Err("Resident stand requires isolated diagnostic mode".into());
     }
+    exercise_tray_retry()?;
     let (original, prior_plan, plan, page, dirty, registry) = {
         let mut slot = state.app.borrow_mut();
         let a = slot.as_mut().unwrap();
@@ -816,6 +1187,38 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
             rgb_id,
         )
     };
+    // A missing icon must not turn the only editor into an unreachable hidden
+    // session. Inject API outcomes; snapshot mode never calls the real tray.
+    let editor_before = state.editor_window.get();
+    state.tray_enabled.set(true);
+    state.tray_registration.set(TrayRegistration::default());
+    for (msg, w) in [(WM_SYSCOMMAND, SC_CLOSE as usize), (WM_CLOSE, 0)] {
+        unsafe {
+            SendMessageW(editor_before, msg, w, 0);
+        }
+        if state.editor_window.get() != editor_before || unsafe { IsWindow(editor_before) } == 0 {
+            return Err("Tray-pending close destroyed the only editor".into());
+        }
+        let slot = state.app.borrow();
+        let app = slot.as_ref().unwrap();
+        if !app.status.contains("Значок Prismestra пока недоступен")
+            || app.runtime.output_revision() != revision
+            || registry.lock().unwrap().status()[0].worker.generation != sensor_generation
+        {
+            return Err("Tray-pending close lost status or runtime ownership".into());
+        }
+    }
+    if poll_tray(&state.tray_registration, 0, |_| true) != Some(true) {
+        return Err("Injected tray registration did not succeed".into());
+    }
+    close_editor(state)?;
+    if !state.editor_window.get().is_null() {
+        return Err("Registered tray did not permit editor close".into());
+    }
+    state.tray_enabled.set(false);
+    state.tray_registration.set(TrayRegistration::default());
+    open_editor(state)?;
+
     for (msg, w) in [(WM_SYSCOMMAND, SC_CLOSE as usize), (WM_CLOSE, 0)] {
         let retained_status = "Resident diagnostic: preserve the last session status";
         state.app.borrow_mut().as_mut().unwrap().status = retained_status.into();
@@ -976,6 +1379,7 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
         a.was_pending = true;
     }
     let stopped_editor = state.editor_window.get();
+    let stop_epoch_before = state.final_stop_render.get().epoch;
     request(state, Action::Stop, false)?;
     {
         let slot = state.app.borrow();
@@ -1013,8 +1417,12 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
             return Err("Stop retained the closing status".into());
         }
     }
-    if unsafe { GetUpdateRect(stopped_editor, null_mut(), 0) } == 0 {
-        return Err("Stop did not invalidate the open editor".into());
+    let receipt = state.final_stop_render.get();
+    if receipt.epoch == stop_epoch_before || receipt.hwnd != stopped_editor || !receipt.invalidated
+    {
+        return Err(format!(
+            "Stop did not invalidate the final open editor view: baseline={stop_epoch_before}, receipt={receipt:?}"
+        ));
     }
     let capture = {
         let slot = state.app.borrow();
@@ -1026,6 +1434,9 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
         )
     };
     let bitmap = Bitmap::new(capture.0, capture.1)?;
+    // The fixture window is deliberately off-screen. WM_PRINT must render its
+    // final stopped view into this bitmap, independently of visible update regions.
+    let print_before = state.final_stop_render.get();
     unsafe {
         SendMessageW(
             stopped_editor,
@@ -1033,6 +1444,17 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
             bitmap.dc as usize,
             (PRF_CLIENT | PRF_CHILDREN | PRF_ERASEBKGND) as isize,
         );
+    }
+    let printed = state.final_stop_render.get();
+    if print_before.epoch != receipt.epoch
+        || printed.epoch != print_before.epoch
+        || printed.hwnd != stopped_editor
+        || !printed.invalidated
+        || printed.prints == print_before.prints
+    {
+        return Err(format!(
+            "Stop final off-screen editor render failed: before={print_before:?}, after={printed:?}"
+        ));
     }
     bitmap.save(&capture.2)?;
     let idle_until = Instant::now() + std::time::Duration::from_millis(100);
@@ -1159,7 +1581,7 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     state.tray_enabled.set(false);
     state.resident.set(false);
     eprintln!(
-        "Resident session stand PASS: owned hidden top-level shell, SC_CLOSE and WM_CLOSE editor destroy/reopen, same Runtime/output revision/Registry, one shared reader, live software RGB while editor absent, queued shell power under active borrow and absent App, Stop drain, failed Stop persistence then Exit upgrade/drain/quit; no tray icon, native hardware or OS power operations"
+        "Resident session stand PASS: owned hidden top-level shell, injected failed tray registration/retry/restart, editor retained until injected tray success, SC_CLOSE and WM_CLOSE editor destroy/reopen, same Runtime/output revision/Registry, one shared reader, live software RGB while editor absent, queued shell power under active borrow and absent App, Stop drain, failed Stop persistence then Exit upgrade/drain/quit; no tray icon, native hardware or OS power operations"
     );
     Ok(())
 }
@@ -1167,6 +1589,57 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shutdown_target_requires_exact_executable_and_window_owner() {
+        let executable = Path::new(r"C:\Applications\Prismestra\Prismestra.exe");
+        let other = Path::new(r"C:\Portable\Prismestra.exe");
+        assert!(same_target(executable, executable, 12, Some(12)));
+        assert!(!same_target(executable, other, 12, Some(12)));
+        assert!(!same_target(executable, executable, 12, Some(13)));
+        assert!(!same_target(executable, executable, 12, None));
+    }
+    #[test]
+    fn tray_failure_retry_success_and_explorer_restart_use_no_shell_api() {
+        exercise_tray_retry().unwrap();
+    }
+    #[test]
+    fn tray_backoff_is_capped_and_repeated_timer_ticks_do_not_add_icons() {
+        let registration = Cell::new(TrayRegistration::default());
+        let mut now = 0;
+        for expected in [1_000, 2_000, 5_000, 15_000, 30_000, 60_000, 60_000, 60_000] {
+            assert_eq!(poll_tray(&registration, now, |_| false), Some(false));
+            assert_eq!(registration.get().retry_at_ms, now + expected);
+            assert_eq!(
+                poll_tray(&registration, now + expected - 1, |_| panic!(
+                    "early NIM_ADD"
+                )),
+                None
+            );
+            now += expected;
+        }
+    }
+    #[test]
+    fn reentrant_timer_and_taskbar_created_cannot_accept_a_stale_registration() {
+        let registration = Cell::new(TrayRegistration::default());
+        let result = poll_tray(&registration, 0, |_| {
+            assert_eq!(
+                poll_tray(&registration, 0, |_| panic!("duplicate NIM_ADD")),
+                None
+            );
+            let mut pending = registration.get();
+            pending.taskbar_created(5);
+            registration.set(pending);
+            assert_eq!(
+                poll_tray(&registration, 5, |_| panic!("reentrant NIM_ADD")),
+                None
+            );
+            true
+        });
+        assert_eq!(result, None);
+        assert!(!registration.get().registered);
+        assert_eq!(poll_tray(&registration, 5, |_| true), Some(true));
+        assert!(registration.get().registered);
+    }
     #[test]
     fn power_coalescing_preserves_suspend_before_latest_resume() {
         let mut pending = PowerIntent::default();

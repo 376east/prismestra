@@ -1,0 +1,1509 @@
+diff --git a/DeferredI2C.h b/DeferredI2C.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..8cb0065f32918bcb9ac776402f55cf94590dd0ce
+--- /dev/null
++++ b/DeferredI2C.h
+@@ -0,0 +1,29 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Local coexistence patch: no thread, controller or driver ownership here.
++#pragma once
++#include <chrono>
++#include <cstddef>
++
++namespace deferred_i2c
++{
++using Clock = std::chrono::steady_clock;
++enum class Stage { NotStarted, Deferred, Running, Complete, Partial, Stopped };
++struct Phase
++{
++    Stage stage = Stage::NotStarted;
++    Clock::time_point retry_at{};
++    std::size_t failures = 0;
++    void reset() { *this = Phase{}; }
++    void stop() { stage = Stage::Stopped; }
++    bool due(Clock::time_point now) const { return stage == Stage::Deferred && now >= retry_at; }
++    void defer(Clock::time_point now)
++    {
++        static constexpr unsigned seconds[] = {1, 2, 5, 15, 30, 60};
++        const auto index = failures < 5 ? failures : 5;
++        if(failures < 5) ++failures;
++        retry_at = now + std::chrono::seconds(seconds[index]);
++        stage = Stage::Deferred;
++    }
++    void finish(bool incomplete) { stage = incomplete ? Stage::Partial : Stage::Complete; }
++};
++}
+diff --git a/DeferredI2CAccess.h b/DeferredI2CAccess.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..6b23c5f3864005da8cbe52adda0c735cabbebbb7
+--- /dev/null
++++ b/DeferredI2CAccess.h
+@@ -0,0 +1,91 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Windows-only SMBus access policy. Never include from DetectionManager.h.
++#pragma once
++#include "DeferredI2C.h"
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#include <atomic>
++#include <utility>
++namespace deferred_i2c
++{
++// Only mutex waiting is budgeted; synchronous kernel IOCTLs are not cancellable
++// by this helper. Output transactions have a separate100ms per-call cap.
++struct WaitBudget { DWORD remaining_ms = 100; bool blocked = false; const std::atomic<bool>* cancelled = nullptr; };
++inline thread_local WaitBudget* current_budget = nullptr;
++class ProbeBudget
++{
++    WaitBudget budget;
++    WaitBudget* previous;
++public:
++    explicit ProbeBudget(const std::atomic<bool>* cancelled = nullptr) : previous(current_budget) { budget.cancelled = cancelled; current_budget = &budget; }
++    ~ProbeBudget() { current_budget = previous; }
++    bool blocked() const { return budget.blocked || (budget.cancelled && budget.cancelled->load()); }
++    ProbeBudget(const ProbeBudget&) = delete;
++    ProbeBudget& operator=(const ProbeBudget&) = delete;
++};
++inline bool probe_blocked() { return current_budget && (current_budget->blocked || (current_budget->cancelled && current_budget->cancelled->load())); }
++
++class Access
++{
++    HANDLE handle;
++    bool close_handle;
++    bool acquired = false;
++    DWORD error = ERROR_SUCCESS;
++    void wait(DWORD timeout_ms)
++    {
++        if(!handle) { error = ERROR_INVALID_HANDLE; if(current_budget) current_budget->blocked = true; return; }
++        if(current_budget)
++        {
++            if(probe_blocked() || current_budget->remaining_ms == 0)
++            { current_budget->blocked = true; error = ERROR_TIMEOUT; return; }
++            if(timeout_ms > current_budget->remaining_ms) timeout_ms = current_budget->remaining_ms;
++        }
++        const ULONGLONG began = GetTickCount64();
++        const DWORD result = WaitForSingleObject(handle, timeout_ms);
++        const DWORD wait_error = result == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
++        if(current_budget)
++        {
++            const ULONGLONG elapsed = GetTickCount64() - began;
++            current_budget->remaining_ms = elapsed >= current_budget->remaining_ms ? 0 : current_budget->remaining_ms - static_cast<DWORD>(elapsed);
++        }
++        if(result == WAIT_OBJECT_0 || result == WAIT_ABANDONED) { acquired = true; return; }
++        error = result == WAIT_TIMEOUT ? ERROR_TIMEOUT : (wait_error ? wait_error : ERROR_GEN_FAILURE);
++        if(current_budget) current_budget->blocked = true;
++    }
++public:
++    explicit Access(HANDLE borrowed, DWORD timeout_ms = 100) : handle(borrowed), close_handle(false) { wait(timeout_ms); }
++    explicit Access(const char* name, DWORD timeout_ms = 100) : handle(CreateMutexA(nullptr, FALSE, name)), close_handle(true)
++    {
++        if(!handle) { error = GetLastError(); if(current_budget) current_budget->blocked = true; }
++        else wait(timeout_ms);
++    }
++    ~Access() { if(acquired) ReleaseMutex(handle); if(close_handle && handle) CloseHandle(handle); }
++    explicit operator bool() const { return acquired; }
++    DWORD failure() const { return error; }
++    template<typename Operation> HRESULT invoke(Operation&& operation) const
++    {
++        if(!acquired) return HRESULT_FROM_WIN32(error ? error : ERROR_GEN_FAILURE);
++        return std::forward<Operation>(operation)();
++    }
++    Access(const Access&) = delete;
++    Access& operator=(const Access&) = delete;
++};
++
++// Called before any I2C buses exist. The temporary guard is released before
++// returning success: never hold the shared SMBus mutex over whole discovery.
++inline bool admit(Phase& phase, const char* name, Clock::time_point now)
++{
++    if(phase.stage != Stage::NotStarted && phase.stage != Stage::Deferred) return false;
++    Access access(name, 100);
++    if(!access)
++    {
++        if(access.failure() == ERROR_TIMEOUT) phase.defer(now);
++        else phase.finish(true);
++        return false;
++    }
++    phase.stage = Stage::Running;
++    return true;
++}
++}
+diff --git a/DetectionManager.cpp b/DetectionManager.cpp
+index 4a5290a8ef3bd45b701d52e6436c854b6c308552..f8681e9384e36c01178c83489fccef9ba4170c06 100644
+--- a/DetectionManager.cpp
++++ b/DetectionManager.cpp
+@@ -14,10 +14,14 @@
+ #include <cctype>
+ #include <cstdio>
+ #include <fstream>
++#include <future>
+ #include <set>
+ #include <system_error>
+ #include <thread>
+ #include "DetectionManager.h"
++#if defined(_WIN32) && defined(PRISMESTRA_PC_BACKEND)
++#include "startup/ParentPipe.h"
++#endif
+ #include "JsonUtils.h"
+ #include "LogManager.h"
+ #include "pci_ids.h"
+@@ -25,6 +29,10 @@
+ #include "ResourceManager.h"
+ #include "SettingsManager.h"
+ #include "StringUtils.h"
++#ifdef _WIN32
++#include "DeferredI2CAccess.h"
++#include "i2c_smbus/Windows/i2c_smbus_pawnio.h"
++#endif
+ 
+ #ifdef __linux__
+ #include <unistd.h>
+@@ -42,7 +50,8 @@ using namespace std::chrono_literals;
+ const char* DETECTIONMANAGER = "DetectionManager";
+ 
+ /*---------------------------------------------------------*\
+-| Upper bound for WaitForDetection(), in milliseconds       |
++| Upper bound for detection-flag polling, in milliseconds   |
++| Joining an active kernel operation is not bounded here.  |
+ \*---------------------------------------------------------*/
+ #define DETECTION_WAIT_TIMEOUT_MS   60000
+ 
+@@ -182,6 +191,8 @@ DetectionManager::DetectionManager()
+ 
+ DetectionManager::~DetectionManager()
+ {
++    stopping = true;
++    i2c_retry_cancelled = true;
+     /*-----------------------------------------------------*\
+     | Exit HID in background thread                         |
+     \*-----------------------------------------------------*/
+@@ -232,9 +243,23 @@ std::vector<i2c_smbus_interface*>& DetectionManager::GetI2CBuses()
+ void DetectionManager::Cleanup()
+ {
+     LOG_INFO("[%s] Cleaning up detected devices", DETECTIONMANAGER);
+-
+-    ProcessPreDetectionHooks();
+-    ProcessCleanup();
++    stopping = true;
++    i2c_retry_cancelled = true;
++    // Serialize teardown with discovery and deferred work; never delete a bus
++    // while the existing owned background thread is using it.
++    auto done = std::make_shared<std::promise<void>>();
++    auto completed = done->get_future();
++    RunInBackgroundThread([this, done] {
++        try
++        {
++            i2c_phase.stop();
++            ProcessPreDetectionHooks();
++            ProcessCleanup();
++            done->set_value();
++        }
++        catch(...) { done->set_exception(std::current_exception()); }
++    });
++    completed.get();
+ }
+ 
+ std::vector<RGBController*>& DetectionManager::GetRGBControllers()
+@@ -556,36 +581,42 @@ void DetectionManager::AbortDetection()
+ {
+     LOG_INFO("[%s] Detection abort requested", DETECTIONMANAGER);
+ 
++#if defined(_WIN32) && defined(PRISMESTRA_PC_BACKEND)
++    // EOF is terminal ownership loss, unlike a normal SDK detection abort.
++    // Keep it sticky so a queued BeginDetection cannot reopen discovery.
++    HANDLE owner = PrismestraParentPipe();
++    if(owner && PrismestraParentPipeClosed(owner)) stopping = true;
++#endif
++
+     detection_in_progress   = false;
+     detection_percent       = 100;
++#ifndef PRISMESTRA_PC_BACKEND
+     detection_string        = "Stopping";
++#endif
++    i2c_retry_cancelled = true;
++    BackgroundThreadScheduledFunctionStart.notify_one();
+ }
+ 
+ void DetectionManager::BeginDetection()
+ {
+-    /*-----------------------------------------------------*\
+-    | Perform pre-detection setup                           |
+-    \*-----------------------------------------------------*/
+-    bool detection_ready = ProcessPreDetection();
+-
+-    /*-----------------------------------------------------*\
+-    | Run DetectDevices function in background thread if    |
+-    | ready to run detection                                |
+-    \*-----------------------------------------------------*/
+-    if(detection_ready)
+-    {
+-        /*-------------------------------------------------*\
+-        | Flag detection as in progress here rather than in |
+-        | the background thread.  WaitForDetection() must   |
+-        | not be able to return between this call and the   |
+-        | thread actually starting, or a caller that only   |
+-        | wants the finished device list, such as the CLI,  |
+-        | gets an empty one.                                |
+-        \*-------------------------------------------------*/
+-        detection_in_progress = true;
+-
+-        RunInBackgroundThread(std::bind(&DetectionManager::BackgroundDetectDevices, this));
+-    }
++    if(stopping.load()) return;
++    bool expected = false;
++    if(!detection_in_progress.compare_exchange_strong(expected, true)) return;
++    // Reserve the full rescan before enqueueing: an idle deferred pass cannot
++    // start between admission and cleanup. Cleanup itself stays on the owner.
++    i2c_retry_cancelled = true;
++    RunInBackgroundThread([this] {
++        if(stopping.load()) { detection_in_progress = false; return; }
++        i2c_phase.reset();
++        i2c_retry_cancelled = false;
++        if(stopping.load()) { i2c_retry_cancelled = true; detection_in_progress = false; return; }
++        try
++        {
++            if(ProcessPreDetection()) BackgroundDetectDevices();
++            else detection_in_progress = false;
++        }
++        catch(...) { i2c_phase.finish(true); detection_in_progress = false; throw; }
++    });
+ }
+ 
+ unsigned int DetectionManager::GetDetectionPercent()
+@@ -600,6 +631,9 @@ std::string DetectionManager::GetDetectionString()
+ 
+ void DetectionManager::WaitForDetection()
+ {
++    // Owner-thread cleanup cannot wait for the job currently running itself.
++    if(std::this_thread::get_id() == BackgroundThread->get_id()) return;
++
+     /*-----------------------------------------------------*\
+     | Taking the mutex is not enough on its own: detection  |
+     | runs in a background thread and there is a window     |
+@@ -653,33 +687,40 @@ void DetectionManager::BackgroundThreadFunction()
+     \*-----------------------------------------------------*/
+     std::unique_lock lock(BackgroundThreadStateMutex);
+ 
+-    while(background_thread_running)
++    while(background_thread_running || !BackgroundThreadScheduledFunctions.empty())
+     {
+-        if(BackgroundThreadScheduledFunction)
++        std::function<void()> coroutine;
++        if(!BackgroundThreadScheduledFunctions.empty())
+         {
+-            std::function<void()> coroutine = nullptr;
+-            std::swap(BackgroundThreadScheduledFunction, coroutine);
+-
+-            try
+-            {
+-                coroutine();
+-            }
+-            catch(std::exception& e)
+-            {
+-                LOG_ERROR("[%s] Unhandled exception in coroutine; e.what(): %s", DETECTIONMANAGER, e.what());
+-            }
+-            catch(...)
+-            {
+-                LOG_ERROR("[%s] Unhandled exception in coroutine", DETECTIONMANAGER);
+-            }
++            coroutine = std::move(BackgroundThreadScheduledFunctions.front());
++            BackgroundThreadScheduledFunctions.pop_front();
++        }
++        else if(!i2c_retry_cancelled.load() && !detection_in_progress.load()
++                && i2c_phase.due(deferred_i2c::Clock::now()))
++        {
++            coroutine = [this] { BackgroundRetryI2C(); };
++        }
++        if(coroutine)
++        {
++            try { coroutine(); }
++            catch(std::exception& e) { LOG_ERROR("[%s] Unhandled exception in coroutine: %s", DETECTIONMANAGER, e.what()); }
++            catch(...) { LOG_ERROR("[%s] Unhandled exception in coroutine", DETECTIONMANAGER); }
++            continue;
++        }
++        if(!background_thread_running) break;
++        if(!i2c_retry_cancelled.load() && i2c_phase.stage == deferred_i2c::Stage::Deferred)
++        {
++            BackgroundThreadScheduledFunctionStart.wait_until(lock, i2c_phase.retry_at, [this] {
++                return !background_thread_running || !BackgroundThreadScheduledFunctions.empty()
++                    || i2c_retry_cancelled.load();
++            });
++        }
++        else
++        {
++            BackgroundThreadScheduledFunctionStart.wait(lock, [this] {
++                return !background_thread_running || !BackgroundThreadScheduledFunctions.empty();
++            });
+         }
+-
+-        /*-------------------------------------------------*\
+-        | This line will cause the thread to suspend until  |
+-        | the condition variable is triggered               |
+-        | NOTE: it may be subject to "spurious wakeups"     |
+-        \*-------------------------------------------------*/
+-        BackgroundThreadScheduledFunctionStart.wait(lock);
+     }
+ }
+ 
+@@ -702,12 +743,9 @@ void DetectionManager::RunInBackgroundThread(std::function<void()> coroutine)
+         \*-------------------------------------------------*/
+         BackgroundThreadStateMutex.lock();
+ 
+-        if(BackgroundThreadScheduledFunction != nullptr)
+-        {
+-            LOG_WARNING("[%s] Detection coroutine: assigned a new coroutine when one was already scheduled - probably two rescan events sent at once", DETECTIONMANAGER);
+-        }
+-
+-        BackgroundThreadScheduledFunction = coroutine;
++        // Preserve queued lifecycle work; a single replaceable slot could lose
++        // a reserved rescan when cleanup was queued before it started.
++        BackgroundThreadScheduledFunctions.push_back(std::move(coroutine));
+         BackgroundThreadStateMutex.unlock();
+         BackgroundThreadScheduledFunctionStart.notify_one();
+     }
+@@ -721,7 +759,9 @@ void DetectionManager::BackgroundDetectDevices()
+     /*-----------------------------------------------------*\
+     | Lock detection mutex                                  |
+     \*-----------------------------------------------------*/
+-    DetectDevicesMutex.lock();
++    std::unique_lock detection_lock(DetectDevicesMutex);
++
++    if(stopping.load()) { detection_in_progress = false; return; }
+ 
+     /*-----------------------------------------------------*\
+     | Set detection in progress flag                        |
+@@ -837,22 +877,7 @@ void DetectionManager::BackgroundDetectDevices()
+     /*-----------------------------------------------------*\
+     | Detect I2C interfaces                                 |
+     \*-----------------------------------------------------*/
+-    BackgroundDetectI2CBuses();
+-
+-    /*-----------------------------------------------------*\
+-    | Detect I2C devices                                    |
+-    \*-----------------------------------------------------*/
+-    BackgroundDetectI2CDevices(detector_settings);
+-
+-    /*-----------------------------------------------------*\
+-    | Detect I2C DRAM devices                               |
+-    \*-----------------------------------------------------*/
+-    BackgroundDetectI2CDRAMDevices(detector_settings);
+-
+-    /*-----------------------------------------------------*\
+-    | Detect I2C PCI devices                                |
+-    \*-----------------------------------------------------*/
+-    BackgroundDetectI2CPCIDevices(detector_settings);
++    BackgroundDetectI2CPhase(detector_settings);
+ 
+     /*-----------------------------------------------------*\
+     | Detect HID devices                                    |
+@@ -920,7 +945,7 @@ void DetectionManager::BackgroundDetectDevices()
+     /*-----------------------------------------------------*\
+     | Unlock detection mutex                                |
+     \*-----------------------------------------------------*/
+-    DetectDevicesMutex.unlock();
++    detection_lock.unlock();
+ 
+ #ifdef __linux__
+     /*-----------------------------------------------------*\
+@@ -995,6 +1020,63 @@ void DetectionManager::BackgroundDetectDevices()
+     }
+ }
+ 
++void DetectionManager::BackgroundDetectI2CPhase(json& detector_settings)
++{
++    if(stopping.load()) { i2c_retry_cancelled = true; return; }
++#ifdef _WIN32
++    // Preflight precedes ALL bus creation; the guard in admit() is released
++    // immediately. Holding it over detection would starve other applications.
++    if(!deferred_i2c::admit(i2c_phase, GLOBAL_SMBUS_MUTEX_NAME, deferred_i2c::Clock::now()))
++    {
++        if(i2c_phase.stage == deferred_i2c::Stage::Deferred)
++            LOG_WARNING("[%s] Shared SMBus is busy; I2C discovery deferred, independent discovery continues", DETECTIONMANAGER);
++        else
++            LOG_ERROR("[%s] SMBus coordination unavailable; I2C discovery not started", DETECTIONMANAGER);
++        return;
++    }
++    deferred_i2c::ProbeBudget budget(&i2c_retry_cancelled);
++#else
++    i2c_phase.stage = deferred_i2c::Stage::Running;
++#endif
++    try
++    {
++        BackgroundDetectI2CBuses();
++        BackgroundDetectI2CDevices(detector_settings);
++        BackgroundDetectI2CDRAMDevices(detector_settings);
++        BackgroundDetectI2CPCIDevices(detector_settings);
++#ifdef _WIN32
++        i2c_phase.finish(budget.blocked());
++#else
++        i2c_phase.finish(false);
++#endif
++    }
++    catch(...) { i2c_phase.finish(true); throw; }
++    if(i2c_phase.stage == deferred_i2c::Stage::Partial)
++        LOG_WARNING("[%s] I2C discovery partial after contention; automatic rescan disabled to preserve registered controllers. Manual rescan is available", DETECTIONMANAGER);
++}
++
++void DetectionManager::BackgroundRetryI2C()
++{
++    if(stopping.load() || i2c_retry_cancelled.load()) return;
++    bool expected = false;
++    if(!detection_in_progress.compare_exchange_strong(expected, true)) return;
++    std::lock_guard detection_lock(DetectDevicesMutex);
++    try
++    {
++        json detector_settings = ResourceManager::get()->GetSettingsManager()->GetSettings("Detectors");
++        BackgroundDetectI2CPhase(detector_settings);
++        if(i2c_phase.stage == deferred_i2c::Stage::Complete || i2c_phase.stage == deferred_i2c::Stage::Partial)
++        {
++            WriteDetectorMap();
++            // Existing registration callbacks already publish each new SDK
++            // controller; this completes the pass without touching HID owners.
++            SignalUpdate(DETECTIONMANAGER_UPDATE_REASON_DETECTION_COMPLETE);
++        }
++    }
++    catch(...) { detection_in_progress = false; throw; }
++    detection_in_progress = false;
++}
++
+ void DetectionManager::BackgroundDetectI2CBuses()
+ {
+     LOG_INFO("------------------------------------------------------");
+@@ -1010,6 +1092,7 @@ void DetectionManager::BackgroundDetectI2CBuses()
+ 
+     for(std::size_t i2c_bus_detector_idx = 0; i2c_bus_detector_idx < i2c_bus_detectors.size(); i2c_bus_detector_idx++)
+     {
++        if(stopping.load() || !detection_in_progress.load()) break;
+         if(i2c_bus_detectors[i2c_bus_detector_idx]() == false)
+         {
+             i2c_interface_fail = true;
+@@ -1040,6 +1123,7 @@ void DetectionManager::BackgroundDetectI2CDevices(json& detector_settings)
+ 
+     for(std::size_t i2c_detector_idx = 0; i2c_detector_idx < i2c_device_detectors.size(); i2c_detector_idx++)
+     {
++        if(stopping.load() || !detection_in_progress.load()) break;
+         /*-------------------------------------------------*\
+         | Update detection string                           |
+         \*-------------------------------------------------*/
+@@ -1096,6 +1180,7 @@ void DetectionManager::BackgroundDetectI2CDRAMDevices(json& detector_settings)
+ 
+     for(std::size_t bus = 0; bus < i2c_buses.size() && IsAnyDimmDetectorEnabled(detector_settings); bus++)
+     {
++        if(stopping.load() || !detection_in_progress.load()) break;
+         IF_DRAM_SMBUS(i2c_buses[bus]->info.pci_vendor, i2c_buses[bus]->info.pci_device)
+         {
+             std::vector<SPDWrapper> slots;
+@@ -1865,15 +1950,8 @@ void DetectionManager::ProcessDynamicDetectors()
+ 
+ bool DetectionManager::ProcessPreDetection()
+ {
+-    /*-----------------------------------------------------*\
+-    | Check if detection is already in progress before      |
+-    | continuing                                            |
+-    \*-----------------------------------------------------*/
+-    if(detection_in_progress.load())
+-    {
+-        return false;
+-    }
+-
++    // BeginDetection reserved this pass before queueing it. This method is
++    // called only on BackgroundThread, before DetectDevicesMutex is acquired.
+     /*-----------------------------------------------------*\
+     | Process pre-detection hooks                           |
+     \*-----------------------------------------------------*/
+diff --git a/DetectionManager.h b/DetectionManager.h
+index 3e334463b96a3eca23501c848f18c2a242d00180..0d3e5b83fc4d9f1979959b078eef524f93bd238d 100644
+--- a/DetectionManager.h
++++ b/DetectionManager.h
+@@ -17,6 +17,7 @@
+ #include <cstdint>
+ #include <cstdio>
+ #include <functional>
++#include <deque>
+ #include <mutex>
+ #include <string>
+ #include <thread>
+@@ -27,6 +28,7 @@
+ #include "i2c_smbus.h"
+ #include "RGBController.h"
+ #include "SPDWrapper.h"
++#include "DeferredI2C.h"
+ 
+ using json = nlohmann::json;
+ 
+@@ -341,12 +343,15 @@ private:
+     | Background Thread Variables                           |
+     \*-----------------------------------------------------*/
+     std::thread *                               BackgroundThread;
+-    std::function<void()>                       BackgroundThreadScheduledFunction;
++    std::deque<std::function<void()>>           BackgroundThreadScheduledFunctions;
+     std::condition_variable                     BackgroundThreadScheduledFunctionStart;
+     std::mutex                                  BackgroundThreadStateMutex;
+ 
+     std::atomic<bool>                           background_thread_running;
+     std::atomic<bool>                           detection_in_progress;
++    std::atomic<bool>                           stopping{false};
++    std::atomic<bool>                           i2c_retry_cancelled{false};
++    deferred_i2c::Phase                         i2c_phase; // Background thread only.
+ 
+     /*-----------------------------------------------------*\
+     | Background Thread Functions                           |
+@@ -366,6 +371,8 @@ private:
+ #endif
+ #endif
+     void BackgroundDetectI2CBuses();
++    void BackgroundDetectI2CPhase(json& detector_settings);
++    void BackgroundRetryI2C();
+     void BackgroundDetectI2CDevices(json& detector_settings);
+     void BackgroundDetectI2CDRAMDevices(json& detector_settings);
+     void BackgroundDetectI2CPCIDevices(json& detector_settings);
+diff --git a/NetworkServer.cpp b/NetworkServer.cpp
+index 967a6e74026a19dcf2d165e7ddb1c4ce9ff322a4..15512ae264a16dcf537e234421418970bb83de1a 100644
+--- a/NetworkServer.cpp
++++ b/NetworkServer.cpp
+@@ -1417,6 +1417,14 @@ void NetworkServer::ListenThreadFunction(NetworkClientInfo* client_info)
+             LOG_ERROR("[%s] received too large packet, closing listener", NETWORKSERVER);
+             goto listen_done;
+         }
++        else if(lighting_only && !((header.pkt_id == 0 && header.pkt_size == 0)
++            || ((header.pkt_id == 1 || header.pkt_id == 40 || header.pkt_id == 52) && header.pkt_size == 4)
++            || (header.pkt_id == 1050 && header.pkt_size >= 6 && header.pkt_size <= 6 + 8192 * 4)
++            || (header.pkt_id == 1101 && header.pkt_size >= 60 && header.pkt_size <= 6 + 8192 * 4)
++            || (header.pkt_id == 40002 && header.pkt_size == 0)))
++        {
++            goto listen_done;
++        }
+         else if(header.pkt_size > 0)
+         {
+             data = new unsigned char[header.pkt_size];
+@@ -1441,6 +1449,18 @@ void NetworkServer::ListenThreadFunction(NetworkClientInfo* client_info)
+         | Entire request received, select functionality     |
+         | based on request ID                               |
+         \*-------------------------------------------------*/
++        // Lighting-only clients cannot grant themselves local-client privileges,
++        // downgrade the protocol, or send unbounded controller descriptions.
++        if(lighting_only && (header.pkt_id == 40 || header.pkt_id == 52 || header.pkt_id == 1))
++        {
++            unsigned int value = 0;
++            memcpy(&value, data, sizeof(value));
++            if((header.pkt_id == 52 && value != NET_CLIENT_FLAG_SUPPORTS_RGBCONTROLLER)
++                || ((header.pkt_id == 40 || header.pkt_id == 1) && value != 6))
++                goto listen_done;
++        }
++        if(lighting_only && (header.pkt_id == 1050 || header.pkt_id == 1101)
++            && client_info->client_protocol_version != 6) goto listen_done;
+         switch(header.pkt_id)
+         {
+         /*-------------------------------------------------*\
+@@ -3417,6 +3437,15 @@ NetPacketStatus NetworkServer::ProcessRequest_RGBController_UpdateLEDs(NetworkCl
+     | Lock access mutex                                     |
+     \*-----------------------------------------------------*/
+     controllers[controller_idx]->AccessMutex.lock();
++    if(lighting_only)
++    {
++        unsigned short count = 0;
++        if(data_size < 6) { controllers[controller_idx]->AccessMutex.unlock(); return NET_PACKET_STATUS_ERROR_INVALID_DATA; }
++        memcpy(&count, data_start + 4, 2);
++        if(count > 8192 || count != controllers[controller_idx]->colors.size() || data_size != 6u + 4u * count)
++        { controllers[controller_idx]->AccessMutex.unlock(); return NET_PACKET_STATUS_ERROR_INVALID_DATA; }
++    }
++
+ 
+     /*-----------------------------------------------------*\
+     | Update colors                                         |
+@@ -3472,6 +3501,17 @@ NetPacketStatus NetworkServer::ProcessRequest_RGBController_UpdateSaveMode(Netwo
+     /*-----------------------------------------------------*\
+     | Copy in data size                                     |
+     \*-----------------------------------------------------*/
++    if(lighting_only)
++    {
++        if(data_size < 56) return NET_PACKET_STATUS_ERROR_INVALID_DATA;
++        unsigned short name_size = 0, colors_size = 0;
++        memcpy(&name_size, data_start + 8, 2);
++        if(name_size == 0 || name_size > 128 || data_size < 56u + name_size
++            || data_start[10 + name_size - 1] != 0) return NET_PACKET_STATUS_ERROR_INVALID_DATA;
++        memcpy(&colors_size, data_start + 54 + name_size, 2);
++        if(colors_size > 8192 || data_size != 56u + name_size + 4u * colors_size)
++            return NET_PACKET_STATUS_ERROR_INVALID_DATA;
++    }
+     COPY_DATA_FIELD(data_ptr, data_start, data_size_pkt);
+ 
+     /*-----------------------------------------------------*\
+@@ -3511,6 +3551,17 @@ NetPacketStatus NetworkServer::ProcessRequest_RGBController_UpdateSaveMode(Netwo
+     \*-----------------------------------------------------*/
+     data_ptr = RGBController::SetModeDescription(data_ptr, data_size - (unsigned int)(data_ptr - data_start), &temp_mode, client_info->client_protocol_version);
+ 
++    // Validate the complete packet before mutating the controller.
++    if(data_ptr == NULL || (lighting_only && (save_mode || data_ptr != data_start + data_size
++        || !(temp_mode.name == "Direct" || temp_mode.name == "direct")
++        || temp_mode.name != controllers[controller_idx]->modes[mode_idx].name
++        || temp_mode.flags != controllers[controller_idx]->modes[mode_idx].flags
++        || (controllers[controller_idx]->modes[mode_idx].flags & MODE_FLAG_AUTOMATIC_SAVE))))
++    {
++        controllers[controller_idx]->AccessMutex.unlock();
++        return NET_PACKET_STATUS_ERROR_INVALID_DATA;
++    }
++
+     /*-----------------------------------------------------*\
+     | Set mode values and active mode                       |
+     \*-----------------------------------------------------*/
+@@ -3520,6 +3571,11 @@ NetPacketStatus NetworkServer::ProcessRequest_RGBController_UpdateSaveMode(Netwo
+         {
+             controllers[controller_idx]->active_mode = mode_idx;
+         }
++        else if(lighting_only)
++        {
++            controllers[controller_idx]->AccessMutex.unlock();
++            return NET_PACKET_STATUS_ERROR_INVALID_DATA;
++        }
+     }
+ 
+     /*-----------------------------------------------------*\
+diff --git a/NetworkServer.h b/NetworkServer.h
+index 088eadec3eb10bcb7b0e6fe65e5961340473b569..924280c28de096a24cc44750dbfe27ebad4e881b 100644
+--- a/NetworkServer.h
++++ b/NetworkServer.h
+@@ -111,6 +111,7 @@ class NetworkServer
+ {
+ public:
+     NetworkServer();
++    void SetLightingOnly() { lighting_only = true; server_flags = NET_SERVER_FLAG_SUPPORTS_RGBCONTROLLER; }
+     ~NetworkServer();
+ 
+     /*-----------------------------------------------------*\
+@@ -173,6 +174,7 @@ public:
+     void                                SendRequest_RGBController_SignalUpdate(RGBController* controller_ptr, unsigned int update_reason);
+ 
+ private:
++    bool lighting_only = false;
+     /*-----------------------------------------------------*\
+     | Server variables                                      |
+     \*-----------------------------------------------------*/
+diff --git a/OpenRGB.pro b/OpenRGB.pro
+index e20d9f4a141332ea84d7e8c6061dcd2b29b21876..718ee9cd45ac4a62f65d7b8e5e69eb7d6fd6ca78 100644
+--- a/OpenRGB.pro
++++ b/OpenRGB.pro
+@@ -18,6 +18,7 @@ DEFINES    += OPENRGB_HEADLESS
+ # GUI subsystem). Also link the Win32 libraries that the Qt config used to drag in
+ # transitively (CommandLineToArgvW, SHGetFolderPathA, registry, sockets, ws2_32 etc.)
+ win32: CONFIG += console
++win32:contains(CONFIG, prismestra_pc_backend): LIBS += -lwinmm
+ win32: LIBS   += -lshell32 -ladvapi32 -luser32 -lole32 -lws2_32 -liphlpapi -lsetupapi -lshlwapi
+ 
+ #-----------------------------------------------------------------------------------------------#
+@@ -767,6 +768,18 @@ macx:contains(QMAKE_HOST.arch, x86_64) {
+ #-----------------------------------------------------------------------------------------------#
+ # Print build configuration                                                                     #
+ #-----------------------------------------------------------------------------------------------#
++# Prismestra's PC adapter does not embed the Hue implementation. hueplusplus
++# is LGPL-3.0-or-later and the vendored mbedTLS 3.2.1 is Apache-2.0, whereas
++# some included device controllers are GPL-2.0-only. Do not stamp that full
++# combination as GPLv2-compatible. Home lighting uses separate app adapters.
++contains(CONFIG, prismestra_pc_backend) {
++    SOURCES -= $$files("Controllers/PhilipsHueController/*.cpp")
++    SOURCES -= $$files("dependencies/hueplusplus-1.2.0/src/*.cpp")
++    LIBS -= -lmbedcrypto -lmbedtls -lmbedx509
++    DEFINES += PRISMESTRA_PC_BACKEND
++    message("Prismestra PC backend: Hue/hueplusplus/mbedTLS excluded")
++}
++
+ message("GIT_BRANCH:  "$$GIT_BRANCH)
+ message("VERSION_NUM: "$$VERSION_NUM)
+ message("VERSION_STR: "$$VERSION_STR)
+diff --git a/ResourceManager.cpp b/ResourceManager.cpp
+index e5b2b4f706df77b04ecb642c03075544a36ffd4f..4a53ae62446eb61f3c8cd97b3cefb4dced6ed592 100644
+--- a/ResourceManager.cpp
++++ b/ResourceManager.cpp
+@@ -1402,6 +1402,7 @@ void ResourceManager::InitializeServer()
+     bool legacy_workaround  = false;
+ 
+     server                  = new NetworkServer();
++    if(lighting_only) server->SetLightingOnly();
+ 
+     /*-----------------------------------------------------*\
+     | Set server name                                       |
+diff --git a/ResourceManager.h b/ResourceManager.h
+index 601f758f9bb441a362825c1b7891f3f18f9134db..9cf7878bf784a495bb2788fc8ece24997488d17c 100644
+--- a/ResourceManager.h
++++ b/ResourceManager.h
+@@ -92,6 +92,7 @@ public:
+     std::vector<RGBController*>&        GetRGBControllers();
+     std::vector<RGBControllerInterface*>&   GetRGBControllerInterfaces();
+     NetworkServer*                      GetServer();
++    void SetLightingOnly() { lighting_only = true; }
+     SettingsManager*                    GetSettingsManager();
+ 
+     void                                SetConfigurationDirectory(const filesystem::path &directory);
+@@ -227,6 +228,7 @@ private:
+     | Network Server                                        |
+     \*-----------------------------------------------------*/
+     NetworkServer*                              server;
++    bool lighting_only = false;
+     std::string                                 default_server_host;
+     unsigned short                              default_server_port;
+ 
+diff --git a/cli.cpp b/cli.cpp
+index e7e6d616da0cb4f0b28cd04f37ccee11f7b38a63..bdcab12bc97c2d7b6047a7c01ccf3c8ddd769c94 100644
+--- a/cli.cpp
++++ b/cli.cpp
+@@ -18,6 +18,7 @@
+ #include "filesystem.h"
+ #include "LogManager.h"
+ #include "NetworkClient.h"
++#include "NetworkServer.h"
+ #include "ProfileManager.h"
+ #include "ResourceManager.h"
+ #include "RGBController.h"
+@@ -1209,6 +1210,7 @@ int ProcessOptions(Options* options, std::vector<RGBController *>& rgb_controlle
+              ||(option == "--nodetect")
+              ||(option == "--noautoconnect")
+              ||(option == "--server")
++             ||(option == "--lighting-only")
+              ||(option == "--gui")
+              ||(option == "--i2c-tools" || option == "--yolo")
+              ||(option == "--startminimized")
+@@ -1547,6 +1549,10 @@ unsigned int cli_pre_detection(int argc, char* argv[])
+         /*-------------------------------------------------*\
+         | --server (no arguments)                           |
+         \*-------------------------------------------------*/
++        else if(option == "--lighting-only")
++        {
++            ResourceManager::get()->SetLightingOnly();
++        }
+         else if(option == "--server")
+         {
+             server_start            = true;
+diff --git a/i2c_smbus/Windows/i2c_smbus_pawnio.cpp b/i2c_smbus/Windows/i2c_smbus_pawnio.cpp
+index 35cd3fda18f704ee4d4f67483325ce83d1d09371..fd9ce9c7517b35ce254c5cac7bf1fb6ce3caf7f9 100644
+--- a/i2c_smbus/Windows/i2c_smbus_pawnio.cpp
++++ b/i2c_smbus/Windows/i2c_smbus_pawnio.cpp
+@@ -10,6 +10,9 @@
+ \*---------------------------------------------------------*/
+ 
+ #include <string>
++#include <cerrno>
++#include <memory>
++#include "DeferredI2CAccess.h"
+ #include "DetectionManager.h"
+ #include "i2c_smbus_pawnio.h"
+ #include "LogManager.h"
+@@ -32,7 +35,9 @@ s32 imc_index_sel(HANDLE pawnio_handle, s32 index)
+     /*-----------------------------------------------------*\
+     | Execute IMC slot_sel ioctl                            |
+     \*-----------------------------------------------------*/
+-    status = pawnio_execute(pawnio_handle, "ioctl_smbus_index", in, in_size, out, 1, &return_size);
++    deferred_i2c::Access access(GLOBAL_SMBUS_MUTEX_NAME);
++    if(!access) return access.failure() == ERROR_TIMEOUT ? -ETIMEDOUT : -EIO;
++    status = access.invoke([&] { return pawnio_execute(pawnio_handle, "ioctl_smbus_index", in, in_size, out, 1, &return_size); });
+ 
+     return(status ? -EIO : 0);
+ }
+@@ -49,28 +54,16 @@ s32 piix4_port_sel(HANDLE pawnio_handle, s32 port)
+     /*-----------------------------------------------------*\
+     | Execute PIIX4 port_sel ioctl                          |
+     \*-----------------------------------------------------*/
+-    HANDLE access_handle = CreateMutexA(NULL, FALSE, GLOBAL_SMBUS_MUTEX_NAME);
+-    if(access_handle == NULL)
+-    {
+-        return -EIO;
+-    }
+-    DWORD wait_status = WaitForSingleObject(access_handle, INFINITE);
+-    if(wait_status != WAIT_OBJECT_0 && wait_status != WAIT_ABANDONED)
+-    {
+-        CloseHandle(access_handle);
+-        return -EIO;
+-    }
+-
+-    status = pawnio_execute(pawnio_handle, "ioctl_piix4_port_sel", in, in_size, out, 1, &return_size);
+-
+-    ReleaseMutex(access_handle);
+-    CloseHandle(access_handle);
++    deferred_i2c::Access access(GLOBAL_SMBUS_MUTEX_NAME);
++    if(!access) return access.failure() == ERROR_TIMEOUT ? -ETIMEDOUT : -EIO;
++    status = access.invoke([&] { return pawnio_execute(pawnio_handle, "ioctl_piix4_port_sel", in, in_size, out, 1, &return_size); });
+ 
+     return(status ? -EIO : 0);
+ }
+ 
+ s32 set_sleep_mode(HANDLE pawnio_handle, s32 sleep_mode)
+ {
++    // The constructor holds shared SMBus ownership across identity/setup only.
+     const SIZE_T    in_size         = 1;
+     ULONG64         in[in_size]     = {(ULONG64)sleep_mode};
+     const SIZE_T    out_size        = 0;
+@@ -80,12 +73,12 @@ s32 set_sleep_mode(HANDLE pawnio_handle, s32 sleep_mode)
+     /*-----------------------------------------------------*\
+     | Execute PIIX4 port_sel ioctl                          |
+     \*-----------------------------------------------------*/
+-    status = pawnio_execute(pawnio_handle, "ioctl_set_sleep_mode", in, in_size, NULL, 1, &return_size);
++    status = pawnio_execute(pawnio_handle, "ioctl_set_sleep_mode", in, in_size, NULL, out_size, &return_size);
+ 
+     return(status ? -EIO : 0);
+ }
+ 
+-i2c_smbus_pawnio::i2c_smbus_pawnio(HANDLE handle, std::string name, unsigned int index)
++i2c_smbus_pawnio::i2c_smbus_pawnio(HANDLE handle, std::string name, unsigned int index, bool supports_sleep_mode)
+ {
+     /*-----------------------------------------------------*\
+     | Store bus information                                 |
+@@ -100,6 +93,45 @@ i2c_smbus_pawnio::i2c_smbus_pawnio(HANDLE handle, std::string name, unsigned int
+     \*-----------------------------------------------------*/
+     json drivers_settings = ResourceManager::get()->GetSettingsManager()->GetSettings("Drivers");
+ 
++    /*-----------------------------------------------------*\
++    | Get shared SMBus access setting                       |
++    \*-----------------------------------------------------*/
++    if(drivers_settings.contains("shared_smbus_access") && !drivers_settings["shared_smbus_access"].get<bool>())
++    {
++        LOG_WARNING("[PawnIO] Legacy shared_smbus_access=false ignored: shared SMBus coordination is mandatory");
++    }
++
++    /*-----------------------------------------------------*\
++    | Get shared SMBus access setting                       |
++    \*-----------------------------------------------------*/
++    unsigned int smbus_sleep_mode = PAWNIO_SLEEPMODE_ALWAYSSLEEP;
++
++    if(drivers_settings.contains("smbus_sleep_mode"))
++    {
++        smbus_sleep_mode = drivers_settings["smbus_sleep_mode"];
++    }
++
++    if(smbus_sleep_mode >= PAWNIO_SLEEPMODE_MAX)
++    {
++        smbus_sleep_mode = PAWNIO_SLEEPMODE_ALWAYSSLEEP;
++    }
++
++    // The constructed object owns the loaded handle even if initialization
++    // fails; register_pawnio_bus deletes rejected objects and closes it.
++    using_handle[name]++;
++    global_smbus_access_handle = CreateMutexA(NULL, FALSE, GLOBAL_SMBUS_MUTEX_NAME);
++    if(!global_smbus_access_handle)
++    {
++        LOG_ERROR("[PawnIO] Cannot open shared SMBus mutex (Win32=%lu); check account permissions. Interface disabled; no uncoordinated I/O", GetLastError());
++        if(deferred_i2c::current_budget) deferred_i2c::current_budget->blocked = true;
++        return;
++    }
++    deferred_i2c::Access access(global_smbus_access_handle);
++    if(!access)
++    {
++        LOG_WARNING("[PawnIO] Shared SMBus unavailable during bus setup (Win32=%lu); interface will not be registered", access.failure());
++        return;
++    }
+     /*-----------------------------------------------------*\
+     | Get bus information                                   |
+     \*-----------------------------------------------------*/
+@@ -110,7 +142,13 @@ i2c_smbus_pawnio::i2c_smbus_pawnio(HANDLE handle, std::string name, unsigned int
+     SIZE_T          return_size;
+     HRESULT         status;
+ 
+-    status = pawnio_execute(handle, "ioctl_identity", in, in_size, out, out_size, &return_size);
++    status = access.invoke([&] { return pawnio_execute(handle, "ioctl_identity", in, in_size, out, out_size, &return_size); });
++    if(status)
++    {
++        LOG_ERROR("[PawnIO] Bus identity failed; interface will not be registered (HRESULT=%ld)", status);
++        if(deferred_i2c::current_budget) deferred_i2c::current_budget->blocked = true;
++        return;
++    }
+ 
+     if(!status)
+     {
+@@ -133,45 +171,13 @@ i2c_smbus_pawnio::i2c_smbus_pawnio(HANDLE handle, std::string name, unsigned int
+         snprintf(this->info.device_name, 512, "PawnIO SMBus %s %d", name_str, index);
+     }
+ 
+-    /*-----------------------------------------------------*\
+-    | Get shared SMBus access setting                       |
+-    \*-----------------------------------------------------*/
+-    bool shared_smbus_access = true;
+-
+-    if(drivers_settings.contains("shared_smbus_access"))
+-    {
+-        shared_smbus_access = drivers_settings["shared_smbus_access"].get<bool>();
+-    }
+-
+-    /*-----------------------------------------------------*\
+-    | Get shared SMBus access setting                       |
+-    \*-----------------------------------------------------*/
+-    unsigned int smbus_sleep_mode = PAWNIO_SLEEPMODE_ALWAYSSLEEP;
+-
+-    if(drivers_settings.contains("smbus_sleep_mode"))
+-    {
+-        smbus_sleep_mode = drivers_settings["smbus_sleep_mode"];
+-    }
+-
+-    if(smbus_sleep_mode >= PAWNIO_SLEEPMODE_MAX)
+-    {
+-        smbus_sleep_mode = PAWNIO_SLEEPMODE_ALWAYSSLEEP;
+-    }
+-
+-    /*-----------------------------------------------------*\
+-    | Initialize sleep mode                                 |
+-    \*-----------------------------------------------------*/
+-    set_sleep_mode(handle, smbus_sleep_mode);
+-
+-    /*-----------------------------------------------------*\
+-    | Create global SMBus mutex if enabled                  |
+-    \*-----------------------------------------------------*/
+-    if(shared_smbus_access)
++    // Sleep mode is an optional module capability, unlike mutex ownership and
++    // identity. Preserve a usable bus if an optional setup call is unsupported.
++    if(supports_sleep_mode && set_sleep_mode(handle, smbus_sleep_mode) != 0)
+     {
+-        global_smbus_access_handle = CreateMutexA(NULL, FALSE, GLOBAL_SMBUS_MUTEX_NAME);
++        LOG_WARNING("[PawnIO] Optional sleep mode setup unavailable; keeping module default");
+     }
+-
+-    using_handle[name]++;
++    initialized = true;
+ }
+ 
+ i2c_smbus_pawnio::~i2c_smbus_pawnio()
+@@ -198,10 +204,11 @@ s32 i2c_smbus_pawnio::i2c_smbus_xfer(u8 addr, char read_write, u8 command, int s
+     /*-----------------------------------------------------*\
+     | Lock SMBus mutex                                      |
+     \*-----------------------------------------------------*/
+-    if(global_smbus_access_handle != NULL)
+-    {
+-        WaitForSingleObject(global_smbus_access_handle, INFINITE);
+-    }
++    // No mutex, timeout or failed wait is never permission to touch the bus.
++    // During discovery the thread-local100ms budget opens a circuit after the
++    // first contention; ordinary output calls have their own100ms bound.
++    deferred_i2c::Access access(global_smbus_access_handle);
++    if(!access) return access.failure() == ERROR_TIMEOUT ? -ETIMEDOUT : -EIO;
+ 
+     /*-----------------------------------------------------*\
+     | Pack input data                                       |
+@@ -226,12 +233,12 @@ s32 i2c_smbus_pawnio::i2c_smbus_xfer(u8 addr, char read_write, u8 command, int s
+     /*-----------------------------------------------------*\
+     | Perform SMBus transfer                                |
+     \*-----------------------------------------------------*/
+-    status  = pawnio_execute(handle, "ioctl_smbus_xfer", in, in_size, out, out_size, &return_size);
++    status = access.invoke([&] { return pawnio_execute(handle, "ioctl_smbus_xfer", in, in_size, out, out_size, &return_size); });
+ 
+     /*-----------------------------------------------------*\
+     | Unpack output data                                    |
+     \*-----------------------------------------------------*/
+-    if(data != NULL)
++    if(status == 0 && data != NULL)
+     {
+         memcpy( data, &out[0], sizeof(i2c_smbus_data));
+     }
+@@ -239,10 +246,7 @@ s32 i2c_smbus_pawnio::i2c_smbus_xfer(u8 addr, char read_write, u8 command, int s
+     /*-----------------------------------------------------*\
+     | Unlock SMBus mutex                                    |
+     \*-----------------------------------------------------*/
+-    if(global_smbus_access_handle != NULL)
+-    {
+-        ReleaseMutex(global_smbus_access_handle);
+-    }
++    // Access releases exactly one successfully acquired ownership on return.
+ 
+     /*-----------------------------------------------------*\
+     | If the PawnIO driver returned an error, convert it to |
+@@ -368,6 +372,16 @@ HRESULT i2c_smbus_pawnio::start_pawnio(std::string filename, PHANDLE phandle)
+     return(S_OK);
+ }
+ 
++static bool register_pawnio_bus(HANDLE handle, const char* name, unsigned int index, bool supports_sleep_mode = true)
++{
++    std::unique_ptr<i2c_smbus_pawnio> bus;
++    try { bus = std::make_unique<i2c_smbus_pawnio>(handle, name, index, supports_sleep_mode); }
++    catch(...) { pawnio_close(handle); throw; }
++    if(!bus->ready()) return false;
++    DetectionManager::get()->RegisterI2CBus(bus.release());
++    return true;
++}
++
+ bool i2c_smbus_pawnio_detect()
+ {
+     ULONG dll_version;
+@@ -377,7 +391,6 @@ bool i2c_smbus_pawnio_detect()
+         return(false);
+     }
+ 
+-    i2c_smbus_interface *   bus;
+     HANDLE                  pawnio_handle;
+     bool                    bus_detected;
+ 
+@@ -390,27 +403,22 @@ bool i2c_smbus_pawnio_detect()
+     /*-----------------------------------------------------*\
+     | Try to load Intel (i801) SMBus driver                 |
+     \*-----------------------------------------------------*/
+-    if(i2c_smbus_pawnio::start_pawnio("SmbusI801.bin", &pawnio_handle) == S_OK)
++    if(!deferred_i2c::probe_blocked() && i2c_smbus_pawnio::start_pawnio("SmbusI801.bin", &pawnio_handle) == S_OK)
+     {
+-        bus_detected = true;
+-
+-        bus = new i2c_smbus_pawnio(pawnio_handle, "i801", 0);
+-        DetectionManager::get()->RegisterI2CBus(bus);
++        bus_detected |= register_pawnio_bus(pawnio_handle, "i801", 0);
+     }
+ 
+     /*-----------------------------------------------------*\
+     | Try to load AMD (PIIX4) SMBus driver - primary bus    |
+     \*-----------------------------------------------------*/
+-    if(i2c_smbus_pawnio::start_pawnio("SmbusPIIX4.bin", &pawnio_handle) == S_OK)
++    if(!deferred_i2c::probe_blocked() && i2c_smbus_pawnio::start_pawnio("SmbusPIIX4.bin", &pawnio_handle) == S_OK)
+     {
+         /*-------------------------------------------------*\
+         | Select port 0 before registering this interface   |
+         \*-------------------------------------------------*/
+         if(piix4_port_sel(pawnio_handle, 0) == 0)
+         {
+-            bus_detected = true;
+-            bus = new i2c_smbus_pawnio(pawnio_handle, "piix4_0", 0);
+-            DetectionManager::get()->RegisterI2CBus(bus);
++            bus_detected |= register_pawnio_bus(pawnio_handle, "piix4_0", 0);
+         }
+         else
+         {
+@@ -422,16 +430,14 @@ bool i2c_smbus_pawnio_detect()
+     /*-----------------------------------------------------*\
+     | Try to load AMD (PIIX4 SMBus driver - secondary bus   |
+     \*-----------------------------------------------------*/
+-    if(i2c_smbus_pawnio::start_pawnio("SmbusPIIX4.bin", &pawnio_handle) == S_OK)
++    if(!deferred_i2c::probe_blocked() && i2c_smbus_pawnio::start_pawnio("SmbusPIIX4.bin", &pawnio_handle) == S_OK)
+     {
+         /*-------------------------------------------------*\
+         | Select port 1 before registering this interface   |
+         \*-------------------------------------------------*/
+         if(piix4_port_sel(pawnio_handle, 1) == 0)
+         {
+-            bus_detected = true;
+-            bus = new i2c_smbus_pawnio(pawnio_handle, "piix4_1", 1);
+-            DetectionManager::get()->RegisterI2CBus(bus);
++            bus_detected |= register_pawnio_bus(pawnio_handle, "piix4_1", 1);
+         }
+         else
+         {
+@@ -443,38 +449,28 @@ bool i2c_smbus_pawnio_detect()
+     /*-----------------------------------------------------*\
+     | Try to load Nuvoton (NCT6793) SMBus driver            |
+     \*-----------------------------------------------------*/
+-    if(i2c_smbus_pawnio::start_pawnio("SmbusNCT6793.bin", &pawnio_handle) == S_OK)
++    if(!deferred_i2c::probe_blocked() && i2c_smbus_pawnio::start_pawnio("SmbusNCT6793.bin", &pawnio_handle) == S_OK)
+     {
+-        bus_detected = true;
+-
+-        bus = new i2c_smbus_pawnio(pawnio_handle, "NCT6793", 0);
+-        DetectionManager::get()->RegisterI2CBus(bus);
++        bus_detected |= register_pawnio_bus(pawnio_handle, "NCT6793", 0);
+     }
+ 
+     /*-----------------------------------------------------*\
+     | Try to load Intel Skylake IMC SMBus driver            |
+     \*-----------------------------------------------------*/
+-    if(i2c_smbus_pawnio::start_pawnio("SmbusIntelSkylakeIMC.bin", &pawnio_handle) == S_OK)
++    if(!deferred_i2c::probe_blocked() && i2c_smbus_pawnio::start_pawnio("SmbusIntelSkylakeIMC.bin", &pawnio_handle) == S_OK)
+     {
+-        bus_detected = true;
+-
+-        imc_index_sel(pawnio_handle, 0);
+-
+-        bus = new i2c_smbus_pawnio(pawnio_handle, "SkylakeIMC_0", 0);
+-        DetectionManager::get()->RegisterI2CBus(bus);
++        // SmbusIntelSkylakeIMC exports identity/index, but no sleep-mode ioctl.
++        if(imc_index_sel(pawnio_handle, 0) == 0) bus_detected |= register_pawnio_bus(pawnio_handle, "SkylakeIMC_0", 0, false);
++        else pawnio_close(pawnio_handle);
+     }
+ 
+     /*-----------------------------------------------------*\
+     | Try to load Intel Skylake IMC SMBus driver            |
+     \*-----------------------------------------------------*/
+-    if(i2c_smbus_pawnio::start_pawnio("SmbusIntelSkylakeIMC.bin", &pawnio_handle) == S_OK)
++    if(!deferred_i2c::probe_blocked() && i2c_smbus_pawnio::start_pawnio("SmbusIntelSkylakeIMC.bin", &pawnio_handle) == S_OK)
+     {
+-        bus_detected = true;
+-
+-        imc_index_sel(pawnio_handle, 1);
+-
+-        bus = new i2c_smbus_pawnio(pawnio_handle, "SkylakeIMC_1", 1);
+-        DetectionManager::get()->RegisterI2CBus(bus);
++        if(imc_index_sel(pawnio_handle, 1) == 0) bus_detected |= register_pawnio_bus(pawnio_handle, "SkylakeIMC_1", 1, false);
++        else pawnio_close(pawnio_handle);
+     }
+ 
+     return(bus_detected);
+diff --git a/i2c_smbus/Windows/i2c_smbus_pawnio.h b/i2c_smbus/Windows/i2c_smbus_pawnio.h
+index e9ddcffcab29af0fcdf436537c2750bfd9c87c49..03eba22a9ce41f20471fc68839c4be9774680eca 100644
+--- a/i2c_smbus/Windows/i2c_smbus_pawnio.h
++++ b/i2c_smbus/Windows/i2c_smbus_pawnio.h
+@@ -33,10 +33,11 @@ class i2c_smbus_pawnio : public i2c_smbus_interface
+ {
+ public:
+     static std::unordered_map<std::string, int> using_handle;
+-    i2c_smbus_pawnio(HANDLE handle, std::string name, unsigned int index);
++    i2c_smbus_pawnio(HANDLE handle, std::string name, unsigned int index, bool supports_sleep_mode = true);
+     ~i2c_smbus_pawnio();
+ 
+     static HRESULT start_pawnio(std::string filename, PHANDLE phandle);
++    bool ready() const { return initialized; }
+ 
+ private:
+     s32 pawnio_read(u8 addr, char read_write, u8 command, int size, i2c_smbus_data *data);
+@@ -44,7 +45,8 @@ private:
+     s32 i2c_smbus_xfer(u8 addr, char read_write, u8 command, int size, i2c_smbus_data* data);
+     s32 i2c_xfer(u8 addr, char read_write, int* size, u8* data);
+ 
+-    HANDLE      global_smbus_access_handle;
++    HANDLE      global_smbus_access_handle = nullptr;
++    bool        initialized = false;
+     std::string name;
+     HANDLE      handle;
+ };
+diff --git a/startup/ParentPipe.h b/startup/ParentPipe.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b22a43135822d0730b9fe0e3bc995929c71ee06
+--- /dev/null
++++ b/startup/ParentPipe.h
+@@ -0,0 +1,24 @@
++// Optional private owner-lifetime pipe; no public shutdown endpoint.
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#if defined(_WIN32) && defined(PRISMESTRA_PC_BACKEND)
++#include <windows.h>
++
++inline HANDLE PrismestraParentPipe()
++{
++    WCHAR enabled[2] = {};
++    if(GetEnvironmentVariableW(L"PRISMESTRA_PARENT_PIPE", enabled, 2) != 1 || enabled[0] != L'1')
++        return NULL;
++    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
++    return input && input != INVALID_HANDLE_VALUE && GetFileType(input) == FILE_TYPE_PIPE ? input : NULL;
++}
++
++inline bool PrismestraParentPipeClosed(HANDLE input)
++{
++    DWORD available = 0;
++    // The parent never writes data. EOF is detected without a blocking reader
++    // thread; an unusable inherited pipe also ends this opted-in session.
++    return !PeekNamedPipe(input, NULL, 0, NULL, &available, NULL);
++}
++#endif
+diff --git a/startup/PcTimerResolution.h b/startup/PcTimerResolution.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d6fdb38a78608a35ecdeffb89395a8192f399cf
+--- /dev/null
++++ b/startup/PcTimerResolution.h
+@@ -0,0 +1,51 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Preserve short protocol delays without the donor's repeating 0.5ms worker.
++#pragma once
++#include <windows.h>
++#include <timeapi.h>
++
++class PcTimerResolution
++{
++    bool active = false;
++    bool restore_policy = false;
++    PROCESS_POWER_THROTTLING_STATE previous = {};
++public:
++    DWORD error = ERROR_SUCCESS;
++    DWORD policy_error = ERROR_SUCCESS;
++    explicit PcTimerResolution(bool hardware_active)
++    {
++        if(!hardware_active) return;
++        // Older Windows uses a GLOBAL timer request. Do not opt into that.
++        using VersionFunction = LONG (WINAPI*)(OSVERSIONINFOW*);
++        auto version_fn = reinterpret_cast<VersionFunction>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
++        OSVERSIONINFOW version = {};
++        version.dwOSVersionInfoSize = sizeof(version);
++        if(!version_fn || version_fn(&version) != 0 || version.dwMajorVersion < 10 ||
++           (version.dwMajorVersion == 10 && version.dwBuildNumber < 19041))
++        {
++            error = ERROR_OLD_WIN_VERSION;
++            return;
++        }
++        previous.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
++        if(GetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &previous, sizeof(previous)))
++        {
++            auto policy = previous;
++            policy.ControlMask |= PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
++            policy.StateMask &= ~PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
++            restore_policy = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &policy, sizeof(policy)) != 0;
++            if(!restore_policy) policy_error = GetLastError();
++        }
++        else policy_error = GetLastError();
++        const MMRESULT result = timeBeginPeriod(1);
++        active = result == TIMERR_NOERROR;
++        if(!active) error = result;
++    }
++    ~PcTimerResolution()
++    {
++        if(active) timeEndPeriod(1);
++        if(restore_policy) SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &previous, sizeof(previous));
++    }
++    bool enabled() const { return active; }
++    PcTimerResolution(const PcTimerResolution&) = delete;
++    PcTimerResolution& operator=(const PcTimerResolution&) = delete;
++};
+diff --git a/startup/main_Windows.cpp b/startup/main_Windows.cpp
+index dd6228967b72f9c818395e5a0fae76c8416d9604..6b0d2d49ed5b81d5fb37c80c8250d1d1e70c3c69 100644
+--- a/startup/main_Windows.cpp
++++ b/startup/main_Windows.cpp
+@@ -10,6 +10,7 @@
+ \*---------------------------------------------------------*/
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <condition_variable>
+ #include <mutex>
+ #include <stdio.h>
+@@ -24,6 +25,10 @@
+ #include "DetectionManager.h"
+ #include "ResourceManager.h"
+ #include "StringUtils.h"
++#include "ParentPipe.h"
++#ifdef PRISMESTRA_PC_BACKEND
++#include "PcTimerResolution.h"
++#endif
+ 
+ using namespace std::chrono_literals;
+ 
+@@ -39,7 +44,7 @@ static SERVICE_STATUS_HANDLE service_status_handle;
+ static SERVICE_STATUS        service_status;
+ 
+ static bool                  started_as_service;
+-static volatile bool         service_stop_requested;
++static std::atomic<bool>     service_stop_requested{false};
+ static std::mutex            service_stop_mutex;
+ static std::condition_variable service_stop_cv;
+ static bool                  have_console;
+@@ -448,7 +453,12 @@ int main(int argc, char* argv[])
+     /*-----------------------------------------------------*\
+     | Attach console output                                 |
+     \*-----------------------------------------------------*/
++#ifdef PRISMESTRA_PC_BACKEND
++    // Attaching/reopening CONIN$ would replace the private lifetime pipe.
++    if(!PrismestraParentPipe() && AttachConsole(ATTACH_PARENT_PROCESS))
++#else
+     if(AttachConsole(ATTACH_PARENT_PROCESS))
++#endif
+     {
+         /*-------------------------------------------------*\
+         | We are running under some terminal context;       |
+@@ -522,14 +532,31 @@ void InitializeTimerResolutionThreadFunction()
+ static void WaitWhileServerOnline(NetworkServer* srv)
+ {
+     std::unique_lock<std::mutex> lock(service_stop_mutex);
++#ifdef PRISMESTRA_PC_BACKEND
++    HANDLE parent_pipe = PrismestraParentPipe();
++#endif
+     while(srv->GetOnline())
+     {
+-        if(service_stop_requested)
++        bool stop_requested = service_stop_requested;
++#ifdef PRISMESTRA_PC_BACKEND
++        stop_requested = stop_requested || (parent_pipe && PrismestraParentPipeClosed(parent_pipe));
++#endif
++        if(stop_requested)
+         {
++            LOG_INFO("Headless server stop requested; draining owned resources");
++#ifdef PRISMESTRA_PC_BACKEND
++            // Cancel before ServiceShutdown waits for discovery. Do not rely on
++            // Cleanup, which is reached only after that wait has completed.
++            DetectionManager::get()->AbortDetection();
++#endif
+             srv->StopServer();
+             break;
+         }
++#ifdef PRISMESTRA_PC_BACKEND
++        service_stop_cv.wait_for(lock, parent_pipe ? 50ms : 1000ms);
++#else
+         service_stop_cv.wait_for(lock, 1s);
++#endif
+     };
+ }
+ 
+@@ -581,9 +608,17 @@ static int common_main(int argc, char* argv[])
+     /*-----------------------------------------------------*\
+     | Start timer resolution correction thread              |
+     \*-----------------------------------------------------*/
++#ifdef PRISMESTRA_PC_BACKEND
++    PcTimerResolution protocol_timing(!(ret_flags & RET_FLAG_NO_DETECT));
++    if(protocol_timing.error)
++        LOG_WARNING("PC protocol timer precision unavailable: %lu", protocol_timing.error);
++    if(protocol_timing.policy_error)
++        LOG_WARNING("PC timer throttling policy unavailable: %lu", protocol_timing.policy_error);
++#else
+     std::thread * InitializeTimerResolutionThread;
+     InitializeTimerResolutionThread = new std::thread(InitializeTimerResolutionThreadFunction);
+     InitializeTimerResolutionThread->detach();
++#endif
+ 
+     /*-----------------------------------------------------*\
+     | Initialize ResourceManager                            |
+diff --git a/startup/startup.cpp b/startup/startup.cpp
+index 522eda75e911b103987e79f16d1fe56104c45a6f..67f2775fe93e497e1ddd26eff90dc38f4e278da0 100644
+--- a/startup/startup.cpp
++++ b/startup/startup.cpp
+@@ -14,6 +14,7 @@
+ #include "ResourceManager.h"
+ #include "NetworkServer.h"
+ #include "startup.h"
++#include "ParentPipe.h"
+ 
+ #ifdef __linux__
+ #include <csignal>
+@@ -62,6 +63,13 @@ int startup(int /*argc*/, char* /*argv*/[], unsigned int ret_flags)
+         return EXIT_FAILURE;
+     }
+ 
++#if defined(_WIN32) && defined(PRISMESTRA_PC_BACKEND)
++    // common_main owns the cooperative stop and ordered cleanup path. Keep the
++    // original blocking startup for standalone/non-opted-in invocations.
++    if(PrismestraParentPipe() && !(ret_flags & RET_FLAG_START_GUI))
++        return EXIT_SUCCESS;
++#endif
++
+     /*-----------------------------------------------------*\
+     | Block forever — the SDK server runs on a background   |
+     | thread, so we'd otherwise return immediately. Sleep   |
+diff --git a/tests/DeferredI2CPolicyTest.cpp b/tests/DeferredI2CPolicyTest.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..d1c224b9327a79f42791753dca4a564d53de3497
+--- /dev/null
++++ b/tests/DeferredI2CPolicyTest.cpp
+@@ -0,0 +1,138 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Software-only Windows test: every mutex has a private fixture name. No
++// production mutex, PawnIO module/driver, device enumeration or IOCTL is used.
++#include "../DeferredI2C.h"
++#ifdef _WINDOWS_
++#error Portable discovery phase must not import windows.h into controllers.
++#endif
++#include <algorithm>
++static_assert(std::min(1, 2) == 1, "Portable phase polluted standard min");
++#include "../DeferredI2CAccess.h"
++#include <cassert>
++#include <iostream>
++#include <string>
++#include <thread>
++
++using namespace deferred_i2c;
++
++struct Holder
++{
++    HANDLE mutex;
++    HANDLE ready = CreateEventA(nullptr, TRUE, FALSE, nullptr);
++    HANDLE release = CreateEventA(nullptr, TRUE, FALSE, nullptr);
++    std::thread thread;
++    explicit Holder(HANDLE target) : mutex(target), thread([this] {
++        const DWORD result = WaitForSingleObject(mutex, 1000);
++        assert(result == WAIT_OBJECT_0 || result == WAIT_ABANDONED);
++        SetEvent(ready);
++        assert(WaitForSingleObject(release, 3000) == WAIT_OBJECT_0);
++        assert(ReleaseMutex(mutex));
++    }) { assert(WaitForSingleObject(ready, 1000) == WAIT_OBJECT_0); }
++    ~Holder() { SetEvent(release); thread.join(); CloseHandle(ready); CloseHandle(release); }
++};
++
++int main()
++{
++    const std::string name = "Local\\Prismestra-Deferred-I2C-Fixture-" + std::to_string(GetCurrentProcessId());
++    HANDLE mutex = CreateMutexA(nullptr, FALSE, name.c_str());
++    assert(mutex);
++    unsigned io_calls = 0, buses = 0, hid_passes = 0;
++    Phase phase;
++    const auto now = Clock::now();
++    {
++        Holder holder(mutex);
++        const auto began = Clock::now();
++        assert(!admit(phase, name.c_str(), now));
++        assert(Clock::now() - began < std::chrono::seconds(1));
++        assert(phase.stage == Stage::Deferred && buses == 0 && io_calls == 0);
++        ++hid_passes; // Busy initial I2C admission does not postpone HID.
++        assert(!phase.due(now + std::chrono::milliseconds(999)));
++        assert(phase.due(now + std::chrono::seconds(1)));
++        assert(!admit(phase, name.c_str(), now + std::chrono::seconds(1)));
++        assert(phase.retry_at == now + std::chrono::seconds(3));
++        Access denied(mutex);
++        assert(!denied && denied.failure() == ERROR_TIMEOUT);
++        assert(FAILED(denied.invoke([&]() -> HRESULT { ++io_calls; return S_OK; })));
++        assert(io_calls == 0);
++    }
++    assert(admit(phase, name.c_str(), now + std::chrono::seconds(3)));
++    ++buses;
++    {
++        ProbeBudget budget;
++        Access owned(mutex);
++        assert(owned && SUCCEEDED(owned.invoke([&]() -> HRESULT { ++io_calls; return S_OK; })));
++        phase.finish(budget.blocked());
++    }
++    assert(phase.stage == Stage::Complete && buses == 1 && hid_passes == 1 && io_calls == 1);
++    assert(!admit(phase, name.c_str(), now + std::chrono::hours(10)));
++    assert(!phase.due(now + std::chrono::hours(10)));
++
++    // Full manual rescan explicitly clears old objects before resetting phase.
++    buses = 0;
++    phase.reset();
++    assert(admit(phase, name.c_str(), now));
++    ++buses;
++    {
++        // Preflight released ownership: a different thread can immediately own
++        // the mutex. Mid-pass contention becomes Partial, never a full retry.
++        ProbeBudget budget;
++        {
++            Holder holder(mutex);
++            Access timed_out(mutex);
++            assert(!timed_out && budget.blocked());
++            assert(FAILED(timed_out.invoke([&]() -> HRESULT { ++io_calls; return S_OK; })));
++        }
++        const auto began = Clock::now();
++        Access circuit_open(mutex);
++        assert(!circuit_open && Clock::now() - began < std::chrono::milliseconds(50));
++        assert(FAILED(circuit_open.invoke([&]() -> HRESULT { ++io_calls; return S_OK; })));
++        phase.finish(budget.blocked());
++    }
++    assert(phase.stage == Stage::Partial && buses == 1 && io_calls == 1);
++    assert(!phase.due(now + std::chrono::hours(10)));
++    assert(!admit(phase, name.c_str(), now + std::chrono::hours(10)));
++    { Access output(mutex); assert(SUCCEEDED(output.invoke([&]() -> HRESULT { ++io_calls; return S_OK; }))); }
++    assert(io_calls == 2); // Probe circuit does not leak into output calls.
++    {
++        Access invalid(static_cast<HANDLE>(nullptr));
++        assert(!invalid && FAILED(invalid.invoke([&]() -> HRESULT { ++io_calls; return S_OK; })));
++    }
++    assert(io_calls == 2);
++    {
++        // A valid mutex handle lacking SYNCHRONIZE exercises WAIT_FAILED
++        // without triggering Windows' strict invalid-handle process policy.
++        HANDLE restricted = OpenMutexA(MUTEX_MODIFY_STATE, FALSE, name.c_str());
++        assert(restricted);
++        Access failed_wait(restricted);
++        assert(!failed_wait && failed_wait.failure() == ERROR_ACCESS_DENIED);
++        assert(FAILED(failed_wait.invoke([&]() -> HRESULT { ++io_calls; return S_OK; })));
++        CloseHandle(restricted);
++    }
++    assert(io_calls == 2);
++    {
++        std::atomic<bool> cancel{true};
++        ProbeBudget budget(&cancel);
++        Access cancelled(mutex);
++        assert(!cancelled && budget.blocked());
++        assert(FAILED(cancelled.invoke([&]() -> HRESULT { ++io_calls; return S_OK; })));
++    }
++    assert(io_calls == 2);
++    std::thread abandoned([&] { assert(WaitForSingleObject(mutex, 1000) == WAIT_OBJECT_0); });
++    abandoned.join(); // Leaves the private fixture mutex abandoned, not closed.
++    { Access recovered(mutex); assert(recovered); assert(SUCCEEDED(recovered.invoke([&]() -> HRESULT { ++io_calls; return S_OK; }))); }
++    assert(io_calls == 3);
++    { Holder other_owner(mutex); } // Successful guard released its ownership.
++    phase.reset();
++    auto time = now;
++    for(unsigned delay : {1u, 2u, 5u, 15u, 30u, 60u, 60u})
++    {
++        phase.defer(time);
++        assert(phase.retry_at == time + std::chrono::seconds(delay));
++        time = phase.retry_at;
++    }
++    phase.stop();
++    assert(!phase.due(time + std::chrono::hours(10)));
++    assert(!admit(phase, name.c_str(), time));
++    CloseHandle(mutex);
++    std::cout << "PASS: private mutex busy/released/abandoned; bounded admission, HID progress, no duplicate scan, partial terminal, probe circuit, independent output, cancellation, no IO on failed acquisition\n";
++}

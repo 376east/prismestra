@@ -36,10 +36,17 @@ use windows_sys::Win32::{
     },
 };
 const TBM_GETPOS: u32 = WM_USER;
+mod brand_icon;
 mod connections;
+mod modern;
+mod native_forms;
 mod resident;
+pub(crate) use resident::shutdown_installed;
 mod runtime_client;
+mod web_shell;
+const MODERN_RETURN: i32 = 109;
 mod sources;
+mod startup_ack;
 use runtime_client::Client;
 const CLASS: &str = "PrismestraWindow";
 const NAV_SCENE: i32 = 101;
@@ -113,6 +120,7 @@ fn wall() -> i64 {
 #[derive(Default)]
 struct Options {
     native_lighting: Option<PathBuf>,
+    start_connected: bool,
     project: Option<PathBuf>,
     setup: Option<PathBuf>,
     scene: Option<PathBuf>,
@@ -124,12 +132,24 @@ struct Options {
     allow_sensor_discovery: bool,
     source_discovery_page: bool,
     selftest: bool,
+    classic_editor: bool,
 }
 fn options(args: Vec<OsString>) -> Result<Options, String> {
     let mut o = Options::default();
     let mut it = args.into_iter();
     while let Some(key) = it.next() {
         let key = key.to_str().ok_or("Invalid option encoding")?;
+        if key == "--start-connected" {
+            if o.start_connected {
+                return Err("Duplicate start-connected option".into());
+            }
+            o.start_connected = true;
+            continue;
+        }
+        if key == "--classic-editor" {
+            o.classic_editor = true;
+            continue;
+        }
         if key == "--selftest" {
             o.selftest = true;
             continue;
@@ -202,16 +222,17 @@ fn options(args: Vec<OsString>) -> Result<Options, String> {
                 })
             }
             _ => {
-                return Err(format!(
-                    "Unknown option{key}; no hardware mode exists in this preview UI"
-                ));
+                return Err(format!("Unknown option{key}"));
             }
         }
     }
     if o.project.is_some() && (o.setup.is_some() || o.scene.is_some()) {
         return Err("Useproject ORsetup+scene".into());
     }
-    if o.native_lighting.is_some() && (o.selftest || o.snapshot.is_some()) {
+    if o.start_connected && (o.project.is_none() || o.native_lighting.is_some()) {
+        return Err("Use --start-connected with --project and saved local connections".into());
+    }
+    if (o.native_lighting.is_some() || o.start_connected) && (o.selftest || o.snapshot.is_some()) {
         return Err("Native lighting is forbidden in snapshots and selftests".into());
     }
     if o.allow_sensor_discovery && (o.selftest || o.snapshot.is_some()) {
@@ -267,7 +288,7 @@ fn rates(current: u32) -> Vec<u32> {
     }
     values
 }
-fn default_scene() -> Scene {
+pub(crate) fn default_scene() -> Scene {
     Scene {
         effect: Effect::NoiseMap,
         colors: vec![0x120100, 0x480500, 0x961801, 0xe64005, 0xff7814],
@@ -370,7 +391,10 @@ fn project(o: &Options) -> Result<(Project, Option<Document>), String> {
         door: vec![],
     };
     for d in &setup.devices {
-        if d.driver == crate::devices::Driver::DoorBle {
+        if matches!(
+            d.driver,
+            crate::devices::Driver::DoorBle | crate::devices::Driver::SurplifeE1Pixels
+        ) {
             groups.door.push(d.id.clone());
         } else {
             groups.pc.push(d.id.clone());
@@ -475,6 +499,7 @@ impl Drop for Bitmap {
     }
 }
 struct App {
+    web_mode: bool,
     connections: connections::Editor,
     native_lighting: Option<crate::app::lighting_outputs::Local>,
     sources: sources::Editor,
@@ -607,6 +632,13 @@ impl App {
         Ok(())
     }
     fn build(&mut self, parent: HWND) -> Result<(), String> {
+        self.control(
+            parent,
+            MODERN_RETURN,
+            "BUTTON",
+            "Новый интерфейс",
+            BS_PUSHBUTTON as u32,
+        )?;
         for (id, text) in [
             (NAV_SCENE, "Сцена"),
             (NAV_DEVICES, "Устройства"),
@@ -909,6 +941,7 @@ impl App {
         ] {
             self.pos(id, 16, y, 132, 32);
         }
+        self.pos(MODERN_RETURN, 16, 72, 156, 32);
         self.pos(OPEN, 16, h - 132, 132, 32);
         self.pos(SAVE, 16, h - 92, 132, 32);
         self.pos(EXPORT, 16, h - 172, 132, 32);
@@ -957,6 +990,14 @@ impl App {
         self.show_page();
     }
     fn show_page(&self) {
+        if self.web_mode {
+            for hwnd in self.widgets.values() {
+                unsafe {
+                    ShowWindow(*hwnd, SW_HIDE);
+                }
+            }
+            return;
+        }
         for id in [
             NAV_SCENE,
             NAV_DEVICES,
@@ -1776,7 +1817,7 @@ impl App {
                         |s| {
                             s.error.map_or_else(
                                 || format!("RGB: передано кадров {}", s.submitted),
-                                |e| format!("Ошибка RGB: {e}"),
+                                |e| format!("Ошибка RGB (передано кадров {}): {e}", s.submitted),
                             )
                         },
                     )
@@ -2134,7 +2175,30 @@ fn parse_time(s: &str) -> Result<u16, String> {
     }
     Ok(h * 60 + m)
 }
+// A receipt for rendering the final Stop view into an explicit print target.
+// Reset on every completed Stop so a previous editor/session cannot satisfy it.
+#[derive(Clone, Copy, Debug)]
+struct FinalStopRender {
+    epoch: u64,
+    hwnd: HWND,
+    invalidated: bool,
+    prints: u64,
+}
+impl Default for FinalStopRender {
+    fn default() -> Self {
+        Self {
+            epoch: 0,
+            hwnd: null_mut(),
+            invalidated: false,
+            prints: 0,
+        }
+    }
+}
 struct State {
+    icon: brand_icon::Icon,
+    modern_enabled: bool,
+    webview: RefCell<Option<web_shell::WebShell>>,
+    modern_session: RefCell<Option<modern::Session>>,
     app: RefCell<Option<App>>,
     snapshot: bool,
     resident: Cell<bool>,
@@ -2142,7 +2206,9 @@ struct State {
     shell_window: Cell<HWND>,
     session_action: Cell<resident::Action>,
     tray_enabled: Cell<bool>,
+    tray_registration: Cell<resident::TrayRegistration>,
     pending_power: Cell<resident::PowerIntent>,
+    final_stop_render: Cell<FinalStopRender>,
 }
 fn dialog(hwnd: HWND, save: bool) -> Result<Option<PathBuf>, String> {
     profile_dialog(hwnd, save, false)
@@ -2447,6 +2513,14 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     }
     let state = unsafe { &*raw };
     if msg == WM_NCDESTROY {
+        let receipt = state.final_stop_render.get();
+        if receipt.hwnd == hwnd {
+            // HWND values can be reused; destruction revokes this window's receipt.
+            state.final_stop_render.set(FinalStopRender {
+                epoch: receipt.epoch,
+                ..FinalStopRender::default()
+            });
+        }
         if state.editor_window.get() == hwnd {
             state.editor_window.set(null_mut());
         }
@@ -2465,6 +2539,7 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
         return 1;
     }
     if msg == WM_DESTROY {
+        modern::close(state);
         if let Ok(mut slot) = state.app.try_borrow_mut()
             && let Some(app) = slot.as_mut()
         {
@@ -2488,6 +2563,7 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
             if state.session_action.get() == resident::Action::None
                 && let Err(error) = resident::close_editor(state)
             {
+                modern::close_failed(state, &error);
                 resident::report(state, error);
             }
             return 0;
@@ -2575,6 +2651,7 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
         let dc = unsafe { BeginPaint(hwnd, &mut ps) };
         if let Ok(mut slot) = state.app.try_borrow_mut()
             && let Some(a) = slot.as_mut()
+            && !a.web_mode
             && let Err(e) = a.render(dc)
         {
             a.status = e;
@@ -2588,7 +2665,41 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
         if let Ok(slot) = state.app.try_borrow()
             && let Some(a) = slot.as_ref()
         {
-            let _ = a.painter.paint(w as HDC, a.width, a.height, &a.view());
+            let receipt = state.final_stop_render.get();
+            let rendered = a
+                .painter
+                .paint(w as HDC, a.width, a.height, &a.view())
+                .is_ok();
+            if rendered
+                && w != 0
+                && a.width > 0
+                && a.height > 0
+                && !a.web_mode
+                && receipt.epoch != 0
+                && receipt.hwnd == hwnd
+                && receipt.invalidated
+                && state.session_action.get() == resident::Action::None
+                && !a.shutdown.active()
+                && a.status.starts_with("Работа остановлена.")
+            {
+                let mut current = state.final_stop_render.get();
+                if current.epoch == receipt.epoch && current.hwnd == hwnd {
+                    current.prints = current.prints.wrapping_add(1).max(1);
+                    state.final_stop_render.set(current);
+                }
+            }
+        }
+        return 0;
+    }
+    if msg == WM_SIZE {
+        modern::resize(state, (l & 0xffff) as i32, ((l >> 16) & 0xffff) as i32);
+    }
+    if msg == WM_TIMER {
+        modern::maintain(state);
+    }
+    if msg == WM_COMMAND && (w & 0xffff) as i32 == MODERN_RETURN {
+        if let Err(error) = modern::return_to_editor(state) {
+            resident::report(state, error);
         }
         return 0;
     }
@@ -2727,8 +2838,16 @@ impl Drop for Window {
 }
 pub fn run(args: Vec<OsString>) -> Result<(), String> {
     let diagnostic = args.iter().any(|a| a == "--snapshot" || a == "--selftest");
+    let error_dir = args
+        .windows(2)
+        .find(|pair| pair[0] == "--state-dir")
+        .map(|pair| PathBuf::from(&pair[1]));
     let result = run_inner(args);
     if !diagnostic && let Err(error) = &result {
+        startup_ack::failed(error);
+        if let Some(dir) = error_dir {
+            let _ = std::fs::write(dir.join("startup-error.txt"), error);
+        }
         let message: String = error.chars().take(1000).collect();
         unsafe {
             MessageBoxW(
@@ -2770,6 +2889,9 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         state_dir
     };
     std::fs::create_dir_all(&state_dir).map_err(|e| e.to_string())?;
+    if o.start_connected {
+        o.native_lighting = Some(state_dir.join("lighting-local.json"));
+    }
     if o.selftest && o.snapshot.is_none() {
         o.snapshot = Some(state_dir.join("diagnostics/selftest.png"));
     }
@@ -2810,6 +2932,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         runtime.enable_autonomous_rgb()?;
     }
     if let Some(local) = &native_lighting {
+        runtime.configure_managed_backend(&state_dir, local)?;
         local.attach_missing(&mut runtime, &asset_root)?;
     } else {
         super::stand::attach_missing(&mut runtime, &asset_root, &feed)?;
@@ -2824,6 +2947,10 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         return Err(last("Initialize native controls"));
     }
     let state = Box::new(State {
+        icon: brand_icon::Icon::new()?,
+        modern_enabled: !o.classic_editor && resident_mode,
+        webview: RefCell::new(None),
+        modern_session: RefCell::new(None),
         app: RefCell::new(None),
         snapshot: o.snapshot.is_some(),
         resident: Cell::new(resident_mode),
@@ -2831,7 +2958,9 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         shell_window: Cell::new(null_mut()),
         session_action: Cell::new(resident::Action::None),
         tray_enabled: Cell::new(false),
+        tray_registration: Cell::new(resident::TrayRegistration::default()),
         pending_power: Cell::new(resident::PowerIntent::default()),
+        final_stop_render: Cell::new(FinalStopRender::default()),
     });
     let instance = unsafe { GetModuleHandleW(null()) };
     let class = wide(CLASS);
@@ -2839,6 +2968,8 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         lpfnWndProc: Some(proc),
         hInstance: instance,
+        hIcon: state.icon.handle(),
+        hIconSm: state.icon.handle(),
         hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
         hbrBackground: unsafe { GetStockObject(WHITE_BRUSH) } as HBRUSH,
         lpszClassName: class.as_ptr(),
@@ -2892,6 +3023,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     state.editor_window.set(raw);
     let window = Window(state.editor_window.clone());
     let mut app = App {
+        web_mode: false,
         connections: connections::Editor::new(
             o.native_lighting
                 .clone()
@@ -2945,7 +3077,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
             app.open_connections()?;
         }
 
-        // Merely grant capabilities here; neither metadata nor readers run at load.
+        // Preview grants capabilities only; connected startup explicitly starts saved routes.
         let native_sources = native_sources_allowed(o.snapshot.is_some(), o.selftest);
         app.sources.native_allowed = native_sources;
         app.sources.scan_factory = (native_sources || o.allow_sensor_discovery)
@@ -2957,6 +3089,9 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         }
         if o.source_discovery_page {
             app.select_source_discovery();
+        }
+        if o.start_connected && !app.source_scope_inputs()?.1.is_empty() {
+            app.start_bound_sources()?;
         }
         Ok(())
     });
@@ -3130,12 +3265,30 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         drop(window);
         return Ok(());
     }
-    if unsafe { SetTimer(raw, 1, 16, None) } == 0 {
-        return Err(last("Start preview refresh"));
+    if crate::app::installed::session() == Some(crate::app::installed::Session::Autostart)
+        && let Err(error) = resident::close_editor(&state)
+    {
+        resident::report(&state, error);
     }
-    unsafe {
-        ShowWindow(raw, SW_SHOWNORMAL);
-        UpdateWindow(raw);
+    if !state.editor_window.get().is_null() {
+        // WebView2 initializes in a nested message pump before ShowWindow.
+        if unsafe { SetTimer(raw, 1, 16, None) } == 0 {
+            return Err(last("Start preview refresh"));
+        }
+        if let Err(error) = modern::open(&state)
+            && let Some(app) = state.app.borrow_mut().as_mut()
+        {
+            app.web_mode = false;
+            app.status = format!("Новый интерфейс недоступен: {error}");
+            app.show_page();
+        }
+        unsafe {
+            ShowWindow(raw, SW_SHOWNORMAL);
+            UpdateWindow(raw);
+        }
+    }
+    if !o.selftest {
+        startup_ack::ready();
     }
     let mut msg = MSG::default();
     loop {
@@ -3862,6 +4015,27 @@ fn native_device_setup(hwnd: HWND, state: &State) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn connected_startup_requires_a_profile_and_excludes_diagnostics_and_legacy_mode() {
+        assert!(!options(vec![]).unwrap().start_connected);
+        assert!(options(vec!["--start-connected".into()]).is_err());
+        let args = vec![
+            "--start-connected".into(),
+            "--project".into(),
+            "profile.json".into(),
+        ];
+        assert!(options(args.clone()).unwrap().start_connected);
+        for tail in [
+            vec!["--selftest"],
+            vec!["--snapshot", "screen.png"],
+            vec!["--native-lighting", "local.json"],
+            vec!["--start-connected"],
+        ] {
+            let mut rejected = args.clone();
+            rejected.extend(tail.into_iter().map(OsString::from));
+            assert!(options(rejected).is_err());
+        }
+    }
     #[test]
     fn native_lighting_requires_explicit_private_file_and_cannot_run_in_capture_tests() {
         for flag in ["--allow-nvidia-discovery", "--allow-sensor-discovery"] {

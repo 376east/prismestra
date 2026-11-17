@@ -27,9 +27,77 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check release packaging boundaries
         run: python scripts/test_package_release.py
+      - name: Check installer packaging boundaries
+        run: python scripts/test_package_installer.py
+      - name: Check portable launchers without hardware
+        run: python scripts/test_portable_launcher.py
+      - name: Check local backend configuration without hardware
+        run: python scripts/test_backend_setup.py
+      - name: Check helper clock contract without hardware
+        run: python scripts/test_helper_clock.py
+      - name: Check component inventory gates without executing hardware code
+        run: python scripts/components/test_verify_openrgb_component.py
+      - name: Check component packaging without executing binaries
+        run: python scripts/components/test_package_openrgb_component.py
+      - name: Check embedded editor commands
+        run: |
+          node --check src/ui/windows/web/app.js
+          node tests/native_ui_ipc.cjs
       - name: Check all targets
         run: cargo check --locked --all-targets
       - name: Test without physical devices
         run: cargo test --locked -- --test-threads=1
       - name: Check Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+
+  installer:
+    name: Isolated installer lifecycle
+    if: github.event_name == 'push' && contains(github.event.head_commit.message, 'Package offline Windows setup')
+    runs-on: windows-latest
+    timeout-minutes: 15
+    # GitHub requires push access to read an unpublished draft release.
+    # This job runs only on trusted pushes, never pull-request code.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Download unpublished lifecycle fixtures
+        id: fixtures
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v0.1.0-preview.5 --repo $env:GITHUB_REPOSITORY --pattern installer-lifecycle-inputs.zip --dir fixture
+          if ($LASTEXITCODE) { throw 'Candidate lifecycle fixtures unavailable' }
+          gh release download v0.1.0-preview.5 --repo $env:GITHUB_REPOSITORY --pattern Prismestra-Setup-0.1.0.5-x64.exe --dir fixture
+          if ($LASTEXITCODE) { throw 'Candidate offline setup unavailable' }
+          Expand-Archive -LiteralPath fixture/installer-lifecycle-inputs.zip -DestinationPath fixture/inputs
+      - name: Exercise the full offline installer
+        shell: pwsh
+        run: |
+          $metadata = Get-Content fixture/inputs/test.json -Raw | ConvertFrom-Json
+          ./scripts/installer/test_offline_setup.ps1 -Installer fixture/Prismestra-Setup-0.1.0.5-x64.exe -Sha256 $metadata.production_sha256 -ReportDirectory offline-setup-result -DisposableRunner
+      - name: Exercise installation, repair, upgrade and uninstall
+        if: always() && steps.fixtures.outcome == 'success'
+        shell: pwsh
+        run: |
+          $metadata = Get-Content fixture/inputs/test.json -Raw | ConvertFrom-Json
+          ./scripts/installer/test_lifecycle.ps1 -Namespace $metadata.namespace -FirstBuild fixture/inputs/first -UpgradeBuild fixture/inputs/upgrade -ReportDirectory lifecycle-result -ElevatedFilesOnly
+      - name: Exercise a fresh standard Windows account
+        if: always() && steps.fixtures.outcome == 'success'
+        shell: pwsh
+        run: |
+          $metadata = Get-Content fixture/inputs/test.json -Raw | ConvertFrom-Json
+          ./scripts/installer/test_standard_user.ps1 -Namespace $metadata.namespace -FirstBuild fixture/inputs/first -ReportDirectory standard-user-result -DisposableRunner
+      - name: Retain lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: installer-lifecycle-evidence
+          path: |
+            offline-setup-result/
+            lifecycle-result/
+            standard-user-result/
+          retention-days: 14

@@ -2,12 +2,15 @@
 // Explicitly invoked Windows backend. Construction/import alone performs no WinRT/device calls.
 use super::ble::{self, Backend, Control, Event, Link};
 use std::{
+    future::{Future, IntoFuture},
     marker::PhantomData,
     rc::Rc,
     sync::{
-        Arc,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    task::{Context, Poll, Wake, Waker},
+    time::Duration,
 };
 use windows::{
     Devices::Bluetooth::{
@@ -17,12 +20,13 @@ use windows::{
         },
         BluetoothCacheMode, BluetoothConnectionStatus, BluetoothLEDevice,
         GenericAttributeProfile::{
-            GattCharacteristic, GattCharacteristicProperties, GattCommunicationStatus,
-            GattDeviceService, GattSession, GattWriteOption,
+            GattCharacteristic, GattCharacteristicProperties,
+            GattClientCharacteristicConfigurationDescriptorValue, GattCommunicationStatus,
+            GattDeviceService, GattSession, GattValueChangedEventArgs, GattWriteOption,
         },
     },
     Foundation::TypedEventHandler,
-    Storage::Streams::DataWriter,
+    Storage::Streams::{DataReader, DataWriter},
     Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
     core::GUID,
 };
@@ -34,30 +38,91 @@ fn uuid(short: u16) -> GUID {
     GUID::from_u128((short as u128) << 96 | 0x00001000800000805f9b34fb)
 }
 
-// Macro preserves each operation's concrete projected type without requiring windows-future publicly.
+fn receive_pixel_capacity(
+    armed: &AtomicBool,
+    received: &Mutex<Option<Result<usize, String>>>,
+    read: impl FnOnce() -> Result<Option<usize>, String>,
+) {
+    if !armed.load(Ordering::Acquire) {
+        return;
+    }
+    let result = match read() {
+        Ok(None) => return,
+        Ok(Some(points)) => Ok(points),
+        Err(e) => Err(e),
+    };
+    let mut slot = received.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_none() {
+        *slot = Some(result);
+    }
+}
+
+#[derive(Default)]
+struct Completion {
+    signalled: Mutex<bool>,
+    changed: Condvar,
+}
+impl Wake for Completion {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        *self.signalled.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.changed.notify_one();
+    }
+}
+impl Completion {
+    fn wait(&self, duration: Duration) {
+        let guard = self.signalled.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut guard, _) = self
+            .changed
+            .wait_timeout_while(guard, duration, |signalled| !*signalled)
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = false;
+    }
+}
+
+fn wait_completion<F: Future>(
+    future: F,
+    control: &mut dyn Control,
+    started: Duration,
+) -> Result<F::Output, String> {
+    let completion = Arc::new(Completion::default());
+    let waker = Waker::from(completion.clone());
+    let mut context = Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let Poll::Ready(result) = future.as_mut().poll(&mut context) {
+            return Ok(result);
+        }
+        ble::check_wait(control, started)?;
+        let remaining = ble::TIMEOUT.saturating_sub(control.now().saturating_sub(started));
+        // Production invokes the event wait; fake controls advance their clock instead.
+        // A retained predicate handles completion between poll and entering the wait.
+        control.idle(&mut |duration| completion.wait(duration.min(ble::POLL).min(remaining)));
+    }
+}
+
+// windows-future 0.3.2's IntoFuture installs Completed once and handles registration races.
+// The callback retains only an Arc-owned waker, safe even after timeout/cancellation.
+// Poll/GetResults and all device ownership remain on the original MTA thread.
 macro_rules! bounded {
     ($operation:expr, $control:expr) => {{
         let started = $control.now();
         ble::check_wait($control, started)?;
         let operation = $operation.map_err(error)?;
-        loop {
-            let status = match operation.Status() {
-                Ok(s) => s,
-                Err(e) => {
+        match wait_completion(operation.clone().into_future(), $control, started) {
+            Ok(result) => {
+                if result.is_err() {
                     let _ = operation.Cancel();
-                    return Err(error(e));
                 }
-            };
-            if status.0 != 0 {
-                break;
+                result
             }
-            if let Err(e) = ble::check_wait($control, started) {
+            Err(e) => {
                 let _ = operation.Cancel();
                 return Err(e);
             }
-            $control.sleep(ble::POLL);
         }
-        operation.GetResults()
     }};
 }
 
@@ -80,11 +145,23 @@ impl Drop for Apartment {
 #[derive(Default)]
 pub struct WindowsBackend;
 pub struct WindowsLink {
+    pixel_capacity: Option<usize>,
     characteristic: Option<GattCharacteristic>,
     service: Option<GattDeviceService>,
     session: Option<GattSession>,
     device: Option<BluetoothLEDevice>,
     _apartment: Apartment,
+}
+struct Notification {
+    characteristic: GattCharacteristic,
+    token: Option<i64>,
+}
+impl Drop for Notification {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            let _ = self.characteristic.RemoveValueChanged(token);
+        }
+    }
 }
 impl Drop for WindowsLink {
     fn drop(&mut self) {
@@ -180,6 +257,7 @@ impl Backend for WindowsBackend {
         }
         ble::check_wait(control, control.now())?;
         let mut link = WindowsLink {
+            pixel_capacity: None,
             characteristic: None,
             service: None,
             session: None,
@@ -252,6 +330,56 @@ impl Backend for WindowsBackend {
     }
 }
 impl Link for WindowsLink {
+    fn pixel_capacity(&mut self, control: &mut dyn Control) -> Result<usize, String> {
+        self.pixel_capacity = None;
+        let started = control.now();
+        let mut budget = ble::FrameControl {
+            inner: control,
+            started,
+        };
+        let result = self
+            .query_pixel_capacity(&mut budget)
+            .map_err(|e| format!("Surplife EA81 capability query: {e}"));
+        match result {
+            Ok(points) => {
+                self.pixel_capacity = Some(points);
+                Ok(points)
+            }
+            Err(e) => {
+                // Release the connection on failure, including a timed-out CCCD cleanup.
+                // The local callback token is always revoked by Notification::drop.
+                if let Some(session) = self.session.as_ref() {
+                    let _ = session.Close();
+                }
+                if let Some(device) = self.device.as_ref() {
+                    let _ = device.Close();
+                }
+                Err(e)
+            }
+        }
+    }
+    fn write_e1_pixels(
+        &mut self,
+        colors: &[crate::lighting::color::Rgb],
+        brightness: i32,
+        sequence: u8,
+        control: &mut dyn Control,
+    ) -> Result<(), String> {
+        (|| {
+            if self.pixel_capacity != Some(colors.len()) {
+                return Err("Pixel frame does not match current EA81 capability handshake".into());
+            }
+            ble::write_e1_pixel_frame(
+                colors,
+                brightness,
+                sequence,
+                self.max_pdu()?,
+                control,
+                &mut |packet, control| self.submit_raw(packet, control),
+            )
+        })()
+        .map_err(|e| format!("Surplife E104 frame: {e}"))
+    }
     fn address(&self) -> Result<u64, String> {
         self.device
             .as_ref()
@@ -275,6 +403,139 @@ impl Link for WindowsLink {
         if !ble::valid_packet(packet) {
             return Err("Packet is not an audited door command; no bytes sent".into());
         }
+        self.submit_raw(packet, control)
+    }
+    fn write_pixels(
+        &mut self,
+        colors: &[crate::lighting::color::Rgb],
+        brightness: i32,
+        sequence: u8,
+        control: &mut dyn Control,
+    ) -> Result<(), String> {
+        ble::write_pixel_frame(
+            colors,
+            brightness,
+            sequence,
+            self.max_pdu()?,
+            control,
+            &mut |packet, control| self.submit_raw(packet, control),
+        )
+    }
+}
+impl WindowsLink {
+    fn query_pixel_capacity(&mut self, control: &mut dyn Control) -> Result<usize, String> {
+        let mut stage = "discover FF02";
+        let result = (|| {
+            let started = control.now();
+            ble::check_wait(control, started)?;
+            let chars = bounded!(
+                self.service
+                    .as_ref()
+                    .unwrap()
+                    .GetCharacteristicsForUuidWithCacheModeAsync(
+                        uuid(0xff02),
+                        BluetoothCacheMode::Uncached
+                    ),
+                control
+            )
+            .map_err(error)?;
+            let list = chars.Characteristics().map_err(error)?;
+            if chars.Status().map_err(error)? != GattCommunicationStatus::Success
+                || list.Size().map_err(error)? != 1
+            {
+                return Err("FF02 notification characteristic unavailable or ambiguous".into());
+            }
+            let characteristic = list.GetAt(0).map_err(error)?;
+            if (characteristic.CharacteristicProperties().map_err(error)?
+                & GattCharacteristicProperties::Notify)
+                == GattCharacteristicProperties::None
+            {
+                return Err("FF02 has no notification support".into());
+            }
+            let received = Arc::new(Mutex::new(None));
+            let armed = Arc::new(AtomicBool::new(false));
+            let callback_received = received.clone();
+            let callback_armed = armed.clone();
+            let callback = TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(
+                move |_, args| {
+                    receive_pixel_capacity(&callback_armed, &callback_received, || {
+                        if let Some(args) = args.as_ref() {
+                            let buffer = args.CharacteristicValue().map_err(error)?;
+                            let length = buffer.Length().map_err(error)? as usize;
+                            if length > 4096 {
+                                return Err("EA81 notification exceeds host limit".into());
+                            }
+                            let reader = DataReader::FromBuffer(&buffer).map_err(error)?;
+                            let mut packet = vec![0; length];
+                            let read = reader.ReadBytes(&mut packet);
+                            let _ = reader.Close();
+                            read.map_err(error)?;
+                            ble::parse_pixel_capacity(&packet)
+                        } else {
+                            Ok(None)
+                        }
+                    });
+                    Ok(())
+                },
+            );
+            let mut subscription = Notification {
+                characteristic,
+                token: None,
+            };
+            subscription.token = Some(
+                subscription
+                    .characteristic
+                    .ValueChanged(&callback)
+                    .map_err(error)?,
+            );
+            stage = "subscribe FF02";
+            let status = bounded!(
+                subscription
+                    .characteristic
+                    .WriteClientCharacteristicConfigurationDescriptorAsync(
+                        GattClientCharacteristicConfigurationDescriptorValue::Notify
+                    ),
+                control
+            )
+            .map_err(error)?;
+            if status != GattCommunicationStatus::Success {
+                return Err("FF02 notification subscription failed".into());
+            }
+            // No cached notification is accepted. Arm immediately before the fixed query so
+            // a response arriving during WriteWithoutResponse completion is not missed.
+            armed.store(true, Ordering::Release);
+            let result = (|| {
+                stage = "send EA81";
+                self.submit_raw(&ble::PIXEL_CAPACITY_QUERY, control)?;
+                stage = "wait for EA81 notification";
+                ble::wait_pixel_capacity(control, started, &mut || {
+                    received.lock().unwrap_or_else(|e| e.into_inner()).take()
+                })
+            })();
+            armed.store(false, Ordering::Release);
+            // Normal completion disables remote notifications within the same total budget.
+            // On any error the caller closes the connection; Drop revokes the callback.
+            if result.is_ok() {
+                stage = "unsubscribe FF02";
+                let status = bounded!(
+                    subscription
+                        .characteristic
+                        .WriteClientCharacteristicConfigurationDescriptorAsync(
+                            GattClientCharacteristicConfigurationDescriptorValue::None
+                        ),
+                    control
+                )
+                .map_err(error)?;
+                if status != GattCommunicationStatus::Success {
+                    return Err("FF02 notification unsubscribe failed".into());
+                }
+            }
+            ble::check_wait(control, started)?;
+            result
+        })();
+        result.map_err(|e| format!("{stage}: {e}"))
+    }
+    fn submit_raw(&mut self, packet: &[u8], control: &mut dyn Control) -> Result<(), String> {
         if control.cancelled() {
             return Err("Operation cancelled or timed out; disconnected".into());
         }
@@ -310,6 +571,49 @@ impl Link for WindowsLink {
 mod tests {
     use super::*;
     use std::time::Duration;
+    #[test]
+    fn notification_read_error_reaches_capacity_wait_without_sleeping() {
+        let received = Mutex::new(None);
+        let armed = AtomicBool::new(true);
+        let read_error = "WinRT error: injected ReadBytes failure; disconnected";
+        receive_pixel_capacity(&armed, &received, || Err(read_error.into()));
+        let mut clock = Clock {
+            time: Duration::ZERO,
+            cancel: false,
+        };
+        let result = ble::wait_pixel_capacity(&mut clock, Duration::ZERO, &mut || {
+            received.lock().unwrap().take()
+        });
+        assert_eq!(result, Err(read_error.into()));
+        assert_eq!(clock.time, Duration::ZERO);
+    }
+    #[test]
+    fn disarmed_notification_does_not_read_or_publish() {
+        let received = Mutex::new(None);
+        receive_pixel_capacity(&AtomicBool::new(false), &received, || {
+            panic!("disarmed callback must not read notification")
+        });
+        assert_eq!(*received.lock().unwrap(), None);
+    }
+    #[test]
+    fn unrelated_notification_is_ignored_and_first_result_is_preserved() {
+        let armed = AtomicBool::new(true);
+        let received = Mutex::new(None);
+        receive_pixel_capacity(&armed, &received, || Ok(None));
+        assert_eq!(*received.lock().unwrap(), None);
+        receive_pixel_capacity(&armed, &received, || Ok(Some(153)));
+        receive_pixel_capacity(&armed, &received, || Err("later read failure".into()));
+        receive_pixel_capacity(&armed, &received, || Ok(Some(256)));
+        assert_eq!(*received.lock().unwrap(), Some(Ok(153)));
+
+        let received = Mutex::new(None);
+        receive_pixel_capacity(&armed, &received, || Err("first read failure".into()));
+        receive_pixel_capacity(&armed, &received, || Ok(Some(153)));
+        assert_eq!(
+            *received.lock().unwrap(),
+            Some(Err("first read failure".into()))
+        );
+    }
     struct Clock {
         time: Duration,
         cancel: bool,
@@ -326,23 +630,26 @@ mod tests {
             self.time += d;
         }
     }
-    struct Status(i32);
+    #[derive(Clone)]
     struct FakeOperation {
         cancelled: Arc<AtomicBool>,
         completed: bool,
     }
     #[allow(non_snake_case)]
     impl FakeOperation {
-        fn Status(&self) -> windows::core::Result<Status> {
-            Ok(Status(if self.completed { 1 } else { 0 }))
-        }
         fn Cancel(&self) -> windows::core::Result<()> {
             self.cancelled.store(true, Ordering::Release);
             Ok(())
         }
-        fn GetResults(&self) -> windows::core::Result<()> {
-            assert!(self.completed);
-            Ok(())
+    }
+    impl Future for FakeOperation {
+        type Output = windows::core::Result<()>;
+        fn poll(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.completed {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
         }
     }
     fn wait(operation: FakeOperation, control: &mut dyn Control) -> Result<(), String> {
@@ -411,6 +718,100 @@ mod tests {
         );
         assert_eq!(clock.0, ble::POLL);
         assert!(cancelled.load(Ordering::Acquire));
+    }
+    #[test]
+    fn completion_between_poll_and_wait_is_retained_without_control_sleep() {
+        struct CompleteOnPoll(bool);
+        impl Future for CompleteOnPoll {
+            type Output = ();
+            fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                if self.0 {
+                    Poll::Ready(())
+                } else {
+                    self.0 = true;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+        }
+        struct EventClock;
+        impl Control for EventClock {
+            fn now(&self) -> Duration {
+                Duration::ZERO
+            }
+            fn cancelled(&self) -> bool {
+                false
+            }
+            fn sleep(&mut self, _: Duration) {
+                panic!("completion must not use Control::sleep");
+            }
+            fn idle(&mut self, wait: &mut dyn FnMut(Duration)) {
+                // A pre-signalled event must return even with an infinite wait.
+                // The implementation additionally clamps this to a 25 ms slice.
+                wait(Duration::MAX);
+            }
+        }
+        wait_completion(CompleteOnPoll(false), &mut EventClock, Duration::ZERO).unwrap();
+    }
+    #[test]
+    fn event_wakes_immediately_when_signalled_before_or_during_wait() {
+        for before in [true, false] {
+            let completion = Arc::new(Completion::default());
+            let signal = completion.clone();
+            let sender = std::thread::spawn(move || {
+                if !before {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                signal.wake();
+            });
+            if before {
+                sender.join().unwrap();
+                let started = std::time::Instant::now();
+                completion.wait(Duration::from_secs(2));
+                assert!(started.elapsed() < Duration::from_secs(1));
+            } else {
+                let started = std::time::Instant::now();
+                completion.wait(Duration::from_secs(2));
+                assert!(started.elapsed() < Duration::from_secs(1));
+                sender.join().unwrap();
+            }
+        }
+    }
+    #[test]
+    fn completed_future_preserves_winrt_error_without_advancing_clock() {
+        let mut clock = Clock {
+            time: Duration::ZERO,
+            cancel: false,
+        };
+        let failure =
+            windows::core::Error::from_hresult(windows::core::HRESULT(0x80004005u32 as i32));
+        let result = wait_completion(
+            std::future::ready(Err::<(), _>(failure.clone())),
+            &mut clock,
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(result.unwrap_err().code(), failure.code());
+        assert_eq!(clock.time, Duration::ZERO);
+    }
+    #[test]
+    fn late_completion_waker_is_safe_after_waiter_has_timed_out() {
+        struct SaveWaker(Arc<Mutex<Option<Waker>>>);
+        impl Future for SaveWaker {
+            type Output = ();
+            fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                *self.0.lock().unwrap() = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+        let saved = Arc::new(Mutex::new(None));
+        let mut clock = Clock {
+            time: Duration::ZERO,
+            cancel: false,
+        };
+        assert!(wait_completion(SaveWaker(saved.clone()), &mut clock, Duration::ZERO).is_err());
+        assert_eq!(clock.time, ble::TIMEOUT);
+        saved.lock().unwrap().take().unwrap().wake();
     }
     #[test]
     fn null_projection_and_endpoint_uuid_are_source_verified_without_activation() {

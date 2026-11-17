@@ -3,6 +3,8 @@ pub mod compositor;
 pub mod fancontrol_pipe;
 pub mod fancontrol_wire;
 pub mod hid_adapter;
+#[cfg(windows)]
+pub mod hid_notifications;
 pub mod hid_policy;
 #[cfg(windows)]
 pub mod hid_windows;

@@ -7,6 +7,30 @@ use std::{
     thread,
 };
 
+/// Opt-in compatibility check against an actual isolated headless server.
+/// The harness must start it with --nodetect and verify listener ownership.
+/// Empty inventory is intentional: this test never activates a hardware output.
+#[test]
+#[ignore = "requires an explicitly supplied isolated --nodetect component server"]
+fn candidate_headless_sdk6_client_smoke() {
+    let endpoint: std::net::SocketAddr = std::env::var("PRISMESTRA_SDK_TEST_ENDPOINT")
+        .expect("supply the owned --nodetect server endpoint")
+        .parse()
+        .expect("invalid component test endpoint");
+    assert!(endpoint.ip().is_loopback());
+    assert_ne!(endpoint.port(), 0);
+    for _ in 0..3 {
+        let mut session = OpenRgbSession::connect(endpoint, deadline(), &|| false)
+            .expect("actual component must negotiate SDK protocol 6 with our client");
+        assert!(
+            session.scan(deadline(), &|| false).unwrap().is_empty(),
+            "component fixture must use --nodetect; no physical device test is authorized here"
+        );
+        // Repeat on the same session, then reconnect in the next iteration.
+        assert!(session.scan(deadline(), &|| false).unwrap().is_empty());
+    }
+}
+
 fn u16v(b: &mut Vec<u8>, v: u16) {
     b.extend(v.to_le_bytes());
 }

@@ -4,17 +4,27 @@ pub mod ambient;
 #[cfg(windows)]
 pub mod ambient_windows;
 pub mod assets;
+#[cfg(windows)]
+pub(crate) mod backend_diagnostics;
+#[cfg(windows)]
+pub mod backend_helper;
 pub mod bundle;
 pub mod capture_worker;
 pub mod config;
 pub mod device_setup;
 pub mod document;
+#[cfg(windows)]
+pub mod installed;
+#[cfg(windows)]
+pub(crate) mod installed_policy;
 pub mod lcd;
 pub mod lcd_worker;
 #[cfg(windows)]
 pub mod lighting_bindings;
 #[cfg(windows)]
 pub mod lighting_outputs;
+#[cfg(windows)]
+pub mod managed_backend;
 pub mod preview;
 pub mod runtime;
 pub mod sensor_bindings;

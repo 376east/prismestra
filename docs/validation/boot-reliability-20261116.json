@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "tested_app_commit": "4c7d15d15a6c1aa78622194c95d30f178c428ccb",
+  "scope": "configured local kit; warm-session and owned-only restart; not reboot acceptance",
+  "software": {
+    "rust_passed": 644,
+    "ignored": 7,
+    "final_ci": [
+      43823058102,
+      43823064450
+    ],
+    "exact_packaged_selftests_passed": 5
+  },
+  "warm_session": {
+    "passed": true,
+    "active_elapsed_ms": 301316,
+    "samples": 21,
+    "bound_sdk_connections": 4,
+    "ram_controllers": 2,
+    "ram_write_failures": 0,
+    "foreign_process_and_settings_preserved": true
+  },
+  "owned_restart": {
+    "passed": true,
+    "backend_exit_code": 0,
+    "cooperative_stop_and_cleanup_logged": true,
+    "old_chain_exit_seconds": 0.4672857000041404,
+    "first_new_chain_returned_ram": true,
+    "foreign_process_and_settings_preserved": true,
+    "scene_and_local_config_preserved": true
+  },
+  "unverified": [
+    "actual reboot/logon",
+    "actual sleep/resume",
+    "other hardware",
+    "clean Windows installation",
+    "measured optical FPS",
+    "matched resource/power comparison"
+  ],
+  "historical_helper_replacement_cause": "UNKNOWN"
+}
