@@ -297,14 +297,26 @@ try {
     [void][IO.Directory]::CreateDirectory($scratch)
     $permissions = Get-Acl -LiteralPath $scratch
     $permissions.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-        $account.SID, 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        $account.SID, 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
     Set-Acl -LiteralPath $scratch -AclObject $permissions
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'original-user.ps1') -Destination $scratch
     $workerFile = Join-Path $scratch 'worker.ps1'
-    [IO.File]::WriteAllText($workerFile, $worker, [Text.UTF8Encoding]::new($false))
+    # Windows PowerShell 5.1 needs a BOM for non-ASCII source on every system locale.
+    [IO.File]::WriteAllText($workerFile, $worker, [Text.UTF8Encoding]::new($true))
     $powershell = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
-    $workerArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $workerFile + '" "' + $install + '" ' + $id + ' ' + $sid
+    $workerLog = Join-Path $scratch 'worker-output.log'
+    $quote = { param([string]$Value) "'" + $Value.Replace("'", "''") + "'" }
+    $command = '$ErrorActionPreference=''Stop''; try { & ' + (& $quote $workerFile) + ' ' +
+        (& $quote $install) + ' ' + (& $quote $id) + ' ' + (& $quote $sid) + ' *> ' +
+        (& $quote $workerLog) + '; exit $LASTEXITCODE } catch { $_ | Out-String | Add-Content -LiteralPath ' +
+        (& $quote $workerLog) + ' -Encoding UTF8; exit 1 }'
+    $workerArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' +
+        [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $status = [PrismestraCiLogon]::Run($username, $password, $sid, $powershell, $workerArguments, $scratch)
+    if (Test-Path -LiteralPath $workerLog) {
+        Copy-Item -LiteralPath $workerLog -Destination (Join-Path $report 'worker-output.log')
+        if ($status -ne 0) { Get-Content -LiteralPath $workerLog -Tail 40 | Write-Host }
+    }
     $profile = Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$sid'"
     Assert-Expected ($null -ne $profile) "Standard-user profile was not loaded (worker exit $status)."
     $evidence = Join-Path $profile.LocalPath ("AppData\Local\Prismestra-CI-" + $id + ".json")
@@ -341,7 +353,7 @@ try {
         }
         if ($password) { $password.Dispose() }
         if (Test-Path -LiteralPath $scratch) {
-            foreach ($name in @('worker.ps1', 'original-user.ps1')) {
+            foreach ($name in @('worker.ps1', 'original-user.ps1', 'worker-output.log')) {
                 $file = Join-Path $scratch $name
                 if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
             }
