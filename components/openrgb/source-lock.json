@@ -3,13 +3,13 @@
   "repository": "https://github.com/hello-nexus/openrgb-headless",
   "revision": "6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43",
   "patch": "prismestra-pc.patch",
-  "patch_sha256": "6475e50f76eb60a3cfcdc82423de15e63e4b91e9a41f06e8e42d3145f78249ee",
+  "patch_sha256": "56a7996f5bc0739611eac46477fb67caa15185b8918133285f1de26b62632e84",
   "configuration": [
     "release",
     "prismestra_pc_backend"
   ],
   "untracked_source_paths": [],
-  "binary_status": "evaluation candidate; not yet bundled with the public application",
+  "binary_status": "installer candidate; hardware acceptance belongs to the recorded binary",
   "excluded_features": [
     "Philips Hue via hueplusplus (use separate home-lighting adapters)",
     "unconditional Windows timer-resolution worker"
@@ -22,7 +22,8 @@
   ],
   "optional_capabilities": [
     "PRISMESTRA_PARENT_PIPE=1 cooperative shutdown; managed opt-in defaults false",
-    "terminal managed-owner EOF cancels queued I2C discovery before shutdown wait"
+    "terminal managed-owner EOF cancels queued I2C discovery before shutdown wait",
+    "--lighting-only strict SDK6 RGB allowlist; excludes cooling, plugins, profiles, settings and rescan"
   ],
   "timer_policy": {
     "resolution_ms": 1,

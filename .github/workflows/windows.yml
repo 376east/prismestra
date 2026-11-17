@@ -27,6 +27,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check release packaging boundaries
         run: python scripts/test_package_release.py
+      - name: Check installer packaging boundaries
+        run: python scripts/test_package_installer.py
       - name: Check portable launchers without hardware
         run: python scripts/test_portable_launcher.py
       - name: Check local backend configuration without hardware
@@ -47,3 +49,31 @@ jobs:
         run: cargo test --locked -- --test-threads=1
       - name: Check Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+
+  installer:
+    name: Isolated installer lifecycle
+    if: github.event_name == 'push' && contains(github.event.head_commit.message, 'Package offline Windows setup')
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Download unpublished lifecycle fixtures
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v0.1.0-preview.5 --repo $env:GITHUB_REPOSITORY --pattern installer-lifecycle-inputs.zip --dir fixture
+          if ($LASTEXITCODE) { throw 'Candidate lifecycle fixtures unavailable' }
+          Expand-Archive -LiteralPath fixture/installer-lifecycle-inputs.zip -DestinationPath fixture/inputs
+      - name: Exercise installation, repair, upgrade and uninstall
+        shell: pwsh
+        run: |
+          $metadata = Get-Content fixture/inputs/test.json -Raw | ConvertFrom-Json
+          ./scripts/installer/test_lifecycle.ps1 -Namespace $metadata.namespace -FirstBuild fixture/inputs/first -UpgradeBuild fixture/inputs/upgrade -ReportDirectory lifecycle-result -ElevatedFilesOnly
+      - name: Retain lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: installer-lifecycle-evidence
+          path: lifecycle-result/
+          retention-days: 14

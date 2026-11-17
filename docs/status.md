@@ -9,7 +9,7 @@ Prismestra is a Windows source preview. Its current product is local lighting/di
 | BLE, LCD and monitor lighting | Direct selected-protocol adapters and temperature inputs; one configured kit accepted previously | Support is protocol/firmware-specific, not every device with Bluetooth/USB |
 | Home lighting | WLED and Home Assistant connection/setup/output paths, software coverage | Other physical devices and installations need acceptance |
 | Sleep and helper ownership | Protocol2 uses active Windows time; deterministic sleep/UTC/failure tests | Actual sleep/resume remains separate from simulated tests |
-| Delivery | Pinned build recipes, dependencies/component patch and source/binary package tooling | General privileged installer, clean Windows, signing and bit-identical builds are not established |
+| Delivery | Single-file offline Inno Setup installer tooling, per-user bootstrap, protected own-user backend policy, repair/upgrade/uninstall harness; [installer contract](windows-installer.md) | See release lifecycle evidence for actual install scope. Cold boot on fresh Windows 10/11, all hardware, product signing and bit-identical builds remain separate gates |
 
 ## Last native acceptance checkpoint
 

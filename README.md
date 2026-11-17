@@ -24,6 +24,12 @@ Start with [verified status](docs/status.md) for what has actually passed, and [
 
 The desktop editor now embeds its local interface through WebView2 and sends validated commands to the same Rust session. Scene drafts and the RGB scene library are stored by Rust. Device, LCD, capture, sensor, connection and schedule forms reuse the existing native validators and activation paths. The previous Win32 editor remains available with `--classic-editor`. See [desktop editor behavior](docs/desktop-editor.md).
 
+## Download for Windows
+
+Download **[Prismestra Setup for Windows x64](https://github.com/malyarq/prismestra/releases/download/v0.1.0-preview.5/Prismestra-Setup-0.1.0.5-x64.exe)** from the [latest preview release](https://github.com/malyarq/prismestra/releases/tag/v0.1.0-preview.5). Run Setup, choose sign-in startup, then connect your devices in the app. A fresh installation starts with an empty profile.
+
+The offline installer includes the application, its private headless OpenRGB backend, Visual C++ and WebView2 installers, and the optional signed PawnIO installer for supported PC lighting. You do not need a separate OpenRGB installation. Updates preserve scenes; uninstall is available in Windows Settings and preserves your data. See [installation and permissions](docs/windows-installer.md) for details and the recorded test scope. Developer source downloads are not installers.
+
 ## What it does
 
 - **One canvas.** Place outputs in a shared scene, combine effects and sample screen content through the [lighting engine](src/lighting) and [desktop capture](src/capture).
@@ -36,7 +42,7 @@ Prismestra does not control fans or pumps. Keep your existing cooling software. 
 
 ## Build and run
 
-Packaged Windows x64 builds require Microsoft Edge WebView2 Runtime 105 or newer for the new editor and the x64 Visual C++ v14 runtime. Neither is bundled. See Microsoft's [WebView2 distribution information](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution) and [Visual C++ runtime downloads](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist#latest-supported-redistributable-version). The classic editor does not need WebView2.
+Packaged Windows x64 builds require Microsoft Edge WebView2 Runtime 105 or newer for the new editor and the x64 Visual C++ v14 runtime. The Setup EXE bundles their offline installers; the older portable ZIPs require a separate runtime installation. See Microsoft's [WebView2 distribution information](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution) and [Visual C++ runtime downloads](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist#latest-supported-redistributable-version). The classic editor does not need WebView2.
 
 Install a current stable [Rust toolchain](https://www.rust-lang.org/tools/install) with the Windows MSVC build tools, then:
 

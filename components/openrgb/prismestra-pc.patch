@@ -559,6 +559,128 @@ index 3e334463b96a3eca23501c848f18c2a242d00180..0d3e5b83fc4d9f1979959b078eef524f
      void BackgroundDetectI2CDevices(json& detector_settings);
      void BackgroundDetectI2CDRAMDevices(json& detector_settings);
      void BackgroundDetectI2CPCIDevices(json& detector_settings);
+diff --git a/NetworkServer.cpp b/NetworkServer.cpp
+index 967a6e74026a19dcf2d165e7ddb1c4ce9ff322a4..15512ae264a16dcf537e234421418970bb83de1a 100644
+--- a/NetworkServer.cpp
++++ b/NetworkServer.cpp
+@@ -1417,6 +1417,14 @@ void NetworkServer::ListenThreadFunction(NetworkClientInfo* client_info)
+             LOG_ERROR("[%s] received too large packet, closing listener", NETWORKSERVER);
+             goto listen_done;
+         }
++        else if(lighting_only && !((header.pkt_id == 0 && header.pkt_size == 0)
++            || ((header.pkt_id == 1 || header.pkt_id == 40 || header.pkt_id == 52) && header.pkt_size == 4)
++            || (header.pkt_id == 1050 && header.pkt_size >= 6 && header.pkt_size <= 6 + 8192 * 4)
++            || (header.pkt_id == 1101 && header.pkt_size >= 60 && header.pkt_size <= 6 + 8192 * 4)
++            || (header.pkt_id == 40002 && header.pkt_size == 0)))
++        {
++            goto listen_done;
++        }
+         else if(header.pkt_size > 0)
+         {
+             data = new unsigned char[header.pkt_size];
+@@ -1441,6 +1449,18 @@ void NetworkServer::ListenThreadFunction(NetworkClientInfo* client_info)
+         | Entire request received, select functionality     |
+         | based on request ID                               |
+         \*-------------------------------------------------*/
++        // Lighting-only clients cannot grant themselves local-client privileges,
++        // downgrade the protocol, or send unbounded controller descriptions.
++        if(lighting_only && (header.pkt_id == 40 || header.pkt_id == 52 || header.pkt_id == 1))
++        {
++            unsigned int value = 0;
++            memcpy(&value, data, sizeof(value));
++            if((header.pkt_id == 52 && value != NET_CLIENT_FLAG_SUPPORTS_RGBCONTROLLER)
++                || ((header.pkt_id == 40 || header.pkt_id == 1) && value != 6))
++                goto listen_done;
++        }
++        if(lighting_only && (header.pkt_id == 1050 || header.pkt_id == 1101)
++            && client_info->client_protocol_version != 6) goto listen_done;
+         switch(header.pkt_id)
+         {
+         /*-------------------------------------------------*\
+@@ -3417,6 +3437,15 @@ NetPacketStatus NetworkServer::ProcessRequest_RGBController_UpdateLEDs(NetworkCl
+     | Lock access mutex                                     |
+     \*-----------------------------------------------------*/
+     controllers[controller_idx]->AccessMutex.lock();
++    if(lighting_only)
++    {
++        unsigned short count = 0;
++        if(data_size < 6) { controllers[controller_idx]->AccessMutex.unlock(); return NET_PACKET_STATUS_ERROR_INVALID_DATA; }
++        memcpy(&count, data_start + 4, 2);
++        if(count > 8192 || count != controllers[controller_idx]->colors.size() || data_size != 6u + 4u * count)
++        { controllers[controller_idx]->AccessMutex.unlock(); return NET_PACKET_STATUS_ERROR_INVALID_DATA; }
++    }
++
+ 
+     /*-----------------------------------------------------*\
+     | Update colors                                         |
+@@ -3472,6 +3501,17 @@ NetPacketStatus NetworkServer::ProcessRequest_RGBController_UpdateSaveMode(Netwo
+     /*-----------------------------------------------------*\
+     | Copy in data size                                     |
+     \*-----------------------------------------------------*/
++    if(lighting_only)
++    {
++        if(data_size < 56) return NET_PACKET_STATUS_ERROR_INVALID_DATA;
++        unsigned short name_size = 0, colors_size = 0;
++        memcpy(&name_size, data_start + 8, 2);
++        if(name_size == 0 || name_size > 128 || data_size < 56u + name_size
++            || data_start[10 + name_size - 1] != 0) return NET_PACKET_STATUS_ERROR_INVALID_DATA;
++        memcpy(&colors_size, data_start + 54 + name_size, 2);
++        if(colors_size > 8192 || data_size != 56u + name_size + 4u * colors_size)
++            return NET_PACKET_STATUS_ERROR_INVALID_DATA;
++    }
+     COPY_DATA_FIELD(data_ptr, data_start, data_size_pkt);
+ 
+     /*-----------------------------------------------------*\
+@@ -3511,6 +3551,17 @@ NetPacketStatus NetworkServer::ProcessRequest_RGBController_UpdateSaveMode(Netwo
+     \*-----------------------------------------------------*/
+     data_ptr = RGBController::SetModeDescription(data_ptr, data_size - (unsigned int)(data_ptr - data_start), &temp_mode, client_info->client_protocol_version);
+ 
++    // Validate the complete packet before mutating the controller.
++    if(data_ptr == NULL || (lighting_only && (save_mode || data_ptr != data_start + data_size
++        || !(temp_mode.name == "Direct" || temp_mode.name == "direct")
++        || temp_mode.name != controllers[controller_idx]->modes[mode_idx].name
++        || temp_mode.flags != controllers[controller_idx]->modes[mode_idx].flags
++        || (controllers[controller_idx]->modes[mode_idx].flags & MODE_FLAG_AUTOMATIC_SAVE))))
++    {
++        controllers[controller_idx]->AccessMutex.unlock();
++        return NET_PACKET_STATUS_ERROR_INVALID_DATA;
++    }
++
+     /*-----------------------------------------------------*\
+     | Set mode values and active mode                       |
+     \*-----------------------------------------------------*/
+@@ -3520,6 +3571,11 @@ NetPacketStatus NetworkServer::ProcessRequest_RGBController_UpdateSaveMode(Netwo
+         {
+             controllers[controller_idx]->active_mode = mode_idx;
+         }
++        else if(lighting_only)
++        {
++            controllers[controller_idx]->AccessMutex.unlock();
++            return NET_PACKET_STATUS_ERROR_INVALID_DATA;
++        }
+     }
+ 
+     /*-----------------------------------------------------*\
+diff --git a/NetworkServer.h b/NetworkServer.h
+index 088eadec3eb10bcb7b0e6fe65e5961340473b569..924280c28de096a24cc44750dbfe27ebad4e881b 100644
+--- a/NetworkServer.h
++++ b/NetworkServer.h
+@@ -111,6 +111,7 @@ class NetworkServer
+ {
+ public:
+     NetworkServer();
++    void SetLightingOnly() { lighting_only = true; server_flags = NET_SERVER_FLAG_SUPPORTS_RGBCONTROLLER; }
+     ~NetworkServer();
+ 
+     /*-----------------------------------------------------*\
+@@ -173,6 +174,7 @@ public:
+     void                                SendRequest_RGBController_SignalUpdate(RGBController* controller_ptr, unsigned int update_reason);
+ 
+ private:
++    bool lighting_only = false;
+     /*-----------------------------------------------------*\
+     | Server variables                                      |
+     \*-----------------------------------------------------*/
 diff --git a/OpenRGB.pro b/OpenRGB.pro
 index e20d9f4a141332ea84d7e8c6061dcd2b29b21876..718ee9cd45ac4a62f65d7b8e5e69eb7d6fd6ca78 100644
 --- a/OpenRGB.pro
@@ -590,6 +712,69 @@ index e20d9f4a141332ea84d7e8c6061dcd2b29b21876..718ee9cd45ac4a62f65d7b8e5e69eb7d
  message("GIT_BRANCH:  "$$GIT_BRANCH)
  message("VERSION_NUM: "$$VERSION_NUM)
  message("VERSION_STR: "$$VERSION_STR)
+diff --git a/ResourceManager.cpp b/ResourceManager.cpp
+index e5b2b4f706df77b04ecb642c03075544a36ffd4f..4a53ae62446eb61f3c8cd97b3cefb4dced6ed592 100644
+--- a/ResourceManager.cpp
++++ b/ResourceManager.cpp
+@@ -1402,6 +1402,7 @@ void ResourceManager::InitializeServer()
+     bool legacy_workaround  = false;
+ 
+     server                  = new NetworkServer();
++    if(lighting_only) server->SetLightingOnly();
+ 
+     /*-----------------------------------------------------*\
+     | Set server name                                       |
+diff --git a/ResourceManager.h b/ResourceManager.h
+index 601f758f9bb441a362825c1b7891f3f18f9134db..9cf7878bf784a495bb2788fc8ece24997488d17c 100644
+--- a/ResourceManager.h
++++ b/ResourceManager.h
+@@ -92,6 +92,7 @@ public:
+     std::vector<RGBController*>&        GetRGBControllers();
+     std::vector<RGBControllerInterface*>&   GetRGBControllerInterfaces();
+     NetworkServer*                      GetServer();
++    void SetLightingOnly() { lighting_only = true; }
+     SettingsManager*                    GetSettingsManager();
+ 
+     void                                SetConfigurationDirectory(const filesystem::path &directory);
+@@ -227,6 +228,7 @@ private:
+     | Network Server                                        |
+     \*-----------------------------------------------------*/
+     NetworkServer*                              server;
++    bool lighting_only = false;
+     std::string                                 default_server_host;
+     unsigned short                              default_server_port;
+ 
+diff --git a/cli.cpp b/cli.cpp
+index e7e6d616da0cb4f0b28cd04f37ccee11f7b38a63..bdcab12bc97c2d7b6047a7c01ccf3c8ddd769c94 100644
+--- a/cli.cpp
++++ b/cli.cpp
+@@ -18,6 +18,7 @@
+ #include "filesystem.h"
+ #include "LogManager.h"
+ #include "NetworkClient.h"
++#include "NetworkServer.h"
+ #include "ProfileManager.h"
+ #include "ResourceManager.h"
+ #include "RGBController.h"
+@@ -1209,6 +1210,7 @@ int ProcessOptions(Options* options, std::vector<RGBController *>& rgb_controlle
+              ||(option == "--nodetect")
+              ||(option == "--noautoconnect")
+              ||(option == "--server")
++             ||(option == "--lighting-only")
+              ||(option == "--gui")
+              ||(option == "--i2c-tools" || option == "--yolo")
+              ||(option == "--startminimized")
+@@ -1547,6 +1549,10 @@ unsigned int cli_pre_detection(int argc, char* argv[])
+         /*-------------------------------------------------*\
+         | --server (no arguments)                           |
+         \*-------------------------------------------------*/
++        else if(option == "--lighting-only")
++        {
++            ResourceManager::get()->SetLightingOnly();
++        }
+         else if(option == "--server")
+         {
+             server_start            = true;
 diff --git a/i2c_smbus/Windows/i2c_smbus_pawnio.cpp b/i2c_smbus/Windows/i2c_smbus_pawnio.cpp
 index 35cd3fda18f704ee4d4f67483325ce83d1d09371..fd9ce9c7517b35ce254c5cac7bf1fb6ce3caf7f9 100644
 --- a/i2c_smbus/Windows/i2c_smbus_pawnio.cpp
