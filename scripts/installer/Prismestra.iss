@@ -330,7 +330,9 @@ begin
         Log('Could not check sign-in startup for the original ordinary user.');
     end;
 #ifndef LifecycleTest
-    if StartupReady then RetireLegacyStartup
+    if StartupReady and not RebootRequired then RetireLegacyStartup
+    else if RebootRequired then
+      Log('Legacy profile preparation deferred until required Windows restart; previous startup entries kept.')
     else Log('Previous startup kept because the new startup preference could not be applied.');
 #endif
   end;
