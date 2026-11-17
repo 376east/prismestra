@@ -34,6 +34,15 @@ function Get-TokenFlag($Api, [IntPtr]$Token, [int]$Class, [IntPtr]$Buffer) {
     [Runtime.InteropServices.Marshal]::ReadInt32($Buffer)
 }
 
+function Test-WebViewVersion($Value) {
+    if ($Value -isnot [string]) { return $false }
+    $parsed = $null
+    if (-not [version]::TryParse($Value, [ref]$parsed) -or $parsed.Revision -lt 0 -or
+        $Value -cne $parsed.ToString(4)) { return $false }
+    $parsed -ge [version]'105.0.0.0' -and $parsed.Major -le 65535 -and
+        $parsed.Minor -le 65535 -and $parsed.Build -le 65535 -and $parsed.Revision -le 65535
+}
+
 $api = $identity = $effective = $impersonation = $rootHandle = $null
 $linked = $duplicate = $buffer = [IntPtr]::Zero
 try {
@@ -91,7 +100,7 @@ try {
         if (-not $key) { exit 1 }
         try { $version = $key.GetValue('pv') }
         finally { $key.Dispose() }
-        if ($version -and [version]$version -gt [version]'0.0.0.0') { exit 0 }
+        if (Test-WebViewVersion $version) { exit 0 }
         exit 1
     }
     $image = Join-Path $InstallRoot 'Prismestra.exe'

@@ -174,7 +174,7 @@ function Invoke-Installer([string]$Path, [string]$Options, [string]$Log) {
 function Get-RegisteredUninstaller {
     $entry = Get-ItemProperty -LiteralPath $arpKey
     Assert-Expected ($entry.DisplayName -eq 'Prismestra' -and $entry.InstallLocation.TrimEnd('\') -eq $install) (
-        'Unexpected Prismestra Add or Remove Programs registration.')
+        ("Unexpected Add or Remove Programs registration: name=$($entry.DisplayName), location=$($entry.InstallLocation)"))
     if ($entry.QuietUninstallString -notmatch '^"(?<path>[^"]+\\unins\d{3}\.exe)"(?:\s|$)') {
         throw 'The registered uninstaller path could not be verified.'
     }

@@ -18,6 +18,7 @@ MinVersion=10.0.18362
 CloseApplications=no
 RestartApplications=no
 RedirectionGuard=yes
+UninstallDisplayName={#ProductName}
 UninstallDisplayIcon={app}\Prismestra.exe
 OutputDir=dist
 OutputBaseFilename={#InstallerBaseName}
@@ -125,13 +126,25 @@ begin
   else Result := Revision >= {#VcRevision};
 end;
 
+function SupportedWebViewVersion(const Value: String): Boolean;
+var
+  VersionNumber: Int64;
+begin
+  Result := False;
+  if not StrToVersion(Value, VersionNumber) then Exit;
+  { StrToVersion accepts partial and extra components. Require the exact
+    four-component format used by EdgeUpdate. }
+  Result := (Value = VersionToStr(VersionNumber)) and
+    (ComparePackedVersion(VersionNumber, PackVersionComponents(105, 0, 0, 0)) >= 0);
+end;
+
 function WebViewReady: Boolean;
 var
   Version: String;
 begin
   Result := RegQueryStringValue(HKLM32,
     'Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
-    'pv', Version) and (Version <> '') and (Version <> '0.0.0.0');
+    'pv', Version) and SupportedWebViewVersion(Version);
   if not Result then Result := OriginalUser('WebView', '');
 end;
 

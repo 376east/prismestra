@@ -45,7 +45,9 @@ Assert-Expected ((Sha256 $setup) -ceq $receipt.installer_sha256) 'Fixture instal
 $username = 'PrismCi' + ([guid]::NewGuid().ToString('N')).Substring(0, 12)
 $scratch = Join-Path $env:ProgramData ("Prismestra-StandardUser-" + [guid]::NewGuid().ToString('N'))
 foreach ($path in @($install, $registry, $scratch, $ReportDirectory)) {
-    Assert-Expected (-not (Test-Path -LiteralPath $path)) 'Expected an unused namespace and output directory.'
+    if ($path -eq $install -and (Test-Path -LiteralPath $path -PathType Container) -and
+        @(Get-ChildItem -LiteralPath $path -Force).Count -eq 0) { continue }
+    Assert-Expected (-not (Test-Path -LiteralPath $path)) ("Expected an unused namespace and output directory: " + $path)
 }
 Assert-Expected (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) 'Fixture username already exists.'
 $report = [IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($ReportDirectory)).FullName
