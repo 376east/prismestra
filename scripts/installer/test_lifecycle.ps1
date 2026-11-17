@@ -53,8 +53,14 @@ function Run-Setup($Path, $Options, $Log) {
         '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART ' + $Options + ' /LOG="' + $Log + '"')
     Assert-Expected ($process.ExitCode -eq 0) ("Setup exited with code " + $process.ExitCode + ". See $Log")
 }
+function Read-Run {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
+    if ($null -eq $key) { return $null }
+    try { $key.GetValue($runName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+    finally { $key.Dispose() }
+}
 function Check-Run($Expected) {
-    $value = Get-ItemPropertyValue -LiteralPath $runKey -Name $runName -ErrorAction SilentlyContinue
+    $value = Read-Run
     Assert-Expected ($value -ceq $Expected) 'The isolated per-user sign-in command did not match.'
 }
 function Check-Payload($Expected) {
@@ -125,7 +131,7 @@ Assert-Expected (Test-Path -LiteralPath $shortcut) 'Installer did not create the
 $asset = Join-Path $user 'state\assets\lifecycle-sentinel.txt'
 $startupVerified = $true
 if ($ElevatedFilesOnly) {
-    $actualStartup = Get-ItemPropertyValue -LiteralPath $runKey -Name $runName -ErrorAction SilentlyContinue
+    $actualStartup = Read-Run
     if ($null -eq $actualStartup) {
         Assert-Expected ((Get-Content -LiteralPath (Join-Path $report 'install.log') -Raw).Contains(
             'Could not enable sign-in startup for the original ordinary user.')) 'Setup did not report missing linked-user startup.'

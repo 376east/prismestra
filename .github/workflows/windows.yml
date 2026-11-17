@@ -70,7 +70,14 @@ jobs:
         run: |
           gh release download v0.1.0-preview.5 --repo $env:GITHUB_REPOSITORY --pattern installer-lifecycle-inputs.zip --dir fixture
           if ($LASTEXITCODE) { throw 'Candidate lifecycle fixtures unavailable' }
+          gh release download v0.1.0-preview.5 --repo $env:GITHUB_REPOSITORY --pattern Prismestra-Setup-0.1.0.5-x64.exe --dir fixture
+          if ($LASTEXITCODE) { throw 'Candidate offline setup unavailable' }
           Expand-Archive -LiteralPath fixture/installer-lifecycle-inputs.zip -DestinationPath fixture/inputs
+      - name: Exercise the full offline installer
+        shell: pwsh
+        run: |
+          $metadata = Get-Content fixture/inputs/test.json -Raw | ConvertFrom-Json
+          ./scripts/installer/test_offline_setup.ps1 -Installer fixture/Prismestra-Setup-0.1.0.5-x64.exe -Sha256 $metadata.production_sha256 -ReportDirectory offline-setup-result -DisposableRunner
       - name: Exercise installation, repair, upgrade and uninstall
         shell: pwsh
         run: |
@@ -87,6 +94,7 @@ jobs:
         with:
           name: installer-lifecycle-evidence
           path: |
+            offline-setup-result/
             lifecycle-result/
             standard-user-result/
           retention-days: 14

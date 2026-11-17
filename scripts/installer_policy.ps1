@@ -383,8 +383,15 @@ try {
     if (-not $create) {
         if ($null -eq $record) { exit 0 }
         if ($null -ne $task) {
-            try { $task.Stop(0) }
-            catch { if ($_.Exception.GetBaseException().HResult -ne -2147216629) { throw } }
+            # The frontend's cancellation is asynchronous. Give the helper time
+            # to drain its private backend instead of terminating SMBus work.
+            $until = [DateTime]::UtcNow.AddSeconds(45)
+            while ($task.State -in @(2, 4)) {
+                if ([DateTime]::UtcNow -ge $until) {
+                    throw 'The owned lighting backend is still closing. Retry uninstall after it exits.'
+                }
+                Start-Sleep -Milliseconds 200
+            }
             $folder.DeleteTask($name, 0)
         }
         # The exact SID directory and every descendant were verified above.
