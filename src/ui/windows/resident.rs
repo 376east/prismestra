@@ -11,8 +11,9 @@ use std::{
 use windows_sys::Win32::{
     Security::*,
     System::Threading::{
-        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
-        PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject,
+        GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
+        WaitForSingleObject,
     },
     UI::Shell::*,
 };
@@ -44,6 +45,10 @@ impl Drop for Process {
 }
 impl Process {
     fn open(pid: u32) -> Result<Self, String> {
+        Self::try_open(pid).map_err(|error| format!("Open resident process: {error}"))
+    }
+
+    fn try_open(pid: u32) -> std::io::Result<Self> {
         let handle = unsafe {
             OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
@@ -52,7 +57,7 @@ impl Process {
             )
         };
         if handle.is_null() {
-            Err(last("Open resident process"))
+            Err(std::io::Error::last_os_error())
         } else {
             Ok(Self(handle))
         }
@@ -67,6 +72,15 @@ impl Process {
         Ok(PathBuf::from(OsString::from_wide(
             &buffer[..length as usize],
         )))
+    }
+
+    fn creation_filetime(&self) -> Result<u64, String> {
+        let mut times = [FILETIME::default(); 4];
+        let [created, exited, kernel, user] = &mut times;
+        if unsafe { GetProcessTimes(self.0, created, exited, kernel, user) } == 0 {
+            return Err(last("Read resident process creation time"));
+        }
+        Ok(u64::from(created.dwHighDateTime) << 32 | u64::from(created.dwLowDateTime))
     }
 }
 
@@ -100,9 +114,7 @@ unsafe extern "system" fn collect_shell(hwnd: HWND, context: LPARAM) -> i32 {
     1
 }
 
-pub(crate) fn shutdown_installed(executable: &Path) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(45);
-    let message = installed_exit_message()?;
+fn resident_windows() -> Result<Vec<(HWND, u32)>, String> {
     let mut windows: Vec<(HWND, u32)> = Vec::new();
     if unsafe {
         EnumWindows(
@@ -113,6 +125,76 @@ pub(crate) fn shutdown_installed(executable: &Path) -> Result<(), String> {
     {
         return Err(last("Enumerate resident windows"));
     }
+    Ok(windows)
+}
+
+/// Called on a background worker with the identity proved by profile migration.
+pub(crate) fn handover_legacy(
+    pid: u32,
+    executable: &Path,
+    creation_filetime: u64,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    if pid == 0 || pid == unsafe { GetCurrentProcessId() } || creation_filetime == 0 {
+        return Err("Некорректная идентификация прежней сессии Prismestra.".into());
+    }
+    let process = match Process::try_open(pid) {
+        Ok(process) => process,
+        Err(error) if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "Не удалось проверить прежнюю сессию Prismestra: {error}"
+            ));
+        }
+    };
+    let actual =
+        installed::checked_local_path(&process.image_path()?).map_err(|e| e.to_string())?;
+    if actual != executable || process.creation_filetime()? != creation_filetime {
+        return Err("Прежняя сессия Prismestra изменилась. Передача управления отменена.".into());
+    }
+    if unsafe { WaitForSingleObject(process.0, 0) } == WAIT_OBJECT_0 {
+        return Ok(());
+    }
+    let mut shells = resident_windows()?
+        .into_iter()
+        .filter(|(_, owner)| *owner == pid);
+    let Some((window, _)) = shells.next() else {
+        return if unsafe { WaitForSingleObject(process.0, 0) } == WAIT_OBJECT_0 {
+            Ok(())
+        } else {
+            Err("Окно прежней фоновой сессии Prismestra недоступно.".into())
+        };
+    };
+    if shells.next().is_some() || shell_pid(window) != Some(pid) {
+        return Err("Окно прежней фоновой сессии Prismestra неоднозначно.".into());
+    }
+    match unsafe { WaitForSingleObject(process.0, 0) } {
+        WAIT_OBJECT_0 => return Ok(()),
+        WAIT_TIMEOUT => {}
+        _ => return Err(last("Check legacy Prismestra process")),
+    }
+    // The legacy shell handles WM_CLOSE as a normal Exit, including its
+    // unsaved-edit guards. The post itself is never considered an exit result.
+    if unsafe { PostMessageW(window, WM_CLOSE, 0, 0) } == 0 {
+        let error = last("Request legacy Prismestra to exit");
+        return if unsafe { WaitForSingleObject(process.0, 0) } == WAIT_OBJECT_0 {
+            Ok(())
+        } else {
+            Err(error)
+        };
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    match unsafe { WaitForSingleObject(process.0, remaining.as_millis() as u32) } {
+        WAIT_OBJECT_0 => Ok(()),
+        WAIT_TIMEOUT => Err("Прежняя Prismestra не завершилась за 45 секунд. Проверьте, сохранены ли правки и подтверждён ли выход.".into()),
+        _ => Err(last("Wait for legacy Prismestra to exit")),
+    }
+}
+
+pub(crate) fn shutdown_installed(executable: &Path) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let message = installed_exit_message()?;
+    let windows = resident_windows()?;
     let mut accepted = Vec::new();
     for (hwnd, pid) in windows {
         let process = match Process::open(pid) {
@@ -1589,6 +1671,18 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_handover_refuses_self_before_enumerating_windows() {
+        assert!(
+            handover_legacy(
+                std::process::id(),
+                Path::new(r"C:\Fixture\Prismestra.exe"),
+                1,
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn shutdown_target_requires_exact_executable_and_window_owner() {
         let executable = Path::new(r"C:\Applications\Prismestra\Prismestra.exe");

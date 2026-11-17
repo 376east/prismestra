@@ -1,4 +1,4 @@
-//! Native editor and persistent session. Hardware activation is an explicit user action.
+//! Native editor and persistent session. Installed startup restores saved hardware routes.
 use super::{CONTENT_LEFT, MIN_HEIGHT, MIN_WIDTH, Page, View, paint::Painter, right_panel};
 use crate::{
     app::{
@@ -38,6 +38,7 @@ use windows_sys::Win32::{
 const TBM_GETPOS: u32 = WM_USER;
 mod brand_icon;
 mod connections;
+mod first_run;
 mod modern;
 mod native_forms;
 mod resident;
@@ -500,6 +501,7 @@ impl Drop for Bitmap {
 }
 struct App {
     web_mode: bool,
+    first_run: first_run::Startup,
     connections: connections::Editor,
     native_lighting: Option<crate::app::lighting_outputs::Local>,
     sources: sources::Editor,
@@ -1088,6 +1090,7 @@ impl App {
         self.begin_shutdown();
     }
     fn begin_shutdown(&mut self) {
+        self.first_run.cancel();
         self.sources.release_lighting();
         self.connections.scan.cancel();
         self.sources.scan.cancel();
@@ -1103,6 +1106,7 @@ impl App {
     }
     fn close_ready(&mut self) -> bool {
         self.shutdown.phase() == crate::app::shutdown::Phase::Ready
+            && self.first_run.drained()
             && self.runtime.drained()
             && self.sources.scan.is_idle()
             && self.connections.scan.is_idle()
@@ -1979,13 +1983,16 @@ impl App {
     }
     fn tick(&mut self) -> Result<bool, String> {
         self.runtime.refresh();
+        let startup_changed = self.poll_first_run();
         self.runtime.maintenance(|r, _| self.sources.poll(r))?;
         if self.sources.last_status.elapsed() >= std::time::Duration::from_millis(500) {
             self.refresh_source_status();
             self.sources.last_status = Instant::now();
         }
-        let scan_changed =
-            self.poll_source_discovery() | self.poll_connections() | self.poll_connection_switch();
+        let scan_changed = self.poll_source_discovery()
+            | self.poll_connections()
+            | self.poll_connection_switch()
+            | startup_changed;
         if self.shutdown.active() {
             let previous = self.status.clone();
             self.runtime.poll_shutdown(&mut self.shutdown)?;
@@ -2018,7 +2025,7 @@ impl App {
             }
         }
         let previous = self.runtime.view_revision();
-        let connection_switching = self.connection_switching();
+        let connection_switching = self.connection_switching() || self.first_run.configuring();
         self.runtime.tick(crate::clock::monotonic_us(), wall())?;
         let mut changed = self.runtime.view_revision() != previous || scan_changed;
         changed |= self.poll_connection_switch();
@@ -2035,7 +2042,7 @@ impl App {
             };
             changed = true;
         }
-        self.was_pending = self.runtime.pending_configuration();
+        self.was_pending = self.runtime.pending_configuration() && !self.first_run.configuring();
         if let Some(error) = self.runtime.configuration_error() {
             self.status = format!("Не удалось применить: {error}");
             self.editor_buttons();
@@ -3024,6 +3031,9 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     let window = Window(state.editor_window.clone());
     let mut app = App {
         web_mode: false,
+        first_run: first_run::Startup::new(
+            resident_mode && crate::app::installed::session().is_some(),
+        ),
         connections: connections::Editor::new(
             o.native_lighting
                 .clone()
