@@ -20,7 +20,7 @@ Prismestra is a local lighting orchestrator for Windows. Its goal is to bring PC
 
 ## Download for Windows
 
-Download **[Prismestra Setup for Windows x64](https://github.com/malyarq/prismestra/releases/download/v0.1.0-preview.5/Prismestra-Setup-0.1.0.5-x64.exe)** from the [latest preview release](https://github.com/malyarq/prismestra/releases/tag/v0.1.0-preview.5). Run Setup, choose sign-in startup, then connect your devices in the app. A fresh installation starts with an empty profile.
+Download **[Prismestra Setup for Windows x64](https://github.com/malyarq/prismestra/releases/download/v0.1.0-preview.6/Prismestra-Setup-0.1.0.6-x64.exe)** from the [latest preview release](https://github.com/malyarq/prismestra/releases/tag/v0.1.0-preview.6). Run Setup and choose sign-in startup. The app restores an existing Prismestra scene or discovers supported local devices, builds a first map and starts a scene automatically. You can then arrange devices to match their physical positions.
 
 The offline installer includes the application, its private headless OpenRGB backend, Visual C++ and WebView2 installers, and the optional signed PawnIO installer for supported PC lighting. You do not need a separate OpenRGB installation. Updates preserve scenes; uninstall is available in Windows Settings and preserves your data. See [installation and permissions](docs/windows-installer.md) for details and the recorded test scope. Developer source downloads are not installers.
 

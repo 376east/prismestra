@@ -149,7 +149,8 @@ $local = [Environment]::GetFolderPath('LocalApplicationData')
 if ($identity.User.Value -ne $ExpectedSid -or $admin -or $local -cne $env:LOCALAPPDATA) { exit 2 }
 $receiptPath = Join-Path $local ("Prismestra-CI-" + $Id + ".json")
 $result = [ordered]@{ sid = $identity.User.Value; standard_user = $true; startup_command = $null;
-    empty_profile = $false; local_bindings = $false; backend_pin = $false; resident_shell = 'not_observed' }
+    empty_profile = $false; local_bindings = $false; backend_pin = $false; resident_shell = 'not_observed';
+    automatic_setup = $false; first_run = $null }
 $app = $null
 $stop = $null
 try {
@@ -200,6 +201,28 @@ try {
     if (-not ($result.empty_profile -and $result.local_bindings -and $result.backend_pin)) {
         throw 'Standard-user bootstrap content did not match the installed contract.'
     }
+    # Observe the real resident coordinator, not merely creation of empty JSON files.
+    $automaticPath = Join-Path $profile 'state\first-run-status.json'
+    $until = [DateTime]::UtcNow.AddSeconds(65)
+    while (-not $app.HasExited -and [DateTime]::UtcNow -lt $until) {
+        if (Test-Path -LiteralPath $automaticPath) {
+            try { $result.first_run = Get-Content -LiteralPath $automaticPath -Raw | ConvertFrom-Json }
+            catch { $result.first_run = $null }
+            if ($null -ne $result.first_run) {
+                if ($result.first_run.phase -eq 'error') { throw ('Automatic setup failed: ' + $result.first_run.detail) }
+                if ($result.first_run.native_outputs -and $result.first_run.phase -in @('applied','discovered','complete')) {
+                    $sdkErrors = @($result.first_run.discovery_issues | Where-Object {
+                        $_ -match '^OpenRGB:|^Управляемый OpenRGB недоступен'
+                    })
+                    if ($sdkErrors.Count) { throw ('Automatic managed SDK discovery failed: ' + ($sdkErrors -join '; ')) }
+                    $result.automatic_setup = $true
+                    break
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    if (-not $result.automatic_setup) { throw 'Installed app never automatically restored and discovered outputs.' }
     try {
         Add-Type -TypeDefinition @"
 using System;
@@ -289,7 +312,8 @@ try {
     Copy-Item -LiteralPath $evidence -Destination (Join-Path $report 'standard-user.json')
     $actual = Get-Content -LiteralPath $evidence -Raw | ConvertFrom-Json
     Assert-Expected ($status -eq 0 -and $actual.sid -ceq $sid -and $actual.standard_user -and $actual.empty_profile -and
-        $actual.local_bindings -and $actual.backend_pin) 'Standard-user verification failed. See standard-user.json.'
+        $actual.local_bindings -and $actual.backend_pin -and $actual.automatic_setup -and
+        $actual.resident_shell -eq 'process_drained_by_shutdown' -and -not $actual.startup_error_file) 'Standard-user verification failed. See standard-user.json.'
     Assert-Expected ($actual.startup_command -ceq ('"' + (Join-Path $install 'Prismestra.exe') + '" --installed --autostart')) 'Standard-user HKCU Run verification failed.'
 } finally {
     try {

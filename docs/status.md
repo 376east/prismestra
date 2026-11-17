@@ -2,6 +2,10 @@
 
 Prismestra is a Windows source preview. Its current product is local lighting/display orchestration, with existing cooling software left in control of cooling. The [product scope](../PRODUCT.md) and [compatibility matrix](compatibility.md) define the boundaries.
 
+Installed startup now restores saved local outputs after a verified prior Prismestra session and its backend have drained. A bounded background search constructs and saves an initial map for supported OpenRGB, Surplife E1 and TT LCD devices, without requiring Add/Apply actions. Existing layout, disabled devices and manual edits take precedence. Paired profile/binding writes recover interrupted commits and preserve conflicting edits. [Startup coordinator](../src/ui/windows/first_run.rs), [discovery and persistence](../src/app/first_run.rs), [migration](../src/app/installed_migration.rs).
+
+Software fixtures cover map geometry, actual generated frames through the engine, save/reload, recovery conflicts and migration provenance. They do not certify a particular device's passive advertisements or physical output. The ordinary-account installer harness additionally requires the real resident startup coordinator to complete a discovery pass and drain normally. Published release notes identify which exact installer ran that harness. [Installer scope](windows-installer.md).
+
 | Area | Implemented and checked | Remaining limit |
 |---|---|---|
 | Editor and resident engine | WebView2 editor, native fallback, persistent scenes/drafts, rendering after editor closure; configured-kit autostart observed after a real reboot | All-output reboot acceptance remains open because LCD failed USB enumeration |
