@@ -123,8 +123,14 @@ Check-Payload $first.Manifest
 Assert-Expected (Test-Path -LiteralPath $arp) 'Installer did not register the isolated uninstaller.'
 Assert-Expected (Test-Path -LiteralPath $shortcut) 'Installer did not create the isolated Start menu entry.'
 $asset = Join-Path $user 'state\assets\lifecycle-sentinel.txt'
+$startupVerified = $true
 if ($ElevatedFilesOnly) {
-    Check-Run $runValue
+    $actualStartup = Get-ItemPropertyValue -LiteralPath $runKey -Name $runName -ErrorAction SilentlyContinue
+    if ($null -eq $actualStartup) {
+        Assert-Expected ((Get-Content -LiteralPath (Join-Path $report 'install.log') -Raw).Contains(
+            'Could not enable sign-in startup for the original ordinary user.')) 'Setup did not report missing linked-user startup.'
+        $startupVerified = $false
+    } else { Check-Run $runValue }
     [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($asset))
     [IO.File]::WriteAllText($profile, '{ "lifecycle_fixture": "' + $id + '" }')
     [IO.File]::WriteAllText($bindings, '{ "lifecycle_fixture": "' + $id + '" }')
@@ -148,7 +154,7 @@ Run-Setup $upgrade.Path '/TASKS=autostart' (Join-Path $report 'upgrade.log')
 if (-not $ElevatedFilesOnly) {
     Assert-Expected ($old.WaitForExit(5000)) 'Upgrade did not drain the original installed process.'
     Check-Run $runValue
-} else { Check-Run $runValue }
+} else { Check-Run $(if ($startupVerified) { $runValue } else { $null }) }
 Check-Payload $upgrade.Manifest
 Assert-Expected ((Sha256 $profile) -ceq $profileHash -and (Sha256 $bindings) -ceq $bindingsHash -and
     (Sha256 $asset) -ceq $assetHash) 'Upgrade changed saved profile, local bindings or assets.'
@@ -173,7 +179,7 @@ Assert-Expected ((Sha256 $profile) -ceq $profileHash -and (Sha256 $bindings) -ce
     namespace = $id
     first_version = $first.Manifest.installer_version
     upgraded_version = $upgrade.Manifest.installer_version
-    startup_registry = 'exact_command_verified_in_original_hive'
+    startup_registry = if ($startupVerified) { 'exact_command_verified_in_original_hive' } else { 'absent_no_linked_token_reported' }
     damaged_manifest_repair = [bool]$ElevatedFilesOnly
     graceful_upgrade = if ($ElevatedFilesOnly) { 'no_live_session_exercised' } else { 'resident_process_drained' }
     graceful_uninstall = if ($ElevatedFilesOnly) { 'no_live_session_exercised' } else { 'resident_process_drained' }
