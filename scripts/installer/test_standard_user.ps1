@@ -169,7 +169,7 @@ try {
     $manifest = Get-Content -LiteralPath (Join-Path $Install 'install-manifest.json') -Raw | ConvertFrom-Json
     if ($manifest.data_namespace -cne $Id) { throw 'Installed manifest does not match the fixture namespace.' }
     $image = Join-Path $Install 'Prismestra.exe'
-    $app = Start-Process -FilePath $image -ArgumentList '--installed', '--autostart' -PassThru -WindowStyle Hidden
+    $app = Start-Process -FilePath $image -ArgumentList '--installed', '--autostart' -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $PSScriptRoot 'app.stderr.log') -RedirectStandardOutput (Join-Path $PSScriptRoot 'app.stdout.log')
     $documentPath = Join-Path $profile 'profile.json'
     $configPath = Join-Path $profile 'state\managed-openrgb.json'
     $bindingPath = Join-Path $profile 'state\lighting-local.json'
@@ -206,7 +206,7 @@ try {
     $until = [DateTime]::UtcNow.AddSeconds(65)
     while (-not $app.HasExited -and [DateTime]::UtcNow -lt $until) {
         if (Test-Path -LiteralPath $automaticPath) {
-            try { $result.first_run = Get-Content -LiteralPath $automaticPath -Raw | ConvertFrom-Json }
+            try { $result.first_run = Get-Content -LiteralPath $automaticPath -Raw -Encoding UTF8 | ConvertFrom-Json }
             catch { $result.first_run = $null }
             if ($null -ne $result.first_run) {
                 if ($result.first_run.phase -eq 'error') { throw ('Automatic setup failed: ' + $result.first_run.detail) }
@@ -328,6 +328,10 @@ try {
         Copy-Item -LiteralPath $workerLog -Destination (Join-Path $report 'worker-output.log')
         if ($status -ne 0) { Get-Content -LiteralPath $workerLog -Tail 40 | Write-Host }
     }
+    foreach ($name in @('app.stderr.log','app.stdout.log')) {
+        $log = Join-Path $scratch $name
+        if (Test-Path -LiteralPath $log) { Copy-Item -LiteralPath $log -Destination (Join-Path $report $name) }
+    }
     $profile = Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$sid'"
     Assert-Expected ($null -ne $profile) "Standard-user profile was not loaded (worker exit $status)."
     $evidence = Join-Path $profile.LocalPath ("AppData\Local\Prismestra-CI-" + $id + ".json")
@@ -364,7 +368,7 @@ try {
         }
         if ($password) { $password.Dispose() }
         if (Test-Path -LiteralPath $scratch) {
-            foreach ($name in @('worker.ps1', 'original-user.ps1', 'invoke-worker.ps1', 'worker-output.log')) {
+            foreach ($name in @('worker.ps1', 'original-user.ps1', 'invoke-worker.ps1', 'worker-output.log', 'app.stderr.log', 'app.stdout.log')) {
                 $file = Join-Path $scratch $name
                 if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
             }

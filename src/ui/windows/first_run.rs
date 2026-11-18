@@ -102,6 +102,7 @@ impl App {
                 "native_outputs": self.native_lighting.is_some(),
                 "devices": self.runtime.document().lighting.setup.devices.len(),
                 "discovery_issues": self.first_run.discovery_issues,
+                "backend_detail": self.runtime.read(|runtime| runtime.managed_backend_detail().map(str::to_owned)),
                 "detail": self.status,
             }));
             if let Ok(bytes) = report
