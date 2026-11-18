@@ -323,7 +323,14 @@ try {
     # https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw
     $workerArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $wrapperFile + '" "' + $install + '" ' + $id + ' ' + $sid
     Assert-Expected (($powershell.Length + $workerArguments.Length + 4) -lt 1024) 'Fixture logon command line exceeds the Windows limit.'
+    $started = Get-Date
     $status = [PrismestraCiLogon]::Run($username, $password, $sid, $powershell, $workerArguments, $scratch)
+    # The bundled Windows entrypoint reports failures before its file logger
+    # starts to the Application event log. Preserve those own-run diagnostics.
+    $events = @(Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=$started} -ErrorAction SilentlyContinue |
+        Where-Object ProviderName -EQ 'OpenRGB')
+    $events | Select-Object TimeCreated, Id, Message, @{Name='Values';Expression={@($_.Properties | ForEach-Object Value)}} |
+        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $report 'backend-events.json') -Encoding UTF8
     if (Test-Path -LiteralPath $workerLog) {
         Copy-Item -LiteralPath $workerLog -Destination (Join-Path $report 'worker-output.log')
         if ($status -ne 0) { Get-Content -LiteralPath $workerLog -Tail 40 | Write-Host }
@@ -334,6 +341,15 @@ try {
     }
     $profile = Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$sid'"
     Assert-Expected ($null -ne $profile) "Standard-user profile was not loaded (worker exit $status)."
+    $backendLogs = Join-Path $profile.LocalPath ("AppData\Local\Prismestra\Instances\" + $id + "\state\openrgb")
+    if (Test-Path -LiteralPath $backendLogs) {
+        $index = 0
+        Get-ChildItem -LiteralPath $backendLogs -Filter '*.log' -File -Recurse |
+            Where-Object Length -LE 2097152 | Select-Object -First 12 | ForEach-Object {
+                Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $report ('backend-' + $index + '.log'))
+                $index++
+            }
+    }
     $evidence = Join-Path $profile.LocalPath ("AppData\Local\Prismestra-CI-" + $id + ".json")
     Assert-Expected (Test-Path -LiteralPath $evidence) "Fixture worker did not report assertions (exit $status)."
     Copy-Item -LiteralPath $evidence -Destination (Join-Path $report 'standard-user.json')

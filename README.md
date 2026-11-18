@@ -36,7 +36,7 @@ The desktop editor now embeds its local interface through WebView2 and sends val
 - **RGB and LCD together.** Compose images, animation and temperature overlays through the [LCD pipeline](src/lcd), alongside independently paced lighting outputs.
 - **Reuse existing support.** Reach an OpenRGB SDK6 server through a [bounded adapter](src/transport/openrgb.rs), send realtime frames to [WLED](src/transport/wled.rs), and submit whole-light colors to [Home Assistant](src/transport/home_assistant.rs).
 - **Keep personal setup local.** [Portable scenes](src/app/document.rs) are separate from [local device bindings](src/app/lighting_bindings.rs).
-- **Activate deliberately.** Discovery, saving a connection and taking ownership of its output are separate steps. A successful submission is reported as submission, not proof that a physical light changed.
+- **Keep control.** Installed startup connects supported local devices automatically; manual network setup and explicit output controls remain available. A successful submission is reported as submission, not proof that a physical light changed.
 
 Prismestra does not control fans or pumps. Keep your existing cooling software. Temperature inputs are read-only.
 
@@ -55,7 +55,7 @@ cargo build --release --locked --bin pc-control-ui
 
 The internal crate and executable still use `pc-control` and `pc-control-ui`. The product name is **Prismestra**.
 
-First launch opens a preview. Set up and inspect a supported connection before applying it. When using an external backend, configure its server separately; Prismestra does not install or silently take over another controller.
+When running from source or an older portable ZIP, first launch opens a preview. Set up and inspect a supported connection before applying it. When using an external backend, configure its server separately; Prismestra does not install or silently take over another controller.
 
 For one-program operation, configure a [managed local OpenRGB backend](docs/managed-openrgb.md) once. Prismestra runs its headless server, verifies ownership/readiness, recovers failures and releases it on exit. Default management uses ordinary permissions; equipment requiring administrator access uses a separately authorized helper.
 
