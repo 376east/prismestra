@@ -52,12 +52,20 @@ try {
     # Qt 6.8.3's dependency scan overflowed on this large source tree. Disable
     # that optional scan and force ALL objects below: header changes must never
     # leave stale objects. This is a full component build, not incremental.
-    $configure = Start-Process -FilePath ($mappedQt + '/bin/qmake.exe') -ArgumentList @('-nodepend', ('"' + $mappedSource + '/OpenRGB.pro"'), 'CONFIG+=release', 'CONFIG-=debug', 'CONFIG-=debug_and_release', 'CONFIG+=prismestra_pc_backend') -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput 'configure.stdout.log' -RedirectStandardError 'configure.log'
-    $configure.WaitForExit()
+    # Wait on the exact tool process below. Start-Process -Wait also waits for
+    # descendants, including a hidden console host that can outlive qmake.
+    $configure = Start-Process -FilePath ($mappedQt + '/bin/qmake.exe') -ArgumentList @('-nodepend', ('"' + $mappedSource + '/OpenRGB.pro"'), 'CONFIG+=release', 'CONFIG-=debug', 'CONFIG-=debug_and_release', 'CONFIG+=prismestra_pc_backend') -WindowStyle Hidden -PassThru -RedirectStandardOutput 'configure.stdout.log' -RedirectStandardError 'configure.log'
+    if (-not $configure.WaitForExit(120000)) {
+        $configure.Kill()
+        throw 'qmake exceeded its two-minute build preparation limit'
+    }
     $configureExit = $configure.ExitCode
     if ($configureExit -ne 0) { throw "qmake failed ($configureExit); inspect configure.log" }
-    $compile = Start-Process -FilePath $jomPath -ArgumentList @('/A', ('-j' + $Jobs)) -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput 'build.log' -RedirectStandardError 'build.stderr.log'
-    $compile.WaitForExit()
+    $compile = Start-Process -FilePath $jomPath -ArgumentList @('/A', ('-j' + $Jobs)) -WindowStyle Hidden -PassThru -RedirectStandardOutput 'build.log' -RedirectStandardError 'build.stderr.log'
+    if (-not $compile.WaitForExit(1800000)) {
+        $compile.Kill()
+        throw 'Component compilation exceeded its thirty-minute limit'
+    }
     $buildExit = $compile.ExitCode
     if ($buildExit -ne 0) { throw "Compilation failed ($buildExit); inspect build.log" }
     Get-FileHash -LiteralPath 'release/OpenRGB.exe'

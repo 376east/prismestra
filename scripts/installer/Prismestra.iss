@@ -248,6 +248,10 @@ begin
     Log('Legacy startup source could not be prepared; previous startup entries kept.');
     Exit;
   end;
+  if RebootRequired then begin
+    Log('Verified legacy source saved for next launch; profile preparation and prior task retirement require Setup after restart.');
+    Exit;
+  end;
   if not OriginalUser('PrepareProfile', SID) then begin
     Log('Legacy profile could not be prepared as the original ordinary user; previous startup entries kept.');
     Exit;
@@ -330,9 +334,7 @@ begin
         Log('Could not check sign-in startup for the original ordinary user.');
     end;
 #ifndef LifecycleTest
-    if StartupReady and not RebootRequired then RetireLegacyStartup
-    else if RebootRequired then
-      Log('Legacy profile preparation deferred until required Windows restart; previous startup entries kept.')
+    if StartupReady then RetireLegacyStartup
     else Log('Previous startup kept because the new startup preference could not be applied.');
 #endif
   end;
