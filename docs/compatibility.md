@@ -34,4 +34,4 @@ Successful compilation does not complete the other stages. A report should say w
 - Home Assistant keys are shared by lights on the same canonical server endpoint and stored in [Windows Credential Manager](../src/credentials_windows.rs). Removing one light preserves the server key. After changing a key, Apply creates a new worker and reads it again. Missing credentials or server rejection can be reported after previous outputs have drained; Return is an explicit recovery action.
 - Read-only temperatures do not grant fan or pump control. The application does not replace Fan Control.
 
-Device reports are welcome through the [device report form](https://github.com/malyarq/prismestra/issues/new?template=device.yml).
+Device reports are welcome through the [device report form](https://github.com/malyarq/prismestra/issues/new?template=device.yml). For a Surplife E1 strip, see the [BLE acceptance steps and report fields](ble-device-acceptance.md).
