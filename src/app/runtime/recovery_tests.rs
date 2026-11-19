@@ -1263,6 +1263,75 @@ fn resume_keeps_ready_outputs_live_while_a_known_output_recovers() {
 }
 
 #[test]
+fn resume_keeps_ready_output_live_past_slow_neighbors_refresh_deadline() {
+    let mut runtime = runtime();
+    let slow = Arc::new(Link::default());
+    let healthy = Arc::new(Link::default());
+    let block_open = Arc::new(AtomicBool::new(false));
+    let slow_factory = factory(&slow);
+    let gate = block_open.clone();
+    runtime
+        .attach_rgb(
+            "a",
+            vec![],
+            Arc::new(move |cancel| {
+                while gate.load(Ordering::SeqCst) {
+                    if cancel.cancelled() {
+                        return Err("Slow stand output opening cancelled".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                slow_factory(cancel)
+            }),
+        )
+        .unwrap();
+    runtime.attach_rgb("b", vec![], factory(&healthy)).unwrap();
+    runtime.enable_registered_output_recovery();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+    working(&mut runtime, "b", &mut now);
+
+    block_open.store(true, Ordering::SeqCst);
+    runtime.notify_power(true, now).unwrap();
+    runtime.notify_power(false, now).unwrap();
+    wait(|| runtime.lighting_drained());
+    now += 7_000_000;
+    tick(&mut runtime, &mut now);
+    wait(|| runtime.host.status("b").unwrap().phase == Phase::Ready);
+    assert_eq!(runtime.host.status("a").unwrap().phase, Phase::Connecting);
+    let generation = runtime.host.status("b").unwrap().generation;
+    tick(&mut runtime, &mut now);
+    assert_eq!(runtime.power.error(), None);
+
+    // Only the simulated clock crosses the legacy global refresh deadline.
+    let last_requested = runtime.host.requested("b");
+    now += 30_000_000;
+    tick(&mut runtime, &mut now);
+    assert_eq!(runtime.power.error(), None);
+    assert_eq!(runtime.host.status("a").unwrap().phase, Phase::Connecting);
+    assert_eq!(runtime.outputs_ready(), Ok(false));
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime
+            .host
+            .status("b")
+            .unwrap()
+            .last_submitted
+            .is_some_and(|ticket| {
+                last_requested.is_none_or(|previous| ticket.sequence > previous.sequence)
+            })
+    });
+    assert_eq!(runtime.host.status("b").unwrap().generation, generation);
+    assert_eq!(healthy.calls.load(Ordering::SeqCst), 2);
+
+    block_open.store(false, Ordering::SeqCst);
+    working(&mut runtime, "a", &mut now);
+    assert_eq!(slow.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(runtime.outputs_ready(), Ok(true));
+    drain(&mut runtime);
+}
+
+#[test]
 fn resume_recovers_a_known_output_whose_endpoint_is_still_claimed() {
     let mut runtime = runtime();
     let a = Arc::new(Link::default());
