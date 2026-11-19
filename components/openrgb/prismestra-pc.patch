@@ -1242,7 +1242,7 @@ index 0000000000000000000000000000000000000000..3d6fdb38a78608a35ecdeffb89395a81
 +    PcTimerResolution& operator=(const PcTimerResolution&) = delete;
 +};
 diff --git a/startup/main_Windows.cpp b/startup/main_Windows.cpp
-index dd6228967b72f9c818395e5a0fae76c8416d9604..6b0d2d49ed5b81d5fb37c80c8250d1d1e70c3c69 100644
+index dd6228967b72f9c818395e5a0fae76c8416d9604..e7a220cdcb39307e4929ff27985d76af5e2809f8 100644
 --- a/startup/main_Windows.cpp
 +++ b/startup/main_Windows.cpp
 @@ -10,6 +10,7 @@
@@ -1273,7 +1273,20 @@ index dd6228967b72f9c818395e5a0fae76c8416d9604..6b0d2d49ed5b81d5fb37c80c8250d1d1
  static std::mutex            service_stop_mutex;
  static std::condition_variable service_stop_cv;
  static bool                  have_console;
-@@ -448,7 +453,12 @@ int main(int argc, char* argv[])
+@@ -384,6 +389,12 @@ int main(int argc, char* argv[])
+ {
+     started_as_service = false;
+ 
++#ifdef PRISMESTRA_PC_BACKEND
++    // A leased child is an application, never a Windows service.
++    if(PrismestraParentPipe())
++        return common_main(argc, argv);
++#endif
++
+     /*-----------------------------------------------------*\
+     | This will call ServiceMain() if we are started as a   |
+     | service                                               |
+@@ -448,7 +459,12 @@ int main(int argc, char* argv[])
      /*-----------------------------------------------------*\
      | Attach console output                                 |
      \*-----------------------------------------------------*/
@@ -1286,7 +1299,7 @@ index dd6228967b72f9c818395e5a0fae76c8416d9604..6b0d2d49ed5b81d5fb37c80c8250d1d1
      {
          /*-------------------------------------------------*\
          | We are running under some terminal context;       |
-@@ -522,14 +532,31 @@ void InitializeTimerResolutionThreadFunction()
+@@ -522,14 +538,31 @@ void InitializeTimerResolutionThreadFunction()
  static void WaitWhileServerOnline(NetworkServer* srv)
  {
      std::unique_lock<std::mutex> lock(service_stop_mutex);
@@ -1319,7 +1332,7 @@ index dd6228967b72f9c818395e5a0fae76c8416d9604..6b0d2d49ed5b81d5fb37c80c8250d1d1
      };
  }
  
-@@ -581,9 +608,17 @@ static int common_main(int argc, char* argv[])
+@@ -581,9 +614,17 @@ static int common_main(int argc, char* argv[])
      /*-----------------------------------------------------*\
      | Start timer resolution correction thread              |
      \*-----------------------------------------------------*/

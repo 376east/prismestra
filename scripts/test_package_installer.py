@@ -2,8 +2,10 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import struct
+import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -180,6 +182,66 @@ class InstallerPackaging(unittest.TestCase):
             installer.package(self.arguments(version="0.1.0-preview.5"))
         with self.assertRaisesRegex(ValueError, "cannot contain prerequisites"):
             installer.package(self.arguments(prerequisite_lock=self.root / "fake.lock"))
+
+    @unittest.skipUnless(os.name == "nt", "Requires inbox Windows PowerShell")
+    def test_generated_standard_user_worker_has_unicode_bom_and_parses_in_powershell_5(self):
+        script = r'''
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$text = [IO.File]::ReadAllText($env:PRISMESTRA_WORKER_SOURCE, [Text.UTF8Encoding]::new($false, $true))
+$ast = [Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors)
+if ($errors) { throw ($errors | Out-String) }
+$assignment = $ast.Find({param($a) $a -is [Management.Automation.Language.AssignmentStatementAst] -and $a.Left.Extent.Text -ceq '$worker'}, $true)
+$literal = $assignment.Find({param($a) $a -is [Management.Automation.Language.StringConstantExpressionAst] -and $a.StringConstantType.ToString() -ceq 'SingleQuotedHereString'}, $true)
+$writer = $ast.Find({param($a) $a -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $a.Member.Value -ceq 'WriteAllText' -and $a.Arguments[0].Extent.Text -ceq '$workerFile'}, $true)
+if (-not $literal -or -not $writer) { throw 'Generated worker source or writer missing' }
+$worker = $literal.Value
+$workerFile = $env:PRISMESTRA_WORKER_FIXTURE
+# Execute only the real file-generation expression, never the test's account/installer actions.
+& ([scriptblock]::Create($writer.Extent.Text))
+$bytes = [IO.File]::ReadAllBytes($workerFile)
+if ($bytes.Length -lt 3 -or $bytes[0] -ne 239 -or $bytes[1] -ne 187 -or $bytes[2] -ne 191) {
+    throw 'Windows PowerShell worker lacks its UTF-8 BOM'
+}
+[void][Management.Automation.Language.Parser]::ParseFile($workerFile, [ref]$tokens, [ref]$errors)
+if ($errors) { throw ($errors | Out-String) }
+$assignment = $ast.Find({param($a) $a -is [Management.Automation.Language.AssignmentStatementAst] -and $a.Left.Extent.Text -ceq '$wrapper'}, $true)
+$literal = $assignment.Find({param($a) $a -is [Management.Automation.Language.StringConstantExpressionAst] -and $a.StringConstantType.ToString() -ceq 'SingleQuotedHereString'}, $true)
+$wrapper = $literal.Value
+$wrapperFile = Join-Path (Split-Path $workerFile) 'invoke-worker.ps1'
+$writer = $ast.Find({param($a) $a -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $a.Member.Value -ceq 'WriteAllText' -and $a.Arguments[0].Extent.Text -ceq '$wrapperFile'}, $true)
+& ([scriptblock]::Create($writer.Extent.Text))
+[void][Management.Automation.Language.Parser]::ParseFile($wrapperFile, [ref]$tokens, [ref]$errors)
+if ($errors) { throw ($errors | Out-String) }
+$id = '01234567-89ab-cdef-0123-456789abcdef'
+$install = 'C:\Program Files\Prismestra Lifecycle Test\' + $id
+$sid = 'S-1-5-21-1234567890-1234567890-1234567890-1001'
+$powershell = Join-Path $PSHOME 'powershell.exe'
+$arguments = $ast.Find({param($a) $a -is [Management.Automation.Language.AssignmentStatementAst] -and $a.Left.Extent.Text -ceq '$workerArguments'}, $true)
+$workerArguments = & ([scriptblock]::Create($arguments.Right.Extent.Text))
+if (($powershell.Length + $workerArguments.Length + 4) -ge 1024) { throw 'Fixture exceeds CreateProcessWithLogonW command-line limit' }
+# Exercise the real wrapper with harmless scripts, never the account/installer worker.
+[IO.File]::WriteAllText($workerFile, 'Write-Output "fixture success"; exit 0', [Text.UTF8Encoding]::new($true))
+& $powershell -NoProfile -NonInteractive -File $wrapperFile $install $id $sid
+if ($LASTEXITCODE -ne 0) { throw 'Wrapper failed to return successful status' }
+$log = Join-Path (Split-Path $workerFile) 'worker-output.log'
+if ([IO.File]::ReadAllText($log) -notmatch 'fixture success') { throw 'Wrapper lost output' }
+[IO.File]::WriteAllText($workerFile, 'throw "fixture failure"', [Text.UTF8Encoding]::new($true))
+& $powershell -NoProfile -NonInteractive -File $wrapperFile $install $id $sid
+if ($LASTEXITCODE -ne 1 -or [IO.File]::ReadAllText($log) -notmatch 'fixture failure') { throw 'Wrapper lost failure status or diagnostic' }
+exit 0
+'''
+        import base64
+        powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+        result = subprocess.run(
+            [str(powershell), "-NoProfile", "-NonInteractive", "-EncodedCommand",
+             base64.b64encode(script.encode("utf-16-le")).decode()],
+            env=os.environ | {
+                "PRISMESTRA_WORKER_SOURCE": str(installer.ROOT / "installer/test_standard_user.ps1"),
+                "PRISMESTRA_WORKER_FIXTURE": str(self.root / "worker.ps1"),
+            }, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_isolated_stage_is_deterministic_and_upgrade_preserves_namespace(self):
         first = self.arguments()

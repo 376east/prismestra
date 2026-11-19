@@ -285,6 +285,10 @@ def package(args):
         if policy.is_symlink() or not policy.is_file():
             raise ValueError("Missing maintained installer policy provisioner")
         shutil.copyfile(policy, payload / policy.name)
+        retirement = ROOT / "installer" / "retire-legacy-startup.ps1"
+        if retirement.is_symlink() or not retirement.is_file():
+            raise ValueError("Missing maintained legacy startup migration")
+        shutil.copyfile(retirement, payload / retirement.name)
     manifest = {
         "version": 1, "product": "Prismestra", "commit": args.expected_commit,
         "app_sha256": args.app_sha256, "app_release_source": release_source,

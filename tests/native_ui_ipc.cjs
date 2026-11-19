@@ -11,6 +11,10 @@ assert.equal(commands[0].op,'snapshot');
 const scene={effect:'noise_map',colors:[0xff0000,0x00ff00],brightness:80,speed:30,fps:48,temperature:0,tint:0,noise:{frequency:.055,amplitude:1,lacunarity:.75,persistence:.5,octaves:2,motion:1,motion_speed:1},noise_palette:'custom',rainbow_width:10};
 const initial={scene, draftScene:{...scene,brightness:65},library:[{id:'saved',name:'Живая сцена',scene}],devices:[],groups:{pc:true,door:false},native:true,pending:false,dirty:false,status:'Готово',error:null,profilePath:'C:\\sample.json',editor:null};
 context.payload={kind:'snapshot',state:initial};vm.runInContext('window.prismestraReceive(payload)',context);
+const navigationIcons=vm.runInContext('Object.keys(pages).map(key => glyphs[key])',context);
+assert.ok(navigationIcons.every(Boolean),'each navigation item has its own glyph definition');
+assert.equal(new Set(navigationIcons).size,navigationIcons.length,'navigation glyphs are distinct');
+assert.match(find('nav').innerHTML,/aria-label="Сцены"[^>]*aria-current="page"/);
 assert.equal(vm.runInContext('draft.brightness',context),65,'restores backend draft once');
 vm.runInContext('draft.noise.frequency=.123;draft.brightness=55',context);
 context.payload={kind:'snapshot',state:structuredClone(initial)};vm.runInContext('window.prismestraReceive(payload)',context);
@@ -127,3 +131,92 @@ context.payload={kind:'status',state:{detail:'RGB: передано кадров
 vm.runInContext('window.prismestraReceive(payload)',context);
 assert.equal(find('#native-runtime-detail').textContent,'RGB: передано кадров 153');
 console.log('PASS: selected output diagnostics are escaped and update from runtime status messages');
+
+// Audit regression: selecting B must preserve the unsaved draft of A until the user decides.
+const entryA={id:'scene-a',name:'A',scene:{...scene,colors:[0x112233]}};
+const entryB={id:'scene-b',name:'B',scene:{...scene,colors:[0x445566]}};
+const draftState={...initial,editor:null,draftScene:null,library:[entryA,entryB]};
+const evaluate=expression=>vm.runInContext(expression,context);
+function restoreDraft(snapshot){
+ context.payload={kind:'snapshot',state:structuredClone(snapshot)};
+ evaluate('draft=null;view="library";window.prismestraReceive(payload)');
+}
+function selectScene(id){
+ events.click({target:{closest:()=>({dataset:{edit:id},disabled:false,hasAttribute:()=>true})}});
+}
+restoreDraft(draftState);
+selectScene(entryA.id);
+evaluate('draft.colors[0]=0xaabbcc;editDraft();flushPreview();changeView("library")');
+const draftA=commands.at(-1);
+assert.equal(draftA.origin.id,entryA.id);
+assert.equal(draftA.origin.scene.colors[0],0x112233);
+const beforeSwitch=commands.length;
+selectScene(entryB.id);
+assert.equal(find('#draft-switch').open,true);
+assert.equal(commands.length,beforeSwitch);
+assert.equal(evaluate('draft.colors[0]'),0xaabbcc);
+find('#draft-stay').onclick();
+assert.equal(evaluate('view'),'editor');
+assert.equal(evaluate('draft.colors[0]'),0xaabbcc);
+evaluate('changeView("library")');
+selectScene(entryA.id);
+assert.equal(find('#draft-switch').open,false,'reopening A resumes its draft');
+assert.equal(evaluate('draft.colors[0]'),0xaabbcc);
+
+// Even if the same edits were applied live, they are still unsaved in the library.
+context.payload={kind:'status',state:{scene:draftA.scene,pending:false}};
+evaluate('window.prismestraReceive(payload);changeView("library")');
+selectScene(entryB.id);
+find('#draft-save').onclick();
+assert.equal(commands.at(-1).op,'save_scene');
+assert.equal(commands.at(-1).id,entryA.id);
+assert.equal(commands.at(-1).scene.colors[0],0xaabbcc);
+evaluate('window.prismestraReceive({kind:"status",state:{pending:false}})');
+assert.equal(evaluate('busy()'),true,'periodic output status does not acknowledge saving');
+context.payload={kind:'snapshot',state:{...draftState,scene:draftA.scene}};
+evaluate('window.prismestraReceive(payload)');
+assert.equal(evaluate('busy()'),true,'an unrelated snapshot without the saved entry does not unlock the switch');
+evaluate('window.prismestraReceive({kind:"draft_error",message:"Could not autosave preview"})');
+assert.equal(evaluate('busy()'),true,'preview autosave errors do not cancel the pending catalog save');
+assert.equal(evaluate('selectedId'),entryA.id);
+evaluate('window.prismestraReceive({kind:"error",message:"Cannot write catalog"})');
+assert.equal(evaluate('selectedId'),entryA.id);
+assert.equal(evaluate('draft.colors[0]'),0xaabbcc);
+selectScene(entryB.id);
+find('#draft-save').onclick();
+context.payload={kind:'snapshot',state:{...draftState,library:[{...entryA,scene:draftA.scene},entryB]}};
+evaluate('window.prismestraReceive(payload)');
+assert.equal(evaluate('selectedId'),entryB.id);
+assert.equal(commands.at(-1).op,'preview_scene');
+assert.equal(commands.at(-1).origin.id,entryB.id);
+assert.ok(!commands.slice(beforeSwitch).some(command=>command.op==='apply_scene'));
+
+restoreDraft({...draftState,draftScene:draftA.scene,draftOrigin:draftA.origin});
+assert.equal(evaluate('draftName'),'A');
+assert.equal(evaluate('selectedId'),entryA.id);
+selectScene(entryB.id);
+find('#draft-discard').onclick();
+assert.equal(evaluate('selectedId'),entryB.id);
+assert.equal(commands.at(-1).scene.colors[0],0x445566);
+
+restoreDraft({...draftState,draftScene:draftA.scene});
+assert.equal(evaluate('draftName'),'Восстановленный черновик');
+selectScene(entryB.id);
+find('#draft-save').onclick();
+assert.equal(find('#name-dialog').open,true);
+find('#scene-name').value='Recovered';
+find('#name-form').onsubmit({preventDefault(){}});
+assert.equal(commands.at(-1).id,null,'legacy draft saves as a new entry');
+assert.equal(evaluate('draft.colors[0]'),0xaabbcc);
+context.payload={kind:'snapshot',state:{...draftState,library:[entryA,entryB,{id:'restored',name:'Recovered',scene:draftA.scene}]}};
+evaluate('window.prismestraReceive(payload)');
+assert.equal(evaluate('selectedId'),entryB.id);
+
+restoreDraft({...draftState,draftScene:draftA.scene,draftOrigin:draftA.origin,library:[{...entryA,name:'Reused ID'},entryB]});
+assert.equal(evaluate('selectedId'),null,'reused source ID does not silently reattach');
+assert.equal(evaluate('draftName'),'A');
+assert.equal(evaluate('draft.colors[0]'),0xaabbcc);
+evaluate('window.prismestraReceive({kind:"flush",id:93})');
+assert.equal(commands.at(-1).origin.id,null);
+assert.equal(commands.at(-1).origin.name,'A');
+console.log('PASS: scene draft guard, all three choices, acknowledged save and error recovery, named/legacy restore, stale source detachment');

@@ -1,0 +1,397 @@
+//! Installed startup restores saved routes and builds the first physical map off the UI thread.
+use super::*;
+use crate::app::{
+    first_run::{self, Plan, Worker},
+    lighting_outputs::Local,
+};
+use std::{thread::JoinHandle, time::Duration};
+
+struct Applying {
+    revision: u64,
+    plan: Plan,
+    previous_document: Document,
+    path: PathBuf,
+    context: u64,
+}
+
+pub(super) struct Startup {
+    installed: bool,
+    phase: &'static str,
+    report: Vec<u8>,
+    reported_phase: &'static str,
+    discovery_issues: Vec<String>,
+    enabled: bool,
+    initialized: bool,
+    handover: Option<JoinHandle<Result<(), String>>>,
+    worker: Worker,
+    applying: Option<Applying>,
+    restoring: Option<u64>,
+    expected: Option<Document>,
+    path: Option<PathBuf>,
+    context: u64,
+    attempts: u8,
+    next: Instant,
+}
+
+impl Startup {
+    pub(super) fn new(enabled: bool) -> Self {
+        Self {
+            installed: enabled,
+            phase: if enabled { "starting" } else { "disabled" },
+            report: Vec::new(),
+            reported_phase: "",
+            discovery_issues: Vec::new(),
+            enabled,
+            initialized: false,
+            handover: None,
+            worker: Worker::default(),
+            applying: None,
+            restoring: None,
+            expected: None,
+            path: None,
+            context: 0,
+            attempts: 0,
+            next: Instant::now(),
+        }
+    }
+    pub(super) fn cancel(&mut self) {
+        self.enabled = false;
+        self.phase = "cancelled";
+        self.worker.cancel();
+    }
+    pub(super) fn drained(&self) -> bool {
+        self.worker.is_idle() && self.handover.as_ref().is_none_or(|job| job.is_finished())
+    }
+    pub(super) fn configuring(&self) -> bool {
+        self.applying.is_some() || self.restoring.is_some()
+    }
+}
+
+impl App {
+    pub(super) fn newly_found_devices(&self) -> impl Iterator<Item = &crate::devices::Device> {
+        self.first_run
+            .applying
+            .iter()
+            .flat_map(|pending| pending.plan.document.lighting.setup.devices.iter())
+            .filter(|candidate| {
+                !self
+                    .runtime
+                    .project()
+                    .setup
+                    .devices
+                    .iter()
+                    .any(|device| device.id == candidate.id)
+            })
+    }
+
+    fn startup_output_labels(&mut self) {
+        self.set_text(PC_ON, "Подсветка ПК");
+        self.set_text(DOOR_ON, "Дополнительный свет");
+        self.set_text(SCHED_ON, "Включить расписание подсветки");
+        self.set_text(APPLY_SCHED, "Применить к устройствам");
+    }
+    pub(super) fn poll_first_run(&mut self) -> bool {
+        let changed = match self.advance_first_run() {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.first_run.cancel();
+                self.first_run.phase = "error";
+                self.status = format!("Автонастройка: {error}");
+                true
+            }
+        };
+        if self.first_run.installed
+            && (self.first_run.enabled || self.first_run.reported_phase != self.first_run.phase)
+        {
+            let report = serde_json::to_vec_pretty(&serde_json::json!({
+                "version": 1, "phase": self.first_run.phase,
+                "attempt": self.first_run.attempts,
+                "native_outputs": self.native_lighting.is_some(),
+                "devices": self.runtime.document().lighting.setup.devices.len(),
+                "discovery_issues": self.first_run.discovery_issues,
+                "backend_detail": self.runtime.read(|runtime| runtime.managed_backend_detail().map(str::to_owned)),
+                "detail": self.status,
+            }));
+            if let Ok(bytes) = report
+                && bytes != self.first_run.report
+                && crate::storage::atomic_write(
+                    &self.state_dir.join("first-run-status.json"),
+                    &bytes,
+                    32 * 1024,
+                )
+                .is_ok()
+            {
+                self.first_run.report = bytes;
+                self.first_run.reported_phase = self.first_run.phase;
+            }
+        }
+        changed
+    }
+
+    fn advance_first_run(&mut self) -> Result<bool, String> {
+        // Always reap cancellation, including when the editor is closed or Stop was selected.
+        if !self.first_run.enabled || self.shutdown.active() {
+            self.first_run.worker.cancel();
+            let _ = self.first_run.worker.poll();
+            return Ok(false);
+        }
+        if !self.first_run.initialized {
+            self.first_run.phase = "handover";
+            self.first_run.initialized = true;
+            self.first_run.expected = Some(self.runtime.document().clone());
+            self.first_run.path = self.path.clone();
+            self.first_run.context = self.context_revision;
+            let root = self
+                .state_dir
+                .parent()
+                .ok_or("Нет папки профиля")?
+                .to_path_buf();
+            self.first_run.handover = Some(
+                std::thread::Builder::new()
+                    .name("installed-handover".into())
+                    .spawn(move || {
+                        if let Some(old) =
+                            crate::app::installed_migration::active_process_for_migration(&root)?
+                        {
+                            resident::handover_legacy(
+                                old.pid,
+                                &old.executable,
+                                old.creation_filetime,
+                            )?;
+                        }
+                        crate::app::installed_migration::wait_for_migrated_backend(&root)
+                    })
+                    .map_err(|e| e.to_string())?,
+            );
+            self.status = "Восстанавливаю сохранённую сцену и подключения…".into();
+            return Ok(true);
+        }
+        if let Some(job) = &self.first_run.handover {
+            if !job.is_finished() {
+                return Ok(false);
+            }
+            self.first_run
+                .handover
+                .take()
+                .unwrap()
+                .join()
+                .map_err(|_| "Не удалось завершить перенос сессии")??;
+            if self.dirty
+                || self.editor_dirty
+                || self.pending_open.is_some()
+                || self.path != self.first_run.path
+                || self.context_revision != self.first_run.context
+                || self.first_run.expected.as_ref() != Some(self.runtime.document())
+                || self.connection_switching()
+                || self.guard_connections_close().is_err()
+                || !self.connections.scan.is_idle()
+            {
+                self.first_run.cancel();
+                self.status =
+                    "Автовключение отменено: вы изменили профиль. Правки остаются в редакторе."
+                        .into();
+                return Ok(true);
+            }
+            // The bootstrap deliberately loaded migrated live sessions in preview until drain.
+            if self.native_lighting.is_none() {
+                let local = Local::read(
+                    &self.state_dir.join("lighting-local.json"),
+                    self.runtime.document(),
+                )?;
+                let document = self.runtime.document().clone();
+                let outputs = local.prepare(&document, &self.asset_root)?;
+                self.first_run.restoring = Some(self.runtime.with(|runtime, _| {
+                    runtime.request_startup_outputs_for(&self.state_dir, &local, document, outputs)
+                })?);
+                self.first_run.phase = "restoring";
+                self.native_lighting = Some(local);
+            }
+            self.first_run.expected = Some(self.runtime.document().clone());
+            self.first_run.context = self.context_revision;
+        }
+        if let Some(revision) = self.first_run.restoring {
+            if self.runtime.pending_configuration() {
+                return Ok(false);
+            }
+            if self.runtime.output_revision() != revision {
+                return Err("Не удалось восстановить подключения сохранённой сцены".into());
+            }
+            self.first_run.restoring = None;
+            self.first_run.phase = "restored";
+            self.was_pending = false;
+            self.startup_output_labels();
+            if !self.source_scope_inputs()?.1.is_empty() {
+                self.start_bound_sources()?;
+            }
+            self.status =
+                "Сохранённые подключения восстановлены. Статусы передачи доступны в устройствах."
+                    .into();
+            return Ok(true);
+        }
+        if self.first_run.applying.is_none()
+            && (self.dirty
+                || self.editor_dirty
+                || self.connection_switching()
+                || self.pending_open.is_some()
+                || self.context_revision != self.first_run.context
+                || self.first_run.expected.as_ref() != Some(self.runtime.document())
+                || self.guard_connections_close().is_err()
+                || !self.connections.scan.is_idle())
+        {
+            self.first_run.cancel();
+            self.status = "Автонастройка остановлена: сохраняю ваши текущие правки.".into();
+            return Ok(true);
+        }
+        if let Some(pending) = &self.first_run.applying {
+            if self.path.as_ref() != Some(&pending.path)
+                || self.context_revision != pending.context
+                || self.dirty
+                || self.editor_dirty
+                || self.pending_open.is_some()
+                || self.connection_switching()
+                || self.guard_connections_close().is_err()
+                || !self.connections.scan.is_idle()
+                || (self.runtime.document() != &pending.previous_document
+                    && self.runtime.document() != &pending.plan.document)
+            {
+                let pending = self.first_run.applying.take().unwrap();
+                if self.path.as_ref() == Some(&pending.path)
+                    && self.runtime.output_revision() == pending.revision
+                {
+                    self.native_lighting = Some(pending.plan.local);
+                    self.dirty = true;
+                }
+                self.first_run.cancel();
+                self.status = "Автонастройка остановлена. Ваши правки остаются в редакторе; профиль не перезаписан.".into();
+                return Ok(true);
+            }
+            if self.runtime.pending_configuration() {
+                return Ok(false);
+            }
+            if self.runtime.output_revision() != pending.revision {
+                return Err(self
+                    .runtime
+                    .configuration_error()
+                    .unwrap_or("Подключения не применились")
+                    .to_owned());
+            }
+            let applied = self.first_run.applying.take().unwrap();
+            if let Err(error) = first_run::persist(&self.state_dir, &applied.path, &applied.plan) {
+                let local = self
+                    .native_lighting
+                    .as_ref()
+                    .ok_or("Не загружены прежние подключения")?;
+                let outputs = local.prepare(&applied.previous_document, &self.asset_root)?;
+                self.runtime.with(|runtime, _| {
+                    runtime.request_startup_outputs_for(
+                        &self.state_dir,
+                        local,
+                        applied.previous_document,
+                        outputs,
+                    )
+                })?;
+                return Err(error);
+            }
+            self.native_lighting = Some(applied.plan.local);
+            self.first_run.phase = "applied";
+            self.startup_output_labels();
+            self.first_run.expected = Some(self.runtime.document().clone());
+            self.context_revision = self.context_revision.wrapping_add(1);
+            self.first_run.context = self.context_revision;
+            self.was_pending = false;
+            self.dirty = false;
+            self.reset_editor(0);
+            self.sync();
+            if self.page == Page::Connections {
+                self.open_connections()?;
+            }
+            self.refresh_connections();
+            self.status = format!(
+                "На карте устройств: {}. Карта и сцена сохранены; проверяйте статусы передачи.{}",
+                self.runtime.document().lighting.setup.devices.len(),
+                if applied.plan.issues.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", applied.plan.issues.join("; "))
+                }
+            );
+            self.first_run.next = Instant::now() + Duration::from_secs(30);
+            return Ok(true);
+        }
+        if let Some(result) = self.first_run.worker.poll() {
+            let plan = result?;
+            self.first_run.discovery_issues = plan.issues.clone();
+            if !plan.changed {
+                self.first_run.phase = "discovered";
+                self.status = if self.runtime.document().lighting.setup.devices.is_empty() {
+                    format!(
+                        "Поддерживаемые устройства пока не найдены. {}",
+                        plan.issues.join("; ")
+                    )
+                } else if plan.issues.is_empty() {
+                    "Подключения восстановлены; новых устройств не найдено.".into()
+                } else {
+                    format!("Поиск устройств: {}", plan.issues.join("; "))
+                };
+                self.first_run.next = Instant::now() + Duration::from_secs(30);
+                return Ok(true);
+            }
+            let outputs = plan.local.prepare(&plan.document, &self.asset_root)?;
+            let previous_document = self.runtime.document().clone();
+            let revision = self.runtime.with(|runtime, _| {
+                runtime.request_startup_outputs_for(
+                    &self.state_dir,
+                    &plan.local,
+                    plan.document.clone(),
+                    outputs,
+                )
+            })?;
+            self.first_run.applying = Some(Applying {
+                revision,
+                plan,
+                previous_document,
+                path: self.path.clone().ok_or("Нет пути профиля")?,
+                context: self.context_revision,
+            });
+            self.first_run.phase = "applying";
+            self.status = "Устройства найдены. Подключаю к общей сцене…".into();
+            return Ok(true);
+        }
+        if !self.first_run.worker.is_idle() || Instant::now() < self.first_run.next {
+            return Ok(false);
+        }
+        if self.first_run.attempts >= 3 {
+            self.first_run.enabled = false;
+            self.first_run.phase = "complete";
+            self.status = format!(
+                "Автопоиск завершён. Устройств на карте: {}. {}",
+                self.runtime.document().lighting.setup.devices.len(),
+                self.first_run.discovery_issues.join("; ")
+            );
+            return Ok(true);
+        }
+        let local = self
+            .native_lighting
+            .clone()
+            .ok_or("Не загружены локальные подключения")?;
+        let document = self.runtime.document().clone();
+        let path = self.path.as_ref().ok_or("Нет пути профиля")?;
+        let baseline = first_run::baseline(&self.state_dir, path, &document, &local)?;
+        let endpoint = "127.0.0.1:17422".parse().unwrap();
+        let guard = self
+            .runtime
+            .with(|runtime, _| runtime.managed_discovery_guard(&self.state_dir, endpoint));
+        self.first_run.worker.start(
+            document,
+            local,
+            self.asset_root.clone(),
+            endpoint,
+            guard,
+            baseline,
+        )?;
+        self.first_run.attempts += 1;
+        self.first_run.phase = "discovering";
+        self.status = "Ищу поддерживаемые устройства. Сцена включится автоматически…".into();
+        Ok(true)
+    }
+}

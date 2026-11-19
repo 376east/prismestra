@@ -15,17 +15,28 @@ impl Runtime {
         if config.endpoint() != endpoint {
             return Ok(None);
         }
-        if let Some(backend) = &self.managed_backend {
+        self.managed_guard_for(state_dir, endpoint).map(Some)
+    }
+
+    fn managed_guard_for(
+        &mut self,
+        state_dir: &Path,
+        endpoint: std::net::SocketAddr,
+    ) -> Result<BackendGuard, String> {
+        if self.managed_backend.is_none() {
+            let backend = crate::app::backend_helper::Backend::start(state_dir)?
+                .ok_or("Managed OpenRGB configuration changed during startup")?;
             if backend.endpoint() != endpoint {
-                return Err(
-                    "Changing the managed backend endpoint requires a session restart".into(),
-                );
+                return Err("Managed OpenRGB endpoint changed during startup".into());
             }
-        } else {
-            self.managed_backend = crate::app::backend_helper::Backend::start(state_dir)?;
+            self.managed_backend = Some(backend);
             self.managed_backend_generation = 0;
         }
-        Ok(self.managed_backend.as_ref().map(|backend| backend.guard()))
+        let backend = self.managed_backend.as_ref().unwrap();
+        if backend.endpoint() != endpoint {
+            return Err("Changing the managed backend endpoint requires a session restart".into());
+        }
+        Ok(backend.guard())
     }
 
     /// Prepare candidate guards without releasing the previous live owner.
@@ -44,24 +55,52 @@ impl Runtime {
             return Ok(false);
         }
         let created = self.managed_backend.is_none();
-        if let Some(backend) = &self.managed_backend {
-            if backend.endpoint() != config.endpoint() {
-                return Err(
-                    "Changing the managed backend endpoint requires a session restart".into(),
-                );
-            }
-        } else {
-            self.managed_backend = crate::app::backend_helper::Backend::start(state_dir)?;
-            self.managed_backend_generation = 0;
-        }
-        if let Some(backend) = &self.managed_backend {
-            for (id, _, factory) in &mut outputs.rgb {
-                if ids.contains(id) {
-                    *factory = guarded(factory.clone(), backend.guard());
-                }
-            }
-        }
+        let guard = self.managed_guard_for(state_dir, config.endpoint())?;
+        guard_outputs(outputs, &ids, &guard);
         Ok(created)
+    }
+
+    /// Queue installed startup with its recovery policy, committed only after
+    /// the previous plan drains. An unavailable managed backend never grants
+    /// access to another listener and does not block independent outputs.
+    pub(crate) fn request_startup_outputs_for(
+        &mut self,
+        state_dir: &Path,
+        local: &crate::app::lighting_outputs::Local,
+        document: Document,
+        mut outputs: OutputPlan,
+    ) -> Result<u64, String> {
+        let config = crate::app::managed_backend::Config::read_optional(state_dir);
+        let ids = match config {
+            Ok(Some(config)) => {
+                let ids = matching_ids(local, &document, config.endpoint());
+                if !ids.is_empty() {
+                    let guard = self
+                        .managed_guard_for(state_dir, config.endpoint())
+                        .unwrap_or_else(unavailable_guard);
+                    guard_outputs(&mut outputs, &ids, &guard);
+                }
+                ids
+            }
+            Ok(None) => BTreeSet::new(),
+            Err(error) => {
+                // Without a readable policy we cannot distinguish managed
+                // and external SDK routes. Keep them closed until repaired.
+                let ids = local
+                    .devices
+                    .iter()
+                    .filter_map(|(id, binding)| {
+                        matches!(binding, crate::devices::Binding::OpenRgb { .. })
+                            .then_some(id.clone())
+                    })
+                    .collect();
+                guard_outputs(&mut outputs, &ids, &unavailable_guard(error));
+                BTreeSet::new()
+            }
+        };
+        let revision = self.request_outputs_for(document, outputs)?;
+        self.pending.as_mut().unwrap().startup_managed_ids = Some(ids);
+        Ok(revision)
     }
 
     pub fn configure_managed_backend(
@@ -167,6 +206,18 @@ fn matching_ids(
             .then(|| id.clone())
         })
         .collect()
+}
+
+fn unavailable_guard(error: String) -> BackendGuard {
+    Arc::new(move || Err(error.clone()))
+}
+
+fn guard_outputs(outputs: &mut OutputPlan, ids: &BTreeSet<String>, guard: &BackendGuard) {
+    for (id, _, factory) in &mut outputs.rgb {
+        if ids.contains(id) {
+            *factory = guarded(factory.clone(), guard.clone());
+        }
+    }
 }
 
 fn guarded(

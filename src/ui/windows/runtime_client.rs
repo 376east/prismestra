@@ -208,9 +208,6 @@ impl Client {
         self.read(Runtime::capture_status)
     }
 
-    pub(super) fn rgb_status(&self, id: &str) -> Option<crate::runtime::output::Snapshot> {
-        self.read(|r| r.host().status(id))
-    }
     pub(super) fn output_plan(&self) -> OutputPlan {
         self.read(Runtime::output_plan)
     }

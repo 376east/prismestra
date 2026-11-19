@@ -317,7 +317,7 @@ impl Manager {
                 .unwrap_or_else(|p| p.into_inner())
                 .clone();
             if state.cancel.load(Ordering::SeqCst) || !snapshot.ready {
-                return Err("Managed OpenRGB is not ready".into());
+                return Err(format!("Managed OpenRGB is not ready: {}", snapshot.detail));
             }
             let pid = snapshot
                 .backend_pid

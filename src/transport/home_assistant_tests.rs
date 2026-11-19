@@ -368,8 +368,17 @@ fn cancellation_and_deadline_are_checked_after_blocking_io() {
             stream
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .unwrap();
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
             let mut request = [0u8; 16_384];
-            assert!(stream.read(&mut request).unwrap() > 0);
+            let mut received = 0;
+            while !request[..received].ends_with(b"\r\n\r\n") {
+                let len = stream.read(&mut request[received..]).unwrap();
+                assert_ne!(len, 0, "incomplete or oversized fixture request");
+                received += len;
+            }
             thread::sleep(Duration::from_millis(150));
             server_cancelled.store(cancel, Ordering::Relaxed);
             let _ = stream.write_all(&response("200 OK", b"[]"));
