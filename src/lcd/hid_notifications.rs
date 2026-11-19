@@ -113,7 +113,10 @@ impl State {
                 .find(|target| target.path.eq_ignore_ascii_case(path))
             {
                 target.observed_event = true;
-                if present && !target.present {
+                if !present {
+                    target.pending = false;
+                    target.pending_reappeared = false;
+                } else if !target.present {
                     target.pending = true;
                     target.pending_reappeared |= target.departed;
                 }
@@ -345,6 +348,23 @@ mod tests {
     }
 
     #[test]
+    fn removal_invalidates_pending_arrival_until_the_selected_interface_returns() {
+        let mut state = State::default();
+        targets(&mut state, &["bound"], &["bound"]);
+        state.event("bound", false);
+        assert!(state.take_arrivals().is_empty());
+
+        state.event("BOUND", true);
+        state.event("bound", false);
+        state.event("other-interface", true);
+        assert!(state.take_arrivals().is_empty());
+
+        state.event("BOUND", true);
+        assert_eq!(state.take_arrivals(), [arrival("bound", true)]);
+        assert!(state.take_arrivals().is_empty());
+    }
+
+    #[test]
     fn pending_initial_presence_upgrades_and_departure_survives_polling() {
         let mut state = State::default();
         targets(&mut state, &["a"], &["a"]);
@@ -371,7 +391,7 @@ mod tests {
         state.event("b", false);
         // Snapshot could be stale on either side of a callback.
         state.finish(Ok(vec!["a".into(), "b".into()])).unwrap();
-        assert_eq!(state.take_arrivals(), [arrival("a", false)]);
+        assert!(state.take_arrivals().is_empty());
         assert!(state.targets.iter().all(|target| !target.present));
         state.event("b", true);
         assert_eq!(state.take_arrivals(), [arrival("b", true)]);
