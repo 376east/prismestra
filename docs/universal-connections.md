@@ -13,6 +13,12 @@ Add the appropriate family in Devices, then open Connections for that logical de
 
 A Surplife capability query takes the same in-process endpoint lease as RGB output. An already owned controller must be detached before its discovery query; a rescan never opens a second connection to a running output. External programs still need to relinquish hardware ownership.
 
+## Choose one write path for a WLED controller
+
+One WLED controller can appear as a direct DDP output and as one or more `light.*` entities in Home Assistant. The HA entity lease and the DDP controller lease are independent. Compare the configured WLED host and the MAC reported by `/json/info` with the physical device in HA. Include any segment entities and the main light for that controller. [Home Assistant WLED integration](https://www.home-assistant.io/integrations/wled/) · [Prismestra binding keys](../src/devices.rs)
+
+In **Devices and properties**, enable the route you want and disable the other outputs for that controller, then apply the configuration. Choose DDP for per-pixel animation or an HA light for slower whole-light control. To check the selection on a test controller, change the scene. A DDP-only selection sends frames to the configured UDP port (normally `4048`) and issues no HA light commands for that controller. An HA-only selection issues light commands for the selected entity and sends no DDP frames to the controller. HA automations can still write to WLED independently. [WLED DDP](https://kno.wled.ge/interfaces/ddp/) · [Output enable setting](../src/ui/editor.rs)
+
 ## Discovery boundaries
 
 DNS-SD browses `_wled._tcp.local.` and `_home-assistant._tcp.local.` for at most three seconds, with bounded result/event counts and explicit shutdown. It does not scan IP ranges. Advertisements are untrusted hints; TXT URLs are not followed and credentials are never supplied during discovery. IPv6 link-local addresses requiring an interface scope are currently omitted. mDNS can be disabled or blocked between network segments; manual endpoints remain available.
