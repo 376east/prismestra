@@ -1,10 +1,55 @@
 use crate::{
     devices::{Role, Setup},
     lighting::color::Rgb,
+    runtime::{Host, scene::Scene},
 };
 use serde::Serialize;
 
 const PAGE_SIZE: usize = 24;
+
+#[derive(Default)]
+pub(super) struct DraftRevision {
+    inputs: Option<(u64, Setup, Scene)>,
+    revision: u64,
+}
+
+impl DraftRevision {
+    pub(super) fn observe(&mut self, input: Option<(u64, &Setup, &Scene)>) -> Option<String> {
+        let previous = self
+            .inputs
+            .as_ref()
+            .map(|(context, setup, scene)| (*context, setup, scene));
+        if input != previous {
+            self.inputs =
+                input.map(|(context, setup, scene)| (context, setup.clone(), scene.clone()));
+            self.revision += 1;
+        }
+        input.map(|_| self.revision.to_string())
+    }
+}
+
+pub(super) fn draft_snapshot(
+    setup: &Setup,
+    scene: &Scene,
+    device: &str,
+    offset: usize,
+) -> Result<Preview, (&'static str, String)> {
+    if !setup
+        .devices
+        .iter()
+        .any(|entry| entry.id == device && entry.role == Role::Canvas && entry.leds > 0)
+    {
+        return Err((
+            "no_map",
+            "У выбранного выхода нет LED-карты в черновике".into(),
+        ));
+    }
+    let invalid = |error| ("invalid_draft", error);
+    let mut host = Host::new(setup.clone(), scene.clone()).map_err(invalid)?;
+    host.tick(0).map_err(invalid)?;
+    snapshot(host.setup(), device, host.frame(device), offset)
+        .map_err(|error| ("no_frame", error.into()))
+}
 
 #[derive(Debug, Serialize)]
 pub(super) struct Preview {
@@ -127,6 +172,16 @@ mod tests {
         assert_eq!(reverse_host.tick(0).unwrap(), 0);
         let a = snapshot(&normal, "strip", host.frame("strip"), 0).unwrap();
         let b = snapshot(&reversed, "strip", reverse_host.frame("strip"), 0).unwrap();
+        let draft = draft_snapshot(&reversed, reverse_host.scene(), "strip", 0).unwrap();
+        assert_eq!(draft.entries, b.entries);
+        assert_eq!(host.setup(), &normal);
+        assert_eq!(
+            draft_snapshot(&normal, host.scene(), "draft-only", 0)
+                .err()
+                .unwrap()
+                .0,
+            "no_map"
+        );
         assert_eq!((a.width, a.height), (13, 4));
         assert_eq!(
             a.entries
@@ -145,6 +200,33 @@ mod tests {
         assert_eq!((b.entries[0].x, b.entries[0].y), (12, 3));
         assert_eq!((b.entries[3].x, b.entries[3].y), (0, 0));
         assert!(snapshot(&normal, "missing", host.frame("strip"), 0).is_err());
+    }
+
+    #[test]
+    fn revision_tracks_scene_geometry_and_editor_context() {
+        let mut setup = Setup {
+            version: 1,
+            devices: vec![],
+            canvas: Canvas {
+                width: 13,
+                height: 4,
+                points: vec![],
+            },
+        };
+        let mut scene = example();
+        let mut revision = DraftRevision::default();
+        let first = revision.observe(Some((0, &setup, &scene)));
+        assert_eq!(revision.observe(Some((0, &setup, &scene))), first);
+        setup.canvas.width += 1;
+        let geometry = revision.observe(Some((0, &setup, &scene)));
+        assert_ne!(geometry, first);
+        scene.brightness -= 1;
+        let effect = revision.observe(Some((0, &setup, &scene)));
+        assert_ne!(effect, geometry);
+        let profile = revision.observe(Some((1, &setup, &scene)));
+        assert_ne!(profile, effect);
+        assert_eq!(revision.observe(None), None);
+        assert_ne!(revision.observe(Some((1, &setup, &scene))), profile);
     }
 
     #[test]

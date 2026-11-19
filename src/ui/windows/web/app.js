@@ -139,7 +139,7 @@ function render() {
  if(!state)$('#main').innerHTML='<div class="native-wait"><h1>Подключение к Prismestra…</h1><p>Ожидание локального профиля.</p></div>';
  else {$('#main').innerHTML=view==='library'?renderLibrary():view==='editor'?renderScene():view==='devices'?renderDevices():heading(pages[view],'Настройки локального профиля.')+(advancedPage()?renderNativeForm():nativeProperties());$('.project-context').innerHTML=`<span>Локальный профиль</span><small title="${esc(state.profilePath||'')}">${esc(state.profilePath?.split(/[\\/]/).pop()||'Не сохранён')}</small>`;}
  document.querySelectorAll('[data-native-kind="secret"]').forEach(input=>{const staged=formStages.get(stageKey('native',input.dataset.nativeField));if(staged)input.value=staged.value;});
- if(view==='devices')window.outputMap?.mount(state,send);
+ if(view==='devices')window.outputMap?.mount(state,send,currentGenericStages);
  syncControls();paintPreview();paintLibraryPreviews();restoreFocus(key,selection);
 }
 function flushPreview(force=false) {
@@ -189,6 +189,7 @@ window.prismestraReceive = message => {
   if(message.kind==='error'){awaitingCommandAck=false;closing=false;submittedStages=[];savedSceneRequest=null;commandPending=false;nativeAwaitingAck=false;if(pendingView){view=pendingView.previous;pendingView=null;render();focusHeading();}showError(message.message,true);syncControls();return;}
   if(message.kind==='snapshot') {
    const acknowledged=awaitingCommandAck;awaitingCommandAck=false;completeStageAck();const previous=state;state=message.state;
+   window.outputMap?.update(state);
    if(acknowledged&&errorIsCommand&&!state.error){error='';errorIsCommand=false;$('#native-error').hidden=true;$('#native-error').innerHTML='';}commandPending=false;nativeAwaitingAck=false;pendingView=null;
    if(!draft){draft=clone(state.draftScene||state.scene);}else if(previous && same(draft,previous.scene)){draft=clone(state.scene);if(!selectedId)draftName='Текущая сцена';}
    if(savedSceneRequest){const saved=state.library.find(item=>(savedSceneRequest.id?item.id===savedSceneRequest.id:!savedSceneRequest.ids.includes(item.id))&&item.name===savedSceneRequest.name&&same(item.scene,savedSceneRequest.scene));if(saved){selectedId=saved.id;draftName=saved.name;savedSceneRequest=null;}}
@@ -196,6 +197,7 @@ window.prismestraReceive = message => {
    render();if(!busy())flushPreview();
   } else if(message.kind==='status'&&state) {
    const oldScene=state.scene,nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));Object.assign(state,message.state);
+   if(state.pending)window.outputMap?.update(state);
    if(!changed()||same(draft,oldScene))draft=clone(state.scene);
    if(!state.pending&&!nativeAwaitingAck)commandPending=false;
    if(message.state.preview)frame=message.state.preview;

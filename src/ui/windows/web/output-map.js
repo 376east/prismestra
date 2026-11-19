@@ -2,12 +2,15 @@
 
 window.outputMap = (() => {
   const dialog = document.getElementById('output-map');
+  const description = document.getElementById('output-map-description');
   const table = document.getElementById('output-map-table');
   const status = document.getElementById('output-map-status');
   const back = document.getElementById('output-map-back');
   const next = document.getElementById('output-map-next');
   const refresh = document.getElementById('output-map-refresh');
   let device = null;
+  let draft = null;
+  let opener = '';
   let request = 0;
   let offset = 0;
   let pageSize = 0;
@@ -19,13 +22,19 @@ window.outputMap = (() => {
     back.disabled = next.disabled = true;
     status.textContent = 'Получаем кадр…';
     table.hidden = true;
-    if (!send({op: 'preview_output', request, device, offset})) {
+    if (!send({op: 'preview_output', request, device, offset, ...draft})) {
       status.textContent = 'Не удалось запросить кадр.';
     }
   }
 
   function receive(message) {
     if (!dialog.open || message.request !== request) return;
+    if (draft && (message.source !== draft.source || message.revision !== draft.revision || message.device !== device)) return;
+    if (!draft && message.source === 'draft') return;
+    if (draft && message.availability !== 'ready') {
+      status.textContent = message.error ?? 'Предпросмотр черновика недоступен.';
+      return;
+    }
     if (message.error) {
       status.textContent = message.error;
       return;
@@ -53,24 +62,53 @@ window.outputMap = (() => {
     table.hidden = false;
   }
 
-  function mount(state, dispatch) {
+  function selectedDevice(state) {
+    if (state?.editor?.page !== 'devices') return null;
+    return (state.draftDevices ?? state.devices)[state.editor.index];
+  }
+
+  function update(state) {
+    if (!dialog.open || !draft || refresh.disabled) return;
+    if (!state?.pending && state?.draftMapRevision === draft.revision && selectedDevice(state)?.id === device) return;
+    request = (request + 1) >>> 0;
+    back.disabled = next.disabled = refresh.disabled = true;
+    table.hidden = true;
+    status.textContent = 'Черновик изменился. Откройте предпросмотр снова.';
+  }
+
+  function mount(state, dispatch, stagedFields) {
     const target = document.getElementById('native-target');
-    if (!target || state?.editor?.page !== 'devices') return;
-    const selected = (state.draftDevices ?? state.devices)[state.editor.index];
-    if (!selected || !state.devices.some(item => item.id === selected.id && item.role === 'canvas' && item.leds > 0)) return;
-    const button = document.createElement('button');
-    button.id = 'output-map-open';
-    button.type = 'button';
-    button.className = 'button';
-    button.dataset.mutation = '';
-    button.textContent = 'Проверить LED-карту';
-    button.onclick = () => {
-      device = selected.id;
-      send = dispatch;
-      dialog.showModal();
-      load(0);
-    };
-    target.after(button);
+    const selected = selectedDevice(state);
+    if (!target || !selected) return;
+    const buttons = [];
+    function button(id, label, isDraft) {
+      const node = document.createElement('button');
+      node.id = id;
+      node.type = 'button';
+      node.className = 'button';
+      node.dataset.mutation = '';
+      node.textContent = label;
+      node.onclick = () => {
+        device = selected.id;
+        send = dispatch;
+        opener = id;
+        draft = isDraft ? {source: 'draft', revision: state.draftMapRevision, fields: stagedFields()} : null;
+        description.textContent = isDraft
+          ? 'Локальный предпросмотр черновика. Вывод изменится после применения.'
+          : 'Снимок цветов сцены по применённой карте. Индексы и координаты начинаются с нуля.';
+        refresh.disabled = false;
+        dialog.showModal();
+        load(0);
+      };
+      buttons.push(node);
+    }
+    if (state.devices.some(item => item.id === selected.id && item.role === 'canvas' && item.leds > 0)) {
+      button('output-map-open', 'Проверить применённую LED-карту', false);
+    }
+    if (state.draftMapRevision && selected.role === 'canvas') {
+      button('draft-output-map-open', 'Предпросмотр черновой LED-карты', true);
+    }
+    target.after(...buttons);
   }
 
   back.onclick = () => load(Math.max(0, offset - pageSize));
@@ -78,12 +116,12 @@ window.outputMap = (() => {
   refresh.onclick = () => load(offset);
   function close() {
     dialog.close();
-    document.getElementById('output-map-open')?.focus({preventScroll:true});
+    document.getElementById(opener)?.focus({preventScroll:true});
   }
   document.getElementById('output-map-close').onclick = close;
   dialog.addEventListener('cancel', event => {
     event.preventDefault();
     close();
   });
-  return {mount, receive};
+  return {mount, receive, update};
 })();
