@@ -218,8 +218,14 @@ fn registered_ha_output_waits_for_explicit_refresh_after_authorization_failure()
         Some("401 Unauthorized"),
         "Home Assistant: Authentication",
         false,
+        RecoveryAction::Refresh,
     );
-    assert_ha_authorization_recovery(Some("403 Forbidden"), "Home Assistant: Http(403)", false);
+    assert_ha_authorization_recovery(
+        Some("403 Forbidden"),
+        "Home Assistant: Http(403)",
+        false,
+        RecoveryAction::Refresh,
+    );
 }
 
 #[test]
@@ -228,16 +234,37 @@ fn registered_ha_initial_authorization_failure_waits_for_explicit_refresh() {
         Some("401 Unauthorized"),
         "Home Assistant: Authentication",
         true,
+        RecoveryAction::Refresh,
     );
-    assert_ha_authorization_recovery(Some("403 Forbidden"), "Home Assistant: Http(403)", true);
+    assert_ha_authorization_recovery(
+        Some("403 Forbidden"),
+        "Home Assistant: Http(403)",
+        true,
+        RecoveryAction::Refresh,
+    );
 }
 
 #[test]
 fn registered_ha_missing_key_waits_for_explicit_refresh_without_http() {
-    assert_ha_authorization_recovery(None, HA_MISSING_KEY, true);
+    assert_ha_authorization_recovery(None, HA_MISSING_KEY, true, RecoveryAction::Refresh);
 }
 
-fn assert_ha_authorization_recovery(status: Option<&'static str>, error: &str, initial: bool) {
+#[test]
+fn registered_ha_missing_key_allows_explicit_reapply_of_the_same_binding() {
+    assert_ha_authorization_recovery(None, HA_MISSING_KEY, true, RecoveryAction::Apply);
+}
+
+enum RecoveryAction {
+    Refresh,
+    Apply,
+}
+
+fn assert_ha_authorization_recovery(
+    status: Option<&'static str>,
+    error: &str,
+    initial: bool,
+    recovery: RecoveryAction,
+) {
     use crate::{
         app::{
             config::{Groups, Project},
@@ -515,8 +542,16 @@ fn assert_ha_authorization_recovery(status: Option<&'static str>, error: &str, i
     assert_eq!(runtime.outputs_ready(), Err(error.into()));
 
     key_saved.store(true, Ordering::SeqCst);
-    runtime.refresh_devices(now).unwrap();
-    now += 7_000_000;
+    match recovery {
+        RecoveryAction::Refresh => {
+            runtime.refresh_devices(now).unwrap();
+            now += 7_000_000;
+        }
+        RecoveryAction::Apply => {
+            let same_bindings = runtime.output_plan();
+            runtime.request_outputs(same_bindings).unwrap();
+        }
+    }
     let until = Instant::now() + Duration::from_secs(3);
     loop {
         now += 50_000;
@@ -531,7 +566,7 @@ fn assert_ha_authorization_recovery(status: Option<&'static str>, error: &str, i
         }
         assert!(
             Instant::now() < until,
-            "explicit refresh did not restore output"
+            "explicit recovery did not restore output"
         );
         thread::sleep(Duration::from_millis(2));
     }
