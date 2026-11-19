@@ -139,7 +139,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test: [offline-setup, standard-user, upgrade-fixtures]
+        test: [offline-setup, standard-user, production-upgrade, upgrade-fixtures]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -161,7 +161,18 @@ jobs:
           SUMS_SHA256: ${{ needs.package.outputs.sums_sha256 }}
         run: |
           $candidate = ./scripts/installer/verify_candidate.ps1 -Directory (Join-Path $env:RUNNER_TEMP candidate) -Commit $env:GITHUB_SHA -SumsSha256 $env:SUMS_SHA256
-          ./scripts/installer/test_offline_setup.ps1 -Installer $candidate.Setup -Sha256 $candidate.SetupSha256 -ReportDirectory evidence -DisposableRunner
+          ./scripts/installer/test_offline_setup.ps1 -Installer $candidate.Setup -Sha256 $candidate.SetupSha256 -Commit $env:GITHUB_SHA -ManifestSha256 $candidate.ManifestSha256 -ReportDirectory evidence -DisposableRunner
+      - name: Upgrade the published Setup to this candidate
+        if: matrix.test == 'production-upgrade'
+        shell: pwsh
+        env:
+          SUMS_SHA256: ${{ needs.package.outputs.sums_sha256 }}
+        run: |
+          $candidate = ./scripts/installer/verify_candidate.ps1 -Directory (Join-Path $env:RUNNER_TEMP candidate) -Commit $env:GITHUB_SHA -SumsSha256 $env:SUMS_SHA256
+          $baseline = Get-Content -LiteralPath scripts/installer/upgrade-baseline.lock.json -Raw | ConvertFrom-Json
+          $previous = Join-Path $env:RUNNER_TEMP $baseline.file
+          Invoke-WebRequest -Uri $baseline.source -OutFile $previous -TimeoutSec 180
+          ./scripts/installer/test_offline_setup.ps1 -PreviousInstaller $previous -Installer $candidate.Setup -Sha256 $candidate.SetupSha256 -Commit $env:GITHUB_SHA -ManifestSha256 $candidate.ManifestSha256 -ReportDirectory evidence -DisposableRunner
       - name: Launch the same Setup payload as a fresh standard user
         if: matrix.test == 'standard-user'
         shell: pwsh

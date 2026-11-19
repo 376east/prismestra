@@ -2,7 +2,10 @@
 param(
     [Parameter(Mandatory)][string]$Installer,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$Sha256,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$Commit,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string]$ManifestSha256,
     [Parameter(Mandatory)][string]$ReportDirectory,
+    [string]$PreviousInstaller,
     [switch]$DisposableRunner
 )
 
@@ -20,6 +23,8 @@ if ($identity.IsSystem -or -not $principal.IsInRole([Security.Principal.WindowsB
 $appId = '9bb22971-3e88-434d-b212-ab8cf717799a'
 $install = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Prismestra'
 $image = Join-Path $install 'Prismestra.exe'
+$userRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Prismestra'
+$manifestPath = Join-Path $install 'install-manifest.json'
 $backend = 'components/openrgb/runtime/OpenRGB.exe'
 $shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Prismestra.lnk'
 $arpKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{${appId}}_is1"
@@ -200,7 +205,7 @@ function Copy-PrerequisiteLogs([DateTime]$Since, [string]$Destination) {
 }
 
 $report = [IO.Path]::GetFullPath($ReportDirectory)
-foreach ($artifactRoot in @($install, $policyDirectory)) {
+foreach ($artifactRoot in @($install, $policyDirectory, $userRoot)) {
     Assert-Expected ($report -ne $artifactRoot -and
         -not $report.StartsWith($artifactRoot + '\', [StringComparison]::OrdinalIgnoreCase)) (
         'The report directory must be outside Prismestra installation and policy directories.')
@@ -215,6 +220,9 @@ $receipt = [ordered]@{
     version = 1
     scope = 'production_offline_installer_lifecycle'
     result = 'failed'
+    previous = $null
+    saved_data_sha256 = $null
+    upgrade_verified = $false
     installer_sha256 = $null
     setup_exit_code = $null
     uninstall_exit_code = $null
@@ -231,6 +239,12 @@ $receipt = [ordered]@{
     network_isolation_exercised = $false
 }
 $setupAttempted = $false
+$savedData = [ordered]@{}
+$receiptName = 'offline-setup.json'
+if ($PreviousInstaller) {
+    $receipt.scope = 'production_upgrade_lifecycle'
+    $receiptName = 'production-upgrade.json'
+}
 try {
     $installerPath = (Resolve-Path -LiteralPath $Installer).Path
     Assert-Expected ([IO.Path]::GetExtension($installerPath) -ieq '.exe') 'Expected a compiled Setup EXE.'
@@ -239,9 +253,48 @@ try {
     Assert-ProductAbsent
     $receipt.runtimes_before = Get-Runtimes
     $receipt.pawnio_before = Get-PawnIOState
-    $setupAttempted = $true
     # No optional PawnIO, launch or autostart selections.
-    $receipt.setup_exit_code = Invoke-Installer $installerPath '/SP- /TASKS="" /RESTARTEXITCODE=3010' $setupLog
+    $options = '/SP- /TASKS="" /RESTARTEXITCODE=3010'
+    if ($PreviousInstaller) {
+        Assert-Expected (-not (Test-Path -LiteralPath $userRoot)) 'Upgrade requires a fresh runner profile.'
+        $baseline = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'upgrade-baseline.lock.json') -Raw | ConvertFrom-Json
+        $previous = Get-Item -LiteralPath $PreviousInstaller
+        Assert-Expected ($previous.Name -ceq $baseline.file -and $previous.Length -eq $baseline.size -and
+            (Get-Sha256 $previous.FullName) -ceq $baseline.sha256) 'Previous release has an unexpected name, size or SHA-256.'
+        $setupAttempted = $true
+        $baselineExit = Invoke-Installer $previous.FullName $options (Join-Path $report 'previous-setup.log')
+        Assert-Expected ($baselineExit -eq 0) "Previous Setup returned $baselineExit. Upgrade requires a completed installation."
+        Assert-ProtectedInstall
+        $previousManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        Assert-Expected ($previousManifest.product -ceq 'Prismestra' -and
+            [string]::IsNullOrEmpty($previousManifest.data_namespace) -and
+            $previousManifest.commit -ceq $baseline.commit -and $previousManifest.installer_version -ceq $baseline.version -and
+            (Get-Sha256 $image) -ceq $previousManifest.app_sha256 -and
+            (Get-Sha256 (Join-Path $install $backend)) -ceq $previousManifest.backend.sha256) 'Previous installed payload does not match the pinned release.'
+        $null = Get-RegisteredUninstaller
+        $receipt.previous = [ordered]@{
+            version = $baseline.version
+            commit = $baseline.commit
+            installer_sha256 = $baseline.sha256
+            app_sha256 = $previousManifest.app_sha256
+            backend_sha256 = $previousManifest.backend.sha256
+        }
+        Assert-Expected (-not (Test-Path -LiteralPath $userRoot)) 'Previous Setup touched the synthetic profile location.'
+        [void][IO.Directory]::CreateDirectory((Join-Path $userRoot 'state/assets'))
+        $files = [ordered]@{
+            'profile.json' = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'upgrade-profile.fixture.json') -Raw
+            'state/lighting-local.json' = '{"version":1,"devices":{},"monitors":{"monitors":[]},"door_brightness":80}'
+            'state/assets/ci-upgrade.txt' = 'Synthetic Prismestra upgrade fixture.'
+        }
+        foreach ($name in $files.Keys) {
+            $path = Join-Path $userRoot $name
+            [IO.File]::WriteAllText($path, $files[$name], [Text.UTF8Encoding]::new($false))
+            $savedData[$name] = Get-Sha256 $path
+        }
+        $receipt.saved_data_sha256 = $savedData
+    }
+    $setupAttempted = $true
+    $receipt.setup_exit_code = Invoke-Installer $installerPath $options $setupLog
     $log = if (Test-Path -LiteralPath $setupLog -PathType Leaf) { Get-Content -LiteralPath $setupLog -Raw } else { '' }
     $receipt.reboot_required = $receipt.setup_exit_code -in @(8, 1641, 3010) -or
         $log -match 'Restart Windows to complete|exit code (1641|3010)\b'
@@ -253,9 +306,11 @@ try {
     Assert-Expected ($log -notmatch '(?im)\bPawnIO_setup\.exe exit code') 'Optional PawnIO installer ran.'
     $receipt.runtimes_installed = Get-Runtimes
     Assert-ProtectedInstall
-    $manifest = Get-Content -LiteralPath (Join-Path $install 'install-manifest.json') -Raw | ConvertFrom-Json
+    $receipt.manifest_sha256 = Get-Sha256 $manifestPath
+    Assert-Expected ($receipt.manifest_sha256 -ceq $ManifestSha256) 'Installed manifest SHA-256 differs from the candidate.'
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     Assert-Expected ($manifest.version -eq 1 -and $manifest.product -ceq 'Prismestra' -and
-        [string]::IsNullOrEmpty($manifest.data_namespace) -and $manifest.commit -cmatch '^[0-9a-f]{40}$' -and
+        [string]::IsNullOrEmpty($manifest.data_namespace) -and $manifest.commit -ceq $Commit -and
         $manifest.prerequisites.vc_redist_x64.file -ceq 'vc_redist.x64.exe' -and
         $manifest.prerequisites.vc_redist_x64.sha256 -cmatch '^[a-f0-9]{64}$' -and
         $manifest.prerequisites.vc_redist_x64.size -ge 10MB -and
@@ -277,6 +332,15 @@ try {
     Assert-Expected ($link.TargetPath -eq $image -and $link.WorkingDirectory -eq $install -and
         $link.Arguments -ceq '--installed') 'Start menu shortcut does not target the normal installed app.'
     Assert-Expected ($null -eq (Read-Startup)) 'Setup selected autostart unexpectedly.'
+    if ($PreviousInstaller) {
+        Assert-Expected (-not $receipt.reboot_required -and
+            [version]$manifest.installer_version -gt [version]$baseline.version) 'Production upgrade needs a completed, higher installer version.'
+        foreach ($name in $savedData.Keys) {
+            Assert-Expected ((Get-Sha256 (Join-Path $userRoot $name)) -ceq $savedData[$name]) "Upgrade changed synthetic data: $name"
+        }
+        $receipt.upgrade_verified = $true
+    }
+    $receipt.installer_version = $manifest.installer_version
     $receipt.install_verified = $true
 } catch {
     $failures.Add($_.Exception.Message)
@@ -289,6 +353,9 @@ try {
                 Assert-Expected ($receipt.uninstall_exit_code -eq 0) "Uninstaller returned $($receipt.uninstall_exit_code)."
                 Assert-Expected (Test-Path -LiteralPath $uninstallLog -PathType Leaf) 'Uninstaller did not write its log.'
                 Assert-ProductAbsent
+                foreach ($name in $savedData.Keys) {
+                    Assert-Expected ((Get-Sha256 (Join-Path $userRoot $name)) -ceq $savedData[$name]) "Uninstall changed synthetic data: $name"
+                }
                 $receipt.uninstall_verified = $true
             } else {
                 Assert-ProductAbsent
@@ -312,9 +379,9 @@ try {
         $receipt.result = 'reboot_required_incomplete'
     }
     $receipt.errors = $failures.ToArray()
-    $receipt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $report 'offline-setup.json') -Encoding UTF8
+    $receipt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $report $receiptName) -Encoding UTF8
 }
 
 if ($receipt.result -notin @('passed', 'passed_with_restart_pending')) {
-    throw "Offline Setup lifecycle result: $($receipt.result). See offline-setup.json and logs in $report."
+    throw "Offline Setup lifecycle result: $($receipt.result). See $receiptName and logs in $report."
 }
