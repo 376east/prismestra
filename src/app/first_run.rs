@@ -1068,6 +1068,11 @@ fn save_lcd_media(root: &Path) -> Result<AssetId, String> {
 }
 
 #[cfg(test)]
+#[path = "../../tests/support/openrgb_peer.rs"]
+#[allow(dead_code)]
+mod openrgb_peer;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -1279,6 +1284,119 @@ mod tests {
         assert_eq!(fs::read(&fixture.profile).unwrap(), profile);
         assert_eq!(fs::read(&local).unwrap(), user_edit);
         assert!(!fixture.state.join(JOURNAL_NAME).exists());
+    }
+
+    #[test]
+    fn empty_installed_profile_reaches_first_sdk6_frame_and_saves_map() {
+        use crate::app::{installed, managed_backend, runtime::Runtime};
+
+        let (_fixture, profile, state, _) = installed::tests::fresh_profile();
+        let document = Document::load(&profile).unwrap();
+        let local = Local::read(&state.join(LOCAL_NAME), &document).unwrap();
+        assert!(document.lighting.setup.devices.is_empty());
+        assert!(document.lighting.setup.canvas.points.is_empty());
+        assert!(local.devices.is_empty());
+        let before = baseline(&state, &profile, &document, &local).unwrap();
+
+        let peer = openrgb_peer::Peer::new(false);
+        let managed = managed_backend::Config::read_optional(&state)
+            .unwrap()
+            .unwrap();
+        // The test route must never match the bundled backend or start its helper.
+        assert_ne!(peer.endpoint, managed.endpoint());
+        let target = device_setup::preset("openrgb-controller")
+            .unwrap()
+            .device("rgb-search")
+            .unwrap();
+        let inventory =
+            openrgb_factory(peer.endpoint)(Target::Device(target), Cancellation::default())
+                .unwrap();
+        assert_eq!(inventory.candidates.len(), 1);
+        assert!(
+            peer.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|call| !matches!(call.1, 1050 | 1101)),
+            "discovery must leave output untouched"
+        );
+        let mut plan = assemble(
+            document.clone(),
+            local,
+            peer.endpoint,
+            Discovery {
+                controllers: inventory
+                    .candidates
+                    .into_iter()
+                    .map(|candidate| candidate.controller.unwrap())
+                    .collect(),
+                ..Default::default()
+            },
+            || unreachable!(),
+        )
+        .unwrap();
+        plan.baseline = Some(before);
+        assert!(plan.changed);
+        assert_eq!(plan.document.lighting.setup.devices.len(), 1);
+        assert_eq!(plan.document.lighting.setup.canvas.points.len(), 2);
+        assert_eq!(plan.local.devices.len(), 1);
+
+        let mut runtime = Runtime::new(document, None).unwrap();
+        let outputs = plan
+            .local
+            .prepare(&plan.document, &state.join("assets"))
+            .unwrap();
+        let revision = runtime
+            .request_startup_outputs_for(&state, &plan.local, plan.document.clone(), outputs)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            runtime
+                .tick(crate::clock::monotonic_us(), 1_700_000_000)
+                .unwrap();
+            if peer.calls.lock().unwrap().iter().any(|call| call.1 == 1050) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no SDK6 frame reached the receiver"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        {
+            let calls = peer.calls.lock().unwrap();
+            let mut writes = calls.iter().filter(|call| matches!(call.1, 1050 | 1101));
+            // Discovery reports ID 7, then the first output session reports ID 8.
+            let direct = writes.next().unwrap();
+            assert_eq!((direct.0, direct.1), (8, 1101));
+            let frame = writes.next().unwrap();
+            assert_eq!((frame.0, frame.1), (8, 1050));
+            assert_eq!(frame.2.len(), 14);
+            assert_eq!(&frame.2[..6], &[14, 0, 0, 0, 2, 0]);
+            assert!(
+                frame.2[6..]
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|color| color[..3] != [0, 0, 0])
+            );
+        }
+        assert_eq!(runtime.output_revision(), revision);
+        assert_eq!(runtime.document(), &plan.document);
+        persist(&state, &profile, &plan).unwrap();
+        let reloaded = Document::load(&profile).unwrap();
+        let local = Local::read(&state.join(LOCAL_NAME), &reloaded).unwrap();
+        assert_eq!(reloaded, plan.document);
+        assert_eq!(
+            serde_json::to_value(&local).unwrap(),
+            serde_json::to_value(&plan.local).unwrap()
+        );
+        runtime.stop();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !runtime.drained() {
+            assert!(Instant::now() < deadline, "SDK6 output did not drain");
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
