@@ -1,5 +1,6 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict'),path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'..','src','ui','windows','web','app.js'),'utf8');
+const outputMapSource=fs.readFileSync(path.join(__dirname,'..','src','ui','windows','web','output-map.js'),'utf8');
 const nodes=new Map(),commands=[],events={},rafQueue=[];
 class Node {constructor(){this.tagName='INPUT';this.validity={valid:true};this.dataset={};this.width=104;this.height=72;this.value='';this.disabled=false;this.innerHTML='';this.textContent='';}setAttribute(){}focus(){document.activeElement=this;}select(){}hasAttribute(name){return name==='data-target'&&this.dataset.target!==undefined;}before(){}append(){}addEventListener(){}setCustomValidity(){}reportValidity(){}showModal(){this.open=true;}close(){this.open=false;}getContext(){return {fillRect(){},clearRect(){},createImageData:(w,h)=>({data:new Uint8ClampedArray(w*h*4)}),putImageData:pixels=>{this.lastPixels=pixels;}};}}
 const find=s=>{if(!nodes.has(s))nodes.set(s,new Node());return nodes.get(s);};
@@ -127,6 +128,88 @@ context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeAux:st
 console.log('PASS: failed snapshot/status retain command error; causal successful ack removes stale error/actions; current backend error remains');
 vm.runInContext('view="devices";state.editor={page:"devices",index:0,targets:["Strip"],fields:[],dirty:false};state.detail="Ошибка RGB: <test>";render()',context);
 assert.ok(find('#main').innerHTML.includes('Ошибка RGB: &lt;test&gt;'));
+
+// Map replies, connection changes and focus all belong to the current logical output.
+const mapEvents = {};
+const mapNodes = new Map();
+const mapNode = id => {
+ if (!mapNodes.has(id)) mapNodes.set(id, new Node());
+ return mapNodes.get(id);
+};
+const mapDocument = {
+ getElementById: mapNode,
+ createElement: () => Object.assign(new Node(), {style: {}, insertCell: () => new Node()}),
+};
+const mapDialog = mapNode('output-map');
+mapDialog.addEventListener = (event, handler) => { mapEvents[event] = handler; };
+const mapTable = mapNode('output-map-table');
+mapTable.tBodies = [{replaceChildren(...rows) { this.rows = rows; }}];
+mapNode('native-target').after = (...buttons) => {
+ for (const button of buttons) mapNodes.set(button.id, button);
+};
+const mapWindow = {};
+vm.runInNewContext(outputMapSource, {window: mapWindow, document: mapDocument});
+const map = mapWindow.outputMap;
+const strip = {id: 'strip', role: 'canvas', leds: 1};
+const other = {...strip, id: 'other'};
+const mapState = {
+ profilePath: 'fixture',
+ editor: {page: 'devices', index: 1},
+ devices: [other, strip],
+ draftDevices: [other, strip],
+ draftMapRevision: '12',
+ mapConnection: {device: 'strip', state: 'ready'},
+};
+const mapRequests = [];
+const mountMap = () => map.mount(mapState, command => !!mapRequests.push(command), () => []);
+const reply = (command, extra = {}) => ({
+ request: command.request, device: command.device, source: command.source,
+ revision: command.revision, availability: 'ready',
+ preview: {device: command.device, label: 'Strip', width: 1, height: 1, total: 1, offset: 0,
+  entries: [{led: 0, x: 0, y: 0, color: 0xff0000}]},
+ ...extra,
+});
+mountMap();
+mapNode('draft-output-map-open').onclick();
+const draftRequest = mapRequests.at(-1);
+assert.equal(draftRequest.device, 'strip');
+map.receive(reply(draftRequest, {revision: '11'}));
+map.receive(reply(draftRequest, {device: 'other'}));
+assert.equal(mapTable.hidden, true);
+map.receive(reply(draftRequest));
+assert.equal(mapTable.hidden, false);
+assert.equal(mapNode('output-map-mode').hidden, false);
+map.update({...mapState, mapConnection: {device: 'other', state: 'offline'}});
+assert.equal(mapNode('output-map-connection').hidden, true);
+mapState.mapConnection.state = 'offline';
+map.update(mapState);
+assert.equal(mapNode('output-map-connection').textContent, 'Выход отключён.');
+assert.equal(mapTable.hidden, false, 'offline transport leaves draft rows visible');
+mapNode('output-map-applied').onclick();
+assert.equal(mapNode('output-map-mode').hidden, true);
+assert.equal(document.activeElement, mapNode('output-map-refresh'));
+assert.equal(mapRequests.length, 1, 'offline return does not request a buffered frame');
+map.receive(reply(draftRequest));
+assert.equal(mapTable.hidden, true);
+mapState.mapConnection.state = 'ready';
+map.update(mapState);
+const appliedRequest = mapRequests.at(-1);
+assert.equal(appliedRequest.source, 'applied');
+assert.equal(appliedRequest.offset, 0);
+map.receive(reply(appliedRequest));
+assert.equal(mapTable.hidden, false);
+mapState.mapConnection.state = 'offline';
+map.update(mapState);
+map.receive(reply(appliedRequest));
+assert.equal(mapTable.hidden, true, 'late applied reply cannot restore an offline frame');
+const originalOpener = mapNode('draft-output-map-open');
+mountMap();
+mapEvents.cancel({preventDefault() {}});
+assert.equal(mapDialog.open, false);
+assert.notEqual(mapNode('draft-output-map-open'), originalOpener);
+assert.equal(document.activeElement, mapNode('draft-output-map-open'));
+assert.ok(mapRequests.every(command => command.op === 'preview_output' && command.device === 'strip'));
+console.log('PASS: one map output, draft revision, offline draft, return and reconnect, stale replies, focus after remount');
 context.payload={kind:'status',state:{detail:'RGB: передано кадров 153'}};
 vm.runInContext('window.prismestraReceive(payload)',context);
 assert.equal(find('#native-runtime-detail').textContent,'RGB: передано кадров 153');

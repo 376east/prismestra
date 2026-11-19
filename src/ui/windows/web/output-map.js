@@ -8,29 +8,65 @@ window.outputMap = (() => {
   const back = document.getElementById('output-map-back');
   const next = document.getElementById('output-map-next');
   const refresh = document.getElementById('output-map-refresh');
+  const applied = document.getElementById('output-map-applied');
+  const mode = document.getElementById('output-map-mode');
+  const connectionNote = document.getElementById('output-map-connection');
+  const closeButton = document.getElementById('output-map-close');
+  const connectionMessages = {
+    connecting: 'Выход подключается…',
+    offline: 'Выход отключён.',
+    disabled: 'Выход выключен в применённом профиле.',
+  };
   let device = null;
   let draft = null;
+  let profile = null;
+  let connection = null;
+  let selectionValid = false;
   let opener = '';
   let request = 0;
   let offset = 0;
   let pageSize = 0;
   let send = null;
 
+  function connectionFor(state) {
+    return state.mapConnection?.device === device ? state.mapConnection.state : null;
+  }
+
+  function showSource() {
+    mode.hidden = applied.hidden = !draft;
+    description.textContent = draft
+      ? 'Локальный предпросмотр черновика. Вывод изменится после применения.'
+      : 'Снимок цветов сцены по применённой карте. Индексы и координаты начинаются с нуля.';
+    showConnection();
+  }
+
+  function showConnection() {
+    const message = connectionMessages[connection];
+    connectionNote.hidden = !draft || !message;
+    connectionNote.textContent = message ?? '';
+  }
+
   function load(page) {
     request = (request + 1) >>> 0;
     offset = page;
     back.disabled = next.disabled = true;
-    status.textContent = 'Получаем кадр…';
     table.hidden = true;
-    if (!send({op: 'preview_output', request, device, offset, ...draft})) {
+    const unavailable = connectionMessages[connection] ??
+      (connection === 'no_map' ? 'У выбранного выхода нет применённой LED-карты.' : null);
+    if (!draft && unavailable) {
+      status.textContent = unavailable;
+      return;
+    }
+    status.textContent = 'Получаем кадр…';
+    if (!send({op: 'preview_output', request, device, offset, source: 'applied', ...draft})) {
       status.textContent = 'Не удалось запросить кадр.';
     }
   }
 
   function receive(message) {
-    if (!dialog.open || message.request !== request) return;
-    if (draft && (message.source !== draft.source || message.revision !== draft.revision || message.device !== device)) return;
-    if (!draft && message.source === 'draft') return;
+    if (!dialog.open || message.request !== request || message.device !== device ||
+        message.source !== (draft?.source ?? 'applied') ||
+        (draft && message.revision !== draft.revision)) return;
     if (draft && message.availability !== 'ready') {
       status.textContent = message.error ?? 'Предпросмотр черновика недоступен.';
       return;
@@ -68,12 +104,32 @@ window.outputMap = (() => {
   }
 
   function update(state) {
-    if (!dialog.open || !draft || refresh.disabled) return;
-    if (!state?.pending && state?.draftMapRevision === draft.revision && selectedDevice(state)?.id === device) return;
+    if (!dialog.open || !selectionValid) return;
+    if (state.profilePath !== profile || selectedDevice(state)?.id !== device) {
+      selectionValid = false;
+      applied.disabled = true;
+      invalidate('Выбран другой выход. Откройте предпросмотр снова.');
+      return;
+    }
+    const nextConnection = connectionFor(state);
+    if (nextConnection !== null && connection !== nextConnection) {
+      connection = nextConnection;
+      showConnection();
+      if (!draft) load(0);
+    }
+    if (draft && !refresh.disabled &&
+        (state.pending || state.draftMapRevision !== draft.revision)) {
+      invalidate('Черновик изменился. Откройте предпросмотр снова.');
+    }
+  }
+
+  function invalidate(message) {
+    const focused = document.activeElement;
     request = (request + 1) >>> 0;
     back.disabled = next.disabled = refresh.disabled = true;
     table.hidden = true;
-    status.textContent = 'Черновик изменился. Откройте предпросмотр снова.';
+    status.textContent = message;
+    if (focused?.disabled) closeButton.focus({preventScroll:true});
   }
 
   function mount(state, dispatch, stagedFields) {
@@ -90,13 +146,14 @@ window.outputMap = (() => {
       node.textContent = label;
       node.onclick = () => {
         device = selected.id;
+        profile = state.profilePath;
+        connection = connectionFor(state);
+        selectionValid = true;
         send = dispatch;
         opener = id;
         draft = isDraft ? {source: 'draft', revision: state.draftMapRevision, fields: stagedFields()} : null;
-        description.textContent = isDraft
-          ? 'Локальный предпросмотр черновика. Вывод изменится после применения.'
-          : 'Снимок цветов сцены по применённой карте. Индексы и координаты начинаются с нуля.';
-        refresh.disabled = false;
+        applied.disabled = refresh.disabled = false;
+        showSource();
         dialog.showModal();
         load(0);
       };
@@ -114,11 +171,22 @@ window.outputMap = (() => {
   back.onclick = () => load(Math.max(0, offset - pageSize));
   next.onclick = () => load(offset + pageSize);
   refresh.onclick = () => load(offset);
+  applied.onclick = () => {
+    draft = null;
+    refresh.disabled = false;
+    showSource();
+    load(0);
+    refresh.focus({preventScroll:true});
+  };
   function close() {
     dialog.close();
-    document.getElementById(opener)?.focus({preventScroll:true});
+    const origin = selectionValid && document.getElementById(opener);
+    const target = document.getElementById('native-target');
+    const fallback = origin && !origin.disabled ? origin :
+      target && !target.disabled ? target : document.querySelector('[data-view="devices"]');
+    fallback?.focus({preventScroll:true});
   }
-  document.getElementById('output-map-close').onclick = close;
+  closeButton.onclick = close;
   dialog.addEventListener('cancel', event => {
     event.preventDefault();
     close();

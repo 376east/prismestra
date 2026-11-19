@@ -497,6 +497,32 @@ fn draft_map_input(app: &App) -> Option<(u64, &crate::devices::Setup, &Scene)> {
         &editor.document.lighting.scene,
     ))
 }
+fn selected_map_device(app: &App) -> Option<&str> {
+    let editor = app
+        .editor
+        .as_ref()
+        .filter(|editor| editor.page == Page::Devices)?;
+    editor
+        .document
+        .lighting
+        .setup
+        .devices
+        .get(editor.index)
+        .map(|device| device.id.as_str())
+}
+
+fn map_connection(app: &App) -> Value {
+    let Some(device) = selected_map_device(app) else {
+        return Value::Null;
+    };
+    let connection = app.runtime.read(|runtime| {
+        output_preview::connection(&runtime.document().lighting.setup, device, || {
+            runtime.host().status(device).map(|status| status.phase)
+        })
+    });
+    json!({"device":device,"state":connection})
+}
+
 fn snapshot(state: &State) -> Result<Value, String> {
     let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
     let app = slot.as_ref().ok_or("Нет сессии")?;
@@ -506,6 +532,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
     let editor=app.editor.as_ref().map(|e|json!({"page":page_name(e.page),"index":e.index,"targets":super::super::editor::Editor::targets(&e.document,e.page),"fields":e.fields().iter().map(|f|json!({"key":f.key,"label":f.label,"value":f.value,"hint":f.hint,"file":f.file,"choices":f.choices.iter().map(|(label,value)|json!({"label":if f.key=="group"{match value.as_str(){"pc"=>"Основной свет","door"=>"Дополнительный свет",_=>label.as_str()}}else{label.as_str()},"value":value})).collect::<Vec<_>>()})).collect::<Vec<_>>(),"dirty":app.editor_dirty}));
     let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":session.catalog.entries.iter().filter_map(|entry|session.catalog_view.get(&entry.id)).collect::<Vec<_>>(),"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
     value["state"]["draftMapRevision"] = json!(draft_map_revision);
+    value["state"]["mapConnection"] = map_connection(app);
     Ok(value)
 }
 fn send(state: &State, value: &Value) -> Result<(), String> {
@@ -668,7 +695,10 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                 let session = session.as_mut().ok_or("Нет интерфейса")?;
                 let current = session.draft_map.observe(draft_map_input(app));
                 let mut reply = json!({"kind":"output_preview","request":request,"source":"draft","device":device,"revision":revision});
-                let (availability, error) = if busy(app) || current.is_none() || current != revision
+                let (availability, error) = if busy(app)
+                    || current.is_none()
+                    || current != revision
+                    || selected_map_device(app) != Some(device.as_str())
                 {
                     (
                         "stale",
@@ -702,18 +732,33 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                 send(state, &reply)?;
                 return Ok(false);
             }
-            let preview = app.runtime.read(|runtime| {
-                output_preview::snapshot(
-                    &runtime.document().lighting.setup,
-                    &device,
-                    runtime.host().frame(&device),
-                    offset,
-                )
-            });
-            let value = match preview {
-                Ok(preview) => json!({"kind":"output_preview","request":request,"preview":preview}),
-                Err(error) => json!({"kind":"output_preview","request":request,"error":error}),
-            };
+            let mut value = json!({"kind":"output_preview","request":request,"source":"applied","device":device});
+            if selected_map_device(app) != Some(device.as_str()) {
+                value["error"] = json!("Выбран другой выход. Откройте предпросмотр снова.");
+            } else {
+                app.runtime.read(|runtime| {
+                    use output_preview::Connection;
+                    let setup = &runtime.document().lighting.setup;
+                    let result = match output_preview::connection(setup, &device, || {
+                        runtime.host().status(&device).map(|status| status.phase)
+                    }) {
+                        Connection::Ready => output_preview::snapshot(
+                            setup,
+                            &device,
+                            runtime.host().frame(&device),
+                            offset,
+                        ),
+                        Connection::Connecting => Err("Выход подключается…"),
+                        Connection::Offline => Err("Выход отключён. Применённый кадр недоступен."),
+                        Connection::Disabled => Err("Выход выключен в применённом профиле."),
+                        Connection::NoMap => Err("У выбранного выхода нет применённой LED-карты."),
+                    };
+                    match result {
+                        Ok(preview) => value["preview"] = json!(preview),
+                        Err(error) => value["error"] = json!(error),
+                    }
+                });
+            }
             send(state, &value)?;
             return Ok(false);
         }
@@ -966,6 +1011,7 @@ pub(super) fn maintain(state: &State) {
             if app.page == Page::Devices {
                 value["state"]["deviceActivity"] = device_activity(app);
             }
+            value["state"]["mapConnection"] = map_connection(app);
             if let Some(form) = native_forms::snapshot(app) {
                 value["state"]["nativeForm"] = form;
             }

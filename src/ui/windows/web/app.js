@@ -307,7 +307,7 @@ window.prismestraReceive = message => {
   } else if(message.kind==='status'&&state) {
    const foundChanged=view==='devices'&&Object.hasOwn(message.state,'deviceActivity')&&!same(state.deviceActivity?.found,message.state.deviceActivity.found);
    const nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));Object.assign(state,message.state);
-   if(state.pending)window.outputMap?.update(state);
+   if(state.pending||Object.hasOwn(message.state,'mapConnection'))window.outputMap?.update(state);
    followActiveScene();
    if(!state.pending&&!nativeAwaitingAck&&!savedSceneRequest)commandPending=false;
    if(message.state.preview)frame=message.state.preview;
