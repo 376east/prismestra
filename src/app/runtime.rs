@@ -156,6 +156,7 @@ pub type CaptureFactory =
 struct RgbSpec {
     keys: Vec<String>,
     factory: RgbFactory,
+    action_required_error: Option<String>,
 }
 struct LcdSpec {
     keys: Vec<String>,
@@ -767,7 +768,16 @@ impl Runtime {
                 self.rgb_specs = outputs
                     .rgb
                     .into_iter()
-                    .map(|(id, keys, factory)| (id, RgbSpec { keys, factory }))
+                    .map(|(id, keys, factory)| {
+                        (
+                            id,
+                            RgbSpec {
+                                keys,
+                                factory,
+                                action_required_error: None,
+                            },
+                        )
+                    })
                     .collect();
                 self.lcd_specs = outputs
                     .lcd
@@ -776,6 +786,18 @@ impl Runtime {
                     .collect();
                 self.capture_factory = outputs.capture;
                 self.output_revision += 1;
+            } else {
+                // A document-only edit replaces the Host, but retains its bindings.
+                for (id, spec) in &mut self.rgb_specs {
+                    if let Some(error) = self
+                        .host
+                        .status(id)
+                        .filter(|snapshot| snapshot.requires_action)
+                        .and_then(|snapshot| snapshot.error)
+                    {
+                        spec.action_required_error = Some(error);
+                    }
+                }
             }
             self.output_recovery
                 .retain(|id, _| self.rgb_specs.contains_key(id) || self.lcd_specs.contains_key(id));
@@ -1103,7 +1125,14 @@ impl Runtime {
         let factory = self.guard_managed_rgb(id, factory);
         let f = factory.clone();
         self.host.attach_claimed(id, keys.clone(), move |c| f(c))?;
-        self.rgb_specs.insert(id.into(), RgbSpec { keys, factory });
+        self.rgb_specs.insert(
+            id.into(),
+            RgbSpec {
+                keys,
+                factory,
+                action_required_error: None,
+            },
+        );
         self.reset_output_recovery(id);
         self.bump_view();
         Ok(())
@@ -1286,14 +1315,23 @@ impl Runtime {
         Ok(())
     }
     fn rgb_requires_action(&self, id: &str) -> bool {
-        self.host
-            .status(id)
-            .is_some_and(|status| status.requires_action)
+        self.rgb_specs
+            .get(id)
+            .is_some_and(|spec| spec.action_required_error.is_some())
+            || self
+                .host
+                .status(id)
+                .is_some_and(|status| status.requires_action)
     }
 
     fn restart_registered(&mut self, retry_action_required: bool) -> Result<(), String> {
         // Called only after all previous owners have been reaped. Never reuse a
         // native handle across suspend; every factory revalidates its binding.
+        if retry_action_required {
+            for spec in self.rgb_specs.values_mut() {
+                spec.action_required_error = None;
+            }
+        }
         let rgb = self
             .rgb_specs
             .iter()
@@ -1365,7 +1403,13 @@ impl Runtime {
         };
         // This is lighting-output readiness. Optional temperature readers may
         // connect/fail independently; absence is not a temperature reading.
-        for id in self.rgb_specs.keys() {
+        for (id, spec) in &self.rgb_specs {
+            if let Some(error) = &spec.action_required_error {
+                if recovers_independently(id) {
+                    continue;
+                }
+                return Err(error.clone());
+            }
             if retry_start(id) {
                 continue;
             }

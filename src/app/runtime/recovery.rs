@@ -151,7 +151,9 @@ impl Runtime {
         for (id, state) in &mut self.output_recovery {
             if let Some(spec) = self.rgb_specs.get(id) {
                 let snapshot = self.host.status(id);
-                if snapshot.as_ref().is_some_and(|s| s.requires_action) {
+                if spec.action_required_error.is_some()
+                    || snapshot.as_ref().is_some_and(|s| s.requires_action)
+                {
                     continue;
                 }
                 let failed = state.start_error.is_some()

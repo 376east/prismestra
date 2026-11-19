@@ -81,12 +81,16 @@ impl Runtime {
         if self.suspended || self.pending.is_some() || self.power.pending() {
             return OutputActivity::Connecting;
         }
-        if let Some(error) = self
-            .output_recovery
+        let action_required_error = self
+            .rgb_specs
             .get(id)
-            .and_then(|state| state.start_error.clone())
-        {
-            return OutputActivity::Unavailable(Some(error));
+            .and_then(|spec| spec.action_required_error.as_ref());
+        if let Some(error) = action_required_error.or_else(|| {
+            self.output_recovery
+                .get(id)
+                .and_then(|state| state.start_error.as_ref())
+        }) {
+            return OutputActivity::Unavailable(Some(error.clone()));
         }
         let (phase, frames, error) = if is_lcd {
             let Some(status) = self.lcd_status(id) else {

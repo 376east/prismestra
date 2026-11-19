@@ -242,7 +242,7 @@ fn assert_ha_authorization_recovery(status: Option<&'static str>, error: &str, i
         app::{
             config::{Groups, Project},
             document::Document,
-            runtime::Runtime,
+            runtime::{OutputActivity, Runtime},
         },
         devices::{Canvas, Device, Point, Role, Setup},
         runtime::output::Phase,
@@ -411,6 +411,40 @@ fn assert_ha_authorization_recovery(status: Option<&'static str>, error: &str, i
         thread::sleep(Duration::from_millis(2));
     }
 
+    let mut edited = runtime.document().clone();
+    edited.lighting.setup.devices[1].label = "Renamed neighbor".into();
+    runtime.request_document(edited.clone()).unwrap();
+    let until = Instant::now() + Duration::from_secs(3);
+    loop {
+        now += 50_000;
+        runtime.tick(now, 1_800_000_000).unwrap();
+        if !runtime.pending_configuration()
+            && runtime
+                .host()
+                .status("neighbor")
+                .is_some_and(|s| s.submitted > 0)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "document edit did not restore the neighbor"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(runtime.document(), &edited);
+    assert!(
+        runtime.host().status("ha").is_none(),
+        "document edit reopened HA"
+    );
+    assert_eq!(runtime.outputs_ready(), Err(error.into()));
+    if initial {
+        let ha = &runtime.document().lighting.setup.devices[0];
+        assert!(
+            matches!(runtime.output_activity(ha), OutputActivity::Unavailable(Some(reason)) if reason == error)
+        );
+    }
+
     key_saved.store(true, Ordering::SeqCst);
     runtime.refresh_devices(now).unwrap();
     now += 7_000_000;
@@ -418,8 +452,9 @@ fn assert_ha_authorization_recovery(status: Option<&'static str>, error: &str, i
     loop {
         now += 50_000;
         runtime.tick(now, 1_800_000_000).unwrap();
-        let status = runtime.host().status("ha").unwrap();
-        if status.generation != failed.generation && status.submitted > 0 {
+        if let Some(status) = runtime.host().status("ha")
+            && status.submitted > 0
+        {
             assert_eq!(status.phase, Phase::Ready);
             assert!(!status.requires_action);
             assert_eq!(status.error, None);
