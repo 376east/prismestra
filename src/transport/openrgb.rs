@@ -59,15 +59,14 @@ pub struct ControllerInfo {
 }
 
 impl ControllerInfo {
-    fn same_identity(&self, other: &Self) -> bool {
-        self.name == other.name
-            && self.vendor == other.vendor
-            && self.serial == other.serial
-            && self.location == other.location
-            && self.kind == other.kind
-            && self.leds == other.leds
-            && self.led_names == other.led_names
-            && self.zones == other.zones
+    pub(crate) fn physical_identity(&self) -> [&str; 5] {
+        [
+            &self.name,
+            &self.vendor,
+            &self.serial,
+            &self.location,
+            &self.kind,
+        ]
     }
 }
 
@@ -316,19 +315,25 @@ fn exact_controller<'a>(
     expected: &ControllerInfo,
 ) -> OpenRgbResult<&'a Controller> {
     let mut candidate = None;
-    let mut matches = 0;
     for controller in group.iter() {
-        if describe(controller)?.same_identity(expected) {
-            matches += 1;
-            candidate = Some(controller);
+        let info = describe(controller)?;
+        if info.physical_identity() == expected.physical_identity() {
+            if candidate.is_some() {
+                return Err(openrgb2::OpenRgbError::ProtocolError(
+                    "OpenRGB controller identity is ambiguous; no output activated".into(),
+                ));
+            }
+            candidate = Some((info, controller));
         }
     }
-    if matches != 1 || candidate.is_none_or(|c| c.id() != expected.id) {
-        return Err(openrgb2::OpenRgbError::ProtocolError(
-            "OpenRGB controller identity changed or is ambiguous; rescan and bind again".into(),
-        ));
-    }
-    Ok(candidate.expect("candidate validated above"))
+    candidate
+        .filter(|(info, _)| info == expected)
+        .map(|(_, controller)| controller)
+        .ok_or_else(|| {
+            openrgb2::OpenRgbError::ProtocolError(
+                "OpenRGB controller identity or topology changed; rescan and bind again".into(),
+            )
+        })
 }
 
 #[cfg(test)]

@@ -29,7 +29,7 @@ fn text(out: &mut Vec<u8>, s: &str) {
     out.extend(s.as_bytes());
     out.push(0);
 }
-fn controller(kind: u32) -> Vec<u8> {
+fn controller(kind: u32, zone_name: &str) -> Vec<u8> {
     let mut out = vec![0; 4];
     dword(&mut out, kind);
     for value in [
@@ -50,7 +50,7 @@ fn controller(kind: u32) -> Vec<u8> {
     }
     word(&mut out, 0);
     word(&mut out, 1);
-    text(&mut out, "Zone");
+    text(&mut out, zone_name);
     for value in [1, 2, 2, 2] {
         dword(&mut out, value);
     }
@@ -59,7 +59,7 @@ fn controller(kind: u32) -> Vec<u8> {
     dword(&mut out, 1 << 30);
     dword(&mut out, u32::MAX);
     word(&mut out, 0);
-    text(&mut out, "Zone");
+    text(&mut out, zone_name);
     word(&mut out, 2);
     text(&mut out, "LED0");
     text(&mut out, "LED1");
@@ -82,12 +82,15 @@ fn packet(stream: &mut TcpStream, device: u32, kind: u32, body: &[u8]) -> std::i
 }
 impl Peer {
     pub fn new(duplicate: bool) -> Self {
-        Self::start(duplicate, false)
+        Self::start(duplicate, false, false)
     }
     pub fn virtual_controller() -> Self {
-        Self::start(false, true)
+        Self::start(false, true, false)
     }
-    fn start(duplicate: bool, virtual_controller: bool) -> Self {
+    pub fn becomes_ambiguous_on_activation() -> Self {
+        Self::start(false, false, true)
+    }
+    fn start(duplicate: bool, virtual_controller: bool, late_duplicate: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let endpoint = listener.local_addr().unwrap();
@@ -107,6 +110,7 @@ impl Peer {
                     Err(e) => panic!("{e}"),
                 };
                 connections += 1;
+                let mut inventory_requests = 0;
                 stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
@@ -129,6 +133,9 @@ impl Peer {
                         40 => packet(&mut stream, device, kind, &6u32.to_le_bytes()),
                         52 => packet(&mut stream, device, 53, &(1u32 | 1 << 30).to_le_bytes()),
                         0 => {
+                            inventory_requests += 1;
+                            let duplicate = duplicate
+                                || (late_duplicate && connections == 2 && inventory_requests > 1);
                             let mut ids = vec![];
                             dword(&mut ids, if duplicate { 2 } else { 1 });
                             dword(&mut ids, if connections == 1 { 7 } else { 8 });
@@ -141,7 +148,14 @@ impl Peer {
                             &mut stream,
                             device,
                             kind,
-                            &controller(if virtual_controller { 13 } else { 14 }),
+                            &controller(
+                                if virtual_controller { 13 } else { 14 },
+                                if late_duplicate && device == 9 {
+                                    "Different zone"
+                                } else {
+                                    "Zone"
+                                },
+                            ),
                         ),
                         1101 | 1050 => Ok(()),
                         _ => panic!("Unexpected SDK packet {kind}"),
