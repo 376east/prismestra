@@ -7,10 +7,12 @@ use std::{
     net::SocketAddr,
     time::{Duration, Instant},
 };
+#[cfg(windows)]
+const HA_MISSING_KEY: &str = "Home Assistant key is missing; save it before Apply";
 
 #[cfg(windows)]
 pub struct HomeAssistant {
-    client: crate::transport::home_assistant::Client,
+    client: Option<crate::transport::home_assistant::Client>,
     entity: String,
     last: Option<[u8; 3]>,
     next: Option<Instant>,
@@ -31,14 +33,15 @@ impl HomeAssistant {
         if cancel.cancelled() {
             return Err("Home Assistant output stopping".into());
         }
-        let token = crate::credentials_windows::read(credential_id)
-            .map_err(|e| e.to_string())?
-            .ok_or("Home Assistant key is missing; save it before Apply")?;
+        let token = crate::credentials_windows::read(credential_id).map_err(|e| e.to_string())?;
         Self::with_token(endpoint, entity, token)
     }
-    fn with_token(endpoint: &str, entity: &str, token: String) -> Result<Self, String> {
+    fn with_token(endpoint: &str, entity: &str, token: Option<String>) -> Result<Self, String> {
         use crate::transport::home_assistant::{Client, Endpoint};
-        let client = Client::new(Endpoint::parse(endpoint).map_err(|e| e.to_string())?, token)
+        let endpoint = Endpoint::parse(endpoint).map_err(|e| e.to_string())?;
+        let client = token
+            .map(|token| Client::new(endpoint, token))
+            .transpose()
             .map_err(|e| e.to_string())?;
         Ok(Self {
             client,
@@ -58,7 +61,11 @@ impl RgbDriver for HomeAssistant {
         1
     }
     fn prepare(&mut self, cancel: &Cancellation) -> Result<(), PrepareError> {
-        self.client
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| PrepareError::RequiresAction(HA_MISSING_KEY.into()))?;
+        client
             .bind_light(
                 &self.entity,
                 Instant::now() + Duration::from_secs(3),
@@ -76,6 +83,9 @@ impl RgbDriver for HomeAssistant {
         if cancel.cancelled() {
             return Err("Home Assistant output stopping".into());
         }
+        let Some(client) = self.client.as_mut() else {
+            return Ok(WriteResult::RequiresAction(HA_MISSING_KEY.into()));
+        };
         let [color] = colors else {
             return Err("Home Assistant requires one whole-light color".into());
         };
@@ -95,10 +105,9 @@ impl RgbDriver for HomeAssistant {
         let result = if self.retry_step == 0 {
             Ok(())
         } else {
-            self.client
-                .bind_light(&self.entity, deadline, || cancel.cancelled())
+            client.bind_light(&self.entity, deadline, || cancel.cancelled())
         }
-        .and_then(|()| self.client.set_color(rgb, deadline, || cancel.cancelled()));
+        .and_then(|()| client.set_color(rgb, deadline, || cancel.cancelled()));
         if let Err(error) = result {
             if error.authorization_rejected() {
                 return Ok(WriteResult::RequiresAction(error.to_string()));

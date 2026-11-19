@@ -72,7 +72,7 @@ fn ha_deduplicates_limits_rate_and_posts_off_only_when_due() {
     ]);
     let cancel = Cancellation::default();
     let mut driver =
-        HomeAssistant::with_token(&url, "light.room", "fake.test-token".into()).unwrap();
+        HomeAssistant::with_token(&url, "light.room", Some("fake.test-token".into())).unwrap();
     driver.prepare(&cancel).unwrap();
     let color = [Rgb { r: 90, g: 30, b: 0 }];
     let black = [Rgb::default()];
@@ -148,7 +148,7 @@ fn ha_discovery_is_read_only_and_errors_do_not_expose_credentials() {
     ] {
         let (url, peer) = start_peer(vec![(status, "secret response")]);
         let mut driver =
-            HomeAssistant::with_token(&url, "light.room", "fake.test-token".into()).unwrap();
+            HomeAssistant::with_token(&url, "light.room", Some("fake.test-token".into())).unwrap();
         let error = match driver.prepare(&Cancellation::default()) {
             Err(PrepareError::RequiresAction(error)) if requires_action => error,
             Err(PrepareError::Failed(error)) if !requires_action => error,
@@ -175,7 +175,7 @@ fn ha_rebinds_before_resending_latest_color_and_leaves_auth_failure_terminal() {
     ]);
     let cancel = Cancellation::default();
     let mut driver =
-        HomeAssistant::with_token(&url, "light.room", "fake.test-token".into()).unwrap();
+        HomeAssistant::with_token(&url, "light.room", Some("fake.test-token".into())).unwrap();
     driver.prepare(&cancel).unwrap();
     let blue = [Rgb { r: 0, g: 20, b: 90 }];
     let black = [Rgb::default()];
@@ -214,17 +214,30 @@ fn ha_rebinds_before_resending_latest_color_and_leaves_auth_failure_terminal() {
 
 #[test]
 fn registered_ha_output_waits_for_explicit_refresh_after_authorization_failure() {
-    assert_ha_authorization_recovery("401 Unauthorized", "Home Assistant: Authentication", false);
-    assert_ha_authorization_recovery("403 Forbidden", "Home Assistant: Http(403)", false);
+    assert_ha_authorization_recovery(
+        Some("401 Unauthorized"),
+        "Home Assistant: Authentication",
+        false,
+    );
+    assert_ha_authorization_recovery(Some("403 Forbidden"), "Home Assistant: Http(403)", false);
 }
 
 #[test]
 fn registered_ha_initial_authorization_failure_waits_for_explicit_refresh() {
-    assert_ha_authorization_recovery("401 Unauthorized", "Home Assistant: Authentication", true);
-    assert_ha_authorization_recovery("403 Forbidden", "Home Assistant: Http(403)", true);
+    assert_ha_authorization_recovery(
+        Some("401 Unauthorized"),
+        "Home Assistant: Authentication",
+        true,
+    );
+    assert_ha_authorization_recovery(Some("403 Forbidden"), "Home Assistant: Http(403)", true);
 }
 
-fn assert_ha_authorization_recovery(status: &'static str, error: &str, initial: bool) {
+#[test]
+fn registered_ha_missing_key_waits_for_explicit_refresh_without_http() {
+    assert_ha_authorization_recovery(None, HA_MISSING_KEY, true);
+}
+
+fn assert_ha_authorization_recovery(status: Option<&'static str>, error: &str, initial: bool) {
     use crate::{
         app::{
             config::{Groups, Project},
@@ -235,7 +248,10 @@ fn assert_ha_authorization_recovery(status: &'static str, error: &str, initial: 
         runtime::output::Phase,
         schedule,
     };
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
     struct Neighbor;
     impl RgbDriver for Neighbor {
@@ -256,7 +272,10 @@ fn assert_ha_authorization_recovery(status: &'static str, error: &str, initial: 
     if !initial {
         responses.extend([("200 OK", AVAILABLE), ("200 OK", "[]")]);
     }
-    responses.extend([(status, "{}"), ("200 OK", AVAILABLE), ("200 OK", "[]")]);
+    if let Some(status) = status {
+        responses.push((status, "{}"));
+    }
+    responses.extend([("200 OK", AVAILABLE), ("200 OK", "[]")]);
     let (url, peer) = start_peer(responses);
     let document = Document::from_lighting(Project {
         version: 1,
@@ -310,6 +329,8 @@ fn assert_ha_authorization_recovery(status: &'static str, error: &str, initial: 
     })
     .unwrap();
     let mut runtime = Runtime::new(document, None).unwrap();
+    let key_saved = Arc::new(AtomicBool::new(status.is_some()));
+    let key_source = key_saved.clone();
     runtime
         .attach_rgb(
             "ha",
@@ -318,7 +339,9 @@ fn assert_ha_authorization_recovery(status: &'static str, error: &str, initial: 
                 Ok(Box::new(HomeAssistant::with_token(
                     &url,
                     "light.room",
-                    "fake.test-token".into(),
+                    key_source
+                        .load(Ordering::SeqCst)
+                        .then(|| "fake.test-token".into()),
                 )?))
             }),
         )
@@ -388,6 +411,7 @@ fn assert_ha_authorization_recovery(status: &'static str, error: &str, initial: 
         thread::sleep(Duration::from_millis(2));
     }
 
+    key_saved.store(true, Ordering::SeqCst);
     runtime.refresh_devices(now).unwrap();
     now += 7_000_000;
     let until = Instant::now() + Duration::from_secs(3);
@@ -411,7 +435,9 @@ fn assert_ha_authorization_recovery(status: &'static str, error: &str, initial: 
     let get = "GET /ha/api/states/light.room ";
     let on = "POST /ha/api/services/light/turn_on ";
     let off = "POST /ha/api/services/light/turn_off ";
-    let expected: &[_] = if initial {
+    let expected: &[_] = if status.is_none() {
+        &[get, on]
+    } else if initial {
         &[get, get, on]
     } else {
         &[get, on, off, get, off]
