@@ -236,6 +236,7 @@ $receipt = [ordered]@{
     pawnio_after = $null
     prereq_installer_log_mentions = @()
     vc_download_verified = $false
+    silent_setup_requires_webview2_terms = $false
     application_launched_by_test = $false
     network_isolation_exercised = $false
 }
@@ -256,6 +257,15 @@ try {
     $receipt.pawnio_before = Get-PawnIOState
     # No optional PawnIO, launch or autostart selections.
     $options = '/SP- /TASKS="" /RESTARTEXITCODE=3010'
+    if (-not $PreviousInstaller) {
+        $declinedLog = Join-Path $report 'setup-without-terms.log'
+        $declinedExit = Invoke-Installer $installerPath $options $declinedLog
+        Assert-Expected ($declinedExit -eq 1 -and
+            (Get-Content -LiteralPath $declinedLog -Raw) -match 'Silent Setup requires /ACCEPTWEBVIEW2TERMS') (
+            'Silent Setup proceeded without explicit acceptance of the WebView2 license.')
+        Assert-ProductAbsent
+        $receipt.silent_setup_requires_webview2_terms = $true
+    }
     if ($PreviousInstaller) {
         Assert-Expected (-not (Test-Path -LiteralPath $userRoot)) 'Upgrade requires a fresh runner profile.'
         $baseline = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'upgrade-baseline.lock.json') -Raw | ConvertFrom-Json
@@ -296,7 +306,7 @@ try {
     }
     $vcBeforeCandidate = (Get-Runtimes).vc_version
     $setupAttempted = $true
-    $receipt.setup_exit_code = Invoke-Installer $installerPath $options $setupLog
+    $receipt.setup_exit_code = Invoke-Installer $installerPath ($options + ' /ACCEPTWEBVIEW2TERMS') $setupLog
     $log = if (Test-Path -LiteralPath $setupLog -PathType Leaf) { Get-Content -LiteralPath $setupLog -Raw } else { '' }
     $receipt.reboot_required = $receipt.setup_exit_code -in @(8, 1641, 3010) -or
         $log -match 'Restart Windows to complete|exit code (1641|3010)\b'
@@ -308,6 +318,8 @@ try {
     Assert-Expected ($log -notmatch '(?im)\bPawnIO_setup\.exe exit code') 'Optional PawnIO installer ran.'
     $receipt.runtimes_installed = Get-Runtimes
     Assert-ProtectedInstall
+    Assert-Expected (Test-Path -LiteralPath (Join-Path $install 'licenses/Microsoft-WebView2.txt') -PathType Leaf) (
+        'The installed WebView2 license and privacy notice is missing.')
     $receipt.manifest_sha256 = Get-Sha256 $manifestPath
     Assert-Expected ($receipt.manifest_sha256 -ceq $ManifestSha256) 'Installed manifest SHA-256 differs from the candidate.'
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json

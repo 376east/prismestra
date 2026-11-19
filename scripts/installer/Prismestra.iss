@@ -27,6 +27,9 @@ SolidCompression=yes
 DiskSpanning=no
 WizardStyle=modern
 SetupLogging=yes
+#ifndef LifecycleTest
+LicenseFile=payload\licenses\Microsoft-WebView2.txt
+#endif
 
 [Tasks]
 Name: "autostart"; Description: "Start Prismestra when I sign in"
@@ -61,6 +64,18 @@ var
   RebootRequired: Boolean;
 #ifndef LifecycleTest
   VcDownloadPage: TDownloadWizardPage;
+
+function InitializeSetup: Boolean;
+var
+  I: Integer;
+begin
+  Result := True;
+  if not WizardSilent then Exit;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), '/ACCEPTWEBVIEW2TERMS') = 0 then Exit;
+  Log('Silent Setup requires /ACCEPTWEBVIEW2TERMS after reviewing the Microsoft WebView2 license.');
+  Result := False;
+end;
 
 procedure InitializeWizard;
 begin
