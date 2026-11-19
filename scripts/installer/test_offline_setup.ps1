@@ -260,6 +260,7 @@ if ($PreviousInstaller) {
         after_removal = $null
         removal_exit = $null
         restored = $false
+        after_test = $null
     }
 }
 try {
@@ -321,16 +322,18 @@ try {
     }
     if ($ExerciseVcDownload) {
         $lock = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'prerequisites.lock.json') -Raw | ConvertFrom-Json
-        $pin = $lock.packages.vc_redist_x64
         $minimum = [version]$lock.minimum_vc_runtime
         $receipt.vc_test.before = Get-Runtimes
-        if ($receipt.vc_test.before.vc_version -and [version]$receipt.vc_test.before.vc_version -ge $minimum) {
-            Assert-Expected ($receipt.vc_test.before.vc_version -ceq $pin.version) (
+        if ($receipt.vc_test.before.vc_version) {
+            $original = [version]$receipt.vc_test.before.vc_version
+            $pin = @($lock.packages.vc_redist_x64, $lock.ci_vc_recovery_x64) |
+                Where-Object version -CEQ $receipt.vc_test.before.vc_version | Select-Object -First 1
+            Assert-Expected ($null -ne $pin) (
                 'The hosted image uses a different VC version. Refusing removal without identical recovery media.')
-            $vcRecovery = Join-Path $env:RUNNER_TEMP $pin.file
-            Invoke-WebRequest -Uri $pin.source -OutFile $vcRecovery -TimeoutSec 90
+            $vcRecovery = Join-Path $env:RUNNER_TEMP 'prismestra-ci-vc-recovery-x64.exe'
+            Invoke-WebRequest -Uri $pin.source -UseBasicParsing -OutFile $vcRecovery -TimeoutSec 90
             $signature = Get-AuthenticodeSignature -LiteralPath $vcRecovery
-            Assert-Expected ((Get-Item -LiteralPath $vcRecovery).Length -eq $pin.size -and
+            Assert-Expected ((Get-Item -LiteralPath $vcRecovery).VersionInfo.FileVersion -ceq $pin.version -and
                 (Get-Sha256 $vcRecovery) -ceq $pin.sha256 -and $signature.Status -eq 'Valid' -and
                 $signature.SignerCertificate.GetNameInfo('SimpleName', $false) -ceq $pin.publisher) (
                 'The exact Microsoft VC Runtime recovery installer could not be verified.')
@@ -442,15 +445,18 @@ try {
     if ($restoreVc) {
         try {
             $restored = Get-Runtimes
-            if ($restored.vc_version -cne $pin.version -or $restored.vc_files.Count -ne 3) {
+            if (-not $restored.vc_version -or [version]$restored.vc_version -lt $original -or
+                $restored.vc_files.Count -ne 3) {
                 $recover = Start-Process -FilePath $vcRecovery -WindowStyle Hidden -Wait -PassThru -ArgumentList @(
                     '/install', '/quiet', '/norestart', '/log', ('"' + (Join-Path $report 'vc-recovery.log') + '"'))
                 try { $recoveryExit = $recover.ExitCode } finally { $recover.Dispose() }
                 Assert-Expected ($recoveryExit -eq 0) "VC Runtime recovery failed with exit $recoveryExit."
                 $restored = Get-Runtimes
             }
-            $receipt.vc_test.restored = $restored.vc_version -ceq $pin.version -and $restored.vc_files.Count -eq 3
-            Assert-Expected $receipt.vc_test.restored 'The original runner VC Runtime could not be restored.'
+            $receipt.vc_test.after_test = $restored
+            $receipt.vc_test.restored = $restored.vc_version -and [version]$restored.vc_version -ge $original -and
+                $restored.vc_files.Count -eq 3
+            Assert-Expected $receipt.vc_test.restored 'A compatible runner VC Runtime could not be restored.'
         } catch { $failures.Add($_.Exception.Message) }
     }
     if ($failures.Count -eq 0 -and $receipt.install_verified -and $receipt.uninstall_verified) {
