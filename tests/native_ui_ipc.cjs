@@ -24,6 +24,60 @@ vm.runInContext("send({op:'delete_scene',id:'saved'},true)",context);assert.equa
 context.payload={kind:'error',message:'Проверочная ошибка'};vm.runInContext('window.prismestraReceive(payload)',context);assert.equal(nodes.get('#native-error').hidden,false);assert.ok(nodes.get('#native-error').innerHTML.includes('Проверочная ошибка'));
 assert.ok(!/localStorage|fetch\(|XMLHttpRequest|WebSocket/.test(source),'project has no browser storage or networking');
 
+const configuredOutput = (id,role,enabled) => ({
+ id,role,enabled,label:id,driver:{type:role==='lcd'?'tt_lcd':'wled_ddp'},leds:role==='lcd'?0:48,rate_hz:30
+});
+function navigationSnapshot(devices, nativeAux=null, editor=null, pending=false) {
+ context.payload={kind:'snapshot',state:{...structuredClone(initial),devices,nativeAux,editor,pending}};
+ vm.runInContext('window.prismestraReceive(payload)',context);
+}
+const navigation = () => find('nav').innerHTML;
+const visible = page => navigation().includes(`data-view="${page}"`);
+
+navigationSnapshot([configuredOutput('ordinary-strip','canvas',true)]);
+assert.ok(!visible('lcd')&&!visible('ambient'),'ordinary RGB does not advertise LCD or screen capture');
+const beforeHiddenNavigation=commands.length;
+vm.runInContext('changeView("ambient")',context);
+assert.equal(commands.length,beforeHiddenNavigation,'unavailable output cannot open an empty native page');
+
+navigationSnapshot([configuredOutput('saved-lcd','lcd',false)]);
+assert.ok(visible('lcd')&&!visible('ambient'),'configured disabled LCD retains its repair route');
+vm.runInContext('changeView("lcd")',context);
+assert.equal(commands.at(-1).page,'lcd');
+assert.ok(main.innerHTML.includes('Проверить подключение'));
+vm.runInContext('changeView("connections")',context);
+assert.equal(commands.at(-1).page,'lcd','wait for native page acknowledgement');
+navigationSnapshot([configuredOutput('saved-lcd','lcd',false)]);
+vm.runInContext('changeView("connections")',context);
+assert.equal(commands.at(-1).page,'connections');
+navigationSnapshot([configuredOutput('saved-lcd','lcd',false)]);
+vm.runInContext('changeView("lcd")',context);
+assert.equal(commands.at(-1).page,'lcd','saved output stays reachable after connection settings');
+
+navigationSnapshot([configuredOutput('ambient-strip','ambient',false)]);
+assert.ok(visible('ambient')&&!visible('lcd'),'switch to another profile recomputes available pages');
+assert.deepEqual(commands.at(-1),{op:'page',page:'devices'});
+assert.equal(document.activeElement,find('h1'));
+
+const ambient= configuredOutput('ambient-strip','ambient',false);
+navigationSnapshot([ambient]);
+vm.runInContext('changeView("ambient")',context);
+navigationSnapshot([ambient],null,{page:'ambient',index:0,targets:['Ambient'],fields:[],dirty:false});
+navigationSnapshot([],null,{page:'ambient',index:0,targets:[],fields:[],dirty:false});
+assert.ok(!visible('ambient'));
+assert.deepEqual(commands.at(-1),{op:'page',page:'devices'},'removing the last output returns to Devices');
+
+const addForm={page:'devices',fields:[{id:714,kind:'select',label:'Тип устройства',value:'0',choices:[{value:'0',label:'TT LCD'}],enabled:true}],actions:[],notes:[]};
+navigationSnapshot([],addForm);
+assert.ok(main.innerHTML.includes('Добавить устройство')&&main.innerHTML.includes('data-view="connections"'));
+const addButton=new Node();addButton.dataset.action='focus-device-setup';
+const presetInput=find('[data-native-field="714"]');
+const beforeAdd=commands.length;
+events.click({target:{closest:()=>addButton}});
+assert.equal(document.activeElement,presetInput,'Add device moves keyboard focus to the existing presets');
+assert.equal(commands.length,beforeAdd,'opening Add does not apply a device or start discovery');
+console.log('PASS: adaptive LCD/Ambient routes, existing connection forms, final-output removal and keyboard entry into Add');
+
 // Recovery operations remain usable while the provider reports pending/fault.
 vm.runInContext('state.pending=true;state.error="Provider fault";state.editor={page:"devices",index:0,targets:["Device"],fields:[],dirty:false};commandPending=true',context);
 for(const [action,op] of [['revert-document','revert_document'],['retry-document','retry_document'],['classic','classic']]){

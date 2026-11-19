@@ -120,8 +120,13 @@ function nativeProperties() {
  if(!editor || editor.page!==view)return state.nativeAux?.page===view?renderNativeForm(state.nativeAux):'<div class="native-wait">Настройки загружаются…</div>';
  return `<section class="native-properties"><div class="native-inline"><label for="native-target">Объект</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select></div><div class="parameter-panel"><p class="parameter-note" role="status" id="native-runtime-detail">${esc(state.detail||'')}</p><div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>Выбрать…</button>`:''}</div>`}${field.hint?`<small>${esc(field.hint)}</small>`:''}</div>`).join('')||'<p class="muted">Параметров объекта нет.</p>'}</div><div class="native-property-actions">${action('Применить','apply-document',true,'data-needs-change="document"')}${action('Отменить изменения','revert-document')}${action('Повторить','retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
 }
+const DEVICE_PRESET_FIELD = 714; // E_PRESET in the native Devices form.
 function renderDevices() {
- return heading('Устройства','Изменения действуют после «Применить». Профиль сохраняется отдельно.')+`<div class="device-list">${state.devices.map((d,index)=>`<article class="device"><div class="device-symbol">${icon('devices')}</div><div class="device-info"><h2>${esc(d.label)}</h2><p>${esc(d.driver?.type)} · ${esc(d.role)}</p></div><div class="device-meta"><span>${esc(d.leds)} LED · ${esc(d.rate_hz)} Гц</span><small>${d.enabled?'Включено':'Выключено'}</small></div><button class="icon-button" data-device-index="${index}" data-mutation ${disabled()} aria-label="Свойства: ${esc(d.label)}">${icon('edit')}</button></article>`).join('')||'<div class="empty"><h2>В профиле нет устройств</h2><p>Добавьте устройство в свойствах профиля.</p></div>'}</div><div style="margin-top:24px">${nativeProperties()}</div>`;
+ const addDevice = state.nativeAux?.page==='devices' && state.nativeAux.fields.some(field=>field.id===DEVICE_PRESET_FIELD && field.enabled)
+   ? action('Добавить устройство','focus-device-setup',true)
+   : '';
+ const connections = '<button class="button" data-view="connections">Подключения</button>';
+ return heading('Устройства','Изменения действуют после «Применить». Профиль сохраняется отдельно.',addDevice+connections)+`<div class="device-list">${state.devices.map((d,index)=>`<article class="device"><div class="device-symbol">${icon('devices')}</div><div class="device-info"><h2>${esc(d.label)}</h2><p>${esc(d.driver?.type)} · ${esc(d.role)}</p></div><div class="device-meta"><span>${esc(d.leds)} LED · ${esc(d.rate_hz)} Гц</span><small>${d.enabled?'Включено':'Выключено'}</small></div><button class="icon-button" data-device-index="${index}" data-mutation ${disabled()} aria-label="Свойства: ${esc(d.label)}">${icon('edit')}</button></article>`).join('')||'<div class="empty"><h2>В профиле нет устройств</h2><p>Добавьте устройство в свойствах профиля.</p></div>'}</div><div style="margin-top:24px">${nativeProperties()}</div>`;
 }
 function renderNativeForm(form=nativeFormForView()) {
  if(!form||form.page!==view)return '<div class="native-wait" role="status">Загрузка настроек…</div>';
@@ -132,12 +137,24 @@ function renderNativeForm(form=nativeFormForView()) {
   return `<div class="native-field"><label for="${id}">${esc(field.label)}</label>${control}</div>`;
  }).join('')}</div><div class="native-property-actions">${form.actions.map(item=>`<button class="button" data-native-action="${esc(item.id)}" data-native-control ${nativeControlDisabled({dataset:{nativeAction:String(item.id)}})?'disabled':''}>${esc(item.label)}</button>`).join('')}<button class="button" data-action="discard-page-fields" data-local-discard ${currentPageStaged()?'':'hidden'}>Отменить незавершённый ввод</button></div>${form.notes.map(note=>`<p class="parameter-note">${esc(note)}</p>`).join('')}</div></section>`;
 }
+function outputPageAvailable(page, snapshot=state) {
+ return (page!=='lcd' && page!=='ambient') || !!snapshot?.devices.some(device=>device.role===page);
+}
+
+function renderOutputPage() {
+ const available=outputPageAvailable(view);
+ const back='<button class="button" data-view="devices">К устройствам</button>';
+ const connections=available?'<button class="button" data-view="connections">Проверить подключение</button>':'';
+ const description=available?'Настройки локального профиля.':'В применённом профиле нет такого выхода.';
+ return heading(pages[view],description,connections+back)+nativeProperties();
+}
+
 function render() {
  if(deferRender())return;renderQueued=false;
  const key=focusKey(),node=document.activeElement,selection=typeof node?.selectionStart==='number'?[node.selectionStart,node.selectionEnd]:null;
- $('nav').innerHTML=Object.entries(pages).map(([key,title])=>`<button data-view="${key}" class="${view===key?'active':''}" aria-label="${title}" title="${title}" ${view===key?'aria-current="page"':''}>${icon(key)}<span>${title}</span></button>`).join('');
+ $('nav').innerHTML=Object.entries(pages).filter(([key])=>outputPageAvailable(key)).map(([key,title])=>`<button data-view="${key}" class="${view===key?'active':''}" aria-label="${title}" title="${title}" ${view===key?'aria-current="page"':''}>${icon(key)}<span>${title}</span></button>`).join('');
  if(!state)$('#main').innerHTML='<div class="native-wait"><h1>Подключение к Prismestra…</h1><p>Ожидание локального профиля.</p></div>';
- else {$('#main').innerHTML=view==='library'?renderLibrary():view==='editor'?renderScene():view==='devices'?renderDevices():heading(pages[view],'Настройки локального профиля.')+(advancedPage()?renderNativeForm():nativeProperties());$('.project-context').innerHTML=`<span>Локальный профиль</span><small title="${esc(state.profilePath||'')}">${esc(state.profilePath?.split(/[\\/]/).pop()||'Не сохранён')}</small>`;}
+ else {$('#main').innerHTML=view==='library'?renderLibrary():view==='editor'?renderScene():view==='devices'?renderDevices():['lcd','ambient'].includes(view)?renderOutputPage():heading(pages[view],'Настройки локального профиля.')+(advancedPage()?renderNativeForm():nativeProperties());$('.project-context').innerHTML=`<span>Локальный профиль</span><small title="${esc(state.profilePath||'')}">${esc(state.profilePath?.split(/[\\/]/).pop()||'Не сохранён')}</small>`;}
  document.querySelectorAll('[data-native-kind="secret"]').forEach(input=>{const staged=formStages.get(stageKey('native',input.dataset.nativeField));if(staged)input.value=staged.value;});
  syncControls();paintPreview();paintLibraryPreviews();restoreFocus(key,selection);
 }
@@ -160,7 +177,7 @@ function paintLibraryPreviews() {
  document.querySelectorAll('[data-library-preview]').forEach(canvas=>paintPixels(canvas,state?.library.find(item=>String(item.id)===canvas.dataset.libraryPreview)?.preview));
 }
 function changeView(next) {
- if(!Object.hasOwn(pages,next)||next===view||closing||pendingView)return;
+ if(!Object.hasOwn(pages,next)||!outputPageAvailable(next)||next===view||closing||pendingView)return;
  if(stagedDirty()||(state?.nativeForm?.page===view&&state.nativeForm.dirty)||(state?.editor?.dirty&&state.editor.page===view)){showError('Примените или отмените изменения перед переходом в другой раздел.');return;}
  const previous=view;view=next;render();focusHeading();
  if(!['library','editor'].includes(next)){
@@ -191,7 +208,11 @@ window.prismestraReceive = message => {
    if(!draft){draft=clone(state.draftScene||state.scene);}else if(previous && same(draft,previous.scene)){draft=clone(state.scene);if(!selectedId)draftName='Текущая сцена';}
    if(savedSceneRequest){const saved=state.library.find(item=>(savedSceneRequest.id?item.id===savedSceneRequest.id:!savedSceneRequest.ids.includes(item.id))&&item.name===savedSceneRequest.name&&same(item.scene,savedSceneRequest.scene));if(saved){selectedId=saved.id;draftName=saved.name;savedSceneRequest=null;}}
    if(selectedId && !state.library.some(item=>item.id===selectedId))selectedId=null;
-   render();if(!busy())flushPreview();
+   render();
+   if(!busy() && outputPageAvailable(view,previous) && !outputPageAvailable(view)){
+     changeView('devices');
+   }
+   if(!busy())flushPreview();
   } else if(message.kind==='status'&&state) {
    const oldScene=state.scene,nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));Object.assign(state,message.state);
    if(!changed()||same(draft,oldScene))draft=clone(state.scene);
@@ -213,6 +234,7 @@ document.addEventListener('click',event=>{
  if(b.dataset.asset)return void send({op:'asset',key:b.dataset.asset},true);
  if(b.dataset.deviceIndex!==undefined)return void selectTarget(+b.dataset.deviceIndex);
  switch(b.dataset.action){
+ case 'focus-device-setup':$(`[data-native-field="${DEVICE_PRESET_FIELD}"]`)?.focus();break;
  case 'new':case 'clone':case 'rename':return nameDialog(b.dataset.action);
  case 'save-scene':return nameDialog('save');
  case 'apply-scene':send({op:'apply_scene',scene:clone(draft)},true);break;
