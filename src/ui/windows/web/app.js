@@ -197,7 +197,7 @@ window.prismestraReceive = message => {
    render();if(!busy())flushPreview();
   } else if(message.kind==='status'&&state) {
    const oldScene=state.scene,nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));Object.assign(state,message.state);
-   if(state.pending)window.outputMap?.update(state);
+   if(state.pending||Object.hasOwn(message.state,'mapConnection'))window.outputMap?.update(state);
    if(!changed()||same(draft,oldScene))draft=clone(state.scene);
    if(!state.pending&&!nativeAwaitingAck)commandPending=false;
    if(message.state.preview)frame=message.state.preview;

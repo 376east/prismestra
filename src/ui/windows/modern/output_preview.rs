@@ -1,11 +1,43 @@
 use crate::{
     devices::{Role, Setup},
     lighting::color::Rgb,
-    runtime::{Host, scene::Scene},
+    runtime::{Host, output::Phase, scene::Scene},
 };
 use serde::Serialize;
 
 const PAGE_SIZE: usize = 24;
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Connection {
+    Ready,
+    Connecting,
+    Offline,
+    Disabled,
+    NoMap,
+}
+
+pub(super) fn connection(
+    setup: &Setup,
+    id: &str,
+    phase: impl FnOnce() -> Option<Phase>,
+) -> Connection {
+    let Some(device) = setup
+        .devices
+        .iter()
+        .find(|device| device.id == id && device.role == Role::Canvas && device.leds > 0)
+    else {
+        return Connection::NoMap;
+    };
+    if !device.enabled {
+        return Connection::Disabled;
+    }
+    match phase() {
+        Some(Phase::Ready) => Connection::Ready,
+        Some(Phase::Connecting) => Connection::Connecting,
+        _ => Connection::Offline,
+    }
+}
 
 #[derive(Default)]
 pub(super) struct DraftRevision {
@@ -124,6 +156,45 @@ mod tests {
     use super::*;
     use crate::devices::{Canvas, Device, Driver, Point};
     use crate::runtime::{Host, scene::example};
+
+    #[test]
+    fn map_connection_uses_the_selected_applied_output() {
+        let mut setup = Setup {
+            version: 1,
+            devices: vec![Device {
+                id: "strip".into(),
+                label: "Test strip".into(),
+                role: Role::Canvas,
+                driver: Driver::OpenRgb,
+                leds: 1,
+                rate_hz: 25,
+                enabled: true,
+            }],
+            canvas: Canvas {
+                width: 1,
+                height: 1,
+                points: vec![],
+            },
+        };
+        for (phase, expected) in [
+            (Some(Phase::Ready), Connection::Ready),
+            (Some(Phase::Connecting), Connection::Connecting),
+            (Some(Phase::Failed), Connection::Offline),
+            (Some(Phase::Stopped), Connection::Offline),
+            (None, Connection::Offline),
+        ] {
+            assert_eq!(connection(&setup, "strip", || phase), expected);
+        }
+        assert_eq!(
+            connection(&setup, "draft-only", || unreachable!()),
+            Connection::NoMap
+        );
+        setup.devices[0].enabled = false;
+        assert_eq!(
+            connection(&setup, "strip", || unreachable!()),
+            Connection::Disabled
+        );
+    }
 
     #[test]
     fn preview_reads_the_engine_frame_by_led_index_on_a_reversed_sparse_map() {
