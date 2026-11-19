@@ -193,6 +193,12 @@ impl Editor {
             _ => vec![],
         }
     }
+    #[cfg(any(windows, test))]
+    pub(super) fn selected_connection_device(&self) -> Option<&str> {
+        self.selected_device_id()
+            .or_else(|| self.selected_output_id())
+    }
+
     pub fn fields(&self) -> Vec<Field> {
         match self.page {
             Page::Devices => self.device_fields(),
@@ -1541,6 +1547,23 @@ mod tests {
         editor.set("key", "memory").unwrap();
         assert_eq!(editor.document.lcd[0].config.sources[0].key, "memory");
     }
+    #[test]
+    fn selected_connection_uses_output_identity_for_each_editor_page() {
+        let mut editor = Editor {
+            document: document(),
+            page: Page::Devices,
+            index: 1,
+        };
+        assert_eq!(editor.selected_connection_device(), Some("lcd"));
+        editor.index = 0;
+        editor.page = Page::Lcd;
+        assert_eq!(editor.selected_connection_device(), Some("lcd"));
+        editor.page = Page::Ambient;
+        assert_eq!(editor.selected_connection_device(), Some("screen"));
+        editor.page = Page::Temperatures;
+        assert_eq!(editor.selected_connection_device(), None);
+    }
+
     #[test]
     fn lcd_selection_keeps_disabled_profile_valid_and_does_not_invent_an_asset() {
         let mut editor = Editor {

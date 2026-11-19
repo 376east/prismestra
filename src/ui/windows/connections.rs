@@ -364,6 +364,24 @@ impl App {
         self.load_connection_fields();
         Ok(())
     }
+    pub(super) fn select_connection_device(&mut self, device: &str) -> Result<(), String> {
+        self.guard_connections_exit()?;
+        if !self.connections.scan.is_idle() {
+            return Err("Дождитесь завершения поиска устройств.".into());
+        }
+        let index = self
+            .connections
+            .targets
+            .iter()
+            .position(|target| matches!(target, BindingTarget::Device(d) if d.id == device))
+            .ok_or("Устройство отсутствует в списке подключений")?;
+        unsafe {
+            SendMessageW(self.h(TARGET), CB_SETCURSEL, index, 0);
+        }
+        self.connections_command(TARGET, CBN_SELCHANGE as u16)?;
+        Ok(())
+    }
+
     fn load_connection_fields(&mut self) {
         let draft = self
             .connections
