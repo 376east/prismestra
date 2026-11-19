@@ -67,3 +67,4 @@ html{scroll-padding-block:16px 100px}main :is(button,input,select,a){scroll-marg
 .native-property-actions{flex-wrap:wrap;align-items:flex-start}
 .native-property-actions>.button{flex:0 1 auto;max-width:100%;height:auto;min-height:var(--command-height);padding-block:8px;white-space:normal;overflow-wrap:anywhere;text-align:left}
 .native-field>label,.native-field>small{min-width:0;overflow-wrap:anywhere}
+#output-map-table{width:100%;border-collapse:collapse;margin-top:12px;font-variant-numeric:tabular-nums}#output-map-table :is(th,td){text-align:left;padding:5px 8px;border-bottom:1px solid var(--ui-border)}.output-map-swatch{display:inline-block;width:1em;height:1em;vertical-align:-.1em;margin-right:.5em;border:1px solid var(--ui-border);border-radius:3px}

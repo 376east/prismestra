@@ -121,7 +121,11 @@ function syncControls() {
  if(state?.error)showError(state.error,true);
 }
 function palette(scene) {return `<div class="palette-art" aria-label="Палитра сцены">${scene.colors.map(c=>`<span style="background:${hex(c)}"></span>`).join('')}</div>`;}
-function heading(title,description,actions='') {return `<div class="page-heading"><div><h1>${esc(title)}</h1><p>${esc(description)}</p></div><div class="heading-actions">${actions}</div></div>`;}
+function heading(title,description,actions='') {
+ const sceneFileAction=window.sceneFile&&draft&&['library','editor'].includes(view)
+  ?action('Файл сцены','scene-file',false,'id="scene-file-launch"'):'';
+ return `<div class="page-heading"><div><h1>${esc(title)}</h1><p>${esc(description)}</p></div><div class="heading-actions">${actions}${sceneFileAction}</div></div>`;
+}
 function action(label,code,primary=false,extra='') {return `<button class="button ${primary?'primary':''}" data-action="${code}" data-mutation ${disabled()} ${extra}>${label}</button>`;}
 function renderLibrary() {
  const list=state.library.filter(item=>item.name.toLocaleLowerCase('ru').includes(search.toLocaleLowerCase('ru')));
@@ -177,6 +181,7 @@ function render() {
  if(!state)$('#main').innerHTML='<div class="native-wait"><h1>Подключение к Prismestra…</h1><p>Ожидание локального профиля.</p></div>';
  else {$('#main').innerHTML=view==='library'?renderLibrary():view==='editor'?renderScene():view==='devices'?renderDevices():heading(pages[view],'Настройки локального профиля.')+(advancedPage()?renderNativeForm():nativeProperties());$('.project-context').innerHTML=`<span>Локальный профиль</span><small title="${esc(state.profilePath||'')}">${esc(state.profilePath?.split(/[\\/]/).pop()||'Не сохранён')}</small>`;}
  document.querySelectorAll('[data-native-kind="secret"]').forEach(input=>{const staged=formStages.get(stageKey('native',input.dataset.nativeField));if(staged)input.value=staged.value;});
+ if(view==='devices')window.outputMap?.mount(state,send,currentGenericStages);
  syncControls();paintPreview();paintLibraryPreviews();restoreFocus(key,selection);
 }
 function flushPreview(force=false) {
@@ -264,16 +269,22 @@ function nameDialog(mode) {
 window.prismestraReceive = message => {
  try {
   if(typeof message==='string')message=JSON.parse(message);
+  if(message.kind==='output_preview'){window.outputMap?.receive(message);return;}
   if(message.kind==='flush'){
    if(!Number.isSafeInteger(message.id)||message.id<0)throw Error('Некорректный запрос закрытия');
+   if(window.sceneFile?.blockClose()){
+    window.ipc.postMessage(JSON.stringify({op:'close_ready',id:message.id,scene:null,form_dirty:true}));return;
+   }
    stageText(document.activeElement);closing=true;clearTimeout(previewTimer);previewTimer=null;previewQueued=false;syncControls();
    window.ipc.postMessage(JSON.stringify({op:'close_ready',id:message.id,scene:draft,origin:draftOrigin,form_dirty:stagedDirty()}));return;
   }
   if(message.kind==='close_cancelled'){closing=false;syncControls();return;}
   if(message.kind==='draft_error'){showError(message.message,true);syncControls();return;}
   if(message.kind==='error'){awaitingCommandAck=false;closing=false;submittedStages=[];savedSceneRequest=null;commandPending=false;nativeAwaitingAck=false;if(pendingView){view=pendingView.previous;pendingView=null;render();focusHeading();}showError(message.message,true);syncControls();return;}
+  if(message.kind==='scene_file'||message.kind==='scene_file_frame'){window.sceneFile?.receive(message);return;}
   if(message.kind==='snapshot') {
    const acknowledged=awaitingCommandAck;awaitingCommandAck=false;completeStageAck();state=message.state;
+   window.outputMap?.update(state);
    if(acknowledged&&errorIsCommand&&!state.error){error='';errorIsCommand=false;$('#native-error').hidden=true;$('#native-error').innerHTML='';}commandPending=false;nativeAwaitingAck=false;pendingView=null;
    if(!draft){
     draft=clone(state.draftScene??state.scene);
@@ -296,6 +307,7 @@ window.prismestraReceive = message => {
   } else if(message.kind==='status'&&state) {
    const foundChanged=view==='devices'&&Object.hasOwn(message.state,'deviceActivity')&&!same(state.deviceActivity?.found,message.state.deviceActivity.found);
    const nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));Object.assign(state,message.state);
+   if(state.pending)window.outputMap?.update(state);
    followActiveScene();
    if(!state.pending&&!nativeAwaitingAck&&!savedSceneRequest)commandPending=false;
    if(message.state.preview)frame=message.state.preview;
@@ -326,6 +338,7 @@ document.addEventListener('click',event=>{
  case 'retry-document':send({op:'retry_document'},true);break;
  case 'classic':send({op:'classic',page:view},true);break;
  case 'dismiss-error':error='';errorIsCommand=false;$('#native-error').hidden=true;if(state)state.error=null;break;
+ case 'scene-file':return window.sceneFile?.open(draft,send,paintPixels);
  case 'open':case 'save':case 'export':send({op:b.dataset.action},true);break;
  }
 });
