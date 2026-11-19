@@ -72,7 +72,8 @@ fn ha_deduplicates_limits_rate_and_posts_off_only_when_due() {
     ]);
     let cancel = Cancellation::default();
     let mut driver =
-        HomeAssistant::with_token(&url, "light.room", "fake.test-token".into(), &cancel).unwrap();
+        HomeAssistant::with_token(&url, "light.room", "fake.test-token".into()).unwrap();
+    driver.prepare(&cancel).unwrap();
     let color = [Rgb { r: 90, g: 30, b: 0 }];
     let black = [Rgb::default()];
     assert!(driver.write(&[], &cancel).is_err());
@@ -141,17 +142,21 @@ fn ha_discovery_is_read_only_and_errors_do_not_expose_credentials() {
     let requests = peer.join().unwrap();
     assert_eq!(requests.len(), 1);
     assert!(requests[0].starts_with("GET /ha/api/states "));
-    let (url, peer) = start_peer(vec![("401 Unauthorized", "secret response")]);
-    let error = HomeAssistant::with_token(
-        &url,
-        "light.room",
-        "fake.test-token".into(),
-        &Cancellation::default(),
-    )
-    .err()
-    .unwrap();
-    assert!(!error.contains("fake.test-token") && !error.contains("secret response"));
-    peer.join().unwrap();
+    for (status, requires_action) in [
+        ("401 Unauthorized", true),
+        ("503 Service Unavailable", false),
+    ] {
+        let (url, peer) = start_peer(vec![(status, "secret response")]);
+        let mut driver =
+            HomeAssistant::with_token(&url, "light.room", "fake.test-token".into()).unwrap();
+        let error = match driver.prepare(&Cancellation::default()) {
+            Err(PrepareError::RequiresAction(error)) if requires_action => error,
+            Err(PrepareError::Failed(error)) if !requires_action => error,
+            other => panic!("unexpected preparation result: {other:?}"),
+        };
+        assert!(!error.contains("fake.test-token") && !error.contains("secret response"));
+        peer.join().unwrap();
+    }
 }
 
 #[test]
@@ -170,7 +175,8 @@ fn ha_rebinds_before_resending_latest_color_and_leaves_auth_failure_terminal() {
     ]);
     let cancel = Cancellation::default();
     let mut driver =
-        HomeAssistant::with_token(&url, "light.room", "fake.test-token".into(), &cancel).unwrap();
+        HomeAssistant::with_token(&url, "light.room", "fake.test-token".into()).unwrap();
+    driver.prepare(&cancel).unwrap();
     let blue = [Rgb { r: 0, g: 20, b: 90 }];
     let black = [Rgb::default()];
     assert!(matches!(
@@ -208,11 +214,17 @@ fn ha_rebinds_before_resending_latest_color_and_leaves_auth_failure_terminal() {
 
 #[test]
 fn registered_ha_output_waits_for_explicit_refresh_after_authorization_failure() {
-    assert_ha_authorization_recovery("401 Unauthorized", "Home Assistant: Authentication");
-    assert_ha_authorization_recovery("403 Forbidden", "Home Assistant: Http(403)");
+    assert_ha_authorization_recovery("401 Unauthorized", "Home Assistant: Authentication", false);
+    assert_ha_authorization_recovery("403 Forbidden", "Home Assistant: Http(403)", false);
 }
 
-fn assert_ha_authorization_recovery(status: &'static str, error: &str) {
+#[test]
+fn registered_ha_initial_authorization_failure_waits_for_explicit_refresh() {
+    assert_ha_authorization_recovery("401 Unauthorized", "Home Assistant: Authentication", true);
+    assert_ha_authorization_recovery("403 Forbidden", "Home Assistant: Http(403)", true);
+}
+
+fn assert_ha_authorization_recovery(status: &'static str, error: &str, initial: bool) {
     use crate::{
         app::{
             config::{Groups, Project},
@@ -240,13 +252,12 @@ fn assert_ha_authorization_recovery(status: &'static str, error: &str) {
 
     const AVAILABLE: &str =
         r#"{"entity_id":"light.room","state":"on","attributes":{"supported_color_modes":["rgb"]}}"#;
-    let (url, peer) = start_peer(vec![
-        ("200 OK", AVAILABLE),
-        ("200 OK", "[]"),
-        (status, "{}"),
-        ("200 OK", AVAILABLE),
-        ("200 OK", "[]"),
-    ]);
+    let mut responses = Vec::new();
+    if !initial {
+        responses.extend([("200 OK", AVAILABLE), ("200 OK", "[]")]);
+    }
+    responses.extend([(status, "{}"), ("200 OK", AVAILABLE), ("200 OK", "[]")]);
+    let (url, peer) = start_peer(responses);
     let document = Document::from_lighting(Project {
         version: 1,
         setup: Setup {
@@ -303,12 +314,11 @@ fn assert_ha_authorization_recovery(status: &'static str, error: &str) {
         .attach_rgb(
             "ha",
             vec![],
-            Arc::new(move |cancel| {
+            Arc::new(move |_| {
                 Ok(Box::new(HomeAssistant::with_token(
                     &url,
                     "light.room",
                     "fake.test-token".into(),
-                    &cancel,
                 )?))
             }),
         )
@@ -319,17 +329,19 @@ fn assert_ha_authorization_recovery(status: &'static str, error: &str) {
     runtime.enable_registered_output_recovery();
 
     let mut now = 0;
-    let until = Instant::now() + Duration::from_secs(3);
-    while runtime.host().status("ha").unwrap().submitted == 0 {
-        now += 50_000;
-        runtime.tick(now, 1_800_000_000).unwrap();
-        assert!(
-            Instant::now() < until,
-            "initial light write did not succeed"
-        );
-        thread::sleep(Duration::from_millis(2));
+    if !initial {
+        let until = Instant::now() + Duration::from_secs(3);
+        while runtime.host().status("ha").unwrap().submitted == 0 {
+            now += 50_000;
+            runtime.tick(now, 1_800_000_000).unwrap();
+            assert!(
+                Instant::now() < until,
+                "initial light write did not succeed"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        runtime.set_group(schedule::Target::Pc, false).unwrap();
     }
-    runtime.set_group(schedule::Target::Pc, false).unwrap();
     let until = Instant::now() + Duration::from_secs(3);
     let failed = loop {
         now += 50_000;
@@ -342,6 +354,7 @@ fn assert_ha_authorization_recovery(status: &'static str, error: &str) {
         thread::sleep(Duration::from_millis(2));
     };
     assert!(failed.requires_action);
+    assert_eq!(failed.submitted == 0, initial);
     assert_eq!(failed.error.as_deref(), Some(error));
     assert_eq!(runtime.outputs_ready(), Err(error.into()));
 
@@ -395,11 +408,20 @@ fn assert_ha_authorization_recovery(status: &'static str, error: &str) {
         thread::sleep(Duration::from_millis(2));
     }
     let requests = peer.join().unwrap();
-    assert_eq!(requests.len(), 5);
-    assert!(requests[0].starts_with("GET /ha/api/states/light.room "));
-    assert!(requests[1].starts_with("POST /ha/api/services/light/turn_on "));
-    assert!(requests[2].starts_with("POST /ha/api/services/light/turn_off "));
-    assert!(requests[3].starts_with("GET /ha/api/states/light.room "));
-    assert!(requests[4].starts_with("POST /ha/api/services/light/turn_off "));
+    let get = "GET /ha/api/states/light.room ";
+    let on = "POST /ha/api/services/light/turn_on ";
+    let off = "POST /ha/api/services/light/turn_off ";
+    let expected: &[_] = if initial {
+        &[get, get, on]
+    } else {
+        &[get, on, off, get, off]
+    };
+    assert_eq!(requests.len(), expected.len());
+    assert!(
+        requests
+            .iter()
+            .zip(expected)
+            .all(|(request, prefix)| request.starts_with(prefix))
+    );
     runtime.stop();
 }

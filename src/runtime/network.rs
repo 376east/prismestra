@@ -1,4 +1,6 @@
 //! Network outputs use the same endpoint lease, latest-frame queue and stop/drain as USB.
+#[cfg(windows)]
+use super::output::PrepareError;
 use super::output::{Cancellation, RgbDriver, WriteResult};
 use crate::{devices::Driver, lighting::color::Rgb, transport::wled};
 use std::{
@@ -16,7 +18,7 @@ pub struct HomeAssistant {
 }
 #[cfg(windows)]
 impl HomeAssistant {
-    pub fn connect(
+    pub fn from_binding(
         endpoint: &str,
         entity: &str,
         credential_id: &str,
@@ -32,21 +34,11 @@ impl HomeAssistant {
         let token = crate::credentials_windows::read(credential_id)
             .map_err(|e| e.to_string())?
             .ok_or("Home Assistant key is missing; save it before Apply")?;
-        Self::with_token(endpoint, entity, token, cancel)
+        Self::with_token(endpoint, entity, token)
     }
-    fn with_token(
-        endpoint: &str,
-        entity: &str,
-        token: String,
-        cancel: &Cancellation,
-    ) -> Result<Self, String> {
+    fn with_token(endpoint: &str, entity: &str, token: String) -> Result<Self, String> {
         use crate::transport::home_assistant::{Client, Endpoint};
-        let mut client = Client::new(Endpoint::parse(endpoint).map_err(|e| e.to_string())?, token)
-            .map_err(|e| e.to_string())?;
-        client
-            .bind_light(entity, Instant::now() + Duration::from_secs(3), || {
-                cancel.cancelled()
-            })
+        let client = Client::new(Endpoint::parse(endpoint).map_err(|e| e.to_string())?, token)
             .map_err(|e| e.to_string())?;
         Ok(Self {
             client,
@@ -64,6 +56,21 @@ impl RgbDriver for HomeAssistant {
     }
     fn leds(&self) -> usize {
         1
+    }
+    fn prepare(&mut self, cancel: &Cancellation) -> Result<(), PrepareError> {
+        self.client
+            .bind_light(
+                &self.entity,
+                Instant::now() + Duration::from_secs(3),
+                || cancel.cancelled(),
+            )
+            .map_err(|error| {
+                if error.authorization_rejected() {
+                    PrepareError::RequiresAction(error.to_string())
+                } else {
+                    PrepareError::Failed(error.to_string())
+                }
+            })
     }
     fn write(&mut self, colors: &[Rgb], cancel: &Cancellation) -> Result<WriteResult, String> {
         if cancel.cancelled() {
@@ -93,8 +100,7 @@ impl RgbDriver for HomeAssistant {
         }
         .and_then(|()| self.client.set_color(rgb, deadline, || cancel.cancelled()));
         if let Err(error) = result {
-            use crate::transport::home_assistant::Error;
-            if matches!(error, Error::Authentication | Error::Http(403)) {
+            if error.authorization_rejected() {
                 return Ok(WriteResult::RequiresAction(error.to_string()));
             }
             let Some(seconds) = error.transient_delay() else {

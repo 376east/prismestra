@@ -88,9 +88,18 @@ pub enum WriteResult {
     /// Reopening with the same configuration cannot fix this failure.
     RequiresAction(String),
 }
+#[derive(Debug)]
+pub enum PrepareError {
+    Failed(String),
+    RequiresAction(String),
+}
 pub trait RgbDriver {
     fn protocol(&self) -> Driver;
     fn leds(&self) -> usize;
+    /// Validate the route before reporting readiness or consuming frames.
+    fn prepare(&mut self, _: &Cancellation) -> Result<(), PrepareError> {
+        Ok(())
+    }
     /// Submitted is a transport completion, never a physical LED acknowledgement.
     fn write(&mut self, colors: &[Rgb], cancel: &Cancellation) -> Result<WriteResult, String>;
 }
@@ -328,6 +337,11 @@ where
     }
     if shared.cancel.cancelled() {
         return Ok(Stop::Cancelled);
+    }
+    match driver.prepare(&shared.cancel) {
+        Ok(()) => {}
+        Err(PrepareError::Failed(error)) => return Err(error),
+        Err(PrepareError::RequiresAction(error)) => return Ok(Stop::RequiresAction(error)),
     }
     {
         let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());

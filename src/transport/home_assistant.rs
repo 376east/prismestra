@@ -40,6 +40,10 @@ pub enum Error {
 }
 
 impl Error {
+    pub(crate) fn authorization_rejected(self) -> bool {
+        matches!(self, Self::Authentication | Self::Http(403))
+    }
+
     /// A bound light may be reachable again without changing its configuration.
     pub(crate) fn transient_delay(self) -> Option<u32> {
         match self {
