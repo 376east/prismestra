@@ -83,6 +83,8 @@ pub enum WriteResult {
     /// The last accepted value is unchanged; no transport request was sent.
     Unchanged,
     Deferred(Duration),
+    /// The current owner can recover in place and is waiting to retry.
+    Retrying(Duration, String),
 }
 pub trait RgbDriver {
     fn protocol(&self) -> Driver;
@@ -349,19 +351,31 @@ where
         if shared.cancel.cancelled() {
             return Ok(());
         }
-        match driver.write(&frame.colors, &shared.cancel)? {
+        let result = driver.write(&frame.colors, &shared.cancel)?;
+        match result {
             WriteResult::Submitted => {
                 let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                if state.snapshot.phase == Phase::Connecting {
+                    state.snapshot.phase = Phase::Ready;
+                    state.snapshot.error = None;
+                }
                 state.snapshot.submitted = state.snapshot.submitted.saturating_add(1);
                 state.snapshot.last_submitted = Some(frame.ticket);
             }
             WriteResult::Unchanged => {}
-            WriteResult::Deferred(delay) => {
+            WriteResult::Deferred(delay) | WriteResult::Retrying(delay, _) => {
                 if delay.is_zero() || delay > Duration::from_secs(30) {
                     return Err("Invalid RGB driver retry delay".into());
                 }
                 retry = Instant::now() + delay;
                 let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                if shared.cancel.cancelled() {
+                    return Ok(());
+                }
+                if let WriteResult::Retrying(_, error) = result {
+                    state.snapshot.phase = Phase::Connecting;
+                    state.snapshot.error = Some(error);
+                }
                 state.snapshot.deferred = state.snapshot.deferred.saturating_add(1);
                 if state.pending.is_none() {
                     state.pending = Some(frame);
