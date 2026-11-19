@@ -38,7 +38,6 @@ Name: "pawnio"; Description: "Enable supported RAM and motherboard lighting (sha
 [Files]
 Source: "payload\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 #ifndef LifecycleTest
-Source: "prerequisites\vc_redist.x64.exe"; Flags: dontcopy solidbreak
 Source: "prerequisites\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Flags: dontcopy solidbreak
 #ifdef IncludePawnIO
 Source: "prerequisites\PawnIO_setup.exe"; Flags: dontcopy solidbreak
@@ -60,6 +59,18 @@ const
 
 var
   RebootRequired: Boolean;
+#ifndef LifecycleTest
+  VcDownloadPage: TDownloadWizardPage;
+
+procedure InitializeWizard;
+begin
+  if not WizardSilent then begin
+    VcDownloadPage := CreateDownloadPage('Microsoft Visual C++ Runtime',
+      'Downloading the required x64 runtime from Microsoft.', nil);
+    VcDownloadPage.ShowBaseNameInsteadOfUrl := True;
+  end;
+end;
+#endif
 
 function PowerShell: String;
 begin
@@ -156,13 +167,41 @@ begin
   Result := RegKeyExists(HKLM64, 'SYSTEM\CurrentControlSet\Services\PawnIO');
 end;
 
-function InstallPrerequisite(const FileName, Parameters: String; var Code: Integer): Boolean;
+function RunPrerequisite(const FileName, Parameters: String; var Code: Integer): Boolean;
 begin
-  ExtractTemporaryFile(FileName);
   Result := Exec(ExpandConstant('{tmp}\') + FileName, Parameters, ExpandConstant('{tmp}'),
     SW_HIDE, ewWaitUntilTerminated, Code);
   if Result then Log(FileName + ' exit code ' + IntToStr(Code))
   else Log(FileName + ' could not start: ' + IntToStr(Code));
+end;
+
+function InstallPrerequisite(const FileName, Parameters: String; var Code: Integer): Boolean;
+begin
+  ExtractTemporaryFile(FileName);
+  Result := RunPrerequisite(FileName, Parameters, Code);
+end;
+
+function DownloadVcRuntime: Boolean;
+begin
+  Result := False;
+  try
+    if WizardSilent then
+      DownloadTemporaryFile('{#VcUrl}', '{#VcFile}', '{#VcSha256}', nil)
+    else begin
+      VcDownloadPage.Clear;
+      VcDownloadPage.Add('{#VcUrl}', '{#VcFile}', '{#VcSha256}');
+      VcDownloadPage.Show;
+      try
+        VcDownloadPage.Download;
+      finally
+        VcDownloadPage.Hide;
+      end;
+    end;
+    Log('Verified Microsoft Visual C++ Runtime download.');
+    Result := True;
+  except
+    Log(GetExceptionMessage);
+  end;
 end;
 
 function ValidSID(const Value: String): Boolean;
@@ -268,6 +307,15 @@ var
 #endif
 begin
   Result := '';
+#ifndef LifecycleTest
+  if not VcRuntimeReady then begin
+    if not DownloadVcRuntime then begin
+      Result := 'Setup could not download or verify the required x64 Visual C++ runtime from Microsoft. ' +
+        'Connect to the internet and retry, or install a compatible x64 runtime from Microsoft before running Setup again.';
+      Exit;
+    end;
+  end;
+#endif
   if not GuardInstall('Stop') then begin
     Result := 'Prismestra could not close or its installation path could not be verified. ' +
       'Finish pending edits and exit Prismestra from the notification area, then retry.';
@@ -275,8 +323,10 @@ begin
   end;
 #ifndef LifecycleTest
   if not VcRuntimeReady then begin
-    if not InstallPrerequisite('vc_redist.x64.exe', '/install /quiet /norestart', Code) then
-      Result := 'Could not start the offline Visual C++ installer.'
+    if not FileExists(ExpandConstant('{tmp}\{#VcFile}')) then
+      Result := 'The Visual C++ runtime changed during Setup. Run Setup again.'
+    else if not RunPrerequisite('{#VcFile}', '/install /quiet /norestart', Code) then
+      Result := 'Could not start the downloaded Visual C++ installer.'
     else if (Code = 3010) or (Code = 1641) then RebootRequired := True
     else if (Code <> 0) and (Code <> 1638) then
       Result := 'The required x64 Visual C++ runtime could not be installed.'

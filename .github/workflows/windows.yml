@@ -83,7 +83,6 @@ jobs:
         shell: pwsh
         env:
           DISPATCH_VERSION: ${{ inputs.installer_version }}
-          PRISMESTRA_VC_REDIST_X64_URL: ${{ vars.PRISMESTRA_VC_REDIST_X64_URL }}
           PRISMESTRA_WEBVIEW2_X64_URL: ${{ vars.PRISMESTRA_WEBVIEW2_X64_URL }}
         run: |
           $version = $env:DISPATCH_VERSION
@@ -93,7 +92,7 @@ jobs:
             }
             $version = "$($Matches[1]).$($Matches[2])"
           } elseif (-not $version) {
-            $version = '0.1.0.6'
+            $version = '0.1.0.7'
           }
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
           $vsdevcmd = & $vswhere -latest -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find Common7/Tools/VsDevCmd.bat

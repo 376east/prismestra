@@ -23,7 +23,7 @@ BACKEND = "components/openrgb/runtime/OpenRGB.exe"
 SHA256 = re.compile(r"[0-9a-f]{64}")
 APP_ID = "9bb22971-3e88-434d-b212-ab8cf717799a"
 PREREQUISITES = {
-    "vc_redist_x64": ("vc_redist.x64.exe", 10 << 20, "Microsoft Corporation", {"aka.ms", "download.visualstudio.microsoft.com"}),
+    "vc_redist_x64": ("vc_redist.x64.exe", 10 << 20, "Microsoft Corporation", {"download.visualstudio.microsoft.com"}),
     "webview2_x64": ("MicrosoftEdgeWebView2RuntimeInstallerX64.exe", 30 << 20, "Microsoft Corporation", {"go.microsoft.com", "msedge.sf.dl.delivery.mp.microsoft.com", "msedge.api.cdp.microsoft.com"}),
     "pawnio": ("PawnIO_setup.exe", 1 << 16, "namazso.eu", {"pawnio.eu", "github.com"}),
 }
@@ -177,9 +177,9 @@ def read_prerequisite_lock(lock_path):
         raise ValueError("The prerequisite lock must pin x64 VC and WebView2 standalone installers")
     floor = parse_vc_version(lock.get("minimum_vc_runtime"), "minimum_vc_runtime")
     vc = packages["vc_redist_x64"]
-    bundled = parse_vc_version(vc.get("version") if isinstance(vc, dict) else None, "bundled VC installer version")
-    if floor > bundled:
-        raise ValueError("minimum_vc_runtime exceeds the bundled VC installer version")
+    available = parse_vc_version(vc.get("version") if isinstance(vc, dict) else None, "downloadable VC installer version")
+    if floor > available:
+        raise ValueError("minimum_vc_runtime exceeds the downloadable VC installer version")
     return packages, floor
 
 
@@ -206,11 +206,23 @@ def stage_prerequisites(packages, source, destination):
                     and not url.path.startswith("/namazso/PawnIO.Setup/releases/download/"))
                 or not re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+)?", package["version"])
                 or type(package["size"]) is not int or not min_size <= package["size"] <= 512 << 20):
-            raise ValueError(f"Invalid offline prerequisite pin: {key}")
+            raise ValueError(f"Invalid prerequisite pin: {key}")
+        if key == "vc_redist_x64" and (
+            url.query or url.fragment or not SHA256.fullmatch(package["sha256"])
+            or not re.fullmatch(
+                rf"/download/pr/[0-9a-f-]{{36}}/{package['sha256']}/vc_redist\.x64\.exe",
+                url.path, re.IGNORECASE,
+            )
+        ):
+            raise ValueError("VC Runtime requires a versioned Microsoft CDN URL matching its SHA-256")
         pinned = source / filename
         file_pin(pinned, package["sha256"])
         if pinned.stat().st_size != package["size"]:
             raise ValueError(f"Prerequisite size mismatch: {filename}")
+        if key == "vc_redist_x64":
+            # Validate Microsoft's bytes during the build and leave them out of Setup.
+            authenticode(pinned, publisher)
+            continue
         staged = destination / filename
         shutil.copyfile(pinned, staged)
         file_pin(staged, package["sha256"])
@@ -259,7 +271,7 @@ def package(args):
         if args.prerequisite_lock or args.prerequisite_dir:
             raise ValueError("Lifecycle fixtures cannot contain prerequisites or drivers")
     elif not all((args.prerequisite_lock, args.prerequisite_dir, args.release_dir)):
-        raise ValueError("Production requires the offline prerequisite lock, its files and the release notices")
+        raise ValueError("Production requires the prerequisite lock, its verified inputs and the release notices")
     if not args.stage_only and not args.iscc:
         raise ValueError("Provide --iscc or choose --stage-only")
     packages, runtime_floor = ({}, None) if test_mode else read_prerequisite_lock(args.prerequisite_lock)
@@ -292,11 +304,12 @@ def package(args):
     manifest = {
         "version": 1, "product": "Prismestra", "commit": args.expected_commit,
         "app_sha256": args.app_sha256, "app_release_source": release_source,
-        "backend": backend, "prerequisites": packages,
+        "backend": backend, "prerequisites": {key: pin for key, pin in packages.items() if key != "vc_redist_x64"},
         "installer_version": args.version, "data_namespace": args.test_namespace,
     }
     if runtime_floor is not None:
         manifest["minimum_vc_runtime"] = ".".join(map(str, runtime_floor))
+        manifest["vc_runtime_download"] = packages["vc_redist_x64"]
     write_json(payload / "install-manifest.json", manifest)
     app_name = "Prismestra Lifecycle Test" if test_mode else "Prismestra"
     app_dir = f"{app_name}\\{args.test_namespace}" if test_mode else app_name
@@ -320,6 +333,9 @@ def package(args):
     if "pawnio" in packages:
         defs.append("#define IncludePawnIO")
     if runtime_floor is not None:
+        vc = manifest["vc_runtime_download"]
+        defs.extend(f'#define {name} "{vc[key]}"'
+                    for name, key in (("VcUrl", "source"), ("VcSha256", "sha256"), ("VcFile", "file")))
         for name, part in zip(("VcMajor", "VcMinor", "VcBuild", "VcRevision"), runtime_floor):
             defs.append(f"#define {name} {part}")
     (stage / "generated.iss").write_bytes(("\n".join(defs) + "\n").encode("utf-8"))
