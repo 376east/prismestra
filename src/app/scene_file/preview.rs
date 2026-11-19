@@ -43,8 +43,13 @@ impl Preview {
     pub fn new(file: SceneFile) -> Result<Self, String> {
         file.validate()?;
         let side = file.width.max(file.height) as usize;
-        let width = (file.width as usize * MAX_PREVIEW_AXIS / side).max(1);
-        let height = (file.height as usize * MAX_PREVIEW_AXIS / side).max(1);
+        let samples = |extent: u32| {
+            let extent = extent as usize;
+            // Retain both endpoints when downsampling a narrow axis.
+            (extent * MAX_PREVIEW_AXIS / side).max(extent.min(2))
+        };
+        let width = samples(file.width);
+        let height = samples(file.height);
         let mut points = Vec::with_capacity(width * height);
         for y in 0..height {
             for x in 0..width {
@@ -236,6 +241,19 @@ mod tests {
                 .chain(&strip.colors)
                 .all(|color| *color == 0x80_00_80)
         );
+    }
+
+    #[test]
+    fn narrow_canvases_preserve_both_edges_on_each_axis() {
+        for (width, height) in [(8192, 2), (2, 8192)] {
+            let model = SceneFile::from_effect(example(), width, height).unwrap();
+            let preview = Preview::new(model).unwrap();
+            let points = &preview.coordinates.points;
+            let first = points.first().unwrap();
+            let last = points.last().unwrap();
+            assert_eq!((first.x, first.y), (0, 0));
+            assert_eq!((last.x, last.y), (width - 1, height - 1));
+        }
     }
 
     #[test]
