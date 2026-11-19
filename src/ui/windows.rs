@@ -50,6 +50,7 @@ mod sources;
 mod startup_ack;
 use runtime_client::Client;
 const CLASS: &str = "PrismestraWindow";
+const PRODUCT_NAME: &str = "Prismestra";
 const NAV_SCENE: i32 = 101;
 const NAV_DEVICES: i32 = 102;
 const NAV_SCHEDULE: i32 = 103;
@@ -3022,12 +3023,7 @@ fn run_inner(args: Vec<OsString>, installed_instance: Option<Instance>) -> Resul
         CreateWindowExW(
             WS_EX_CONTROLPARENT,
             class.as_ptr(),
-            wide(if native_lighting.is_some() {
-                "Prismestra · Подсветка устройств"
-            } else {
-                "Prismestra · Предпросмотр"
-            })
-            .as_ptr(),
+            wide(PRODUCT_NAME).as_ptr(),
             style,
             CW_USEDEFAULT,
             CW_USEDEFAULT,

@@ -696,7 +696,7 @@ fn tray_data(hwnd: HWND, icon: HICON) -> NOTIFYICONDATAW {
         hIcon: icon,
         ..Default::default()
     };
-    for (out, input) in data.szTip.iter_mut().zip("Prismestra".encode_utf16()) {
+    for (out, input) in data.szTip.iter_mut().zip(PRODUCT_NAME.encode_utf16()) {
         *out = input;
     }
     data
@@ -819,16 +819,11 @@ pub(super) fn open_editor(state: &State) -> Result<(), String> {
         if unsafe { AdjustWindowRectExForDpi(&mut rect, style, 0, WS_EX_CONTROLPARENT, dpi) } == 0 {
             return Err(last("Size editor"));
         }
-        let title = if app.native_lighting.is_some() {
-            "Prismestra · Подсветка устройств"
-        } else {
-            "Prismestra · Предпросмотр"
-        };
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_CONTROLPARENT,
                 wide(super::CLASS).as_ptr(),
-                wide(title).as_ptr(),
+                wide(PRODUCT_NAME).as_ptr(),
                 style,
                 if state.snapshot {
                     -32000
@@ -1443,12 +1438,13 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     // A missing icon must not turn the only editor into an unreachable hidden
     // session. Inject API outcomes; snapshot mode never calls the real tray.
     let editor_before = state.editor_window.get();
+    let expected_name = "Prismestra";
     let mut title = [0u16; 128];
     let len = unsafe { GetWindowTextW(editor_before, title.as_mut_ptr(), title.len() as i32) };
-    if !String::from_utf16_lossy(&title[..len as usize]).starts_with("Prismestra · ") {
+    if String::from_utf16_lossy(&title[..len as usize]) != expected_name {
         return Err("Initial editor did not retain its native caption".into());
     }
-    let expected_tip = wide("Prismestra");
+    let expected_tip = wide(expected_name);
     let tip = tray_data(shell.hwnd, state.icon.handle()).szTip;
     if tip[..expected_tip.len()] != expected_tip {
         return Err("Unexpected tray tooltip".into());
@@ -1500,15 +1496,18 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     {
         return Err("Duplicate autostart activated an editor or took the lock".into());
     }
-    if Instance::start_installed(&state_dir, &exe, installed::Session::Interactive)?.is_some()
-        || !state.activation_requested.get()
-    {
-        return Err("Interactive launch did not reuse the resident session".into());
+    for _ in 0..2 {
+        if Instance::start_installed(&state_dir, &exe, installed::Session::Interactive)?.is_some()
+            || !state.activation_requested.get()
+            || !state.editor_window.get().is_null()
+        {
+            return Err("Rapid interactive launches did not queue for the same resident".into());
+        }
     }
     open_requested_editor(state)?;
     let reopened = state.editor_window.get();
     let len = unsafe { GetWindowTextW(reopened, title.as_mut_ptr(), title.len() as i32) };
-    if !String::from_utf16_lossy(&title[..len as usize]).starts_with("Prismestra · ") {
+    if String::from_utf16_lossy(&title[..len as usize]) != expected_name {
         return Err("Reopened editor did not retain its native caption".into());
     }
     if Instance::start_installed(&state_dir, &exe, installed::Session::Interactive)?.is_some() {
@@ -1517,6 +1516,15 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     open_requested_editor(state)?;
     if state.editor_window.get() != reopened {
         return Err("Second interactive launch created a duplicate editor".into());
+    }
+    let owner = unsafe { GetCurrentProcessId() };
+    if resident_windows()?
+        .iter()
+        .filter(|(_, pid)| *pid == owner)
+        .count()
+        != 1
+    {
+        return Err("Rapid activation created a duplicate resident shell".into());
     }
     state.activation_message.set(0);
     drop(instance);

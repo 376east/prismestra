@@ -89,14 +89,6 @@ impl App {
         self.set_text(DOOR_ON, "Дополнительный свет");
         self.set_text(SCHED_ON, "Включить расписание подсветки");
         self.set_text(APPLY_SCHED, "Применить к устройствам");
-        if !self.widgets.is_empty() {
-            unsafe {
-                SetWindowTextW(
-                    GetParent(self.h(PC_ON)),
-                    wide("Prismestra · Подсветка устройств").as_ptr(),
-                );
-            }
-        }
     }
     pub(super) fn poll_first_run(&mut self) -> bool {
         let changed = match self.advance_first_run() {
