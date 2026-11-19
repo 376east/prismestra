@@ -256,26 +256,31 @@ pub fn openrgb_factory(endpoint: std::net::SocketAddr) -> Factory {
         let deadline = || std::time::Instant::now() + std::time::Duration::from_secs(3);
         let cancelled = || cancel.cancelled();
         let mut session = OpenRgbSession::connect(endpoint, deadline(), &cancelled)?;
-        let controllers = session.scan(deadline(), &cancelled)?;
+        let controllers = session.scan_inventory(deadline(), &cancelled)?;
         let mut counts = std::collections::BTreeMap::new();
-        for c in &controllers {
-            *counts.entry(metadata::identity(c)).or_insert(0usize) += 1;
+        for entry in &controllers {
+            *counts.entry(&entry.identity_fields).or_insert(0usize) += 1;
         }
         let mut inventory = Inventory::empty(target.clone());
-        for controller in controllers {
-            let identity = metadata::identity(&controller);
-            let name = controller
-                .name
+        for entry in &controllers {
+            let name = entry.identity_fields[0]
                 .chars()
                 .filter(|c| !c.is_control())
                 .take(80)
                 .collect::<String>();
-            if counts[&identity] != 1 {
+            if counts[&entry.identity_fields] != 1 {
                 inventory.issues.push(format!(
                     "{name}: неоднозначная идентичность; вывод запрещён."
                 ));
                 continue;
             }
+            let controller = match &entry.description {
+                Ok(info) => info,
+                Err(error) => {
+                    inventory.issues.push(format!("{name}: {error}"));
+                    continue;
+                }
+            };
             if controller.kind.eq_ignore_ascii_case("virtual") {
                 inventory.issues.push(format!("{name}: виртуальный контроллер исключён, чтобы не дублировать физические выходы."));
                 continue;
@@ -286,15 +291,15 @@ pub fn openrgb_factory(endpoint: std::net::SocketAddr) -> Factory {
                     .push(format!("{name}: нет полного Direct-вывода."));
                 continue;
             }
-            metadata::positions(&controller)?;
+            metadata::positions(controller)?;
             inventory.candidates.push(Candidate {
                 wled: None,
                 controller: Some(controller.clone()),
                 label: format!("{name} · {} LED · {endpoint}", controller.leds),
                 draft: Draft {
                     endpoint: endpoint.to_string(),
-                    identity,
-                    serial: metadata::topology(&controller),
+                    identity: metadata::identity(controller),
+                    serial: metadata::topology(controller),
                 },
             });
         }

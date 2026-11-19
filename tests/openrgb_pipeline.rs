@@ -259,6 +259,92 @@ fn late_duplicate_with_different_topology_blocks_direct_mode() {
 }
 
 #[test]
+fn invalid_geometry_only_excludes_the_affected_physical_identity() {
+    let peer = Peer::with_invalid_neighbor("INVALID-SERIAL");
+    let before = document();
+    let inventory = discovery::openrgb_factory(peer.endpoint)(
+        discovery::Target::Device(before.lighting.setup.devices[0].clone()),
+        Cancellation::default(),
+    )
+    .unwrap();
+    let [candidate] = inventory.candidates.as_slice() else {
+        panic!("the controller with valid geometry should remain visible");
+    };
+    let controller = candidate.controller.as_ref().unwrap();
+    assert_eq!(controller.serial, "FAKE-SERIAL");
+    assert_eq!(controller.leds, 2);
+    assert!(
+        inventory
+            .issues
+            .iter()
+            .any(|issue| issue.contains("invalid geometry"))
+    );
+    let after = device_setup::adopt_openrgb(&before, "rgb", controller).unwrap();
+    let binding = candidate
+        .draft
+        .binding(&after.lighting.setup.devices[0])
+        .unwrap();
+    let bindings: Bindings = [("rgb".into(), binding.clone())].into();
+    let (_, factory) = native::bound_factory(&after.lighting.setup, "rgb", &bindings, 15).unwrap();
+    let cancel = Cancellation::default();
+    let mut output = factory(cancel.clone()).unwrap();
+    output
+        .write(&[Rgb { r: 1, g: 2, b: 3 }; 2], &cancel)
+        .unwrap();
+    assert!(
+        peer.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.0 == 8 && c.1 == 1050)
+    );
+
+    let duplicate = Peer::with_invalid_neighbor("FAKE-SERIAL");
+    let duplicate_inventory = discovery::openrgb_factory(duplicate.endpoint)(
+        discovery::Target::Device(before.lighting.setup.devices[0].clone()),
+        Cancellation::default(),
+    )
+    .unwrap();
+    assert!(duplicate_inventory.candidates.is_empty());
+    assert!(
+        duplicate_inventory
+            .issues
+            .iter()
+            .any(|issue| issue.contains("неоднозначная"))
+    );
+    let Binding::OpenRgb {
+        identity, topology, ..
+    } = binding
+    else {
+        panic!("expected an OpenRGB binding");
+    };
+    let bindings: Bindings = [(
+        "rgb".into(),
+        Binding::OpenRgb {
+            endpoint: duplicate.endpoint,
+            identity,
+            topology,
+        },
+    )]
+    .into();
+    let (_, factory) = native::bound_factory(&after.lighting.setup, "rgb", &bindings, 15).unwrap();
+    assert!(
+        factory(Cancellation::default())
+            .err()
+            .unwrap()
+            .contains("ambiguous")
+    );
+    assert!(
+        duplicate
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|c| c.1 != 1101 && c.1 != 1050)
+    );
+}
+
+#[test]
 fn virtual_controllers_are_excluded_even_if_a_private_binding_is_forged() {
     let peer = Peer::virtual_controller();
     let mut document = document();
