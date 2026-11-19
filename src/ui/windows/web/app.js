@@ -260,7 +260,13 @@ $('#cancel-name').onclick=()=>{$('#name-dialog').close();restoreFocus(dialogRetu
 $('#name-dialog').addEventListener('cancel',()=>restoreFocus(dialogReturn));
 const removal=document.createElement('dialog');removal.id='remove-dialog';removal.setAttribute('aria-labelledby','remove-title');removal.innerHTML='<form id="remove-form"><h2 id="remove-title">Удалить сцену</h2><p id="remove-description"></p><div class="dialog-actions"><button type="button" class="button" id="cancel-remove">Отмена</button><button type="submit" class="button primary" data-mutation>Удалить</button></div></form>';document.body.append(removal);
 $('#cancel-remove').onclick=()=>{removal.close();restoreFocus(dialogReturn);};removal.addEventListener('cancel',()=>restoreFocus(dialogReturn));$('#remove-form').onsubmit=event=>{event.preventDefault();if(send({op:'delete_scene',id:removal.dataset.id},true)){removal.close();restoreFocus(dialogReturn);}};
-const projectActions=document.createElement('div');projectActions.className='native-project-actions';projectActions.innerHTML=action('Открыть','open')+action('Сохранить','save')+action('Экспорт','export');$('#save-status').before(projectActions);
+const projectActions=document.createElement('div');
+projectActions.className='native-project-actions';
+const exportDescription='Профиль и используемые медиа. «Мои сцены» хранятся отдельно.';
+projectActions.innerHTML=action('Открыть','open')+action('Сохранить','save')+
+ action('Экспорт профиля','export',false,`title="${esc(exportDescription)}" aria-describedby="profile-export-scope"`)+
+ `<span id="profile-export-scope" class="sr-only">${esc(exportDescription)}</span>`;
+$('#save-status').before(projectActions);
 document.addEventListener('pointerdown',()=>{pointerGesture=true;},true);
 document.addEventListener('pointerup',()=>{pointerGesture=false;releaseGesture();},true);
 document.addEventListener('pointercancel',()=>{pointerGesture=false;releaseGesture();},true);

@@ -8,6 +8,9 @@ const document={querySelector:find,querySelectorAll:selector=>[...nodes.values()
 const context=vm.createContext({document,window:{addEventListener:(name,fn)=>events[name]=fn,ipc:{postMessage:v=>commands.push(JSON.parse(v))}},requestAnimationFrame:fn=>rafQueue.push(fn),CSS:{escape:s=>s},structuredClone,setTimeout:()=>1,clearTimeout(){},console});
 vm.runInContext(source,context);
 assert.equal(commands[0].op,'snapshot');
+const exportMarkup=vm.runInContext('projectActions.innerHTML',context);
+assert.match(exportMarkup,/<button[^>]*data-action="export"[^>]*aria-describedby="profile-export-scope">Экспорт профиля<\/button>/);
+assert.match(exportMarkup,/<span id="profile-export-scope"[^>]*>[^<]*«Мои сцены» хранятся отдельно\.<\/span>/);
 const scene={effect:'noise_map',colors:[0xff0000,0x00ff00],brightness:80,speed:30,fps:48,temperature:0,tint:0,noise:{frequency:.055,amplitude:1,lacunarity:.75,persistence:.5,octaves:2,motion:1,motion_speed:1},noise_palette:'custom',rainbow_width:10};
 const initial={scene, draftScene:{...scene,brightness:65},library:[{id:'saved',name:'Живая сцена',scene}],devices:[],groups:{pc:true,door:false},native:true,pending:false,dirty:false,status:'Готово',error:null,profilePath:'C:\\sample.json',editor:null};
 context.payload={kind:'snapshot',state:initial};vm.runInContext('window.prismestraReceive(payload)',context);
