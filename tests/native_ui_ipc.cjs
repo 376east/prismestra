@@ -115,6 +115,31 @@ const cleanSchedule={...structuredClone(recoveryForm),dirty:false,actions:[{id:4
 vm.runInContext('formStages.set("other-page",{kind:"native",page:"sources",id:999,value:"Keep me"})',context);events.click({target:{closest:()=>localDiscard}});assert.equal(commands.length,beforeLocalCancel,'local cancellation performs no backend operation');assert.equal(vm.runInContext('currentPageStaged()',context),false);assert.equal(vm.runInContext('formStages.get("other-page").value',context),'Keep me','other page edits preserved');assert.equal(find('#native-field-0').value,'10:00');assert.equal(find('local-discard').hidden,true);assert.equal(vm.runInContext('state.nativeForm.dirty',context),false);
 console.log('PASS: Schedule text-only draft has immediate local discard without rerender/RPC; current page clears, other page and backend stay untouched');
 
+// The selected LCD can have a different index from its binding.
+const connectionDevices=['first-lcd','selected-lcd'].map(id=>({
+ id,label:'LCD',role:'lcd',driver:{type:'tt_lcd'},leds:0,rate_hz:30,enabled:false
+}));
+const connectionEditor={page:'lcd',index:0,targets:['LCD','LCD'],fields:[],dirty:false,deviceId:'selected-lcd'};
+context.payload={kind:'snapshot',state:{...structuredClone(initial),devices:connectionDevices,editor:connectionEditor}};
+vm.runInContext('formStages.clear();view="lcd";window.prismestraReceive(payload)',context);
+assert.ok(find('#main').innerHTML.includes('data-connection-device="selected-lcd"'));
+const repairButton=new Node();
+repairButton.dataset={view:'connections',connectionDevice:'selected-lcd'};
+events.click({target:{closest:()=>repairButton}});
+assert.deepEqual(commands.at(-1),{op:'page',page:'connections',device:'selected-lcd'});
+vm.runInContext('window.prismestraReceive({kind:"error",message:"Target unavailable"})',context);
+assert.equal(vm.runInContext('view',context),'lcd','a rejected target restores the source page');
+context.payload.state.editor.deviceId='draft-only';
+vm.runInContext('window.prismestraReceive(payload)',context);
+assert.ok(!find('#main').innerHTML.includes('data-connection-device'),'draft-only outputs cannot edit applied bindings');
+context.payload.state.editor.deviceId='selected-lcd';
+context.payload.state.editor.dirty=true;
+vm.runInContext('window.prismestraReceive(payload)',context);
+const beforeRepair=commands.length;
+events.click({target:{closest:()=>repairButton}});
+assert.equal(commands.length,beforeRepair,'targeted navigation keeps unsaved editor changes protected');
+console.log('PASS: repair opens the selected logical output and preserves navigation guards');
+
 // Command errors survive failed-followup snapshots/status, and clear only on a new command's successful ack.
 context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeAux:structuredClone(aux),editor:{page:'devices',index:0,targets:[],fields:[],dirty:false}}};vm.runInContext('formStages.clear();view="devices";window.prismestraReceive(payload)',context);const errorName=find('#native-field-0');errorName.value='UI test light';events.input({target:errorName});vm.runInContext('send({op:"native_action",id:410},true);window.prismestraReceive({kind:"error",message:"fixedLEDcount"});window.prismestraReceive(payload)',context);assert.equal(find('#native-error').hidden,false);assert.ok(find('#native-error').innerHTML.includes('fixedLEDcount'));assert.ok(find('#native-error').innerHTML.includes('discard-fields'),'failed command keeps local discard while text remains staged');
 vm.runInContext('window.prismestraReceive({kind:"status",state:{error:null,pending:false}})',context);assert.equal(find('#native-error').hidden,false,'periodic success cannot dismiss validation error');

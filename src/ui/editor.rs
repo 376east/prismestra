@@ -137,6 +137,30 @@ impl Editor {
             _ => vec![],
         }
     }
+    pub fn selected_connection_device(&self) -> Option<&str> {
+        match self.page {
+            Page::Devices => self
+                .document
+                .lighting
+                .setup
+                .devices
+                .get(self.index)
+                .map(|d| d.id.as_str()),
+            Page::Lcd => self
+                .document
+                .lcd
+                .get(self.index)
+                .map(|lcd| lcd.device.as_str()),
+            Page::Ambient => self
+                .document
+                .ambient
+                .routes
+                .get(self.index)
+                .map(|route| route.device.as_str()),
+            _ => None,
+        }
+    }
+
     pub fn fields(&self) -> Vec<Field> {
         match self.page {
             Page::Devices => self.device_fields(),
@@ -1487,6 +1511,23 @@ mod tests {
         editor.set("key", "memory").unwrap();
         assert_eq!(editor.document.lcd[0].config.sources[0].key, "memory");
     }
+    #[test]
+    fn selected_connection_uses_output_identity_for_each_editor_page() {
+        let mut editor = Editor {
+            document: document(),
+            page: Page::Devices,
+            index: 1,
+        };
+        assert_eq!(editor.selected_connection_device(), Some("lcd"));
+        editor.index = 0;
+        editor.page = Page::Lcd;
+        assert_eq!(editor.selected_connection_device(), Some("lcd"));
+        editor.page = Page::Ambient;
+        assert_eq!(editor.selected_connection_device(), Some("screen"));
+        editor.page = Page::Temperatures;
+        assert_eq!(editor.selected_connection_device(), None);
+    }
+
     #[test]
     fn lcd_selection_keeps_disabled_profile_valid_and_does_not_invent_an_asset() {
         let mut editor = Editor {
