@@ -1,6 +1,6 @@
 //! Explicitly selected, hardware-free LCD layout and media preview.
 use image::{
-    AnimationDecoder, Frame, RgbaImage,
+    AnimationDecoder, Frame, Rgb, RgbImage, RgbaImage,
     codecs::gif::{GifDecoder, GifEncoder, Repeat},
 };
 use pc_control::lcd::{media, overlay, protocol};
@@ -34,10 +34,113 @@ const BLOCKS: [overlay::Block<'static>; 4] = [
     },
 ];
 
+fn check_budget() -> Result<(), Box<dyn std::error::Error>> {
+    let mut renderer = load_renderer()?;
+    let side = overlay::LAYOUT_SIZE;
+    let original = GifDecoder::new(Cursor::new(media::BUILTIN_KALEIDOSCOPE_GIF))?
+        .into_frames()
+        .next()
+        .ok_or("Missing GIF frame")??;
+    let backgrounds = [
+        (
+            "kaleidoscope",
+            media::canvas(original.buffer(), side, side, true, 0)?,
+        ),
+        (
+            "dark-gradient",
+            RgbImage::from_fn(side, side, |x, y| Rgb([(x / 20) as u8, (y / 16) as u8, 18])),
+        ),
+        (
+            "bright-grid",
+            RgbImage::from_fn(side, side, |x, y| {
+                if (x / 11 + y / 11).is_multiple_of(2) {
+                    Rgb([255, 237, 16])
+                } else {
+                    Rgb([8, 14, 192])
+                }
+            }),
+        ),
+        (
+            "fine-stipple",
+            RgbImage::from_fn(side, side, |x, y| {
+                // Deterministic high-frequency input to exercise the negative case.
+                let bits = (y * side + x).wrapping_mul(2_654_435_761).rotate_left(7);
+                Rgb([bits as u8, (bits >> 8) as u8, (bits >> 16) as u8])
+            }),
+        ),
+        (
+            "dark-stipple",
+            RgbImage::from_fn(side, side, |x, y| {
+                let bits = (y * side + x).wrapping_mul(2_654_435_761).rotate_left(7);
+                Rgb([
+                    (bits & 63) as u8,
+                    ((bits >> 8) & 63) as u8,
+                    ((bits >> 16) & 63) as u8,
+                ])
+            }),
+        ),
+    ];
+    let corners = std::array::from_fn::<_, 4, _>(|index| {
+        let x = if index % 2 == 0 {
+            0
+        } else {
+            side - overlay::CARD_WIDTH
+        };
+        let y = if index < 2 {
+            0
+        } else {
+            side - overlay::CARD_HEIGHT
+        };
+        overlay::Block {
+            x,
+            y,
+            label: BLOCKS[index].label,
+            celsius: BLOCKS[index].celsius,
+        }
+    });
+    let mut checked = 0;
+    let mut fallbacks = 0;
+    for (background_name, background) in backgrounds {
+        for (layout, blocks) in [
+            ("preset", &BLOCKS[..]),
+            ("corners", &corners[..]),
+            ("single", &BLOCKS[..1]),
+        ] {
+            let started = Instant::now();
+            let frame = renderer.encode_tt_blocks(&background, blocks, 0)?;
+            let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+            protocol::validate_jpeg(&frame.jpeg)?;
+            assert!(frame.jpeg.len() <= media::FRAME_BUDGET);
+            let method = if frame.used_solid_background {
+                "solid"
+            } else {
+                "original"
+            };
+            fallbacks += u32::from(frame.used_solid_background);
+            checked += 1;
+            println!(
+                "{background_name:14} {layout:8} {:5} bytes {method:8} {elapsed:.1} ms",
+                frame.jpeg.len()
+            );
+        }
+    }
+    println!("{checked} cases passed, {fallbacks} used the solid background");
+    Ok(())
+}
+
+fn load_renderer() -> Result<overlay::Renderer, Box<dyn std::error::Error>> {
+    let font = PathBuf::from(std::env::var_os("SystemRoot").ok_or("Windows system font required")?)
+        .join("Fonts/seguibl.ttf");
+    Ok(overlay::Renderer::new(std::fs::read(font)?)?)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.len() == 1 && args[0] == "--budget" {
+        return check_budget();
+    }
     if args.len() != 2 || args[0] != "--kaleidoscope" {
-        return Err("Usage: lcd_layout_stand --kaleidoscope <output-directory>".into());
+        return Err("Usage: lcd_layout_stand --kaleidoscope <output-directory> | --budget".into());
     }
     let output = PathBuf::from(&args[1]);
     std::fs::create_dir_all(&output)?;
@@ -45,9 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let started = Instant::now();
     let prepared = media::prepare(source.into(), 0, || false)?;
     let prepare_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let font = PathBuf::from(std::env::var_os("SystemRoot").ok_or("Windows system font required")?)
-        .join("Fonts/seguibl.ttf");
-    let mut renderer = overlay::Renderer::new(std::fs::read(font)?)?;
+    let mut renderer = load_renderer()?;
     let mut preview = Vec::new();
     let mut durations_ms = Vec::new();
     let mut max_jpeg = 0;

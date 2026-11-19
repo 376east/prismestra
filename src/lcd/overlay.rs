@@ -20,6 +20,14 @@ pub struct Block<'a> {
     pub celsius: f64,
 }
 
+pub struct TtLayoutFrame {
+    pub jpeg: Vec<u8>,
+    /// True when encoding needed a plain background to keep the cards readable.
+    pub used_solid_background: bool,
+}
+
+const TT_FALLBACK_BACKGROUND: Rgb<u8> = Rgb([16, 16, 20]);
+
 pub struct Renderer {
     font: fontdue::Font,
     glyphs: HashMap<char, (fontdue::Metrics, Vec<u8>)>,
@@ -177,6 +185,40 @@ impl Renderer {
         Ok(view)
     }
 
+    /// Encode an upright layout for TT. On size exhaustion alone, retry once
+    /// with a solid background while retaining all positioned cards.
+    pub fn encode_tt_blocks(
+        &mut self,
+        background: &RgbImage,
+        blocks: &[Block<'_>],
+        device_rotation: i32,
+    ) -> Result<TtLayoutFrame, String> {
+        let angle = super::media::rotation(device_rotation)?;
+        let encode = |view| {
+            let device_frame = match angle {
+                90 => imageops::rotate90(&view),
+                180 => imageops::rotate180(&view),
+                270 => imageops::rotate270(&view),
+                _ => view,
+            };
+            super::media::encode_jpeg_within_budget(&device_frame)
+        };
+        let view = self.render_blocks(background, blocks)?;
+        if let Some(jpeg) = encode(view)? {
+            return Ok(TtLayoutFrame {
+                jpeg,
+                used_solid_background: false,
+            });
+        }
+        let plain = RgbImage::from_pixel(LAYOUT_SIZE, LAYOUT_SIZE, TT_FALLBACK_BACKGROUND);
+        let view = self.render_blocks(&plain, blocks)?;
+        let jpeg = encode(view)?.ok_or("Solid LCD layout exceeds the 20000-byte TT JPEG budget")?;
+        Ok(TtLayoutFrame {
+            jpeg,
+            used_solid_background: true,
+        })
+    }
+
     pub fn render(
         &mut self,
         background: &RgbImage,
@@ -326,6 +368,41 @@ mod tests {
         );
         block.x = u32::MAX;
         assert!(renderer.render_blocks(&background, &[block]).is_err());
+    }
+
+    #[test]
+    fn tt_layout_keeps_fitting_frames_and_preserves_cards_on_budget_fallback() {
+        let mut renderer = renderer();
+        let layout = [Block {
+            x: 20,
+            y: 100,
+            label: "GPU",
+            celsius: 47.0,
+        }];
+        let plain = RgbImage::from_pixel(LAYOUT_SIZE, LAYOUT_SIZE, TT_FALLBACK_BACKGROUND);
+        let expected = renderer.render_blocks(&plain, &layout).unwrap();
+        let expected = super::super::media::encode_jpeg(&imageops::rotate90(&expected)).unwrap();
+        let fitting = renderer.encode_tt_blocks(&plain, &layout, 90).unwrap();
+        assert!(!fitting.used_solid_background);
+        assert_eq!(fitting.jpeg, expected);
+
+        let grid = RgbImage::from_fn(LAYOUT_SIZE, LAYOUT_SIZE, |x, y| {
+            if (x / 11 + y / 11).is_multiple_of(2) {
+                Rgb([255, 237, 16])
+            } else {
+                Rgb([8, 14, 192])
+            }
+        });
+        let view = renderer.render_blocks(&grid, &layout).unwrap();
+        assert!(
+            super::super::media::encode_jpeg_within_budget(&imageops::rotate90(&view))
+                .unwrap()
+                .is_none()
+        );
+        let fallback = renderer.encode_tt_blocks(&grid, &layout, 90).unwrap();
+        assert!(fallback.used_solid_background);
+        assert_eq!(fallback.jpeg, expected);
+        assert!(renderer.encode_tt_blocks(&grid, &layout, 45).is_err());
     }
     #[test]
     fn compact_icons_and_invalid_values_preserve_background() {
