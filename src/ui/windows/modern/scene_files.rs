@@ -7,6 +7,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
+mod lcd_draft;
+pub(super) use lcd_draft::Layout;
+
 const FILTER: &str = "Сцена Prismestra (*.json)\0*.json\0\0";
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -17,6 +20,8 @@ pub(super) enum Operation {
     Open,
     Save { file: SceneFile },
     Preview { file: SceneFile },
+    LcdLayout { x: u32, y: u32 },
+    StopLcdLayout,
     Stop,
 }
 
@@ -54,7 +59,7 @@ pub(super) fn execute(
     operation: Operation,
 ) -> Result<(), String> {
     let result = (|| {
-        if !matches!(&operation, Operation::Stop) {
+        if !matches!(&operation, Operation::Stop | Operation::StopLcdLayout) {
             let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
             if slot
                 .as_ref()
@@ -93,12 +98,19 @@ pub(super) fn execute(
                 Ok(json!({"saved":true}))
             }
             Operation::Preview { file } => prepare(state, request, file, false),
-            Operation::Stop => {
+            Operation::LcdLayout { x, y } => {
+                update_lcd_layout(state, request, x, y).map(|()| Value::Null)
+            }
+            Operation::Stop | Operation::StopLcdLayout => {
                 let mut slot = state
                     .modern_session
                     .try_borrow_mut()
                     .map_err(|_| "Интерфейс занят")?;
-                slot.as_mut().ok_or("Нет интерфейса")?.portable_preview = None;
+                let session = slot.as_mut().ok_or("Нет интерфейса")?;
+                session.lcd_layout_preview = None;
+                if matches!(operation, Operation::Stop) {
+                    session.portable_preview = None;
+                }
                 Ok(json!(null))
             }
         }
@@ -116,6 +128,53 @@ pub(super) fn execute(
     }
 }
 
+fn update_lcd_layout(state: &State, request: u32, x: u32, y: u32) -> Result<(), String> {
+    let result = (|| -> Result<(), String> {
+        Layout::validate_position(x, y)?;
+        let mut slot = state
+            .modern_session
+            .try_borrow_mut()
+            .map_err(|_| "Редактор занят")?;
+        let session = slot.as_mut().ok_or("Нет интерфейса")?;
+        if session.lcd_layout_preview.is_none() {
+            session.lcd_layout_preview = Some(Layout::new()?);
+        }
+        let running = session.lcd_layout_preview.as_mut().unwrap();
+        running.set_position(request, x, y);
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => send(
+            state,
+            &json!({"kind":"scene_file_lcd_frame","request":request,"error":error}),
+        ),
+    }
+}
+
+fn publish_lcd_layout(state: &State) {
+    let message = {
+        let Ok(mut slot) = state.modern_session.try_borrow_mut() else {
+            return;
+        };
+        let Some(session) = slot.as_mut() else { return };
+        let Some(layout) = session.lcd_layout_preview.as_mut() else {
+            return;
+        };
+        match layout.message() {
+            Ok(message) => message,
+            Err(error) => {
+                let request = layout.request();
+                session.lcd_layout_preview = None;
+                Some(json!({"kind":"scene_file_lcd_frame","request":request,"error":error}))
+            }
+        }
+    };
+    if let Some(message) = message {
+        let _ = send(state, &message);
+    }
+}
+
 pub(super) fn publish(state: &State) {
     if !state
         .app
@@ -124,6 +183,7 @@ pub(super) fn publish(state: &State) {
     {
         return;
     }
+    publish_lcd_layout(state);
     let message = {
         let Ok(mut slot) = state.modern_session.try_borrow_mut() else {
             return;
@@ -166,6 +226,20 @@ mod tests {
             super::super::Command::SceneFile {
                 request: 7,
                 operation: Operation::Preview { .. }
+            }
+        ));
+        command["operation"]["activate"] = true.into();
+        assert!(serde_json::from_value::<super::super::Command>(command).is_err());
+    }
+
+    #[test]
+    fn lcd_layout_ipc_accepts_only_position_and_request() {
+        let mut command = json!({"op":"scene_file","request":19,"operation":{"type":"lcd_layout","x":146,"y":324}});
+        assert!(matches!(
+            serde_json::from_value::<super::super::Command>(command.clone()).unwrap(),
+            super::super::Command::SceneFile {
+                request: 19,
+                operation: Operation::LcdLayout { x: 146, y: 324 }
             }
         ));
         command["operation"]["activate"] = true.into();
