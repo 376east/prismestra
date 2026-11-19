@@ -502,9 +502,9 @@ fn startup_registers_managed_outputs_on_commit_and_retries_on_new_inventory() {
         .unwrap(),
     )
     .unwrap();
-    runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
-        endpoint, 1,
-    ));
+    let task = state.join("backend-task.json");
+    // A bad task descriptor makes backend creation fail before any process can start.
+    std::fs::write(&task, "{").unwrap();
     let mut outputs = local.prepare(&document, &state.join("assets")).unwrap();
     // Even a fixture that reports SDK readiness cannot grant native I/O.
     let a = Arc::new(Link::default());
@@ -518,6 +518,9 @@ fn startup_registers_managed_outputs_on_commit_and_retries_on_new_inventory() {
     let mut now = 0;
     working(&mut runtime, "b", &mut now);
     assert_eq!(runtime.managed_backend_ids, BTreeSet::from(["a".into()]));
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+    let initial_error = runtime.host.status("a").unwrap().error.unwrap();
+    assert!(initial_error.contains("EOF"), "{initial_error}");
     let healthy = runtime.host.status("b").unwrap().generation;
     for delay in [1_000_000, 5_000_000, 15_000_000] {
         wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
@@ -536,18 +539,41 @@ fn startup_registers_managed_outputs_on_commit_and_retries_on_new_inventory() {
     tick(&mut runtime, &mut now);
     assert_eq!(runtime.host.status("a").unwrap().generation, exhausted);
     runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
-        endpoint, 2,
+        ([127, 0, 0, 1], 17423).into(),
+        2,
     ));
     tick(&mut runtime, &mut now);
     now += 1_000_000;
     wait(|| {
         tick(&mut runtime, &mut now);
-        runtime.host.status("a").unwrap().generation != exhausted
+        let status = runtime.host.status("a").unwrap();
+        status.generation != exhausted && status.phase == Phase::Failed
     });
+    let wrong_endpoint = runtime.host.status("a").unwrap();
+    assert_eq!(
+        wrong_endpoint.error.as_deref(),
+        Some(initial_error.as_str())
+    );
+
+    runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
+        endpoint, 3,
+    ));
+    tick(&mut runtime, &mut now);
+    now += 1_000_000;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.host.status("a").unwrap().generation != wrong_endpoint.generation
+    });
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+    assert_eq!(
+        runtime.host.status("a").unwrap().error.as_deref(),
+        Some("Software fixture cannot own a backend")
+    );
     assert_eq!(a.calls.load(Ordering::SeqCst), 0);
     assert_eq!(b.calls.load(Ordering::SeqCst), 1);
     assert_eq!(runtime.host.status("b").unwrap().generation, healthy);
     drain(&mut runtime);
+    std::fs::remove_file(task).unwrap();
     std::fs::remove_file(config).unwrap();
     std::fs::remove_dir(state).unwrap();
 }
