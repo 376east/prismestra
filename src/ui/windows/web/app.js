@@ -126,7 +126,7 @@ function renderDevices() {
    ? action('Добавить устройство','focus-device-setup',true)
    : '';
  const connections = '<button class="button" data-view="connections">Подключения</button>';
- return heading('Устройства','Изменения действуют после «Применить». Профиль сохраняется отдельно.',addDevice+connections)+`<div class="device-list">${state.devices.map((d,index)=>`<article class="device"><div class="device-symbol">${icon('devices')}</div><div class="device-info"><h2>${esc(d.label)}</h2><p>${esc(d.driver?.type)} · ${esc(d.role)}</p></div><div class="device-meta"><span>${esc(d.leds)} LED · ${esc(d.rate_hz)} Гц</span><small>${d.enabled?'Включено':'Выключено'}</small></div><button class="icon-button" data-device-index="${index}" data-mutation ${disabled()} aria-label="Свойства: ${esc(d.label)}">${icon('edit')}</button></article>`).join('')||'<div class="empty"><h2>В профиле нет устройств</h2><p>Добавьте устройство в свойствах профиля.</p></div>'}</div><div style="margin-top:24px">${nativeProperties()}</div>`;
+ return heading('Устройства','Изменения действуют после «Применить». Профиль сохраняется отдельно.',addDevice+connections)+`<div class="device-list">${state.devices.map((d,index)=>`<article class="device"><div class="device-symbol">${icon('devices')}</div><div class="device-info"><h2>${esc(d.label)}</h2><p>${esc(d.driver?.type)} · ${esc(d.role)}</p></div><div class="device-meta"><span>${esc(d.leds)} LED · ${esc(d.rate_hz)} Гц</span><small>${d.enabled?'Включено':'Выключено'}</small></div><button class="icon-button" data-device-index="${index}" data-mutation ${disabled()} aria-label="Свойства: ${esc(d.label)}">${icon('edit')}</button></article>`).join('')||'<div class="empty"><h2>В профиле нет устройств</h2><p>Выберите тип устройства или откройте подключения для ручной настройки.</p></div>'}</div><div style="margin-top:24px">${nativeProperties()}</div>`;
 }
 function renderNativeForm(form=nativeFormForView()) {
  if(!form||form.page!==view)return '<div class="native-wait" role="status">Загрузка настроек…</div>';
@@ -149,14 +149,20 @@ function renderOutputPage() {
  return heading(pages[view],description,connections+back)+nativeProperties();
 }
 
+let renderedProfile = null;
 function render() {
  if(deferRender())return;renderQueued=false;
+ const previousProfile=renderedProfile;
+ renderedProfile=state;
  const key=focusKey(),node=document.activeElement,selection=typeof node?.selectionStart==='number'?[node.selectionStart,node.selectionEnd]:null;
  $('nav').innerHTML=Object.entries(pages).filter(([key])=>outputPageAvailable(key)).map(([key,title])=>`<button data-view="${key}" class="${view===key?'active':''}" aria-label="${title}" title="${title}" ${view===key?'aria-current="page"':''}>${icon(key)}<span>${title}</span></button>`).join('');
  if(!state)$('#main').innerHTML='<div class="native-wait"><h1>Подключение к Prismestra…</h1><p>Ожидание локального профиля.</p></div>';
  else {$('#main').innerHTML=view==='library'?renderLibrary():view==='editor'?renderScene():view==='devices'?renderDevices():['lcd','ambient'].includes(view)?renderOutputPage():heading(pages[view],'Настройки локального профиля.')+(advancedPage()?renderNativeForm():nativeProperties());$('.project-context').innerHTML=`<span>Локальный профиль</span><small title="${esc(state.profilePath||'')}">${esc(state.profilePath?.split(/[\\/]/).pop()||'Не сохранён')}</small>`;}
  document.querySelectorAll('[data-native-kind="secret"]').forEach(input=>{const staged=formStages.get(stageKey('native',input.dataset.nativeField));if(staged)input.value=staged.value;});
  syncControls();paintPreview();paintLibraryPreviews();restoreFocus(key,selection);
+ if(!busy() && outputPageAvailable(view,previousProfile) && !outputPageAvailable(view)){
+   changeView('devices');
+ }
 }
 function flushPreview(force=false) {
  clearTimeout(previewTimer);previewTimer=null;
@@ -208,11 +214,7 @@ window.prismestraReceive = message => {
    if(!draft){draft=clone(state.draftScene||state.scene);}else if(previous && same(draft,previous.scene)){draft=clone(state.scene);if(!selectedId)draftName='Текущая сцена';}
    if(savedSceneRequest){const saved=state.library.find(item=>(savedSceneRequest.id?item.id===savedSceneRequest.id:!savedSceneRequest.ids.includes(item.id))&&item.name===savedSceneRequest.name&&same(item.scene,savedSceneRequest.scene));if(saved){selectedId=saved.id;draftName=saved.name;savedSceneRequest=null;}}
    if(selectedId && !state.library.some(item=>item.id===selectedId))selectedId=null;
-   render();
-   if(!busy() && outputPageAvailable(view,previous) && !outputPageAvailable(view)){
-     changeView('devices');
-   }
-   if(!busy())flushPreview();
+   render();if(!busy())flushPreview();
   } else if(message.kind==='status'&&state) {
    const oldScene=state.scene,nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));Object.assign(state,message.state);
    if(!changed()||same(draft,oldScene))draft=clone(state.scene);
