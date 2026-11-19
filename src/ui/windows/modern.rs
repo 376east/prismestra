@@ -1,6 +1,9 @@
 //! Local editor bridge. Hardware stays behind the existing validated Runtime.
 use super::*;
-use crate::ui::catalog::Catalog;
+use crate::ui::catalog::{
+    Catalog,
+    draft::{Draft, Origin},
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -39,6 +42,7 @@ enum Command {
     CloseReady {
         id: u32,
         scene: Option<Scene>,
+        origin: Option<Origin>,
         #[serde(default)]
         form_dirty: bool,
     },
@@ -47,6 +51,7 @@ enum Command {
     },
     PreviewScene {
         scene: Scene,
+        origin: Option<Origin>,
     },
     SaveScene {
         id: Option<String>,
@@ -104,7 +109,7 @@ pub(super) struct Session {
     catalog: Catalog,
     catalog_view: BTreeMap<String, Value>,
     catalog_path: PathBuf,
-    draft: Option<Scene>,
+    draft: Option<Draft>,
     draft_path: PathBuf,
     preview: Option<crate::runtime::scene::Renderer>,
     canvas: crate::devices::Canvas,
@@ -119,23 +124,7 @@ impl Session {
         let catalog_path = app.state_dir.join("scene-library.json");
         let catalog = Catalog::load(&catalog_path, &app.runtime.project().scene)?;
         let draft_path = app.state_dir.join("editor-scene-draft.json");
-        let draft = match File::open(&draft_path) {
-            Ok(file) => {
-                let mut bytes = Vec::new();
-                file.take(65537)
-                    .read_to_end(&mut bytes)
-                    .map_err(|e| e.to_string())?;
-                if bytes.len() > 65536 {
-                    return Err("Черновик сцены слишком большой".into());
-                }
-                let scene: Scene = serde_json::from_slice(&bytes)
-                    .map_err(|e| format!("Не удалось прочитать черновик: {e}"))?;
-                scene.validate()?;
-                Some(scene)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e.to_string()),
-        };
+        let draft = Draft::load(&draft_path)?;
         let canvas = crate::devices::Canvas {
             width: 36,
             height: 18,
@@ -174,20 +163,21 @@ impl Session {
         };
         let scene = result
             .draft
-            .clone()
+            .as_ref()
+            .map(|draft| draft.scene.clone())
             .unwrap_or_else(|| app.runtime.project().scene.clone());
-        result.configure_preview(scene, false)?;
+        result.configure_preview(scene)?;
         Ok(result)
     }
-    fn configure_preview(&mut self, scene: Scene, persist: bool) -> Result<(), String> {
-        scene.validate()?;
-        if persist {
-            self.close_ready = false;
-            let bytes = serde_json::to_vec(&scene).map_err(|e| e.to_string())?;
-            crate::storage::atomic_write(&self.draft_path, &bytes, 65536)
-                .map_err(|e| e.to_string())?;
-            self.draft = Some(scene.clone());
-        }
+    fn persist_draft(&mut self, scene: Scene, origin: Option<Origin>) -> Result<(), String> {
+        self.close_ready = false;
+        let draft = Draft::new(scene, origin)?;
+        draft.save(&self.draft_path)?;
+        self.configure_preview(draft.scene.clone())?;
+        self.draft = Some(draft);
+        Ok(())
+    }
+    fn configure_preview(&mut self, scene: Scene) -> Result<(), String> {
         let mut preview_scene = scene;
         preview_scene.fps = 20;
         if let Some(renderer) = self.preview.as_mut() {
@@ -383,7 +373,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
     let session = session.as_ref().ok_or("Нет интерфейса")?;
     let editor=app.editor.as_ref().map(|e|json!({"page":page_name(e.page),"index":e.index,"targets":super::super::editor::Editor::targets(&e.document,e.page),"fields":e.fields().iter().map(|f|json!({"key":f.key,"label":f.label,"value":f.value,"hint":f.hint,"file":f.file,"choices":f.choices.iter().map(|(label,value)|json!({"label":if f.key=="group"{match value.as_str(){"pc"=>"Основной свет","door"=>"Дополнительный свет",_=>label.as_str()}}else{label.as_str()},"value":value})).collect::<Vec<_>>()})).collect::<Vec<_>>(),"dirty":app.editor_dirty}));
     Ok(
-        json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft,"library":session.catalog.entries.iter().filter_map(|entry|session.catalog_view.get(&entry.id)).collect::<Vec<_>>(),"devices":app.runtime.document().lighting.setup.devices,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}}),
+        json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":session.catalog.entries.iter().filter_map(|entry|session.catalog_view.get(&entry.id)).collect::<Vec<_>>(),"devices":app.runtime.document().lighting.setup.devices,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}}),
     )
 }
 fn send(state: &State, value: &Value) -> Result<(), String> {
@@ -458,6 +448,7 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
         Command::CloseReady {
             id,
             scene,
+            origin,
             form_dirty,
         } => {
             let request = {
@@ -471,7 +462,7 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                     return Err("Устаревшее подтверждение закрытия".into());
                 }
                 if let Some(scene) = scene
-                    && let Err(error) = session.configure_preview(scene, true)
+                    && let Err(error) = session.persist_draft(scene, origin)
                 {
                     session.close_request = None;
                     return Err(error);
@@ -521,13 +512,13 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             };
             modal_command(hwnd, state, id)?;
         }
-        Command::PreviewScene { scene } => {
+        Command::PreviewScene { scene, origin } => {
             state
                 .modern_session
                 .borrow_mut()
                 .as_mut()
                 .ok_or("Нет интерфейса")?
-                .configure_preview(scene, true)?;
+                .persist_draft(scene, origin)?;
             return Ok(false);
         }
         Command::SaveScene { id, name, scene } => {
@@ -596,12 +587,6 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                     native_forms::set_field(a, id, &value)?;
                 }
                 Command::ApplyScene { scene } => {
-                    state
-                        .modern_session
-                        .borrow_mut()
-                        .as_mut()
-                        .ok_or("Нет интерфейса")?
-                        .configure_preview(scene.clone(), true)?;
                     if a.editor_dirty {
                         return Err("Примените или сбросьте параметры устройств".into());
                     }
