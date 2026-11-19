@@ -28,6 +28,12 @@ pub(crate) fn parse_pixel_capacity(packet: &[u8]) -> Result<Option<usize>, Strin
         .get("payload")
         .and_then(|v| v.as_str())
         .ok_or("EA81 notification has no hex payload")?;
+    // A complete foreign opcode is enough to rule out an EA81 reply.
+    if hex.as_bytes().get(..4).is_some_and(|opcode| {
+        opcode.iter().all(u8::is_ascii_hexdigit) && !opcode.eq_ignore_ascii_case(b"ea81")
+    }) {
+        return Ok(None);
+    }
     if !hex.len().is_multiple_of(2) || !hex.is_ascii() {
         return Err("Malformed EA81 hex payload".into());
     }
