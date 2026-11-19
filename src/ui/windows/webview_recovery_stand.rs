@@ -205,9 +205,10 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
         .state_dir
         .join("editor-scene-draft.json");
     let draft_brightness = || {
-        serde_json::from_slice::<Scene>(&std::fs::read(&draft_path).ok()?)
+        crate::ui::catalog::draft::Draft::load(&draft_path)
             .ok()
-            .map(|scene| scene.brightness)
+            .flatten()
+            .map(|draft| draft.scene.brightness)
     };
     modern::open(state)?;
     let initial = core(state).ok_or("No initial WebView2 controller")?;
@@ -222,7 +223,7 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     })?;
     eval(
         &initial,
-        "window.ipc.postMessage(JSON.stringify({op:'preview_scene',scene:{...draft,brightness:37}}))",
+        "window.ipc.postMessage(JSON.stringify({op:'preview_scene',scene:{...draft,brightness:37},origin:state.library.find(entry=>entry.id==='current')}))",
     )?;
     wait(state, "draft IPC write", || draft_brightness() == Some(37))?;
     let committed = std::fs::read(&draft_path).map_err(|error| error.to_string())?;
@@ -244,7 +245,7 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
                 browser_pid(&replacement).is_some_and(|pid| pid != old_pid)
                     && eval(
                         &replacement,
-                        "typeof draft !== 'undefined' && draft?.brightness === 37",
+                        "typeof draft !== 'undefined' && draft?.brightness === 37 && draftOrigin?.id === 'current'",
                     )
                     .as_deref()
                         == Ok("true")
@@ -257,7 +258,7 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     let replacement_pid = browser_pid(&replacement).ok_or("No replacement browser PID")?;
     eval(
         &replacement,
-        "window.ipc.postMessage(JSON.stringify({op:'preview_scene',scene:{...draft,brightness:47}}))",
+        "window.ipc.postMessage(JSON.stringify({op:'preview_scene',scene:{...draft,brightness:47},origin:draftOrigin}))",
     )?;
     wait(
         state,
