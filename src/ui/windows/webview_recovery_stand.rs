@@ -223,7 +223,7 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     })?;
     eval(
         &initial,
-        "window.ipc.postMessage(JSON.stringify({op:'preview_scene',scene:{...draft,brightness:37},origin:state.library.find(entry=>entry.id==='current')}))",
+        "openEntry(state.library.find(entry=>entry.id==='current')); draft.brightness=37; editDraft(); flushPreview()",
     )?;
     wait(state, "draft IPC write", || draft_brightness() == Some(37))?;
     let committed = std::fs::read(&draft_path).map_err(|error| error.to_string())?;
@@ -258,7 +258,7 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     let replacement_pid = browser_pid(&replacement).ok_or("No replacement browser PID")?;
     eval(
         &replacement,
-        "window.ipc.postMessage(JSON.stringify({op:'preview_scene',scene:{...draft,brightness:47},origin:draftOrigin}))",
+        "draft.brightness=47; editDraft(); flushPreview()",
     )?;
     wait(
         state,
