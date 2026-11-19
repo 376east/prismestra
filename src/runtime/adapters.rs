@@ -226,7 +226,8 @@ impl<L: ble::Link> Ble<L> {
         let actual = link.pixel_capacity(&mut Control::new(cancel.clone()))?;
         if actual != leds {
             return Err(format!(
-                "Surplife reports {actual} points; update the device geometry before Apply"
+                "Surplife E1 reports {actual} points. The current map expects {leds}. \
+                 In Connections, run Find for this controller, select its result, save the binding and Apply."
             ));
         }
         Ok(Self {
@@ -394,7 +395,14 @@ mod ble_tests {
             ..Default::default()
         }));
         let cancel = Cancellation::default();
-        assert!(Ble::with_e1(Link(state.clone()), 1, 60, 153, &cancel).is_err());
+        let Err(detail) = Ble::with_e1(Link(state.clone()), 1, 60, 153, &cancel) else {
+            panic!("Changed Surplife length must prevent output");
+        };
+        assert_eq!(
+            detail,
+            "Surplife E1 reports 152 points. The current map expects 153. \
+             In Connections, run Find for this controller, select its result, save the binding and Apply."
+        );
         assert!(state.lock().unwrap().pixels.is_empty());
         let mut driver = Ble::with_e1(Link(state.clone()), 1, 60, 152, &cancel).unwrap();
         assert_eq!(driver.protocol(), Driver::SurplifeE1Pixels);
