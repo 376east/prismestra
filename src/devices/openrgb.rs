@@ -11,13 +11,7 @@ fn digest(value: serde_json::Value) -> String {
 }
 /// Physical ownership deliberately excludes mutable topology and SDK ordering.
 pub fn identity(controller: &ControllerInfo) -> String {
-    digest(json!([
-        controller.name,
-        controller.vendor,
-        controller.serial,
-        controller.location,
-        controller.kind
-    ]))
+    digest(json!(controller.physical_identity()))
 }
 pub fn topology(controller: &ControllerInfo) -> String {
     let zones = controller
