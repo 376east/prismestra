@@ -118,6 +118,7 @@ pub(super) struct Session {
     context: u64,
     pending: bool,
     configuration_error: Option<String>,
+    snapshot_requested: bool,
 }
 impl Session {
     fn new(app: &App) -> Result<Self, String> {
@@ -160,6 +161,7 @@ impl Session {
             context: u64::MAX,
             pending: false,
             configuration_error: None,
+            snapshot_requested: false,
         };
         let scene = result
             .draft
@@ -232,7 +234,7 @@ fn assets(path: &str) -> Option<(&'static str, &'static [u8])> {
     })
 }
 pub(super) fn open(state: &State) -> Result<(), String> {
-    if state.snapshot || !state.modern_enabled {
+    if !state.modern_enabled {
         return Ok(());
     }
     let hwnd = state.editor_window.get();
@@ -260,6 +262,13 @@ pub(super) fn open(state: &State) -> Result<(), String> {
             format!("failed: {_error}"),
         );
     })?;
+    // WebView creation pumps Win32 messages, including a pending editor close.
+    if state.editor_window.get() != hwnd {
+        return Err("Окно было закрыто при открытии редактора".into());
+    }
+    if shell.browser_failed() {
+        return Err("Процесс WebView2 завершился при открытии редактора".into());
+    }
     #[cfg(debug_assertions)]
     let _ = std::fs::write(state_dir.join("webview-stage.txt"), "ready");
     let mut rect = RECT::default();
@@ -328,6 +337,46 @@ pub(super) fn close(state: &State) {
     drop(shell);
     let session = state.modern_session.borrow_mut().take();
     drop(session);
+}
+pub(super) fn recover_failed_browser(state: &State) {
+    let failed = state
+        .webview
+        .borrow()
+        .as_ref()
+        .is_some_and(web_shell::WebShell::browser_failed);
+    if !failed {
+        return;
+    }
+    let was_visible = state.app.borrow().as_ref().is_some_and(|app| app.web_mode);
+    let had_snapshot = state
+        .modern_session
+        .borrow()
+        .as_ref()
+        .is_some_and(|session| session.snapshot_requested);
+    // Release the dead controller and its UI-only state before rebuilding.
+    // The next session reads the already committed draft from disk.
+    close(state);
+    if !was_visible
+        || state.editor_window.get().is_null()
+        || state.session_action.get() == resident::Action::Exit
+    {
+        return;
+    }
+    // One automatic attempt per working editor. A replacement that crashes
+    // before its initial snapshot falls back to the classic controls.
+    let error = if had_snapshot {
+        match open(state) {
+            Ok(()) => return,
+            Err(error) => error,
+        }
+    } else {
+        "Процесс WebView2 завершился до загрузки редактора".into()
+    };
+    if let Some(app) = state.app.borrow_mut().as_mut() {
+        app.web_mode = false;
+        app.show_page();
+    }
+    resident::report(state, format!("Новый интерфейс недоступен: {error}"));
 }
 pub(super) fn resize(state: &State, width: i32, height: i32) {
     if let Ok(slot) = state.webview.try_borrow()
@@ -527,7 +576,11 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             }
             native_forms::action(state, id)?;
         }
-        Command::Snapshot => {}
+        Command::Snapshot => {
+            if let Some(session) = state.modern_session.borrow_mut().as_mut() {
+                session.snapshot_requested = true;
+            }
+        }
         Command::Open | Command::Save | Command::Export => {
             let id = match command {
                 Command::Open => OPEN,
@@ -671,7 +724,11 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
 }
 pub(super) fn maintain(state: &State) {
     let messages = match state.webview.try_borrow() {
-        Ok(slot) => slot.as_ref().map(|w| w.drain()).unwrap_or_default(),
+        Ok(slot) => match slot.as_ref() {
+            Some(shell) if shell.browser_failed() => return,
+            Some(shell) => shell.drain(),
+            None => Vec::new(),
+        },
         Err(_) => return,
     };
     let timed_out = if let Ok(mut sessions) = state.modern_session.try_borrow_mut() {
@@ -796,8 +853,6 @@ pub(super) fn return_to_editor(state: &State) -> Result<(), String> {
         if a.editor_dirty || a.runtime.pending_configuration() {
             return Err("Примените или сбросьте параметры".into());
         }
-        a.web_mode = true;
-        a.show_page();
     }
     if state.webview.borrow().is_none() {
         open(state)?;
@@ -805,6 +860,10 @@ pub(super) fn return_to_editor(state: &State) -> Result<(), String> {
     if let Some(shell) = state.webview.borrow().as_ref() {
         shell.set_visible(true)?;
         shell.focus()?;
+    }
+    if let Some(app) = state.app.borrow_mut().as_mut() {
+        app.web_mode = true;
+        app.show_page();
     }
     send(state, &snapshot(state)?)
 }
