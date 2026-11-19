@@ -72,7 +72,7 @@ impl Runtime {
         self.output_revision
     }
     pub fn outputs_ready(&self) -> Result<bool, String> {
-        self.ready()
+        self.ready(|_| false)
     }
     /// Reuse the configuration drain/persistence barrier.
     pub fn request_outputs(&mut self, outputs: OutputPlan) -> Result<u64, String> {

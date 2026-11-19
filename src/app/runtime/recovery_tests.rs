@@ -816,3 +816,39 @@ fn recovery_lcd_reopens_after_real_frame_and_republishes_current_off() {
     }
     std::fs::remove_dir(&dir).unwrap();
 }
+
+#[test]
+fn resume_keeps_ready_outputs_live_while_a_known_output_recovers() {
+    let mut runtime = runtime();
+    let a = Arc::new(Link::default());
+    let b = Arc::new(Link::default());
+    runtime.attach_rgb("a", vec![], factory(&a)).unwrap();
+    runtime.attach_rgb("b", vec![], factory(&b)).unwrap();
+    runtime.enable_registered_output_recovery();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+    working(&mut runtime, "b", &mut now);
+
+    a.fail_open.store(true, Ordering::SeqCst);
+    runtime.notify_power(true, now).unwrap();
+    runtime.notify_power(false, now).unwrap();
+    wait(|| runtime.lighting_drained());
+    now += 7_000_000;
+    tick(&mut runtime, &mut now);
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+    tick(&mut runtime, &mut now);
+    assert_eq!(runtime.power.error(), None);
+    working(&mut runtime, "b", &mut now);
+    let healthy_generation = runtime.host.status("b").unwrap().generation;
+
+    a.fail_open.store(false, Ordering::SeqCst);
+    now += 1_000_000;
+    working(&mut runtime, "a", &mut now);
+    assert_eq!(a.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(b.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        healthy_generation
+    );
+    drain(&mut runtime);
+}

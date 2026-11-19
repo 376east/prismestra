@@ -1334,7 +1334,7 @@ impl Runtime {
         self.sensor_stamps.clear();
         self.bump()
     }
-    fn ready(&self) -> Result<bool, String> {
+    fn ready(&self, will_retry: impl Fn(&str) -> bool) -> Result<bool, String> {
         let mut ready = true;
         // This is lighting-output readiness. Optional temperature readers may
         // connect/fail independently; absence is not a temperature reading.
@@ -1346,14 +1346,16 @@ impl Runtime {
             match s.phase {
                 crate::runtime::output::Phase::Ready => {}
                 crate::runtime::output::Phase::Connecting => ready = false,
+                crate::runtime::output::Phase::Failed if will_retry(id) => {}
                 _ => return Err(s.error.unwrap_or_else(|| "RGB refresh stopped".into())),
             }
         }
-        for w in self.lcd.values() {
-            let s = w.snapshot();
+        for (id, worker) in &self.lcd {
+            let s = worker.snapshot();
             match s.phase {
                 lcd_worker::Phase::Ready => {}
                 lcd_worker::Phase::Connecting => ready = false,
+                lcd_worker::Phase::Failed if will_retry(id) => {}
                 _ => return Err(s.error.unwrap_or_else(|| "LCD refresh stopped".into())),
             }
         }
@@ -1380,7 +1382,9 @@ impl Runtime {
                 self.stop_channels();
                 return Ok(false);
             }
-            match self.ready() {
+            // A known output with its own finite retry budget can recover
+            // after resume without discarding successfully reopened owners.
+            match self.ready(|id| self.output_recovery.contains_key(id)) {
                 Ok(true) => {
                     self.power
                         .refreshed(generation, now / 1000, Ok(()))
