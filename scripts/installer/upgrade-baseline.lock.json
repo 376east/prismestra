@@ -1,8 +1,8 @@
 {
-  "file": "Prismestra-Setup-0.1.0.5-x64.exe",
-  "version": "0.1.0.5",
-  "commit": "fd33a2630481a0b665cddc2b2108261d36e2757a",
-  "source": "https://github.com/malyarq/prismestra/releases/download/v0.1.0-preview.5/Prismestra-Setup-0.1.0.5-x64.exe",
-  "size": 260857335,
-  "sha256": "0b3fa3adff43737c91a044c834ae2c93f4ec604357011ded57d1fb8634f6e442"
+  "file": "Prismestra-Setup-0.1.0.6-x64.exe",
+  "version": "0.1.0.6",
+  "commit": "16ab57a061ed3560529cef40043afe4bfd8f1655",
+  "source": "https://github.com/malyarq/prismestra/releases/download/v0.1.0-preview.6/Prismestra-Setup-0.1.0.6-x64.exe",
+  "size": 261033666,
+  "sha256": "599a025cc9dad757eb99bcfba9be0e609a6f09a4e1ad984f8c1908598529ad45"
 }

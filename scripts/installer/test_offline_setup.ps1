@@ -218,7 +218,7 @@ $started = [DateTime]::UtcNow
 $failures = [Collections.Generic.List[string]]::new()
 $receipt = [ordered]@{
     version = 1
-    scope = 'production_offline_installer_lifecycle'
+    scope = 'production_installer_lifecycle'
     result = 'failed'
     previous = $null
     saved_data_sha256 = $null
@@ -235,6 +235,7 @@ $receipt = [ordered]@{
     pawnio_before = $null
     pawnio_after = $null
     prereq_installer_log_mentions = @()
+    vc_download_verified = $false
     application_launched_by_test = $false
     network_isolation_exercised = $false
 }
@@ -293,6 +294,7 @@ try {
         }
         $receipt.saved_data_sha256 = $savedData
     }
+    $vcBeforeCandidate = (Get-Runtimes).vc_version
     $setupAttempted = $true
     $receipt.setup_exit_code = Invoke-Installer $installerPath $options $setupLog
     $log = if (Test-Path -LiteralPath $setupLog -PathType Leaf) { Get-Content -LiteralPath $setupLog -Raw } else { '' }
@@ -311,12 +313,13 @@ try {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     Assert-Expected ($manifest.version -eq 1 -and $manifest.product -ceq 'Prismestra' -and
         [string]::IsNullOrEmpty($manifest.data_namespace) -and $manifest.commit -ceq $Commit -and
-        $manifest.prerequisites.vc_redist_x64.file -ceq 'vc_redist.x64.exe' -and
-        $manifest.prerequisites.vc_redist_x64.sha256 -cmatch '^[a-f0-9]{64}$' -and
-        $manifest.prerequisites.vc_redist_x64.size -ge 10MB -and
+        'vc_redist_x64' -cnotin $manifest.prerequisites.PSObject.Properties.Name -and
+        $manifest.vc_runtime_download.file -ceq 'vc_redist.x64.exe' -and
+        $manifest.vc_runtime_download.sha256 -cmatch '^[a-f0-9]{64}$' -and
+        $manifest.vc_runtime_download.source -clike 'https://download.visualstudio.microsoft.com/download/pr/*' -and
         $manifest.prerequisites.webview2_x64.file -ceq 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe' -and
         $manifest.prerequisites.webview2_x64.sha256 -cmatch '^[a-f0-9]{64}$' -and
-        $manifest.prerequisites.webview2_x64.size -ge 30MB) 'Expected a production manifest with embedded offline prerequisites.'
+        $manifest.prerequisites.webview2_x64.size -ge 30MB) 'Expected a production manifest with downloadable VC Runtime and embedded WebView2.'
     $receipt.commit = $manifest.commit
     $receipt.app_sha256 = Get-Sha256 $image
     $receipt.backend_sha256 = Get-Sha256 (Join-Path $install $backend)
@@ -324,6 +327,9 @@ try {
         $receipt.backend_sha256 -ceq $manifest.backend.sha256 -and $manifest.backend.relative_executable -ceq $backend) (
         'Installed app or OpenRGB differs from the package SHA-256 pins.')
     $minimumVc = [version]$manifest.minimum_vc_runtime
+    $receipt.vc_download_verified = $log -match '(?m)Verified Microsoft Visual C\+\+ Runtime download\.'
+    $vcNeeded = [string]::IsNullOrEmpty($vcBeforeCandidate) -or [version]$vcBeforeCandidate -lt $minimumVc
+    Assert-Expected ($receipt.vc_download_verified -eq $vcNeeded) 'Setup did not follow the expected VC Runtime download/reuse path.'
     Assert-Expected (Test-RuntimesReady $receipt.runtimes_installed $minimumVc) (
         'Installed shared runtime registration or runtime binaries are missing.')
     $null = Get-RegisteredUninstaller

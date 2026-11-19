@@ -134,10 +134,39 @@ class InstallerPackaging(unittest.TestCase):
         path = self.root / "prerequisites.json"
         installer.write_json(path, lock)
         with patch.object(installer, "authenticode") as verify:
-            with self.assertRaisesRegex(ValueError, "Invalid offline prerequisite pin"):
+            with self.assertRaisesRegex(ValueError, "Invalid prerequisite pin"):
                 packages, _ = installer.read_prerequisite_lock(path)
                 installer.stage_prerequisites(packages, self.root, self.root / "staged")
         verify.assert_not_called()
+
+    def test_vc_runtime_is_verified_but_excluded_from_installer_inputs(self):
+        lock = self.prerequisite_lock()
+        for item in lock["packages"].values():
+            payload = self.root / item["file"]
+            with payload.open("wb") as stream:
+                stream.truncate(item["size"])
+            actual = installer.sha256(payload)
+            item["source"] = item["source"].replace(item["sha256"].upper(), actual.upper())
+            item["sha256"] = actual
+        destination = self.root / "staged"
+        with patch.object(installer, "authenticode") as verify:
+            installer.stage_prerequisites(lock["packages"], self.root, destination)
+        vc = lock["packages"]["vc_redist_x64"]["file"]
+        verify.assert_any_call(self.root / vc, "Microsoft Corporation")
+        self.assertEqual({path.name for path in destination.iterdir()},
+                         {lock["packages"]["webview2_x64"]["file"]})
+
+    def test_vc_download_rejects_a_moving_url_or_a_different_sha(self):
+        for url in (
+            "https://aka.ms/vc14/vc_redist.x64.exe",
+            "https://download.visualstudio.microsoft.com/download/pr/"
+            "78d061c5-9ef3-42ab-98ed-3309d1095dc4/" + "a" * 64 + "/VC_redist.x64.exe",
+        ):
+            with self.subTest(url=url):
+                lock = self.prerequisite_lock()
+                lock["packages"]["vc_redist_x64"]["source"] = url
+                with self.assertRaisesRegex(ValueError, "Invalid prerequisite pin|versioned Microsoft CDN URL"):
+                    installer.stage_prerequisites(lock["packages"], self.root, self.root / ("staged-" + url.split("/")[2]))
 
     def test_unsigned_prerequisite_is_delegated_to_authenticode_and_rejected(self):
         lock = self.prerequisite_lock()
@@ -145,7 +174,9 @@ class InstallerPackaging(unittest.TestCase):
         payload = self.root / item["file"]
         with payload.open("wb") as stream:
             stream.truncate(11 << 20)
-        item["sha256"] = installer.sha256(payload)
+        digest = installer.sha256(payload)
+        item["source"] = item["source"].replace(item["sha256"].upper(), digest.upper())
+        item["sha256"] = digest
         item["size"] = payload.stat().st_size
         path = self.root / "prerequisites.json"
         installer.write_json(path, lock)

@@ -214,7 +214,9 @@ def main():
     prerequisites = root / "prerequisites"
     prerequisites.mkdir()
     for key, pin in read(INSTALLER / "prerequisites.lock.json")["packages"].items():
-        url = os.environ.get("PRISMESTRA_" + key.upper() + "_URL") or pin["source"]
+        url = pin["source"]
+        if key == "webview2_x64":
+            url = os.environ.get("PRISMESTRA_WEBVIEW2_X64_URL") or url
         fetch(prerequisites, pin["file"], url, pin["sha256"], pin["size"])
     inno = root / "inno"
     run(POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
