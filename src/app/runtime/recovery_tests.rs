@@ -1301,14 +1301,26 @@ fn resume_keeps_ready_output_live_past_slow_neighbors_refresh_deadline() {
     assert_eq!(runtime.host.status("a").unwrap().phase, Phase::Connecting);
     let generation = runtime.host.status("b").unwrap().generation;
     tick(&mut runtime, &mut now);
+    assert_eq!(runtime.power.error(), None);
 
     // Only the simulated clock crosses the legacy global refresh deadline.
+    let last_requested = runtime.host.requested("b");
     now += 30_000_000;
     tick(&mut runtime, &mut now);
     assert_eq!(runtime.power.error(), None);
     assert_eq!(runtime.host.status("a").unwrap().phase, Phase::Connecting);
     assert_eq!(runtime.outputs_ready(), Ok(false));
-    working(&mut runtime, "b", &mut now);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime
+            .host
+            .status("b")
+            .unwrap()
+            .last_submitted
+            .is_some_and(|ticket| {
+                last_requested.is_none_or(|previous| ticket.sequence > previous.sequence)
+            })
+    });
     assert_eq!(runtime.host.status("b").unwrap().generation, generation);
     assert_eq!(healthy.calls.load(Ordering::SeqCst), 2);
 
