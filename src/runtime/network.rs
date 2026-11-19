@@ -9,8 +9,10 @@ use std::{
 #[cfg(windows)]
 pub struct HomeAssistant {
     client: crate::transport::home_assistant::Client,
+    entity: String,
     last: Option<[u8; 3]>,
     next: Option<Instant>,
+    retry_step: usize,
 }
 #[cfg(windows)]
 impl HomeAssistant {
@@ -48,8 +50,10 @@ impl HomeAssistant {
             .map_err(|e| e.to_string())?;
         Ok(Self {
             client,
+            entity: entity.into(),
             last: None,
             next: None,
+            retry_step: 0,
         })
     }
 }
@@ -76,13 +80,36 @@ impl RgbDriver for HomeAssistant {
         if let Some(next) = self.next
             && next > now
         {
-            return Ok(WriteResult::Deferred(next - now));
+            return Ok(WriteResult::Deferred(
+                (next - now).min(Duration::from_secs(30)),
+            ));
         }
-        self.client
-            .set_color(rgb, now + Duration::from_secs(3), || cancel.cancelled())
-            .map_err(|e| e.to_string())?;
+        let deadline = now + Duration::from_secs(3);
+        let result = if self.retry_step == 0 {
+            Ok(())
+        } else {
+            self.client
+                .bind_light(&self.entity, deadline, || cancel.cancelled())
+        }
+        .and_then(|()| self.client.set_color(rgb, deadline, || cancel.cancelled()));
+        if let Err(error) = result {
+            let Some(seconds) = error.transient_delay() else {
+                return Err(error.to_string());
+            };
+            const BACKOFF_SECONDS: [u32; 4] = [1, 5, 15, 30];
+            let delay = Duration::from_secs(seconds.max(BACKOFF_SECONDS[self.retry_step]).into());
+            self.retry_step = (self.retry_step + 1).min(BACKOFF_SECONDS.len() - 1);
+            // The prior submission may no longer reflect a reconnected light.
+            self.last = None;
+            self.next = Some(Instant::now() + delay);
+            return Ok(WriteResult::Retrying(
+                delay.min(Duration::from_secs(30)),
+                error.to_string(),
+            ));
+        }
         self.last = Some(rgb);
         self.next = Some(Instant::now() + Duration::from_secs(1));
+        self.retry_step = 0;
         Ok(WriteResult::Submitted)
     }
 }

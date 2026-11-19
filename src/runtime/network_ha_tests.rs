@@ -153,3 +153,55 @@ fn ha_discovery_is_read_only_and_errors_do_not_expose_credentials() {
     assert!(!error.contains("fake.test-token") && !error.contains("secret response"));
     peer.join().unwrap();
 }
+
+#[test]
+fn ha_rebinds_before_resending_latest_color_and_leaves_auth_failure_terminal() {
+    const AVAILABLE: &str =
+        r#"{"entity_id":"light.room","state":"on","attributes":{"supported_color_modes":["rgb"]}}"#;
+    const UNAVAILABLE: &str = r#"{"entity_id":"light.room","state":"unavailable"}"#;
+    let (url, peer) = start_peer(vec![
+        ("200 OK", AVAILABLE),
+        ("200 OK", "[]"),
+        ("503 Service Unavailable", "{}"),
+        ("200 OK", UNAVAILABLE),
+        ("200 OK", AVAILABLE),
+        ("200 OK", "[]"),
+        ("401 Unauthorized", "{}"),
+    ]);
+    let cancel = Cancellation::default();
+    let mut driver =
+        HomeAssistant::with_token(&url, "light.room", "fake.test-token".into(), &cancel).unwrap();
+    let blue = [Rgb { r: 0, g: 20, b: 90 }];
+    let black = [Rgb::default()];
+    assert!(matches!(
+        driver.write(&blue, &cancel),
+        Ok(WriteResult::Submitted)
+    ));
+    driver.next = None;
+    assert!(
+        matches!(driver.write(&black, &cancel), Ok(WriteResult::Retrying(delay, _)) if delay == Duration::from_secs(1))
+    );
+    assert!(matches!(
+        driver.write(&blue, &cancel),
+        Ok(WriteResult::Deferred(_))
+    ));
+    driver.next = None;
+    assert!(
+        matches!(driver.write(&blue, &cancel), Ok(WriteResult::Retrying(delay, _)) if delay == Duration::from_secs(5))
+    );
+    driver.next = None;
+    assert!(matches!(
+        driver.write(&blue, &cancel),
+        Ok(WriteResult::Submitted)
+    ));
+    assert_eq!(driver.retry_step, 0);
+    driver.next = None;
+    assert_eq!(
+        driver.write(&black, &cancel).err().as_deref(),
+        Some("Home Assistant: Authentication")
+    );
+    let requests = peer.join().unwrap();
+    assert!(requests[3].starts_with("GET /ha/api/states/light.room "));
+    assert!(requests[4].starts_with("GET /ha/api/states/light.room "));
+    assert_eq!(requests[1], requests[5]);
+}
