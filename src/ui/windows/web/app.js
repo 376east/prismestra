@@ -5,8 +5,10 @@ const clone = value => structuredClone(value);
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 const hex = color => '#' + (Number(color) >>> 0).toString(16).padStart(6,'0').slice(-6);
 const effects = {noise_map:'Карта шума',breathing:'Дыхание',rainbow_wave:'Радужная волна'};
-const pages = {library:'Сцены',editor:'Редактор',devices:'Устройства',lcd:'LCD',ambient:'Экран',temperatures:'Температуры',connections:'Подключения',sources:'Источники',schedule:'Расписание'};
+const pages = {library:'Сцены',editor:'Редактор',devices:'Устройства',lcd:'LCD',ambient:'Экран',temperatures:'Температуры',connections:'Подключения',sources:'Источники',schedule:'Расписание',settings:'Настройки'};
+const settingsPages = ['temperatures','connections','sources','schedule'];
 const glyphs = {library:'<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>',editor:'<path d="M7 3v6m0 4v8M17 3v11m0 4v3M4 9h6v4H4zm10 5h6v4h-6z"/>',devices:'<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/>',edit:'<path d="m15 4 5 5M4 20l5-1L21 7a2 2 0 0 0-5-5L4 14Z"/>',play:'<path d="m9 5 11 7-11 7Z"/>',trash:'<path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 11v6m4-6v6"/>',plus:'<path d="M12 5v14M5 12h14"/>',sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2"/>'};
+glyphs.settings='<path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="2" fill="var(--ui-sidebar)"/><circle cx="15" cy="12" r="2" fill="var(--ui-sidebar)"/><circle cx="10" cy="18" r="2" fill="var(--ui-sidebar)"/>';
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${glyphs[name] || glyphs.devices}</svg>`;
 let state = null, draft = null, draftName = 'Текущая сцена', selectedId = null;
 let view = 'library', search = '', previewTimer = null, frame = null, commandPending = false, error = '', dialogMode = 'new', dialogReturn = null, savedSceneRequest = null, previewQueued = false, closing = false, nativeAwaitingAck = false, pendingView = null, advancedOpen = false, submittedStages = [], pointerGesture = false, keyGesture = false, composing = false, renderQueued = false, awaitingCommandAck = false, errorIsCommand = false;
@@ -132,12 +134,30 @@ function renderNativeForm(form=nativeFormForView()) {
   return `<div class="native-field"><label for="${id}">${esc(field.label)}</label>${control}</div>`;
  }).join('')}</div><div class="native-property-actions">${form.actions.map(item=>`<button class="button" data-native-action="${esc(item.id)}" data-native-control ${nativeControlDisabled({dataset:{nativeAction:String(item.id)}})?'disabled':''}>${esc(item.label)}</button>`).join('')}<button class="button" data-action="discard-page-fields" data-local-discard ${currentPageStaged()?'':'hidden'}>Отменить незавершённый ввод</button></div>${form.notes.map(note=>`<p class="parameter-note">${esc(note)}</p>`).join('')}</div></section>`;
 }
+function settingsLink(page,label=pages[page]) {
+ return `<button class="button" data-view="${page}">${label}</button>`;
+}
+function settingsGroup(title,links) {
+ return `<section class="parameter-panel"><h2>${title}</h2><div class="settings-links">${links}</div></section>`;
+}
+function renderSettings() {
+ const schedule=state.schedule?.enabled
+   ? settingsGroup('Правила профиля',settingsLink('schedule',state.schedule.paused?'Расписание на паузе':'Активное расписание'))
+   : '';
+ return heading(pages.settings,'Настройки локального профиля.')+
+   `<div class="settings-sections">${settingsGroup('Диагностика',settingsLink('temperatures'))}${settingsGroup('Расширенные',settingsLink('connections')+settingsLink('sources','Источники температур'))}${schedule}</div>`;
+}
+function renderProfilePage() {
+ const links=settingsPages.includes(view)?settingsLink('settings','К настройкам'):view==='lcd'?settingsLink('temperatures','Проверить температуры'):'';
+ return heading(pages[view],'Настройки локального профиля.',links)+(advancedPage()?renderNativeForm():nativeProperties());
+}
 function render() {
  if(deferRender())return;renderQueued=false;
  const key=focusKey(),node=document.activeElement,selection=typeof node?.selectionStart==='number'?[node.selectionStart,node.selectionEnd]:null;
- $('nav').innerHTML=Object.entries(pages).map(([key,title])=>`<button data-view="${key}" class="${view===key?'active':''}" aria-label="${title}" title="${title}" ${view===key?'aria-current="page"':''}>${icon(key)}<span>${title}</span></button>`).join('');
+ const section=settingsPages.includes(view)?'settings':view;
+ $('nav').innerHTML=Object.entries(pages).filter(([key])=>!settingsPages.includes(key)).map(([key,title])=>`<button data-view="${key}" class="${section===key?'active':''}" aria-label="${title}" title="${title}" ${section===key?'aria-current="page"':''}>${icon(key)}<span>${title}</span></button>`).join('');
  if(!state)$('#main').innerHTML='<div class="native-wait"><h1>Подключение к Prismestra…</h1><p>Ожидание локального профиля.</p></div>';
- else {$('#main').innerHTML=view==='library'?renderLibrary():view==='editor'?renderScene():view==='devices'?renderDevices():heading(pages[view],'Настройки локального профиля.')+(advancedPage()?renderNativeForm():nativeProperties());$('.project-context').innerHTML=`<span>Локальный профиль</span><small title="${esc(state.profilePath||'')}">${esc(state.profilePath?.split(/[\\/]/).pop()||'Не сохранён')}</small>`;}
+ else {$('#main').innerHTML=view==='library'?renderLibrary():view==='editor'?renderScene():view==='devices'?renderDevices():view==='settings'?renderSettings():renderProfilePage();$('.project-context').innerHTML=`<span>Локальный профиль</span><small title="${esc(state.profilePath||'')}">${esc(state.profilePath?.split(/[\\/]/).pop()||'Не сохранён')}</small>`;}
  document.querySelectorAll('[data-native-kind="secret"]').forEach(input=>{const staged=formStages.get(stageKey('native',input.dataset.nativeField));if(staged)input.value=staged.value;});
  syncControls();paintPreview();paintLibraryPreviews();restoreFocus(key,selection);
 }

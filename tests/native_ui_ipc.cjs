@@ -115,6 +115,42 @@ const cleanSchedule={...structuredClone(recoveryForm),dirty:false,actions:[{id:4
 vm.runInContext('formStages.set("other-page",{kind:"native",page:"sources",id:999,value:"Keep me"})',context);events.click({target:{closest:()=>localDiscard}});assert.equal(commands.length,beforeLocalCancel,'local cancellation performs no backend operation');assert.equal(vm.runInContext('currentPageStaged()',context),false);assert.equal(vm.runInContext('formStages.get("other-page").value',context),'Keep me','other page edits preserved');assert.equal(find('#native-field-0').value,'10:00');assert.equal(find('local-discard').hidden,true);assert.equal(vm.runInContext('state.nativeForm.dirty',context),false);
 console.log('PASS: Schedule text-only draft has immediate local discard without rerender/RPC; current page clears, other page and backend stay untouched');
 
+const settingsSnapshot=(schedule,nativeForm=null)=>{
+ context.payload={kind:'snapshot',state:{...structuredClone(initial),schedule,nativeForm}};
+ vm.runInContext('window.prismestraReceive(payload)',context);
+};
+vm.runInContext('formStages.clear(); view="library"',context);
+settingsSnapshot({enabled:false,paused:false});
+const sidebar=find('nav').innerHTML;
+for(const hiddenRoute of ['temperatures','connections','sources','schedule']){
+ assert.ok(!sidebar.includes(`data-view="${hiddenRoute}"`),'Advanced routes stay out of the sidebar');
+}
+assert.ok(sidebar.includes('data-view="settings"'));
+vm.runInContext('changeView("settings")',context);
+assert.deepEqual(commands.at(-1),{op:'page',page:'settings'});
+settingsSnapshot({enabled:false,paused:false});
+assert.ok(main.innerHTML.includes('Диагностика')&&main.innerHTML.includes('data-view="temperatures"'));
+assert.ok(main.innerHTML.includes('Расширенные')&&main.innerHTML.includes('data-view="connections"')&&main.innerHTML.includes('data-view="sources"'));
+assert.ok(!main.innerHTML.includes('data-view="schedule"'));
+settingsSnapshot({enabled:true,paused:false});
+assert.ok(main.innerHTML.includes('Активное расписание'));
+settingsSnapshot({enabled:true,paused:true});
+assert.ok(main.innerHTML.includes('Расписание на паузе'));
+vm.runInContext('changeView("schedule")',context);
+assert.deepEqual(commands.at(-1),{op:'page',page:'schedule'});
+settingsSnapshot({enabled:true,paused:true},{...cleanSchedule,dirty:true});
+const beforeSettingsExit=commands.length;
+vm.runInContext('changeView("settings")',context);
+assert.equal(commands.length,beforeSettingsExit,'Back to settings protects a dirty native schedule');
+settingsSnapshot({enabled:false,paused:true},cleanSchedule);
+vm.runInContext('changeView("settings")',context);
+assert.deepEqual(commands.at(-1),{op:'page',page:'settings'});
+settingsSnapshot({enabled:false,paused:true});
+assert.ok(!main.innerHTML.includes('data-view="schedule"'),'Disabled schedule can be left without reopening or reactivating it');
+vm.runInContext('view="lcd";render()',context);
+assert.ok(main.innerHTML.includes('Проверить температуры'));
+console.log('PASS: settings routes, existing active and paused schedules, draft protection and LCD diagnostics shortcut');
+
 // Command errors survive failed-followup snapshots/status, and clear only on a new command's successful ack.
 context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeAux:structuredClone(aux),editor:{page:'devices',index:0,targets:[],fields:[],dirty:false}}};vm.runInContext('formStages.clear();view="devices";window.prismestraReceive(payload)',context);const errorName=find('#native-field-0');errorName.value='UI test light';events.input({target:errorName});vm.runInContext('send({op:"native_action",id:410},true);window.prismestraReceive({kind:"error",message:"fixedLEDcount"});window.prismestraReceive(payload)',context);assert.equal(find('#native-error').hidden,false);assert.ok(find('#native-error').innerHTML.includes('fixedLEDcount'));assert.ok(find('#native-error').innerHTML.includes('discard-fields'),'failed command keeps local discard while text remains staged');
 vm.runInContext('window.prismestraReceive({kind:"status",state:{error:null,pending:false}})',context);assert.equal(find('#native-error').hidden,false,'periodic success cannot dismiss validation error');
