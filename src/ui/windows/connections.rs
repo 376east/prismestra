@@ -76,7 +76,7 @@ pub(super) struct Editor {
     pub(super) scan: discovery::Worker,
     workspace: Option<Workspace>,
     targets: Vec<BindingTarget>,
-    selected: usize,
+    selected: Option<usize>,
     inventory: Option<discovery::Inventory>,
     scan_endpoint: Option<String>,
     controllers: BTreeMap<String, crate::transport::openrgb::ControllerInfo>,
@@ -99,7 +99,7 @@ impl Editor {
             scan: Default::default(),
             workspace: None,
             targets: vec![],
-            selected: 0,
+            selected: None,
             inventory: None,
             scan_endpoint: None,
             controllers: BTreeMap::new(),
@@ -132,7 +132,19 @@ impl Editor {
         self.watch_outputs = false;
     }
     fn current(&self) -> Option<&BindingTarget> {
-        self.targets.get(self.selected)
+        self.selected.and_then(|index| self.targets.get(index))
+    }
+    fn replace_targets(&mut self, targets: Vec<BindingTarget>) {
+        self.selected = match self.current() {
+            Some(previous) => targets.iter().position(|next| match (previous, next) {
+                (BindingTarget::Device(old), BindingTarget::Device(new)) => old.id == new.id,
+                (BindingTarget::Monitor(old), BindingTarget::Monitor(new)) => old == new,
+                _ => false,
+            }),
+            None if self.targets.is_empty() && !targets.is_empty() => Some(0),
+            None => None,
+        };
+        self.targets = targets;
     }
     fn scannable(&self) -> bool {
         matches!(self.current(), Some(BindingTarget::Monitor(_)))
@@ -312,7 +324,7 @@ impl App {
             &self.connections.path,
             self.runtime.document(),
         )?);
-        self.connections.targets = self
+        let targets = self
             .runtime
             .document()
             .lighting
@@ -330,10 +342,7 @@ impl App {
                     .map(|s| BindingTarget::Monitor(s.key.clone())),
             )
             .collect();
-        self.connections.selected = self
-            .connections
-            .selected
-            .min(self.connections.targets.len().saturating_sub(1));
+        self.connections.replace_targets(targets);
         unsafe {
             SendMessageW(self.h(TARGET), CB_RESETCONTENT, 0, 0);
         }
@@ -345,7 +354,12 @@ impl App {
             self.add(TARGET, &label);
         }
         unsafe {
-            SendMessageW(self.h(TARGET), CB_SETCURSEL, self.connections.selected, 0);
+            SendMessageW(
+                self.h(TARGET),
+                CB_SETCURSEL,
+                self.connections.selected.unwrap_or(usize::MAX),
+                0,
+            );
         }
         self.load_connection_fields();
         Ok(())
@@ -462,6 +476,8 @@ impl App {
             format!(
                 "Сначала добавьте устройство на вкладке «Устройства» или источник экрана. Привязок удалённых источников: {n}."
             )
+        } else if self.connections.current().is_none() {
+            "Выберите устройство или источник экрана.".into()
         } else if let Some(inventory) = &self.connections.inventory {
             format!(
                 "Найдено: {}. Выберите результат, сохраните привязку и нажмите «Применить». {}",
@@ -572,13 +588,16 @@ impl App {
                     && self.connections.scannable()
                     && self.connections.scan.is_idle(),
             ),
-            (TARGET, ready),
-            (LIST, ready),
-            (ENDPOINT, ready),
-            (IDENTITY, ready),
-            (SERIAL, ready),
-            (SAVE_KEY, ready && self.connections.activation.is_some()),
-            (SAVE_BINDING, ready && self.connections.dirty()),
+            (TARGET, ready && !self.connections.targets.is_empty()),
+            (LIST, ready && target),
+            (ENDPOINT, ready && target),
+            (IDENTITY, ready && target),
+            (SERIAL, ready && target),
+            (
+                SAVE_KEY,
+                ready && target && self.connections.activation.is_some(),
+            ),
+            (SAVE_BINDING, ready && target && self.connections.dirty()),
             (RESET_BINDING, ready || switching),
             (
                 APPLY_OUTPUTS,
@@ -671,13 +690,18 @@ impl App {
             TARGET if notice == CBN_SELCHANGE as u16 => {
                 if self.connections.dirty() || !self.connections.scan.is_idle() {
                     unsafe {
-                        SendMessageW(self.h(TARGET), CB_SETCURSEL, self.connections.selected, 0);
+                        SendMessageW(
+                            self.h(TARGET),
+                            CB_SETCURSEL,
+                            self.connections.selected.unwrap_or(usize::MAX),
+                            0,
+                        );
                     }
                     return Err("Сначала сохраните/отмените правки и дождитесь поиска.".into());
                 }
                 let selected = unsafe { SendMessageW(self.h(TARGET), CB_GETCURSEL, 0, 0) };
                 if selected >= 0 && (selected as usize) < self.connections.targets.len() {
-                    self.connections.selected = selected as usize;
+                    self.connections.selected = Some(selected as usize);
                     self.load_connection_fields();
                 }
             }
@@ -1278,6 +1302,46 @@ pub(super) fn stand_factory() -> discovery::Factory {
 #[cfg(test)]
 mod activation_tests {
     use super::*;
+    fn lcd(id: &str) -> BindingTarget {
+        BindingTarget::Device(
+            crate::app::device_setup::preset("tt-lcd")
+                .unwrap()
+                .device(id)
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn refresh_preserves_binding_target_identity_after_device_removal() {
+        let mut editor = Editor::new(PathBuf::from("unused.json"), None);
+        editor.replace_targets(vec![lcd("first"), lcd("selected"), lcd("other")]);
+        assert_eq!(editor.current(), Some(&lcd("first")));
+        editor.selected = Some(1);
+
+        let mut renamed = lcd("selected");
+        if let BindingTarget::Device(device) = &mut renamed {
+            device.label = "Renamed".into();
+        }
+        editor.replace_targets(vec![renamed.clone(), lcd("other")]);
+        assert_eq!(editor.current(), Some(&renamed));
+    }
+
+    #[test]
+    fn refresh_requires_explicit_selection_if_the_target_disappears() {
+        let monitor = BindingTarget::Monitor("shared".into());
+        let mut editor = Editor::new(PathBuf::from("unused.json"), None);
+        editor.replace_targets(vec![lcd("shared"), monitor.clone()]);
+
+        editor.replace_targets(vec![monitor.clone(), lcd("other")]);
+        assert!(editor.current().is_none());
+        editor.replace_targets(vec![lcd("other"), monitor.clone()]);
+        assert!(editor.current().is_none());
+
+        editor.selected = Some(1);
+        editor.replace_targets(vec![monitor.clone(), lcd("shared")]);
+        assert_eq!(editor.current(), Some(&monitor));
+    }
+
     #[test]
     fn normal_ui_can_explicitly_apply_native_bindings_but_diagnostics_cannot() {
         let normal = Editor::new(PathBuf::from("unused.json"), None).activation(false, false);
