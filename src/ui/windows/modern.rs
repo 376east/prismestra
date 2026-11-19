@@ -513,12 +513,15 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             modal_command(hwnd, state, id)?;
         }
         Command::PreviewScene { scene, origin } => {
-            state
+            let result = state
                 .modern_session
                 .borrow_mut()
                 .as_mut()
                 .ok_or("Нет интерфейса")?
-                .persist_draft(scene, origin)?;
+                .persist_draft(scene, origin);
+            if let Err(message) = result {
+                send(state, &json!({"kind":"draft_error","message":message}))?;
+            }
             return Ok(false);
         }
         Command::SaveScene { id, name, scene } => {
