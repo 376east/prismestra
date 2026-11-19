@@ -1,6 +1,6 @@
 # Windows installer
 
-The supported entry point is `Prismestra-Setup-0.1.0.6-x64.exe` on the [Preview 6 release](https://github.com/malyarq/prismestra/releases/tag/v0.1.0-preview.6). This is a Windows 10/11 x64 installer, not a portable ZIP. Device support remains model- and firmware-specific; see [compatibility](compatibility.md).
+The candidate entry point is `Prismestra-Setup-0.1.0.6-x64.exe` for the planned [Preview 6 release](https://github.com/malyarq/prismestra/releases/tag/v0.1.0-preview.6). This is a Windows 10/11 x64 installer, not a portable ZIP. Device support remains model- and firmware-specific; see [compatibility](compatibility.md).
 
 ## Install and use
 
@@ -50,3 +50,13 @@ python scripts/package_installer.py --app-exe APP_EXE --app-sha256 APP_SHA256 --
 ```
 
 `--test-namespace GUID` creates a separately named lifecycle fixture without drivers, prerequisites or elevated tasks. `test_lifecycle.ps1` distinguishes ordinary interactive startup/live-drain checks from elevated disposable-runner file/repair/upgrade/uninstall checks. Those are different gates. Published release notes record actual results; software fixtures do not certify untested hardware or a cold boot on every Windows version.
+
+### Windows Actions candidate
+
+Use **Windows checks** → **Run workflow** on the intended revision and provide a four-part Windows version. Pushes to delivery CI branches and preview tags also run packaging. A preview tag such as `v0.1.0-preview.6` supplies version `0.1.0.6`. The job builds on a native x64 Windows runner with Visual Studio 2022 to stay within the bundled Visual C++ runtime floor. It uses pinned Rust and Inno versions, the application and component recipes, and the current OpenRGB lock and patch. Its pinned published Preview 5 source companion supplies verified dependency files and corresponding source archives. The previous backend executable is excluded. The build checks the new backend inventory and tests its parent lease with hardware detection disabled.
+
+The prerequisite URLs are checked against `prerequisites.lock.json`. If the Microsoft URLs change bytes, approved HTTPS mirrors of the exact files can be configured with `PRISMESTRA_VC_REDIST_X64_URL` and `PRISMESTRA_WEBVIEW2_X64_URL`. Size, SHA-256 and the packager's Authenticode checks still apply.
+
+The run stores the compiled Setup, source companion, installation manifest and checksums as an Actions artifact. Separate artifacts contain synthetic repair/upgrade inputs and lifecycle evidence. The offline-payload and fresh-account jobs run the **same production Setup SHA-256** on separate disposable runners. The fresh account checks HKCU registration and executes the installed command under a standard token. Setup itself runs under the elevated CI account. True interactive UAC, a reboot or Windows sign-in, missing runtimes, optional driver provisioning and physical devices require separate acceptance. The synthetic repair/upgrade cases check files and saved data through a separate AppId.
+
+Only after all required jobs pass does the run retain `prismestra-verified-candidate-<attempt>` with the tested bytes. This workflow has read-only repository permissions and does not publish a release. A newly compiled or signed EXE requires its own installation checks.
