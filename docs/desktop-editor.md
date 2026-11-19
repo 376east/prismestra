@@ -8,6 +8,8 @@ A scene in the library contains RGB effect parameters. Editing and previewing it
 
 Device topology, output groups, LCD media, screen capture and temperature routes belong to the profile. Open, Save and Export use the existing profile and media handling. Local hardware bindings and credentials remain separate from portable profiles. Applying a connection is an explicit hardware operation; saving its form does not activate it. Source: [profiles](../src/app/document.rs), [connections](../src/ui/windows/connections.rs).
 
+**Scene File** opens a separate composition preview in the library or scene editor. It starts with a copy of the current draft effect. You can add color layers, set layer opacity, choose a region for one logical LCD and choose the ordered edges for one logical strip. **Open File** restores the composition from a scene JSON file. **Save File** writes the composition and the logical assignments. The preview draws the LCD and strip from the same composed frame. Use the existing library for named RGB scenes and the profile for physical output. Source: [scene files](../src/app/scene_file.rs), [preview](../src/app/scene_file/preview.rs).
+
 Closing the editor first requests the latest RGB draft and waits for its atomic save. An error or timeout cancels closing instead of discarding changes. Unsaved device/connection/source forms still require Apply or Revert. The resident session's Stop and Exit paths remain distinct. Source: [close handshake](../src/ui/windows/modern.rs), [resident session](../src/ui/windows/resident.rs).
 
 ## Runtime and recovery

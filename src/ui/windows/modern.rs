@@ -56,6 +56,10 @@ enum Command {
     DeleteScene {
         id: String,
     },
+    SceneFile {
+        request: u32,
+        operation: scene_files::Operation,
+    },
     Groups {
         pc: bool,
         door: bool,
@@ -97,6 +101,9 @@ struct CloseRequest {
     confirm: bool,
     started: Instant,
 }
+
+mod scene_files;
+
 pub(super) struct Session {
     close_request: Option<CloseRequest>,
     close_id: u32,
@@ -106,6 +113,7 @@ pub(super) struct Session {
     catalog_path: PathBuf,
     draft: Option<Scene>,
     draft_path: PathBuf,
+    portable_preview: Option<scene_files::Running>,
     preview: Option<crate::runtime::scene::Renderer>,
     canvas: crate::devices::Canvas,
     last_send: Instant,
@@ -164,6 +172,7 @@ impl Session {
             catalog_path,
             draft,
             draft_path,
+            portable_preview: None,
             preview: None,
             canvas,
             last_send: Instant::now(),
@@ -229,6 +238,14 @@ fn assets(path: &str) -> Option<(&'static str, &'static [u8])> {
         "/app.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("web/app.js"),
+        ),
+        "/scene-file.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("web/scene-file.js"),
+        ),
+        "/scene-file.css" => (
+            "text/css; charset=utf-8",
+            include_bytes!("web/scene-file.css"),
         ),
         "/theme.js" => (
             "text/javascript; charset=utf-8",
@@ -442,6 +459,10 @@ fn stage_native(app: &mut App, fields: &[NativeValue]) -> Result<(), String> {
 }
 fn execute(state: &State, command: Command) -> Result<bool, String> {
     let hwnd = state.editor_window.get();
+    if let Command::SceneFile { request, operation } = command {
+        scene_files::execute(state, hwnd, request, operation)?;
+        return Ok(false);
+    }
     if !matches!(
         &command,
         Command::Snapshot | Command::PreviewScene { .. } | Command::CloseReady { .. }
@@ -766,6 +787,7 @@ pub(super) fn maintain(state: &State) {
     if let Ok(Some(value)) = value {
         let _ = send(state, &value);
     }
+    scene_files::publish(state);
 }
 pub(super) fn return_to_editor(state: &State) -> Result<(), String> {
     if !state.modern_enabled {
