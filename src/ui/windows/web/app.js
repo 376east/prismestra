@@ -5,7 +5,9 @@ const clone = value => structuredClone(value);
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 const hex = color => '#' + (Number(color) >>> 0).toString(16).padStart(6,'0').slice(-6);
 const effects = {noise_map:'Карта шума',breathing:'Дыхание',rainbow_wave:'Радужная волна'};
-const pages = {library:'Сцены',editor:'Редактор',devices:'Устройства',lcd:'LCD',ambient:'Экран',temperatures:'Температуры',connections:'Подключения',sources:'Источники',schedule:'Расписание'};
+const pages = {library:'Сцены',editor:'Редактор',devices:'Устройства',lcd:'LCD',ambient:'Экран',settings:'Настройки',temperatures:'Температуры',connections:'Подключения',sources:'Источники',schedule:'Расписание'};
+const settingsPages = ['temperatures','connections','sources','schedule'];
+const devicePresetField = 714;
 const glyphs = {
  library:'<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>',
  editor:'<path d="M7 3v6m0 4v8M17 3v11m0 4v3M4 9h6v4H4zm10 5h6v4h-6z"/>',
@@ -22,6 +24,7 @@ const glyphs = {
  plus:'<path d="M12 5v14M5 12h14"/>',
  sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2"/>',
 };
+glyphs.settings='<path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="2" fill="var(--ui-sidebar)"/><circle cx="15" cy="12" r="2" fill="var(--ui-sidebar)"/><circle cx="10" cy="18" r="2" fill="var(--ui-sidebar)"/>';
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${glyphs[name] ?? ''}</svg>`;
 let state = null, draft = null, draftOrigin = null, draftName = 'Текущая сцена', selectedId = null, draftSwitchId = null;
 let view = 'library', search = '', previewTimer = null, frame = null, commandPending = false, error = '', dialogMode = 'new', dialogReturn = null, savedSceneRequest = null, previewQueued = false, closing = false, nativeAwaitingAck = false, pendingView = null, advancedOpen = false, submittedStages = [], pointerGesture = false, keyGesture = false, composing = false, renderQueued = false, awaitingCommandAck = false, errorIsCommand = false;
@@ -200,6 +203,14 @@ function deviceStatus(device) {
  if(labels&&Object.hasOwn(labels,device.id))return labels[device.id];
  return !device.enabled?'Выключено':state.native?'Недоступно':'Предпросмотр';
 }
+function pageButton(page, label=pages[page]) {
+ return `<button class="button" data-view="${page}">${label}</button>`;
+}
+
+function outputPageAvailable(page) {
+ return (page!=='lcd' && page!=='ambient') || !!state?.devices.some(device=>device.role===page);
+}
+
 function renderDevices() {
  const devices=state.devices.map(d=>`<article class="device">
   <div class="device-symbol">${icon('devices')}</div>
@@ -214,7 +225,14 @@ function renderDevices() {
   <div class="device-meta"><small>Найдено</small></div>
  </article>`);
  const entries=[...devices,...found].join('')||'<div class="empty"><h2>В профиле нет устройств</h2><p>Добавьте устройство в свойствах профиля.</p></div>';
- return heading('Устройства','Изменения действуют после «Применить». Профиль сохраняется отдельно.')+`<div class="device-list">${entries}</div><div style="margin-top:24px">${nativeProperties()}</div>`;
+ const add = state.nativeAux?.page==='devices' && state.nativeAux.fields.some(field=>field.id===devicePresetField && field.enabled)
+  ? action('Добавить устройство','focus-device-setup',true)
+  : '';
+ const shortcuts = add + pageButton('connections','Поиск и подключения')
+  + (outputPageAvailable('lcd') ? pageButton('lcd','Настроить LCD') : '')
+  + (outputPageAvailable('ambient') ? pageButton('ambient','Настроить экран') : '');
+ return heading('Устройства','Изменения действуют после «Применить». Профиль сохраняется отдельно.',shortcuts)
+  + `<div class="device-list">${entries}</div><div style="margin-top:24px">${nativeProperties()}</div>`;
 }
 function renderNativeForm(form=nativeFormForView()) {
  if(!form||form.page!==view)return '<div class="native-wait" role="status">Загрузка настроек…</div>';
@@ -225,15 +243,54 @@ function renderNativeForm(form=nativeFormForView()) {
   return `<div class="native-field"><label for="${id}">${esc(field.label)}</label>${control}</div>`;
  }).join('')}</div><div class="native-property-actions">${form.actions.map(item=>`<button class="button" data-native-action="${esc(item.id)}" data-native-control ${nativeControlDisabled({dataset:{nativeAction:String(item.id)}})?'disabled':''}>${esc(item.label)}</button>`).join('')}<button class="button" data-action="discard-page-fields" data-local-discard ${currentPageStaged()?'':'hidden'}>Отменить незавершённый ввод</button></div>${form.notes.map(note=>`<p class="parameter-note">${esc(note)}</p>`).join('')}</div></section>`;
 }
+function renderSettings() {
+ const schedule = state.schedule?.enabled
+  ? (state.schedule.paused ? 'Расписание на паузе' : 'Расписание активно')
+  : 'Расписание выключено';
+ return heading('Настройки','Настройки локального профиля.')
+  + `<div class="settings-sections">
+    <section class="parameter-panel"><h2>Диагностика</h2><div class="settings-links">${pageButton('temperatures')}${pageButton('connections')}${pageButton('sources','Источники температур')}</div></section>
+    <section class="parameter-panel"><h2>Расписание</h2><p class="parameter-note">${schedule}</p><div class="settings-links">${pageButton('schedule','Управлять расписанием')}</div></section>
+  </div>`;
+}
+
+function renderProfilePage() {
+ if (view==='settings') return renderSettings();
+ if (view==='lcd'||view==='ambient') {
+  const available = outputPageAvailable(view);
+  const actions = (available ? pageButton('connections','Проверить подключение') : '')
+   + (available && view==='lcd' ? pageButton('temperatures') : '') + pageButton('devices','К устройствам');
+  return heading(pages[view],available?'Настройки локального профиля.':'В применённом профиле нет такого выхода.',actions)
+   + nativeProperties();
+ }
+ return heading(pages[view],'Настройки локального профиля.',pageButton('settings','К настройкам'))
+  + (advancedPage()?renderNativeForm():nativeProperties());
+}
+
+function pageHasEdits() {
+ return stagedDirty() || (state?.nativeForm?.page===view&&state.nativeForm.dirty)
+  || (state?.editor?.page===view&&state.editor.dirty);
+}
+
 function render() {
  if(deferRender())return;renderQueued=false;
+ if(!busy()&&!pendingView&&!pageHasEdits()&&!outputPageAvailable(view)){
+  changeView('devices');
+  return;
+ }
  const key=focusKey(),node=document.activeElement,selection=typeof node?.selectionStart==='number'?[node.selectionStart,node.selectionEnd]:null;
- $('nav').innerHTML=Object.entries(pages).map(([key,title])=>`<button data-view="${key}" class="${view===key?'active':''}" aria-label="${title}" title="${title}" ${view===key?'aria-current="page"':''}>${icon(key)}<span>${title}</span></button>`).join('');
+ const headingFocused = node === $('#main h1');
+ const hiddenNavFocused = node?.closest?.('nav') && !outputPageAvailable(node.dataset.view);
+ const selectedPage = settingsPages.includes(view)?'settings':view;
+ $('nav').innerHTML=Object.entries(pages).filter(([key])=>!settingsPages.includes(key)&&outputPageAvailable(key)).map(([key,title])=>`<button data-view="${key}" class="${selectedPage===key?'active':''}" aria-label="${title}" title="${title}" ${selectedPage===key?'aria-current="page"':''}>${icon(key)}<span>${title}</span></button>`).join('');
  if(!state)$('#main').innerHTML='<div class="native-wait"><h1>Подключение к Prismestra…</h1><p>Ожидание локального профиля.</p></div>';
- else {$('#main').innerHTML=view==='library'?renderLibrary():view==='editor'?renderScene():view==='devices'?renderDevices():heading(pages[view],'Настройки локального профиля.')+(advancedPage()?renderNativeForm():nativeProperties());$('.project-context').innerHTML=`<span>Локальный профиль</span><small title="${esc(state.profilePath||'')}">${esc(state.profilePath?.split(/[\\/]/).pop()||'Не сохранён')}</small>`;}
+ else {$('#main').innerHTML=view==='library'?renderLibrary():view==='editor'?renderScene():view==='devices'?renderDevices():renderProfilePage();$('.project-context').innerHTML=`<span>Локальный профиль</span><small title="${esc(state.profilePath||'')}">${esc(state.profilePath?.split(/[\\/]/).pop()||'Не сохранён')}</small>`;}
  document.querySelectorAll('[data-native-kind="secret"]').forEach(input=>{const staged=formStages.get(stageKey('native',input.dataset.nativeField));if(staged)input.value=staged.value;});
  if(view==='devices')window.outputMap?.mount(state,send,currentGenericStages);
- syncControls();paintPreview();paintLibraryPreviews();restoreFocus(key,selection);
+ syncControls();paintPreview();paintLibraryPreviews();
+ if(headingFocused)focusHeading();
+ else if(hiddenNavFocused)$('nav [data-view="devices"]')?.focus({preventScroll:true});
+ else restoreFocus(key,selection);
 }
 function flushPreview(force=false) {
  clearTimeout(previewTimer);previewTimer=null;
@@ -254,8 +311,8 @@ function paintLibraryPreviews() {
  document.querySelectorAll('[data-library-preview]').forEach(canvas=>paintPixels(canvas,state?.library.find(item=>String(item.id)===canvas.dataset.libraryPreview)?.preview));
 }
 function changeView(next) {
- if(!Object.hasOwn(pages,next)||next===view||closing||pendingView)return;
- if(stagedDirty()||(state?.nativeForm?.page===view&&state.nativeForm.dirty)||(state?.editor?.dirty&&state.editor.page===view)){showError('Примените или отмените изменения перед переходом в другой раздел.');return;}
+ if(!Object.hasOwn(pages,next)||!outputPageAvailable(next)||next===view||closing||pendingView)return;
+ if(pageHasEdits()){showError('Примените или отмените изменения перед переходом в другой раздел.');return;}
  const previous=view;view=next;render();focusHeading();
  if(!['library','editor'].includes(next)){
   pendingView={previous,next};
@@ -362,7 +419,7 @@ window.prismestraReceive = message => {
    followActiveScene();
    if(!state.pending&&!nativeAwaitingAck&&!savedSceneRequest)commandPending=false;
    if(message.state.preview)frame=message.state.preview;
-   if(nativeFormChanged||foundChanged)render();else {syncControls();paintPreview();}if(!busy())flushPreview();
+   if(nativeFormChanged||foundChanged||(!busy()&&!outputPageAvailable(view)))render();else {syncControls();paintPreview();}if(!busy())flushPreview();
   }
  }catch(e){awaitingCommandAck=false;closing=false;commandPending=false;showError('Ошибка ответа приложения: '+e.message);syncControls();}
 };
@@ -391,6 +448,7 @@ document.addEventListener('click',event=>{
   return;
  }
  switch(b.dataset.action){
+ case 'focus-device-setup':$(`[data-native-field="${devicePresetField}"]`)?.focus();break;
  case 'new':case 'clone':case 'rename':return nameDialog(b.dataset.action);
  case 'save-scene':return nameDialog('save');
  case 'apply-scene':send({op:'apply_scene',scene:clone(draft)},true);break;

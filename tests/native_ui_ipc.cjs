@@ -409,3 +409,50 @@ evaluate('window.prismestraReceive({kind:"flush",id:93})');
 assert.equal(commands.at(-1).origin.id,null);
 assert.equal(commands.at(-1).origin.name,'A');
 console.log('PASS: scene draft guard, all three choices, acknowledged save and error recovery, named/legacy restore, stale source detachment');
+
+const navFixture = (devices = [], extra = {}) => ({
+ ...structuredClone(initial), devices, draftDevices: devices, deviceCandidates: [],
+ schedule: {enabled: false, paused: false}, ...extra,
+});
+const navHas = page => find('nav').innerHTML.includes(`data-view="${page}"`);
+const viewNow = () => vm.runInContext('view', context);
+const openView = page => vm.runInContext('changeView('+JSON.stringify(page)+')', context);
+const navLcd = {id: 'lcd', label: 'LCD', role: 'lcd', enabled: true, leds: 0};
+const navAmbient = {id: 'ambient', label: 'Screen strip', role: 'ambient', enabled: false, leds: 10};
+vm.runInContext('window.prismestraReceive({kind:"close_cancelled"})', context);
+vm.runInContext('formStages.clear();view="library";pendingView=null', context);
+receiveDeviceState('snapshot', navFixture([], {deviceCandidates: [navLcd, navAmbient]}));
+assert.ok(navHas('devices') && navHas('settings'));
+assert.ok(['lcd','ambient','connections','temperatures','sources','schedule'].every(page => !navHas(page)));
+const beforeHiddenOutput = commands.length;
+openView('lcd');
+assert.equal(commands.length, beforeHiddenOutput, 'Unapplied discovery does not open the LCD editor');
+openView('devices');
+receiveDeviceState('snapshot', navFixture([], {editor: {page:'devices',index:0,targets:[],fields:[],dirty:false}, nativeAux:{
+ page:'devices',fields:[{id:714,label:'Семейство',kind:'select',enabled:true,value:'lcd',choices:[]}],actions:[],notes:[],
+}}));
+assert.ok(mainMarkup.includes('data-action="focus-device-setup"'));
+assert.ok(mainMarkup.includes('Поиск и подключения'));
+openView('connections');
+assert.deepEqual(commands.at(-1), {op:'page',page:'connections'});
+receiveDeviceState('snapshot', navFixture([navLcd, navAmbient], {deviceActivity:{labels:{lcd:'Нет связи'}}}));
+assert.ok(navHas('lcd') && navHas('ambient'), 'Configured disabled and unreachable outputs stay discoverable');
+openView('lcd');
+receiveDeviceState('snapshot', navFixture([navLcd, navAmbient], {editor:{page:'lcd',index:0,targets:['LCD'],fields:[],dirty:false}}));
+assert.equal(viewNow(), 'lcd');
+assert.ok(mainMarkup.includes('Проверить подключение') && mainMarkup.includes('Температуры'));
+receiveDeviceState('snapshot', navFixture([navAmbient], {pending:true}));
+assert.equal(viewNow(), 'lcd', 'Wait for configuration to settle before leaving the page');
+receiveDeviceState('status', {pending:false});
+assert.deepEqual(commands.at(-1), {op:'page',page:'devices'});
+assert.equal(viewNow(), 'devices');
+assert.ok(!navHas('lcd') && navHas('ambient'));
+receiveDeviceState('snapshot', navFixture([navAmbient], {schedule:{enabled:true,paused:true}}));
+openView('settings');
+assert.deepEqual(commands.at(-1), {op:'page',page:'settings'});
+receiveDeviceState('snapshot', navFixture([navAmbient], {schedule:{enabled:true,paused:true}}));
+assert.ok(mainMarkup.includes('Диагностика') && mainMarkup.includes('Расписание на паузе'));
+openView('schedule');
+assert.deepEqual(commands.at(-1), {op:'page',page:'schedule'});
+assert.ok(find('nav').innerHTML.includes('data-view="settings" class="active"'));
+console.log('PASS: hidden output links, discovery access, configured offline routes, removal fallback, settings and schedule');

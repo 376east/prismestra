@@ -431,6 +431,7 @@ pub(super) fn resize(state: &State, width: i32, height: i32) {
 }
 fn page(value: &str) -> Result<(Page, i32), String> {
     Ok(match value {
+        "settings" => (Page::Scene, NAV_SCENE),
         "devices" => (Page::Devices, NAV_DEVICES),
         "lcd" => (Page::Lcd, NAV_LCD),
         "ambient" => (Page::Ambient, NAV_AMBIENT),
@@ -526,6 +527,8 @@ fn snapshot(state: &State) -> Result<Value, String> {
     let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":session.catalog.entries.iter().filter_map(|entry|session.catalog_view.get(&entry.id)).collect::<Vec<_>>(),"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
     value["state"]["draftMapRevision"] = json!(draft_map_revision);
     value["state"]["mapConnection"] = map_connection(app);
+    let schedule = &app.runtime.project().schedule;
+    value["state"]["schedule"] = json!({"enabled":schedule.enabled,"paused":schedule.paused});
     Ok(value)
 }
 fn send(state: &State, value: &Value) -> Result<(), String> {
