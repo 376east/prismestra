@@ -23,6 +23,7 @@ window.sceneFile = (() => {
   const lcdToggle = byId('lcd-layout-toggle');
   const lcdStatus = byId('lcd-layout-status');
   let layoutRequest = null;
+  let sentLayout = null;
   let layoutAnimation = null;
   let cardPosition = {x:146,y:300};
   let cardDrag = null;
@@ -247,6 +248,7 @@ window.sceneFile = (() => {
     lcdLayout.hidden = true;
     lcdToggle.setAttribute('aria-expanded','false');
     layoutRequest = null;
+    sentLayout = null;
     clearTimeout(layoutAnimation);
     layoutAnimation = null;
     cardPosition = {x:146,y:300};
@@ -254,17 +256,43 @@ window.sceneFile = (() => {
     if (notify) send('stop_lcd_layout');
   }
 
-  function positionCard(x,y) {
-    cardPosition = {x:Math.max(0,Math.min(292,Math.round(x))),y:Math.max(0,Math.min(404,Math.round(y)))};
+  function paintCardPosition() {
     lcdCard.style.left = cardPosition.x / 4.8 + '%';
     lcdCard.style.top = cardPosition.y / 4.8 + '%';
     lcdStatus.textContent = `X ${cardPosition.x} · Y ${cardPosition.y}`;
+  }
+
+  function queueLcdLayout() {
     layoutRequest = null;
     if (layoutAnimation === null) layoutAnimation = setTimeout(() => {
       layoutAnimation = null;
       layoutRequest = send('lcd_layout',cardPosition);
       if (layoutRequest === null) lcdStatus.textContent = 'Не удалось открыть предпросмотр LCD.';
+      else sentLayout = {request:layoutRequest,...cardPosition};
     }, 32);
+  }
+
+  function positionCard(x,y) {
+    cardPosition = {x:Math.max(0,Math.min(292,Math.round(x))),y:Math.max(0,Math.min(404,Math.round(y)))};
+    paintCardPosition();
+    queueLcdLayout();
+  }
+
+  function finishCardDrag(event, cancelled) {
+    if (cardDrag?.id !== event.pointerId) return;
+    const {x,y} = cardDrag;
+    cardDrag = null;
+    if (!cancelled) return;
+    clearTimeout(layoutAnimation);
+    layoutAnimation = null;
+    cardPosition = {x,y};
+    paintCardPosition();
+    if (sentLayout?.x === x && sentLayout.y === y) {
+      layoutRequest = sentLayout.request;
+    } else {
+      setCanvas('lcd-layout-canvas',null);
+      queueLcdLayout();
+    }
   }
 
   lcdToggle.onclick = () => {
@@ -279,6 +307,7 @@ window.sceneFile = (() => {
     const delta = {ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]}[event.key];
     if (!delta) return;
     event.preventDefault();
+    if (cardDrag) return;
     const step = event.shiftKey ? 10 : 1;
     positionCard(cardPosition.x+delta[0]*step,cardPosition.y+delta[1]*step);
   };
@@ -292,7 +321,9 @@ window.sceneFile = (() => {
     if (cardDrag?.id !== event.pointerId) return;
     positionCard(cardDrag.x+(event.clientX-cardDrag.clientX)*cardDrag.scale,cardDrag.y+(event.clientY-cardDrag.clientY)*cardDrag.scale);
   };
-  lcdCard.onlostpointercapture = () => { cardDrag = null; };
+  lcdCard.onpointerup = event => finishCardDrag(event,false);
+  lcdCard.onpointercancel = event => finishCardDrag(event,true);
+  lcdCard.onlostpointercapture = event => finishCardDrag(event,true);
 
   byId('open').onclick = () => { if (canLeave()) requestFile('open'); };
   byId('save').onclick = () => { if (file && validDraft()) requestFile('save',{file}); };
