@@ -731,6 +731,10 @@ impl Runtime {
             };
             let pending = self.pending.take().unwrap();
             let outputs = pending.outputs;
+            let preserve_action_failures = outputs.is_none();
+            #[cfg(windows)]
+            let preserve_action_failures =
+                preserve_action_failures || pending.startup_managed_ids.is_some();
             let proposal = pending.document;
             let old = &self.document.lighting.setup.devices;
             let new = &proposal.lighting.setup.devices;
@@ -764,17 +768,39 @@ impl Runtime {
             }
             let inputs = Self::temperature_inputs(&proposal);
             self.sensor_specs.retain(|input, _| inputs.contains(input));
+            if preserve_action_failures {
+                for (id, spec) in &mut self.rgb_specs {
+                    if let Some(error) = self
+                        .host
+                        .status(id)
+                        .filter(|snapshot| snapshot.requires_action)
+                        .and_then(|snapshot| snapshot.error)
+                    {
+                        spec.action_required_error = Some(error);
+                    }
+                }
+            }
             if let Some(outputs) = outputs {
                 self.rgb_specs = outputs
                     .rgb
                     .into_iter()
                     .map(|(id, keys, factory)| {
+                        // Startup discovery can replace the factory of an unchanged binding.
+                        let action_required_error = if preserve_action_failures && !keys.is_empty()
+                        {
+                            self.rgb_specs
+                                .get(&id)
+                                .filter(|previous| previous.keys == keys)
+                                .and_then(|previous| previous.action_required_error.clone())
+                        } else {
+                            None
+                        };
                         (
                             id,
                             RgbSpec {
                                 keys,
                                 factory,
-                                action_required_error: None,
+                                action_required_error,
                             },
                         )
                     })
@@ -786,18 +812,6 @@ impl Runtime {
                     .collect();
                 self.capture_factory = outputs.capture;
                 self.output_revision += 1;
-            } else {
-                // A document-only edit replaces the Host, but retains its bindings.
-                for (id, spec) in &mut self.rgb_specs {
-                    if let Some(error) = self
-                        .host
-                        .status(id)
-                        .filter(|snapshot| snapshot.requires_action)
-                        .and_then(|snapshot| snapshot.error)
-                    {
-                        spec.action_required_error = Some(error);
-                    }
-                }
             }
             self.output_recovery
                 .retain(|id, _| self.rgb_specs.contains_key(id) || self.lcd_specs.contains_key(id));

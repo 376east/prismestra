@@ -242,9 +242,10 @@ fn assert_ha_authorization_recovery(status: Option<&'static str>, error: &str, i
         app::{
             config::{Groups, Project},
             document::Document,
+            lighting_outputs::Local,
             runtime::{OutputActivity, Runtime},
         },
-        devices::{Canvas, Device, Point, Role, Setup},
+        devices::{Binding, Canvas, Device, Point, Role, Setup},
         runtime::output::Phase,
         schedule,
     };
@@ -329,12 +330,17 @@ fn assert_ha_authorization_recovery(status: Option<&'static str>, error: &str, i
     })
     .unwrap();
     let mut runtime = Runtime::new(document, None).unwrap();
+    let binding = Binding::HomeAssistant {
+        endpoint: url.clone(),
+        entity: "light.room".into(),
+        credential_id: crate::devices::home_assistant::credential_id(&url).unwrap(),
+    };
     let key_saved = Arc::new(AtomicBool::new(status.is_some()));
     let key_source = key_saved.clone();
     runtime
         .attach_rgb(
             "ha",
-            vec![],
+            binding.endpoint_keys(),
             Arc::new(move |_| {
                 Ok(Box::new(HomeAssistant::with_token(
                     &url,
@@ -444,6 +450,69 @@ fn assert_ha_authorization_recovery(status: Option<&'static str>, error: &str, i
             matches!(runtime.output_activity(ha), OutputActivity::Unavailable(Some(reason)) if reason == error)
         );
     }
+
+    let mut discovered = edited;
+    let mut new_device = discovered.lighting.setup.devices[1].clone();
+    new_device.id = "discovered".into();
+    discovered.lighting.setup.devices.push(new_device);
+    discovered.lighting.setup.canvas.width = 3;
+    discovered.lighting.setup.canvas.points.push(Point {
+        device: "discovered".into(),
+        led: 0,
+        x: 2,
+        y: 0,
+    });
+    discovered.lighting.groups.door.push("discovered".into());
+    let mut outputs = runtime.output_plan();
+    let (_, _, ha_factory) = outputs
+        .rgb
+        .iter_mut()
+        .find(|(id, _, _)| id == "ha")
+        .unwrap();
+    let prior_factory = ha_factory.clone();
+    *ha_factory = Arc::new(move |cancel| prior_factory(cancel));
+    outputs.rgb.push((
+        "discovered".into(),
+        vec![],
+        Arc::new(|_| Ok(Box::new(Neighbor))),
+    ));
+    let local = Local {
+        version: 1,
+        devices: [("ha".into(), binding)].into(),
+        monitors: Default::default(),
+        door_brightness: 100,
+    };
+    let state = std::env::temp_dir().join(format!(
+        "prismestra-ha-startup-{}-{}",
+        std::process::id(),
+        crate::clock::monotonic_us()
+    ));
+    runtime
+        .request_startup_outputs_for(&state, &local, discovered.clone(), outputs)
+        .unwrap();
+    let until = Instant::now() + Duration::from_secs(3);
+    loop {
+        now += 50_000;
+        runtime.tick(now, 1_800_000_000).unwrap();
+        if runtime
+            .host()
+            .status("discovered")
+            .is_some_and(|status| status.submitted > 0)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "startup plan did not activate the discovered output"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(runtime.document(), &discovered);
+    assert!(
+        runtime.host().status("ha").is_none(),
+        "startup plan reopened HA"
+    );
+    assert_eq!(runtime.outputs_ready(), Err(error.into()));
 
     key_saved.store(true, Ordering::SeqCst);
     runtime.refresh_devices(now).unwrap();
