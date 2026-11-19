@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][guid]$Namespace,
-    [Parameter(Mandatory)][string]$FirstBuild,
+    [Parameter(Mandatory)][string]$Installer,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string]$InstallerSha256,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string]$ManifestSha256,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$Commit,
     [Parameter(Mandatory)][string]$ReportDirectory,
     [switch]$DisposableRunner
 )
@@ -27,20 +29,13 @@ function Run-Setup($Path, $Options, $Log) {
     Assert-Expected ($process.ExitCode -eq 0) ("Setup exited with code " + $process.ExitCode + ". See $Log")
 }
 
-$id = $Namespace.ToString('D')
-Assert-Expected ($Namespace -ne [guid]::Empty) 'Use a fresh test namespace.'
-$install = Join-Path $env:ProgramFiles "Prismestra Lifecycle Test\$id"
-$registry = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{' + $id + '}_is1'
-$root = (Resolve-Path -LiteralPath $FirstBuild).Path
-$manifestFile = Join-Path $root 'stage\payload\install-manifest.json'
-$manifest = Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json
-$receipt = Get-Content -LiteralPath (Join-Path $root 'installer-receipt.json') -Raw | ConvertFrom-Json
-Assert-Expected ($manifest.data_namespace -ceq $id -and @($manifest.prerequisites.PSObject.Properties).Count -eq 0) 'Expected an isolated installer without prerequisites.'
-Assert-Expected (-not (Test-Path -LiteralPath (Join-Path $root 'stage\payload\installer_policy.ps1'))) 'Expected an installer without policy provisioning.'
-Assert-Expected ($receipt.scope -eq 'compiled_only' -and $receipt.manifest_sha256 -ceq (Sha256 $manifestFile)) 'Fixture manifest and receipt differ.'
-Assert-Expected ($receipt.installer -cmatch ('^stage/dist/Prismestra-[0-9.]+-[0-9a-f]{12}-x64-test-' + $id + '\.exe$')) 'Expected an isolated Setup filename.'
-$setup = Join-Path $root $receipt.installer
-Assert-Expected ((Sha256 $setup) -ceq $receipt.installer_sha256) 'Fixture installer and receipt differ.'
+$id = [guid]::NewGuid().ToString('D')
+$install = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Prismestra'
+$registry = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{9bb22971-3e88-434d-b212-ab8cf717799a}_is1'
+$setup = (Resolve-Path -LiteralPath $Installer).Path
+Assert-Expected ([IO.Path]::GetFileName($setup) -cmatch '^Prismestra-Setup-[0-9]+(?:\.[0-9]+){2,3}-x64\.exe$') 'Expected the production Setup.'
+$setupHash = Sha256 $setup
+Assert-Expected ($setupHash -ceq $InstallerSha256) 'Production Setup SHA-256 mismatch.'
 
 $username = 'PrismCi' + ([guid]::NewGuid().ToString('N')).Substring(0, 12)
 $scratch = Join-Path $env:ProgramData ("Prismestra-StandardUser-" + [guid]::NewGuid().ToString('N'))
@@ -120,7 +115,7 @@ public static class PrismestraCiLogon {
                 ref startup, out child), "Log in fixture account with its own profile");
             Marshal.ZeroFreeGlobalAllocUnicode(secret);
             secret = IntPtr.Zero;
-            if (WaitForSingleObject(child.Process, 150000) != 0) {
+            if (WaitForSingleObject(child.Process, 240000) != 0) {
                 TerminateProcess(child.Process, 1);
                 throw new TimeoutException("Standard-user fixture worker did not finish.");
             }
@@ -154,20 +149,20 @@ $result = [ordered]@{ sid = $identity.User.Value; standard_user = $true; startup
 $app = $null
 $stop = $null
 try {
-    $profile = Join-Path $local ("Prismestra\Instances\" + $Id)
+    $profile = Join-Path $local 'Prismestra'
     if (Test-Path -LiteralPath $profile) { throw 'The standard-user profile was not fresh.' }
     $ps = Join-Path $PSHOME powershell.exe
-    $value = 'Prismestra-Test-' + $Id
+    $value = 'Prismestra'
     $command = '"' + (Join-Path $Install Prismestra.exe) + '" --installed --autostart'
     $helper = Start-Process -FilePath $ps -ArgumentList ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
-        (Join-Path $PSScriptRoot 'original-user.ps1') + '" EnableStartup "' + $Install + '" ' + $value) -PassThru -WindowStyle Hidden
+        (Join-Path $Install 'original-user.ps1') + '" EnableStartup "' + $Install + '" ' + $value) -PassThru -WindowStyle Hidden
     if (-not $helper.WaitForExit(20000)) { $helper.Kill(); throw 'Startup registration timed out.' }
     if ($helper.ExitCode -ne 0) { throw 'Standard-user startup registration failed.' }
     $prior = Get-ItemPropertyValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' $value
     if ($prior -cne $command) { throw 'HKCU startup command did not match.' }
     $result.startup_command = $prior
     $manifest = Get-Content -LiteralPath (Join-Path $Install 'install-manifest.json') -Raw | ConvertFrom-Json
-    if ($manifest.data_namespace -cne $Id) { throw 'Installed manifest does not match the fixture namespace.' }
+    if ($null -ne $manifest.data_namespace) { throw 'Expected the installed production manifest.' }
     $image = Join-Path $Install 'Prismestra.exe'
     $app = Start-Process -FilePath $image -ArgumentList '--installed', '--autostart' -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $PSScriptRoot 'app.stderr.log') -RedirectStandardOutput (Join-Path $PSScriptRoot 'app.stdout.log')
     $documentPath = Join-Path $profile 'profile.json'
@@ -282,8 +277,11 @@ $setupAttempted = $false
 try {
     $setupAttempted = $true
     Run-Setup $setup '/TASKS=""' (Join-Path $report 'install.log')
-    Assert-Expected ((Sha256 (Join-Path $install 'install-manifest.json')) -ceq $receipt.manifest_sha256) 'Installed fixture manifest differs.'
-    Assert-Expected ((Sha256 (Join-Path $install 'Prismestra.exe')) -ceq $manifest.app_sha256) 'Installed fixture app differs.'
+    $manifestPath = Join-Path $install 'install-manifest.json'
+    Assert-Expected ((Sha256 $manifestPath) -ceq $ManifestSha256) 'Installed production manifest SHA-256 mismatch.'
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    Assert-Expected ($manifest.commit -ceq $Commit -and $null -eq $manifest.data_namespace) 'Expected the production manifest for this commit.'
+    Assert-Expected ((Sha256 (Join-Path $install 'Prismestra.exe')) -ceq $manifest.app_sha256) 'Installed production app SHA-256 mismatch.'
 
     $password = [Security.SecureString]::new()
     foreach ($ch in ('Q7!' + [guid]::NewGuid().ToString('N')).ToCharArray()) { $password.AppendChar($ch) }
@@ -299,7 +297,6 @@ try {
     $permissions.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
         $account.SID, 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
     Set-Acl -LiteralPath $scratch -AclObject $permissions
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'original-user.ps1') -Destination $scratch
     $workerFile = Join-Path $scratch 'worker.ps1'
     # Windows PowerShell 5.1 needs a BOM for non-ASCII source on every system locale.
     [IO.File]::WriteAllText($workerFile, $worker, [Text.UTF8Encoding]::new($true))
@@ -341,7 +338,7 @@ try {
     }
     $profile = Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$sid'"
     Assert-Expected ($null -ne $profile) "Standard-user profile was not loaded (worker exit $status)."
-    $backendLogs = Join-Path $profile.LocalPath ("AppData\Local\Prismestra\Instances\" + $id + "\state\openrgb")
+    $backendLogs = Join-Path $profile.LocalPath 'AppData\Local\Prismestra\state\openrgb'
     if (Test-Path -LiteralPath $backendLogs) {
         $index = 0
         Get-ChildItem -LiteralPath $backendLogs -Filter '*.log' -File -Recurse |
@@ -352,8 +349,10 @@ try {
     }
     $evidence = Join-Path $profile.LocalPath ("AppData\Local\Prismestra-CI-" + $id + ".json")
     Assert-Expected (Test-Path -LiteralPath $evidence) "Fixture worker did not report assertions (exit $status)."
-    Copy-Item -LiteralPath $evidence -Destination (Join-Path $report 'standard-user.json')
     $actual = Get-Content -LiteralPath $evidence -Raw | ConvertFrom-Json
+    $actual | Add-Member -NotePropertyName installer_sha256 -NotePropertyValue $setupHash
+    $actual | Add-Member -NotePropertyName commit -NotePropertyValue $manifest.commit
+    $actual | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $report 'standard-user.json') -Encoding UTF8
     Assert-Expected ($status -eq 0 -and $actual.sid -ceq $sid -and $actual.standard_user -and $actual.empty_profile -and
         $actual.local_bindings -and $actual.backend_pin -and $actual.automatic_setup -and
         $actual.resident_shell -eq 'process_drained_by_shutdown' -and -not $actual.startup_error_file) 'Standard-user verification failed. See standard-user.json.'
@@ -362,11 +361,11 @@ try {
     try {
         if ($setupAttempted -and (Test-Path -LiteralPath $registry)) {
             $command = (Get-ItemProperty -LiteralPath $registry).QuietUninstallString
-            Assert-Expected ($command -match '^"(.+\\unins\d{3}\.exe)"') 'Expected the fixture uninstaller.'
+            Assert-Expected ($command -match '^"(.+\\unins\d{3}\.exe)"') 'Expected the production uninstaller.'
             $uninstaller = [IO.Path]::GetFullPath($Matches[1])
-            Assert-Expected ([IO.Path]::GetDirectoryName($uninstaller) -ieq $install) 'Uninstaller escaped fixture namespace.'
+            Assert-Expected ([IO.Path]::GetDirectoryName($uninstaller) -ieq $install) 'Uninstaller escaped the production install directory.'
             Run-Setup $uninstaller '' (Join-Path $report 'uninstall.log')
-            Assert-Expected (-not (Test-Path -LiteralPath (Join-Path $install 'Prismestra.exe'))) 'Fixture app was not removed.'
+            Assert-Expected (-not (Test-Path -LiteralPath (Join-Path $install 'Prismestra.exe'))) 'The production app was not removed.'
         }
     } finally {
         if ($account) {
@@ -384,7 +383,7 @@ try {
         }
         if ($password) { $password.Dispose() }
         if (Test-Path -LiteralPath $scratch) {
-            foreach ($name in @('worker.ps1', 'original-user.ps1', 'invoke-worker.ps1', 'worker-output.log', 'app.stderr.log', 'app.stdout.log')) {
+            foreach ($name in @('worker.ps1', 'invoke-worker.ps1', 'worker-output.log', 'app.stderr.log', 'app.stdout.log')) {
                 $file = Join-Path $scratch $name
                 if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
             }

@@ -5,10 +5,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: Release tag containing the installer and lifecycle fixtures
+      installer_version:
+        description: Four-part Windows installer version for a candidate build
         required: true
-        default: v0.1.0-preview.6
+        default: '0.1.0.6'
         type: string
 
 permissions:
@@ -59,91 +59,162 @@ jobs:
       - name: Check Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
-  installer:
-    name: Isolated installer lifecycle
+  package:
+    name: Build Windows Setup candidate
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && contains(github.event.head_commit.message, 'Package offline Windows setup'))
-    runs-on: windows-latest
-    timeout-minutes: 15
-    # GitHub requires push access to read an unpublished draft release.
-    # Runs only on the packaging push or an authorized manual dispatch.
-    permissions:
-      contents: write
+      github.repository == 'malyarq/prismestra' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' &&
+        ((startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-preview.')) ||
+         startsWith(github.ref, 'refs/heads/codex/delivery-ci-'))))
+    runs-on: windows-2025
+    timeout-minutes: 65
+    outputs:
+      candidate: ${{ steps.build.outputs.candidate }}
+      fixtures: ${{ steps.build.outputs.fixtures }}
+      sums_sha256: ${{ steps.build.outputs.sums_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Download and verify release fixtures
-        id: fixtures
+      - name: Build the installer and lifecycle inputs
+        id: build
         shell: pwsh
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag || 'v0.1.0-preview.6' }}
+          DISPATCH_VERSION: ${{ inputs.installer_version }}
+          PRISMESTRA_VC_REDIST_X64_URL: ${{ vars.PRISMESTRA_VC_REDIST_X64_URL }}
+          PRISMESTRA_WEBVIEW2_X64_URL: ${{ vars.PRISMESTRA_WEBVIEW2_X64_URL }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:RELEASE_TAG)) { throw 'A release tag is required' }
-          git check-ref-format "refs/tags/$env:RELEASE_TAG"
-          if ($LASTEXITCODE) { throw 'Invalid release tag' }
-          gh release download --repo $env:GITHUB_REPOSITORY --pattern installer-lifecycle-inputs.zip --dir fixture -- $env:RELEASE_TAG
-          if ($LASTEXITCODE) { throw 'Candidate lifecycle fixtures unavailable' }
-          Expand-Archive -LiteralPath fixture/installer-lifecycle-inputs.zip -DestinationPath fixture/inputs
-          $metadata = Get-Content -LiteralPath fixture/inputs/test.json -Raw | ConvertFrom-Json
-          if ($metadata.commit -isnot [string] -or $metadata.commit -cnotmatch '^[0-9a-f]{40}$' -or
-              $metadata.commit -cne $env:GITHUB_SHA) {
-            throw 'Lifecycle fixture commit differs from the workflow checkout commit'
+          $version = $env:DISPATCH_VERSION
+          if ($env:GITHUB_REF_TYPE -ceq 'tag') {
+            if ($env:GITHUB_REF_NAME -cnotmatch '^v(\d+\.\d+\.\d+)-preview\.(\d+)$') {
+              throw 'Expected a preview tag like v0.1.0-preview.6'
+            }
+            $version = "$($Matches[1]).$($Matches[2])"
+          } elseif (-not $version) {
+            $version = '0.1.0.6'
           }
-          if ($metadata.namespace -isnot [string] -or
-              $metadata.namespace -cnotmatch '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$') {
-            throw 'Lifecycle fixture does not specify an isolated namespace'
-          }
-          foreach ($build in 'first', 'upgrade') {
-            $manifest = Get-Content -LiteralPath "fixture/inputs/$build/stage/payload/install-manifest.json" -Raw | ConvertFrom-Json
-            if ($manifest.commit -cne $env:GITHUB_SHA -or $manifest.data_namespace -cne $metadata.namespace) {
-              throw "Lifecycle $build manifest does not match its fixture commit and namespace"
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vsdevcmd = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find Common7/Tools/VsDevCmd.bat
+          if (-not $vsdevcmd) { throw 'MSVC build tools were not found' }
+          rustup toolchain install 1.99.1 --profile minimal
+          if ($LASTEXITCODE) { throw 'Installing the candidate Rust toolchain failed' }
+          $env:RUSTUP_TOOLCHAIN = '1.99.1'
+          $output = Join-Path $env:RUNNER_TEMP prismestra-candidate
+          python scripts/build_windows_candidate.py --commit $env:GITHUB_SHA --version $version --vsdevcmd $vsdevcmd --output $output
+          if ($LASTEXITCODE) { throw 'Building the Windows candidate failed' }
+          "candidate=prismestra-compiled-$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_OUTPUT
+          "fixtures=prismestra-lifecycle-inputs-$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_OUTPUT
+          "sums_sha256=$((Get-FileHash (Join-Path $output 'candidate/SHA256SUMS.txt')).Hash.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.build.outputs.candidate }}
+          path: ${{ runner.temp }}/prismestra-candidate/candidate/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.build.outputs.fixtures }}
+          path: ${{ runner.temp }}/prismestra-candidate/fixtures/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Retain component build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: component-build-diagnostics-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/prismestra-candidate/openrgb-build/*.log
+            ${{ runner.temp }}/prismestra-candidate/openrgb-inventory.json
+            ${{ runner.temp }}/prismestra-candidate/component-parent-smoke/
+          retention-days: 14
+
+  installer:
+    name: Windows lifecycle (${{ matrix.test }})
+    needs: package
+    runs-on: windows-2025
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        test: [offline-setup, standard-user, upgrade-fixtures]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: matrix.test != 'upgrade-fixtures'
+        with:
+          name: ${{ needs.package.outputs.candidate }}
+          path: ${{ runner.temp }}/candidate
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: matrix.test == 'upgrade-fixtures'
+        with:
+          name: ${{ needs.package.outputs.fixtures }}
+          path: ${{ runner.temp }}/fixtures
+      - name: Exercise setup and uninstall
+        if: matrix.test == 'offline-setup'
+        shell: pwsh
+        env:
+          SUMS_SHA256: ${{ needs.package.outputs.sums_sha256 }}
+        run: |
+          $candidate = ./scripts/installer/verify_candidate.ps1 -Directory (Join-Path $env:RUNNER_TEMP candidate) -Commit $env:GITHUB_SHA -SumsSha256 $env:SUMS_SHA256
+          ./scripts/installer/test_offline_setup.ps1 -Installer $candidate.Setup -Sha256 $candidate.SetupSha256 -ReportDirectory evidence -DisposableRunner
+      - name: Launch the same Setup payload as a fresh standard user
+        if: matrix.test == 'standard-user'
+        shell: pwsh
+        env:
+          SUMS_SHA256: ${{ needs.package.outputs.sums_sha256 }}
+        run: |
+          $candidate = ./scripts/installer/verify_candidate.ps1 -Directory (Join-Path $env:RUNNER_TEMP candidate) -Commit $env:GITHUB_SHA -SumsSha256 $env:SUMS_SHA256
+          ./scripts/installer/test_standard_user.ps1 -Installer $candidate.Setup -InstallerSha256 $candidate.SetupSha256 -ManifestSha256 $candidate.ManifestSha256 -Commit $env:GITHUB_SHA -ReportDirectory evidence -DisposableRunner
+      - name: Exercise repair, upgrade and retention in an isolated namespace
+        if: matrix.test == 'upgrade-fixtures'
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP fixtures
+          $namespace = [guid](Get-Content -LiteralPath (Join-Path $root namespace.txt) -Raw).Trim()
+          foreach ($name in 'first', 'upgrade') {
+            $manifest = Get-Content -LiteralPath (Join-Path $root "$name/stage/payload/install-manifest.json") -Raw | ConvertFrom-Json
+            if ($manifest.commit -cne $env:GITHUB_SHA -or $manifest.data_namespace -cne $namespace.ToString('D')) {
+              throw "Lifecycle $name fixture differs from this run's commit or namespace"
             }
           }
-          $asset = $metadata.production_asset
-          if (-not $asset -and $env:RELEASE_TAG -ceq 'v0.1.0-preview.5') {
-            $asset = 'Prismestra-Setup-0.1.0.5-x64.exe'
-          }
-          if ($asset -isnot [string] -or $asset -cnotmatch '^Prismestra-Setup-[0-9]+(?:\.[0-9]+){2,3}-x64\.exe$' -or
-              $metadata.production_sha256 -isnot [string] -or $metadata.production_sha256 -cnotmatch '^[0-9a-f]{64}$') {
-            throw 'Lifecycle fixture does not pin a valid offline installer asset'
-          }
-          gh release download --repo $env:GITHUB_REPOSITORY --pattern $asset --dir fixture -- $env:RELEASE_TAG
-          if ($LASTEXITCODE) { throw 'Candidate offline setup unavailable' }
-          $installer = Join-Path fixture $asset
-          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant() -cne $metadata.production_sha256) {
-            throw 'Offline setup SHA-256 differs from the fixture pin'
-          }
-          "production_asset=$asset" >> $env:GITHUB_OUTPUT
-          "production_sha256=$($metadata.production_sha256)" >> $env:GITHUB_OUTPUT
-      - name: Exercise the full offline installer
-        shell: pwsh
-        env:
-          PRODUCTION_ASSET: ${{ steps.fixtures.outputs.production_asset }}
-          PRODUCTION_SHA256: ${{ steps.fixtures.outputs.production_sha256 }}
-        run: |
-          ./scripts/installer/test_offline_setup.ps1 -Installer (Join-Path fixture $env:PRODUCTION_ASSET) -Sha256 $env:PRODUCTION_SHA256 -ReportDirectory offline-setup-result -DisposableRunner
-      - name: Exercise installation, repair, upgrade and uninstall
-        if: always() && steps.fixtures.outcome == 'success'
-        shell: pwsh
-        run: |
-          $metadata = Get-Content fixture/inputs/test.json -Raw | ConvertFrom-Json
-          ./scripts/installer/test_lifecycle.ps1 -Namespace $metadata.namespace -FirstBuild fixture/inputs/first -UpgradeBuild fixture/inputs/upgrade -ReportDirectory lifecycle-result -ElevatedFilesOnly
-      - name: Exercise a fresh standard Windows account
-        if: always() && steps.fixtures.outcome == 'success'
-        shell: pwsh
-        run: |
-          $metadata = Get-Content fixture/inputs/test.json -Raw | ConvertFrom-Json
-          ./scripts/installer/test_standard_user.ps1 -Namespace $metadata.namespace -FirstBuild fixture/inputs/first -ReportDirectory standard-user-result -DisposableRunner
+          ./scripts/installer/test_lifecycle.ps1 -Namespace $namespace -FirstBuild (Join-Path $root first) -UpgradeBuild (Join-Path $root upgrade) -ReportDirectory evidence -ElevatedFilesOnly
       - name: Retain lifecycle evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: installer-lifecycle-evidence
-          path: |
-            offline-setup-result/
-            lifecycle-result/
-            standard-user-result/
+          name: lifecycle-${{ matrix.test }}-${{ github.run_attempt }}
+          path: evidence/
           retention-days: 14
+
+  candidate:
+    name: Retain verified Windows candidate
+    needs: [software, package, installer]
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.package.outputs.candidate }}
+          path: ${{ runner.temp }}/candidate
+      - name: Verify the tested bytes
+        shell: pwsh
+        env:
+          SUMS_SHA256: ${{ needs.package.outputs.sums_sha256 }}
+        run: |
+          $candidate = ./scripts/installer/verify_candidate.ps1 -Directory (Join-Path $env:RUNNER_TEMP candidate) -Commit $env:GITHUB_SHA -SumsSha256 $env:SUMS_SHA256
+          "Setup SHA-256: $($candidate.SetupSha256)" >> $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: prismestra-verified-candidate-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
