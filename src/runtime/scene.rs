@@ -217,6 +217,14 @@ impl Renderer {
         Ok(())
     }
     pub fn step(&mut self, canvas: &Canvas) -> Result<Vec<Rgb>, String> {
+        self.step_after_skips(canvas, 0)
+    }
+
+    pub(super) fn step_after_skips(
+        &mut self,
+        canvas: &Canvas,
+        skipped: u64,
+    ) -> Result<Vec<Rgb>, String> {
         if canvas.width == 0
             || canvas.height == 0
             || canvas.points.len() > 65536
@@ -242,6 +250,7 @@ impl Renderer {
                 Ok(vec![color; canvas.points.len()])
             }
             State::Rainbow(rainbow) => {
+                rainbow.advance_frames(p, skipped);
                 let columns = rainbow
                     .step(
                         p,
