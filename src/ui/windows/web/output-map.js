@@ -76,7 +76,14 @@ window.outputMap = (() => {
   back.onclick = () => load(Math.max(0, offset - pageSize));
   next.onclick = () => load(offset + pageSize);
   refresh.onclick = () => load(offset);
-  document.getElementById('output-map-close').onclick = () => dialog.close();
-  dialog.addEventListener('close', () => document.getElementById('output-map-open')?.focus());
+  function close() {
+    dialog.close();
+    document.getElementById('output-map-open')?.focus({preventScroll:true});
+  }
+  document.getElementById('output-map-close').onclick = close;
+  dialog.addEventListener('cancel', event => {
+    event.preventDefault();
+    close();
+  });
   return {mount, receive};
 })();
