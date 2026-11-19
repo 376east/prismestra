@@ -1333,14 +1333,27 @@ impl Runtime {
         let mut ready = true;
         if let Some(error) = self
             .output_recovery
-            .values()
-            .find_map(|state| state.start_error.as_ref())
+            .iter()
+            .filter(|(id, _)| !will_retry(id))
+            .find_map(|(_, state)| state.start_error.as_ref())
         {
             return Err(error.clone());
         }
+        // A failed synchronous start may leave the old stopped worker as the
+        // only snapshot. Its committed route still has a retry budget.
+        let retry_start = |id: &str| {
+            will_retry(id)
+                && self
+                    .output_recovery
+                    .get(id)
+                    .is_some_and(|state| state.start_error.is_some())
+        };
         // This is lighting-output readiness. Optional temperature readers may
         // connect/fail independently; absence is not a temperature reading.
         for id in self.rgb_specs.keys() {
+            if retry_start(id) {
+                continue;
+            }
             let s = self
                 .host
                 .status(id)
@@ -1353,6 +1366,9 @@ impl Runtime {
             }
         }
         for (id, worker) in &self.lcd {
+            if retry_start(id) {
+                continue;
+            }
             let s = worker.snapshot();
             match s.phase {
                 lcd_worker::Phase::Ready => {}

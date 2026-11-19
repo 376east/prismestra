@@ -1047,3 +1047,83 @@ fn resume_keeps_ready_outputs_live_while_a_known_output_recovers() {
     );
     drain(&mut runtime);
 }
+
+#[test]
+fn resume_recovers_a_known_output_whose_endpoint_is_still_claimed() {
+    let mut runtime = runtime();
+    let a = Arc::new(Link::default());
+    let b = Arc::new(Link::default());
+    let keys = vec!["resume-lease-fixture:a".into()];
+    runtime.attach_rgb("a", keys.clone(), factory(&a)).unwrap();
+    runtime.attach_rgb("b", vec![], factory(&b)).unwrap();
+    runtime.enable_registered_output_recovery();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+    working(&mut runtime, "b", &mut now);
+
+    runtime.notify_power(true, now).unwrap();
+    runtime.notify_power(false, now).unwrap();
+    wait(|| runtime.lighting_drained());
+    let lease = crate::runtime::output::Lease::acquire(keys).unwrap();
+    now += 7_000_000;
+    tick(&mut runtime, &mut now);
+    wait(|| b.calls.load(Ordering::SeqCst) == 2);
+    tick(&mut runtime, &mut now);
+    assert_eq!(runtime.power.error(), None);
+    working(&mut runtime, "b", &mut now);
+    let healthy_generation = runtime.host.status("b").unwrap().generation;
+
+    drop(lease);
+    now += 1_000_000;
+    working(&mut runtime, "a", &mut now);
+    assert_eq!(a.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(b.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        healthy_generation
+    );
+    drain(&mut runtime);
+}
+
+#[test]
+fn resume_recovers_a_known_lcd_whose_endpoint_is_still_claimed() {
+    let link = Arc::new(Link::default());
+    let (mut runtime, dir) = arrival_lcd_runtime("resume-lease", link.clone());
+    let rgb = Arc::new(Link::default());
+    runtime.attach_rgb("b", vec![], factory(&rgb)).unwrap();
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.lcd_status("lcd").unwrap().frames_sent > 0
+    });
+
+    runtime.notify_power(true, now).unwrap();
+    runtime.notify_power(false, now).unwrap();
+    wait(|| runtime.lighting_drained());
+    let lease = crate::runtime::output::Lease::acquire(vec!["hid:bound-interface".into()]).unwrap();
+    now += 7_000_000;
+    tick(&mut runtime, &mut now);
+    wait(|| rgb.calls.load(Ordering::SeqCst) == 2);
+    tick(&mut runtime, &mut now);
+    assert_eq!(runtime.power.error(), None);
+    assert!(runtime.outputs_ready().is_err());
+    working(&mut runtime, "b", &mut now);
+    let healthy_generation = runtime.host.status("b").unwrap().generation;
+
+    drop(lease);
+    now += 1_000_000;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        let status = runtime.lcd_status("lcd").unwrap();
+        status.phase == lcd_worker::Phase::Ready && status.frames_sent > 0
+    });
+    assert_eq!(link.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(rgb.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        healthy_generation
+    );
+    drain(&mut runtime);
+    remove_lcd_assets(runtime, dir);
+}
