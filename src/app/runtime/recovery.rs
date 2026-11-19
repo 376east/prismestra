@@ -71,7 +71,7 @@ impl Runtime {
     /// Success does not replenish the budget. Budget is renewed only by
     /// an explicit configuration/refresh/power epoch or the return of a bound
     /// LCD interface, never by a successful factory or duplicate arrival.
-    /// Errors are untyped, so even auth/topology failures use this finite budget.
+    /// Generic errors use this finite budget. A worker can explicitly require user action.
     pub fn enable_output_recovery(&mut self, id: &str) -> Result<(), String> {
         if !self.rgb_specs.contains_key(id) && !self.lcd_specs.contains_key(id) {
             return Err("Output recovery requires a registered output".into());
@@ -151,6 +151,9 @@ impl Runtime {
         for (id, state) in &mut self.output_recovery {
             if let Some(spec) = self.rgb_specs.get(id) {
                 let snapshot = self.host.status(id);
+                if snapshot.as_ref().is_some_and(|s| s.requires_action) {
+                    continue;
+                }
                 let failed = state.start_error.is_some()
                     || snapshot
                         .as_ref()
