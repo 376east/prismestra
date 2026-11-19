@@ -6,7 +6,7 @@ Extract the complete Windows ZIP into a folder you can write to. The launchers u
 
 1. Run `Open Prismestra.cmd`. This opens a software preview, without activating saved hardware outputs.
 2. Create your device layout or open an exported profile using the editor. Inspect the Connections page and configure the supported devices on this PC. Saving connection settings and applying them are separate actions. See [connection behavior](https://github.com/malyarq/prismestra/blob/codex/native-design/docs/universal-connections.md).
-3. Save your profile as `data/profile.json` inside the extracted folder. The launcher does not guess which of your scenes to use and does not automatically save unsaved profile edits. Use Export to move a profile with its LCD media to another PC; opening that exported package imports media into the local asset store. Save the imported profile at `data/profile.json` afterward.
+3. Save your profile as `data/profile.json` inside the extracted folder. The launcher does not guess which of your scenes to use and does not automatically save unsaved profile edits. Use **Export Profile** to move a profile with its LCD media to another PC. Opening the ZIP imports those files into the local asset store. Save the imported profile at `data/profile.json` afterward.
 4. Exit the resident session from the tray before changing launch modes. Run `Start saved scene.cmd` to open the saved profile and activate its saved connections, including configured temperature routes. Later launches use the same saved profile and state directory.
 
 `Open Prismestra.cmd` loads `data/profile.json` when it exists; otherwise it opens the default preview. It never adds `--start-connected`. `Start saved scene.cmd` requires both that profile and `data/state/lighting-local.json`. A missing file stops launch with an instruction rather than selecting another device. Rust still validates the profile, bindings, device identities and capabilities at runtime. Passing launcher checks does not prove that a device is connected or compatible.
@@ -25,7 +25,7 @@ The launcher waits up to 15 seconds for an atomic, process-bound native-core ack
 | `data/state/` | Local connection bindings, sensor routes, imported media, scene library and editor state |
 | Windows Credential Manager | Home Assistant tokens, outside the folder |
 
-The release ZIP contains no personal profile or state. Your populated folder contains private device details; do not upload or redistribute it. A profile exported from the editor excludes local bindings and credentials. On another PC, inspect or replace local connections and temperature sources before activating outputs. Home Assistant credentials must be entered on that PC. Device identity checks are retained; copying files does not grant compatibility with a replacement controller.
+The release ZIP contains no personal profile or state. Your populated folder contains private device details; do not upload or redistribute it. **Export Profile** includes the current profile and its referenced media. The named **My Scenes** library stays in `data/state/scene-library.json` when using the portable launchers. Back up that file separately if you want to keep the library. Local bindings and credentials stay on this PC. On another PC, inspect or replace local connections and temperature sources before activating outputs. Home Assistant credentials must be entered on that PC. Device identity checks are retained; copying files does not grant compatibility with a replacement controller.
 
 ## OpenRGB and prerequisites
 
