@@ -24,6 +24,10 @@ pub struct Media {
     pub rotation: i32,
 }
 
+/// Author-distributed original GIF. See resources/lcd/README.md for provenance.
+pub const BUILTIN_KALEIDOSCOPE_GIF: &[u8] =
+    include_bytes!("../../resources/lcd/animated-kaleidoscope.gif");
+
 fn limits() -> Limits {
     let mut limits = Limits::default();
     limits.max_image_width = Some(4096);

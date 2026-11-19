@@ -1033,38 +1033,10 @@ fn place(id: &str, points: &[(usize, usize)], tile: Tile) -> Vec<Point> {
 }
 
 fn save_lcd_media(root: &Path) -> Result<AssetId, String> {
-    use image::{
-        Delay, Frame, Rgba, RgbaImage,
-        codecs::gif::{GifEncoder, Repeat},
-    };
-    let mut media = Vec::new();
-    {
-        let mut encoder = GifEncoder::new_with_speed(&mut media, 10);
-        encoder
-            .set_repeat(Repeat::Infinite)
-            .map_err(|e| e.to_string())?;
-        for phase in 0..16i32 {
-            let offset = 8 * (8 - (phase - 8).abs());
-            let image = RgbaImage::from_fn(96, 96, |x, y| {
-                let glow = (112 - (x as i32 - 16 - offset).abs() - (y as i32 - 48).abs()).max(0);
-                Rgba([
-                    20 + (glow / 2) as u8,
-                    12 + (glow / 3) as u8,
-                    42 + glow as u8,
-                    255,
-                ])
-            });
-            encoder
-                .encode_frame(Frame::from_parts(
-                    image,
-                    0,
-                    0,
-                    Delay::from_numer_denom_ms(120, 1),
-                ))
-                .map_err(|e| e.to_string())?;
-        }
-    }
-    Store::new(root.to_path_buf())?.put(&media, crate::lcd::media::MAX_SOURCE)
+    Store::new(root.to_path_buf())?.put(
+        crate::lcd::media::BUILTIN_KALEIDOSCOPE_GIF,
+        crate::lcd::media::MAX_SOURCE,
+    )
 }
 
 #[cfg(test)]

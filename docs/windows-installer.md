@@ -18,7 +18,7 @@ During the existing installation elevation, Setup can also recognize the pinned 
 
 ## Automatic setup scope
 
-The built-in first map uses physical Direct-capable controllers reported by the owned OpenRGB backend, positively identified TT LCD interfaces and compatible Surplife E1 controllers that confirm their actual pixel capacity. BLE discovery first requires a precise advertisement signature and then a read-only capability query; a Bluetooth name alone never enables a new protocol. A fresh LCD gets a bundled generated animation, while migration preserves selected media and sensor mappings. Available temperature providers are not invented.
+The built-in first map uses physical Direct-capable controllers reported by the owned OpenRGB backend, positively identified TT LCD interfaces and compatible Surplife E1 controllers that confirm their actual pixel capacity. BLE discovery first requires a precise advertisement signature and then a read-only capability query; a Bluetooth name alone never enables a new protocol. A fresh LCD gets the bundled [Animated Kaleidoscope GIF by Tim Kloske](../resources/lcd/README.md). Migration preserves selected media and sensor mappings. Available temperature providers are not invented.
 
 The initial map preserves LED order and native controller geometry, with separate tiles for devices. Software cannot infer where a strip runs around a room: move tiles to match the installation. Scans are finite and repeated during startup to allow late devices to appear; a temporarily unavailable path does not permanently close discovery. Stop/Exit cancels the scan, and manual editing takes precedence over a pending automatic result.
 
