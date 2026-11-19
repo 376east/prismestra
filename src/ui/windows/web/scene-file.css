@@ -42,6 +42,8 @@
 }
 .scene-file-stage {
  position: relative;
+ width: min(100%, calc(min(55vh, 480px) * var(--scene-frame-ratio, 1)));
+ margin-inline: auto;
 }
 #scene-file-outline {
  position: absolute;

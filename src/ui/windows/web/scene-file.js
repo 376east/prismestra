@@ -5,6 +5,7 @@ window.sceneFile = (() => {
   const dialog = byId('dialog');
   const controls = byId('controls');
   const status = byId('status');
+  const stage = byId('canvas').parentElement;
   const positions = ['x','y','width','height'];
   const edges = [...byId('edges').querySelectorAll('input')];
   const effects = {noise_map:'Карта шума',breathing:'Дыхание',rainbow_wave:'Радужная волна'};
@@ -51,6 +52,7 @@ window.sceneFile = (() => {
   }
 
   function showFrame(frame) {
+    stage.style.setProperty('--scene-frame-ratio', frame.canvas.width / frame.canvas.height);
     setCanvas('canvas',frame.canvas);
     setCanvas('lcd',frame.lcd);
     setCanvas('strip',frame.strip);
