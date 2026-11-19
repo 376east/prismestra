@@ -69,6 +69,9 @@ enum Command {
     SelectItem {
         index: usize,
     },
+    SelectDevice {
+        id: String,
+    },
     SetField {
         key: String,
         value: String,
@@ -628,6 +631,16 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                         return Err("Объект не найден".into());
                     }
                     e.index = index;
+                    a.refresh_editor(true);
+                }
+                Command::SelectDevice { id } => {
+                    if a.runtime.pending_configuration() {
+                        return Err("Дождитесь применения".into());
+                    }
+                    a.editor
+                        .as_mut()
+                        .ok_or("Нет параметров")?
+                        .select_device(&id)?;
                     a.refresh_editor(true);
                 }
                 Command::SetField {

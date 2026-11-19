@@ -92,6 +92,21 @@ pub struct Editor {
     pub index: usize,
 }
 impl Editor {
+    pub fn select_device(&mut self, id: &str) -> Result<(), String> {
+        if self.page != Page::Devices {
+            return Err("Откройте раздел «Устройства»".into());
+        }
+        self.index = self
+            .document
+            .lighting
+            .setup
+            .devices
+            .iter()
+            .position(|device| device.id == id)
+            .ok_or("Устройства нет в черновике профиля")?;
+        Ok(())
+    }
+
     pub fn targets(document: &Document, page: Page) -> Vec<String> {
         match page {
             Page::Devices => document
@@ -1550,6 +1565,30 @@ mod tests {
         expected.lighting.setup.canvas.height = 100;
         assert_eq!(editor.document, expected);
     }
+    #[test]
+    fn device_selection_follows_identity_after_draft_removal() {
+        let mut editor = Editor {
+            document: document(),
+            page: Page::Devices,
+            index: 0,
+        };
+        editor.add_device("door20").unwrap();
+        editor.index = 0;
+        editor.remove_device().unwrap();
+
+        editor.select_device("lcd").unwrap();
+        assert_eq!(editor.index, 0);
+        assert_eq!(
+            editor.document.lighting.setup.devices[editor.index].id,
+            "lcd"
+        );
+        assert!(editor.select_device("screen").is_err());
+        assert_eq!(editor.index, 0);
+
+        editor.page = Page::Lcd;
+        assert!(editor.select_device("lcd").is_err());
+    }
+
     #[test]
     fn device_remove_cleans_references_and_lcd_add_invents_no_asset() {
         let original = document();

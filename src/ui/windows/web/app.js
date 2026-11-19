@@ -17,7 +17,8 @@ const changed = () => !!draft && !!state && !same(draft,state.scene);
 function focusKey(node=document.activeElement) {
  if(!node) return null;
  if(node.id) return '#'+CSS.escape(node.id);
- for(const key of ['view','action','edit','apply','remove','field','param','color','target','group','effect','asset','device-index','remove-color','native-field','native-action']) if(node.dataset?.[key] !== undefined) return `[data-${key}="${CSS.escape(node.dataset[key])}"]`;
+ if(node.dataset?.deviceId!==undefined)return `[data-device-id="${CSS.escape(node.dataset.deviceId)}"]`;
+ for(const key of ['view','action','edit','apply','remove','field','param','color','target','group','effect','asset','remove-color','native-field','native-action']) if(node.dataset?.[key] !== undefined) return `[data-${key}="${CSS.escape(node.dataset[key])}"]`;
  return null;
 }
 function restoreFocus(key, selection) {
@@ -60,7 +61,7 @@ function stagedDirty() {return formStages.size>0;}
 function currentPageStaged() {return [...formStages.values()].some(record=>record.page===view);}
 function discardPageFields() {const removed=new Set();for(const [key,record] of formStages)if(record.page===view){formStages.delete(key);removed.add(key);}submittedStages=submittedStages.filter(([key])=>!removed.has(key));render();}
 function completeStageAck() {for(const [key,value] of submittedStages)if(formStages.get(key)?.value===value)formStages.delete(key);submittedStages=[];}
-function selectTarget(index,input=null) {if(stagedDirty()){if(input)input.value=String(state.editor.index);showError('Примените или отмените незавершённый ввод перед выбором другого объекта.');return;}send({op:'select_item',index},true);}
+function selectTarget(command,input=null) {if(stagedDirty()){if(input)input.value=String(state.editor.index);showError('Примените или отмените незавершённый ввод перед выбором другого объекта.');return;}send(command,true);}
 function deferRender() {if(pointerGesture||keyGesture||composing){renderQueued=true;return true;}return false;}
 function releaseGesture() {requestAnimationFrame(()=>{if(renderQueued&&!pointerGesture&&!keyGesture&&!composing){renderQueued=false;render();}});}
 function nativeControlDisabled(node) {
@@ -121,7 +122,7 @@ function nativeProperties() {
  return `<section class="native-properties"><div class="native-inline"><label for="native-target">Объект</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select></div><div class="parameter-panel"><p class="parameter-note" role="status" id="native-runtime-detail">${esc(state.detail||'')}</p><div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>Выбрать…</button>`:''}</div>`}${field.hint?`<small>${esc(field.hint)}</small>`:''}</div>`).join('')||'<p class="muted">Параметров объекта нет.</p>'}</div><div class="native-property-actions">${action('Применить','apply-document',true,'data-needs-change="document"')}${action('Отменить изменения','revert-document')}${action('Повторить','retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
 }
 function renderDevices() {
- return heading('Устройства','Изменения действуют после «Применить». Профиль сохраняется отдельно.')+`<div class="device-list">${state.devices.map((d,index)=>`<article class="device"><div class="device-symbol">${icon('devices')}</div><div class="device-info"><h2>${esc(d.label)}</h2><p>${esc(d.driver?.type)} · ${esc(d.role)}</p></div><div class="device-meta"><span>${esc(d.leds)} LED · ${esc(d.rate_hz)} Гц</span><small>${d.enabled?'Включено':'Выключено'}</small></div><button class="icon-button" data-device-index="${index}" data-mutation ${disabled()} aria-label="Свойства: ${esc(d.label)}">${icon('edit')}</button></article>`).join('')||'<div class="empty"><h2>В профиле нет устройств</h2><p>Добавьте устройство в свойствах профиля.</p></div>'}</div><div style="margin-top:24px">${nativeProperties()}</div>`;
+ return heading('Устройства','Изменения действуют после «Применить». Профиль сохраняется отдельно.')+`<div class="device-list">${state.devices.map(d=>`<article class="device"><div class="device-symbol">${icon('devices')}</div><div class="device-info"><h2>${esc(d.label)}</h2><p>${esc(d.driver?.type)} · ${esc(d.role)}</p></div><div class="device-meta"><span>${esc(d.leds)} LED · ${esc(d.rate_hz)} Гц</span><small>${d.enabled?'Включено':'Выключено'}</small></div><button class="icon-button" data-device-id="${esc(d.id)}" data-mutation ${disabled()} aria-label="Свойства: ${esc(d.label)}">${icon('edit')}</button></article>`).join('')||'<div class="empty"><h2>В профиле нет устройств</h2><p>Добавьте устройство в свойствах профиля.</p></div>'}</div><div style="margin-top:24px">${nativeProperties()}</div>`;
 }
 function renderNativeForm(form=nativeFormForView()) {
  if(!form||form.page!==view)return '<div class="native-wait" role="status">Загрузка настроек…</div>';
@@ -211,7 +212,12 @@ document.addEventListener('click',event=>{
  if(b.dataset.effect){draft.effect=b.dataset.effect;draft.speed=Math.min(draft.effect==='breathing'?200:100,Math.max(draft.effect==='breathing'?10:1,draft.speed));render();requestPreview();return;}
  if(b.dataset.removeColor!==undefined){if(draft.colors.length>1)draft.colors.splice(+b.dataset.removeColor,1);render();requestPreview();return;}
  if(b.dataset.asset)return void send({op:'asset',key:b.dataset.asset},true);
- if(b.dataset.deviceIndex!==undefined)return void selectTarget(+b.dataset.deviceIndex);
+ if(b.dataset.deviceId!==undefined){
+  if(!pendingView && !renderQueued && view==='devices' && state?.editor?.page==='devices'){
+   selectTarget({op:'select_device',id:b.dataset.deviceId});
+  }
+  return;
+ }
  switch(b.dataset.action){
  case 'new':case 'clone':case 'rename':return nameDialog(b.dataset.action);
  case 'save-scene':return nameDialog('save');
@@ -239,7 +245,7 @@ document.addEventListener('change',event=>{
  if(input.dataset.nativeField!==undefined){if(['text','secret'].includes(input.dataset.nativeKind)){stageText(input);return;}if(nativeControlDisabled(input))return;send({op:'native_field',id:input.dataset.nativeField,value:input.dataset.nativeKind==='checkbox'?String(input.checked):input.value},true);return;}
  if(busy())return;
  if(input.dataset.group){send({op:'groups',...state.groups,[input.dataset.group]:input.checked},true);return;}
- if(input.hasAttribute('data-target'))return void selectTarget(+input.value,input);
+ if(input.hasAttribute('data-target'))return void selectTarget({op:'select_item',index:+input.value},input);
  if(input.dataset.field){if(input.tagName==='INPUT'){stageText(input);return;}return void send({op:'set_field',key:input.dataset.field,value:input.value},true);}
  if(input.dataset.sceneSelect){draft[input.dataset.sceneSelect]=input.value;editDraft();}
 });
