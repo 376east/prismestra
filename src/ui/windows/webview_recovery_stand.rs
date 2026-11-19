@@ -64,13 +64,16 @@ fn browser_process_crash_preserves_resident_rgb_and_committed_draft() {
     .save(&setup)
     .unwrap();
     ENABLED.set(true);
-    let result = run_inner(vec![
-        "--selftest".into(),
-        "--state-dir".into(),
-        root.join("state").into_os_string(),
-        "--setup".into(),
-        setup.into_os_string(),
-    ]);
+    let result = run_inner(
+        vec![
+            "--selftest".into(),
+            "--state-dir".into(),
+            root.join("state").into_os_string(),
+            "--setup".into(),
+            setup.into_os_string(),
+        ],
+        None,
+    );
     ENABLED.set(false);
     result.unwrap();
 }
