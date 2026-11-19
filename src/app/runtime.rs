@@ -248,6 +248,7 @@ pub struct Runtime {
     suspended: bool,
     stopped: bool,
     refresh_started: bool,
+    retry_action_required_on_refresh: bool,
     error: Option<String>,
     pending: Option<Configuration>,
     colors: Vec<Rgb>,
@@ -324,6 +325,7 @@ impl Runtime {
             suspended: false,
             stopped: false,
             refresh_started: false,
+            retry_action_required_on_refresh: false,
             error: None,
             pending: None,
             colors,
@@ -810,7 +812,7 @@ impl Runtime {
             self.refresh = None;
             self.refresh_started = false;
         }
-        if restart && let Err(error) = self.restart_registered() {
+        if restart && let Err(error) = self.restart_registered(false) {
             self.stop_channels();
             return Err(error);
         }
@@ -1255,6 +1257,7 @@ impl Runtime {
         self.bump_view();
         self.refresh = None;
         self.refresh_started = false;
+        self.retry_action_required_on_refresh = false;
         // A resume can be delivered without a preceding suspend notification.
         // Its old owners must still drain before new factories are invoked.
         if suspended || self.power.resumes != resumes {
@@ -1274,15 +1277,23 @@ impl Runtime {
     pub fn refresh_devices(&mut self, now_us: u64) -> Result<(), String> {
         self.lighting_power(true, now_us)?;
         self.lighting_power(false, now_us)?;
+        self.retry_action_required_on_refresh = true;
         self.error = None;
         Ok(())
     }
-    fn restart_registered(&mut self) -> Result<(), String> {
+    fn rgb_requires_action(&self, id: &str) -> bool {
+        self.host
+            .status(id)
+            .is_some_and(|status| status.requires_action)
+    }
+
+    fn restart_registered(&mut self, retry_action_required: bool) -> Result<(), String> {
         // Called only after all previous owners have been reaped. Never reuse a
         // native handle across suspend; every factory revalidates its binding.
         let rgb = self
             .rgb_specs
             .iter()
+            .filter(|(id, _)| retry_action_required || !self.rgb_requires_action(id))
             .map(|(id, s)| (id.clone(), s.keys.clone(), s.factory.clone()))
             .collect::<Vec<_>>();
         for (id, keys, f) in rgb {
@@ -1402,7 +1413,9 @@ impl Runtime {
             }
             // A known output with its own finite retry budget can recover
             // after resume without discarding successfully reopened owners.
-            match self.ready(|id| self.output_recovery.contains_key(id)) {
+            match self
+                .ready(|id| self.output_recovery.contains_key(id) || self.rgb_requires_action(id))
+            {
                 Ok(true) => {
                     self.power
                         .refreshed(generation, now / 1000, Ok(()))
@@ -1428,10 +1441,12 @@ impl Runtime {
             {
                 Some(Action::Refresh { generation }) => {
                     self.refresh_started = true;
+                    let retry_action_required =
+                        std::mem::take(&mut self.retry_action_required_on_refresh);
                     let configuring = self.pending.is_some();
                     let restart = if configuring {
                         match self.configuration_tick(false) {
-                            Ok(true) => self.restart_registered(),
+                            Ok(true) => self.restart_registered(retry_action_required),
                             Ok(false) => Err(self
                                 .configuration_error()
                                 .unwrap_or("Configuration is still draining")
@@ -1439,7 +1454,7 @@ impl Runtime {
                             Err(error) => Err(error),
                         }
                     } else {
-                        self.restart_registered()
+                        self.restart_registered(retry_action_required)
                     };
                     if let Err(e) = restart {
                         self.stop_channels();

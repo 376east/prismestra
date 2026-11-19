@@ -225,6 +225,19 @@ fn assert_ha_authorization_recovery(status: &'static str, error: &str) {
     };
     use std::sync::Arc;
 
+    struct Neighbor;
+    impl RgbDriver for Neighbor {
+        fn protocol(&self) -> Driver {
+            Driver::WledDdp
+        }
+        fn leds(&self) -> usize {
+            1
+        }
+        fn write(&mut self, _: &[Rgb], _: &Cancellation) -> Result<WriteResult, String> {
+            Ok(WriteResult::Submitted)
+        }
+    }
+
     const AVAILABLE: &str =
         r#"{"entity_id":"light.room","state":"on","attributes":{"supported_color_modes":["rgb"]}}"#;
     let (url, peer) = start_peer(vec![
@@ -238,31 +251,50 @@ fn assert_ha_authorization_recovery(status: &'static str, error: &str) {
         version: 1,
         setup: Setup {
             version: 1,
-            devices: vec![Device {
-                id: "ha".into(),
-                label: "Light".into(),
-                driver: Driver::HomeAssistant,
-                role: Role::Canvas,
-                leds: 1,
-                rate_hz: 1,
-                enabled: true,
-            }],
+            devices: vec![
+                Device {
+                    id: "ha".into(),
+                    label: "Light".into(),
+                    driver: Driver::HomeAssistant,
+                    role: Role::Canvas,
+                    leds: 1,
+                    rate_hz: 1,
+                    enabled: true,
+                },
+                Device {
+                    id: "neighbor".into(),
+                    label: "Neighbor".into(),
+                    driver: Driver::WledDdp,
+                    role: Role::Canvas,
+                    leds: 1,
+                    rate_hz: 25,
+                    enabled: true,
+                },
+            ],
             canvas: Canvas {
-                width: 1,
+                width: 2,
                 height: 1,
-                points: vec![Point {
-                    device: "ha".into(),
-                    led: 0,
-                    x: 0,
-                    y: 0,
-                }],
+                points: vec![
+                    Point {
+                        device: "ha".into(),
+                        led: 0,
+                        x: 0,
+                        y: 0,
+                    },
+                    Point {
+                        device: "neighbor".into(),
+                        led: 0,
+                        x: 1,
+                        y: 0,
+                    },
+                ],
             },
         },
         scene: crate::runtime::scene::example(),
         schedule: schedule::Config::default(),
         groups: Groups {
             pc: vec!["ha".into()],
-            door: vec![],
+            door: vec!["neighbor".into()],
         },
     })
     .unwrap();
@@ -280,6 +312,9 @@ fn assert_ha_authorization_recovery(status: &'static str, error: &str) {
                 )?))
             }),
         )
+        .unwrap();
+    runtime
+        .attach_rgb("neighbor", vec![], Arc::new(|_| Ok(Box::new(Neighbor))))
         .unwrap();
     runtime.enable_registered_output_recovery();
 
@@ -316,6 +351,28 @@ fn assert_ha_authorization_recovery(status: &'static str, error: &str) {
         let status = runtime.host().status("ha").unwrap();
         assert_eq!(status.generation, failed.generation);
         assert_eq!(status.error.as_deref(), Some(error));
+    }
+
+    let neighbor_before = runtime.host().status("neighbor").unwrap().generation;
+    runtime.notify_power(true, now).unwrap();
+    runtime.notify_power(false, now).unwrap();
+    now += 7_000_000;
+    let until = Instant::now() + Duration::from_secs(3);
+    loop {
+        now += 50_000;
+        runtime.tick(now, 1_800_000_000).unwrap();
+        let ha = runtime.host().status("ha").unwrap();
+        assert_eq!(ha.generation, failed.generation, "resume reopened HA");
+        assert_eq!(ha.error.as_deref(), Some(error));
+        let neighbor = runtime.host().status("neighbor").unwrap();
+        if neighbor.generation != neighbor_before && neighbor.submitted > 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "resume did not restore the neighbor"
+        );
+        thread::sleep(Duration::from_millis(2));
     }
 
     runtime.refresh_devices(now).unwrap();
