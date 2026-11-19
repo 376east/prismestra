@@ -155,10 +155,10 @@ try {
     $value = 'Prismestra'
     $command = '"' + (Join-Path $Install Prismestra.exe) + '" --installed --autostart'
     $helper = Start-Process -FilePath $ps -ArgumentList ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
-        (Join-Path $Install 'original-user.ps1') + '" EnableStartup "' + $Install + '" ' + $value) -PassThru -WindowStyle Hidden
+        (Join-Path $PSScriptRoot 'original-user.ps1') + '" EnableStartup "' + $Install + '" ' + $value + ' ' + $ExpectedSid) -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $PSScriptRoot 'startup-helper.stderr.log') -RedirectStandardOutput (Join-Path $PSScriptRoot 'startup-helper.stdout.log')
     $null = $helper.Handle
     if (-not $helper.WaitForExit(20000)) { $helper.Kill(); throw 'Startup registration timed out.' }
-    if ($helper.ExitCode -ne 0) { throw 'Standard-user startup registration failed.' }
+    if ($helper.ExitCode -ne 0) { throw ('Standard-user startup registration failed: ' + $helper.ExitCode) }
     $prior = Get-ItemPropertyValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' $value
     if ($prior -cne $command) { throw 'HKCU startup command did not match.' }
     $result.startup_command = $prior
@@ -300,6 +300,8 @@ try {
     $permissions.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
         $account.SID, 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
     Set-Acl -LiteralPath $scratch -AclObject $permissions
+    # Inno embeds this checkout's script in Setup; it is not an installed file.
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'original-user.ps1') -Destination $scratch
     $workerFile = Join-Path $scratch 'worker.ps1'
     # Windows PowerShell 5.1 needs a BOM for non-ASCII source on every system locale.
     [IO.File]::WriteAllText($workerFile, $worker, [Text.UTF8Encoding]::new($true))
@@ -338,6 +340,14 @@ try {
     foreach ($name in @('app.stderr.log','app.stdout.log')) {
         $log = Join-Path $scratch $name
         if (Test-Path -LiteralPath $log) { Copy-Item -LiteralPath $log -Destination (Join-Path $report $name) }
+    }
+    foreach ($name in @('startup-helper.stdout.log', 'startup-helper.stderr.log')) {
+        $log = Get-Item -LiteralPath (Join-Path $scratch $name) -ErrorAction SilentlyContinue
+        if ($log -and $log.Length -le 64KB) {
+            Copy-Item -LiteralPath $log.FullName -Destination (Join-Path $report $name)
+        } elseif ($log) {
+            Write-Warning "Omitted $name because it exceeds 64 KiB."
+        }
     }
     $profile = Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$sid'"
     Assert-Expected ($null -ne $profile) "Standard-user profile was not loaded (worker exit $status)."
@@ -386,7 +396,7 @@ try {
         }
         if ($password) { $password.Dispose() }
         if (Test-Path -LiteralPath $scratch) {
-            foreach ($name in @('worker.ps1', 'invoke-worker.ps1', 'worker-output.log', 'app.stderr.log', 'app.stdout.log')) {
+            foreach ($name in @('worker.ps1', 'invoke-worker.ps1', 'original-user.ps1', 'startup-helper.stderr.log', 'startup-helper.stdout.log', 'worker-output.log', 'app.stderr.log', 'app.stdout.log')) {
                 $file = Join-Path $scratch $name
                 if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
             }
