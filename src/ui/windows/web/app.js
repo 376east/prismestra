@@ -93,6 +93,10 @@ function syncControls() {
  $('#player-name').textContent=state?(effects[state.scene.effect]||state.scene.effect):'Prismestra';
  $('#player-status').textContent=state?.status||'Подключение к приложению…';
  const runtimeDetail=$('#native-runtime-detail');if(runtimeDetail)runtimeDetail.textContent=state?.detail||'';
+ document.querySelectorAll('[data-output-status]').forEach(node=>{
+  const status=deviceStatus(state?.devices[Number(node.dataset.outputStatus)]);
+  if(node.textContent!==status)node.textContent=status;
+ });
  $('#save-status').textContent=busy()&&state?'Выполняется…':state?.dirty?'Профиль изменён':'Локальный профиль';
  if(draft){$('#master-brightness').value=draft.brightness;$('#master-value').textContent=draft.brightness+'%';}
  const status=$('.scene-status');if(status)status.textContent=changed()?'Изменения ещё не применены':'Эта версия применена';
@@ -120,8 +124,26 @@ function nativeProperties() {
  if(!editor || editor.page!==view)return state.nativeAux?.page===view?renderNativeForm(state.nativeAux):'<div class="native-wait">Настройки загружаются…</div>';
  return `<section class="native-properties"><div class="native-inline"><label for="native-target">Объект</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select></div><div class="parameter-panel"><p class="parameter-note" role="status" id="native-runtime-detail">${esc(state.detail||'')}</p><div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>Выбрать…</button>`:''}</div>`}${field.hint?`<small>${esc(field.hint)}</small>`:''}</div>`).join('')||'<p class="muted">Параметров объекта нет.</p>'}</div><div class="native-property-actions">${action('Применить','apply-document',true,'data-needs-change="document"')}${action('Отменить изменения','revert-document')}${action('Повторить','retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
 }
+function deviceStatus(device) {
+ if(!device)return '';
+ const labels=state.deviceActivity?.labels;
+ if(labels&&Object.hasOwn(labels,device.id))return labels[device.id];
+ return !device.enabled?'Выключено':state.native?'Недоступно':'Предпросмотр';
+}
 function renderDevices() {
- return heading('Устройства','Изменения действуют после «Применить». Профиль сохраняется отдельно.')+`<div class="device-list">${state.devices.map((d,index)=>`<article class="device"><div class="device-symbol">${icon('devices')}</div><div class="device-info"><h2>${esc(d.label)}</h2><p>${esc(d.driver?.type)} · ${esc(d.role)}</p></div><div class="device-meta"><span>${esc(d.leds)} LED · ${esc(d.rate_hz)} Гц</span><small>${d.enabled?'Включено':'Выключено'}</small></div><button class="icon-button" data-device-index="${index}" data-mutation ${disabled()} aria-label="Свойства: ${esc(d.label)}">${icon('edit')}</button></article>`).join('')||'<div class="empty"><h2>В профиле нет устройств</h2><p>Добавьте устройство в свойствах профиля.</p></div>'}</div><div style="margin-top:24px">${nativeProperties()}</div>`;
+ const devices=state.devices.map((d,index)=>`<article class="device">
+  <div class="device-symbol">${icon('devices')}</div>
+  <div class="device-info"><h2>${esc(d.label)}</h2><p>${esc(d.driver?.type)} · ${esc(d.role)}</p></div>
+  <div class="device-meta"><span>${esc(d.leds)} LED · ${esc(d.rate_hz)} Гц</span><small data-output-status="${index}">${esc(deviceStatus(d))}</small></div>
+  <button class="icon-button" data-device-index="${index}" data-mutation ${disabled()} aria-label="Свойства: ${esc(d.label)}">${icon('edit')}</button>
+ </article>`);
+ const found=(state.deviceActivity?.found||[]).map(label=>`<article class="device">
+  <div class="device-symbol">${icon('devices')}</div>
+  <div class="device-info"><h2>${esc(label)}</h2></div>
+  <div class="device-meta"><small>Найдено</small></div>
+ </article>`);
+ const entries=[...devices,...found].join('')||'<div class="empty"><h2>В профиле нет устройств</h2><p>Добавьте устройство в свойствах профиля.</p></div>';
+ return heading('Устройства','Изменения действуют после «Применить». Профиль сохраняется отдельно.')+`<div class="device-list">${entries}</div><div style="margin-top:24px">${nativeProperties()}</div>`;
 }
 function renderNativeForm(form=nativeFormForView()) {
  if(!form||form.page!==view)return '<div class="native-wait" role="status">Загрузка настроек…</div>';
@@ -193,11 +215,12 @@ window.prismestraReceive = message => {
    if(selectedId && !state.library.some(item=>item.id===selectedId))selectedId=null;
    render();if(!busy())flushPreview();
   } else if(message.kind==='status'&&state) {
+   const foundChanged=view==='devices'&&Object.hasOwn(message.state,'deviceActivity')&&!same(state.deviceActivity?.found,message.state.deviceActivity.found);
    const oldScene=state.scene,nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));Object.assign(state,message.state);
    if(!changed()||same(draft,oldScene))draft=clone(state.scene);
    if(!state.pending&&!nativeAwaitingAck)commandPending=false;
    if(message.state.preview)frame=message.state.preview;
-   if(nativeFormChanged)render();else {syncControls();paintPreview();}if(!busy())flushPreview();
+   if(nativeFormChanged||foundChanged)render();else {syncControls();paintPreview();}if(!busy())flushPreview();
   }
  }catch(e){awaitingCommandAck=false;closing=false;commandPending=false;showError('Ошибка ответа приложения: '+e.message);syncControls();}
 };

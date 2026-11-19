@@ -1801,31 +1801,18 @@ impl App {
                 let Some(applied) = applied else {
                     return "Новое устройство в черновике. Примените параметры.".into();
                 };
-                if !applied.enabled {
-                    return "Выключено в применённом профиле. Аппаратные выходы не используются."
-                        .into();
+                if self.native_lighting.is_none() && applied.enabled {
+                    return "Предпросмотр".into();
                 }
-                if applied.role == crate::devices::Role::Lcd {
-                    self.runtime.lcd_status(&applied.id).map_or_else(
-                        || "LCD: не запущен".into(),
-                        |s| {
-                            s.error.map_or_else(
-                                || format!("LCD: передано кадров {}", s.frames_sent),
-                                |e| format!("Ошибка LCD: {e}"),
-                            )
-                        },
-                    )
-                } else {
-                    self.runtime.rgb_status(&applied.id).map_or_else(
-                        || "RGB: не запущен".into(),
-                        |s| {
-                            s.error.map_or_else(
-                                || format!("RGB: передано кадров {}", s.submitted),
-                                |e| format!("Ошибка RGB (передано кадров {}): {e}", s.submitted),
-                            )
-                        },
-                    )
-                }
+                self.runtime.read(|runtime| {
+                    let activity = runtime.output_activity(applied);
+                    use crate::app::runtime::OutputActivity;
+                    match activity {
+                        OutputActivity::Sent(frames) => format!("Кадры отправлены: {frames}"),
+                        OutputActivity::Unavailable(Some(error)) => format!("Недоступно: {error}"),
+                        _ => output_activity_label(&activity).into(),
+                    }
+                })
             },
         );
     }
@@ -2867,6 +2854,16 @@ pub fn run(args: Vec<OsString>) -> Result<(), String> {
     }
     result
 }
+fn output_activity_label(activity: &crate::app::runtime::OutputActivity) -> &'static str {
+    use crate::app::runtime::OutputActivity;
+    match activity {
+        OutputActivity::Off => "Выключено",
+        OutputActivity::Connecting => "Подключается",
+        OutputActivity::Sent(_) => "Кадры отправлены",
+        OutputActivity::Unavailable(_) => "Недоступно",
+    }
+}
+
 fn native_sources_allowed(snapshot: bool, selftest: bool) -> bool {
     !snapshot && !selftest
 }

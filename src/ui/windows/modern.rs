@@ -376,6 +376,30 @@ fn busy(app: &App) -> bool {
         || app.connection_switching()
         || app.shutdown.active()
 }
+fn device_activity(app: &App) -> Value {
+    let labels = app.runtime.read(|runtime| {
+        runtime
+            .document()
+            .lighting
+            .setup
+            .devices
+            .iter()
+            .map(|device| {
+                let label = if app.native_lighting.is_none() && device.enabled {
+                    "Предпросмотр"
+                } else {
+                    output_activity_label(&runtime.output_activity(device))
+                };
+                (device.id.clone(), label)
+            })
+            .collect::<BTreeMap<_, _>>()
+    });
+    json!({
+        "labels": labels,
+        "found": app.newly_found_devices().map(|d| &d.label).collect::<Vec<_>>(),
+    })
+}
+
 fn snapshot(state: &State) -> Result<Value, String> {
     let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
     let app = slot.as_ref().ok_or("Нет сессии")?;
@@ -383,7 +407,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
     let session = session.as_ref().ok_or("Нет интерфейса")?;
     let editor=app.editor.as_ref().map(|e|json!({"page":page_name(e.page),"index":e.index,"targets":super::super::editor::Editor::targets(&e.document,e.page),"fields":e.fields().iter().map(|f|json!({"key":f.key,"label":f.label,"value":f.value,"hint":f.hint,"file":f.file,"choices":f.choices.iter().map(|(label,value)|json!({"label":if f.key=="group"{match value.as_str(){"pc"=>"Основной свет","door"=>"Дополнительный свет",_=>label.as_str()}}else{label.as_str()},"value":value})).collect::<Vec<_>>()})).collect::<Vec<_>>(),"dirty":app.editor_dirty}));
     Ok(
-        json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft,"library":session.catalog.entries.iter().filter_map(|entry|session.catalog_view.get(&entry.id)).collect::<Vec<_>>(),"devices":app.runtime.document().lighting.setup.devices,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}}),
+        json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft,"library":session.catalog.entries.iter().filter_map(|entry|session.catalog_view.get(&entry.id)).collect::<Vec<_>>(),"devices":app.runtime.document().lighting.setup.devices,"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}}),
     )
 }
 fn send(state: &State, value: &Value) -> Result<(), String> {
@@ -757,6 +781,9 @@ pub(super) fn maintain(state: &State) {
         let mut value = json!({"kind":"status","state":{"scene":app.runtime.project().scene,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"preview":{"width":36,"height":18,"colors":colors}}});
         if session.last_native_send.elapsed() >= Duration::from_millis(250) {
             session.last_native_send = Instant::now();
+            if app.page == Page::Devices {
+                value["state"]["deviceActivity"] = device_activity(app);
+            }
             if let Some(form) = native_forms::snapshot(app) {
                 value["state"]["nativeForm"] = form;
             }

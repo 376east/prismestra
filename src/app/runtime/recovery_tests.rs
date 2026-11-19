@@ -170,6 +170,174 @@ fn managed_candidate_without_matching_bindings_keeps_live_owner_until_commit() {
     drain(&mut runtime);
 }
 
+#[cfg(windows)]
+#[test]
+fn startup_isolates_endpoint_contention_and_retries_the_returned_output() {
+    let mut runtime = runtime();
+    let document = runtime.document().clone();
+    let local = crate::app::lighting_outputs::Local {
+        version: 1,
+        devices: [("a", 40481), ("b", 40482)]
+            .into_iter()
+            .map(|(id, port)| {
+                (
+                    id.to_owned(),
+                    crate::devices::Binding::WledDdp {
+                        endpoint: ([127, 0, 0, 1], port).into(),
+                        controller: None,
+                    },
+                )
+            })
+            .collect(),
+        monitors: Default::default(),
+        door_brightness: 60,
+    };
+    let state =
+        std::env::temp_dir().join(format!("prismestra-unprovisioned-{}", std::process::id()));
+    let mut outputs = local.prepare(&document, &state.join("assets")).unwrap();
+    let a = Arc::new(Link::default());
+    let b = Arc::new(Link::default());
+    outputs.rgb[0].2 = factory(&a);
+    outputs.rgb[1].2 = factory(&b);
+    let lease = crate::runtime::output::Lease::acquire(outputs.rgb[0].1.clone()).unwrap();
+    let revision = runtime
+        .request_startup_outputs_for(&state, &local, document.clone(), outputs)
+        .unwrap();
+    let device = &document.lighting.setup.devices[0];
+    assert!(matches!(
+        runtime.output_activity(device),
+        OutputActivity::Connecting
+    ));
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    let healthy = runtime.host.status("b").unwrap().generation;
+    assert_eq!(runtime.output_revision(), revision);
+    assert_eq!(a.calls.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        runtime.output_activity(device),
+        OutputActivity::Unavailable(Some(_))
+    ));
+    drop(lease);
+    now += 1_000_000;
+    working(&mut runtime, "a", &mut now);
+    assert!(matches!(runtime.output_activity(device), OutputActivity::Sent(frames) if frames > 0));
+
+    disconnected(&mut runtime, &a, "a", &mut now);
+    assert!(matches!(
+        runtime.output_activity(device),
+        OutputActivity::Unavailable(Some(_))
+    ));
+    a.fail.store(false, Ordering::SeqCst);
+    runtime.set_group(Target::Pc, false).unwrap();
+    assert!(matches!(
+        runtime.output_activity(device),
+        OutputActivity::Off
+    ));
+    now += 1_000_000;
+    working(&mut runtime, "a", &mut now);
+    assert_eq!(a.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(b.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.host.status("b").unwrap().generation, healthy);
+    assert_eq!(a.frames.lock().unwrap().last().unwrap(), &[Rgb::default()]);
+    drain(&mut runtime);
+}
+
+#[cfg(windows)]
+#[test]
+fn startup_registers_managed_outputs_on_commit_and_retries_on_new_inventory() {
+    let mut runtime = runtime();
+    let mut document = runtime.document().clone();
+    document.lighting.setup.devices[0].driver = Driver::OpenRgb;
+    let endpoint = ([127, 0, 0, 1], 17422).into();
+    let local = crate::app::lighting_outputs::Local {
+        version: 1,
+        devices: [
+            (
+                "a".into(),
+                crate::devices::Binding::OpenRgb {
+                    endpoint,
+                    identity: "1".repeat(64),
+                    topology: "2".repeat(64),
+                },
+            ),
+            (
+                "b".into(),
+                crate::devices::Binding::WledDdp {
+                    endpoint: ([127, 0, 0, 1], 40483).into(),
+                    controller: None,
+                },
+            ),
+        ]
+        .into(),
+        monitors: Default::default(),
+        door_brightness: 60,
+    };
+    let state = std::env::temp_dir().join(format!(
+        "prismestra-startup-managed-{}-{}",
+        std::process::id(),
+        crate::clock::monotonic_us()
+    ));
+    std::fs::create_dir(&state).unwrap();
+    let config = state.join("managed-openrgb.json");
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1, "enabled": true, "executable": std::env::current_exe().unwrap(),
+            "config_dir": state, "endpoint": endpoint, "expected_executable_sha256": "0".repeat(64)
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
+        endpoint, 1,
+    ));
+    let mut outputs = local.prepare(&document, &state.join("assets")).unwrap();
+    // Even a fixture that reports SDK readiness cannot grant native I/O.
+    let a = Arc::new(Link::default());
+    let b = Arc::new(Link::default());
+    outputs.rgb[0].2 = factory(&a);
+    outputs.rgb[1].2 = factory(&b);
+    runtime
+        .request_startup_outputs_for(&state, &local, document, outputs)
+        .unwrap();
+    assert!(runtime.managed_backend_ids.is_empty());
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    assert_eq!(runtime.managed_backend_ids, BTreeSet::from(["a".into()]));
+    let healthy = runtime.host.status("b").unwrap().generation;
+    for delay in [1_000_000, 5_000_000, 15_000_000] {
+        wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+        tick(&mut runtime, &mut now);
+        let old = runtime.host.status("a").unwrap().generation;
+        now += delay;
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            runtime.host.status("a").unwrap().generation != old
+        });
+    }
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+    tick(&mut runtime, &mut now);
+    let exhausted = runtime.host.status("a").unwrap().generation;
+    now += 60_000_000;
+    tick(&mut runtime, &mut now);
+    assert_eq!(runtime.host.status("a").unwrap().generation, exhausted);
+    runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
+        endpoint, 2,
+    ));
+    tick(&mut runtime, &mut now);
+    now += 1_000_000;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.host.status("a").unwrap().generation != exhausted
+    });
+    assert_eq!(a.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(b.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.host.status("b").unwrap().generation, healthy);
+    drain(&mut runtime);
+    std::fs::remove_file(config).unwrap();
+    std::fs::remove_dir(state).unwrap();
+}
+
 #[test]
 fn recovery_default_policy_keeps_initial_and_later_failures_terminal() {
     let mut runtime = runtime();
@@ -543,25 +711,52 @@ fn arrival_lcd_runtime(name: &str, link: Arc<Link>) -> (Runtime, std::path::Path
             ..lcd::Config::default()
         },
     });
-    runtime = Runtime::new(document, None).unwrap();
+    runtime = Runtime::new(document.clone(), None).unwrap();
     let root = dir.clone();
-    runtime
-        .attach_lcd(
-            "lcd",
-            vec!["hid:bound-interface".into()],
-            Arc::new(move |config, _| {
-                link.calls.fetch_add(1, Ordering::SeqCst);
-                if link.fail_open.load(Ordering::SeqCst) {
-                    return Err("LCD stand unavailable".into());
-                }
-                Ok((
-                    lcd::Controller::new(config, &Assets::new(root.clone())?)?,
-                    Box::new(Reports(link.clone())),
-                ))
-            }),
-        )
-        .unwrap();
-    runtime.enable_output_recovery("lcd").unwrap();
+    let factory: LcdFactory = Arc::new(move |config, _| {
+        link.calls.fetch_add(1, Ordering::SeqCst);
+        if link.fail_open.load(Ordering::SeqCst) {
+            return Err("LCD stand unavailable".into());
+        }
+        Ok((
+            lcd::Controller::new(config, &Assets::new(root.clone())?)?,
+            Box::new(Reports(link.clone())),
+        ))
+    });
+    let keys = vec!["hid:bound-interface".into()];
+    #[cfg(windows)]
+    {
+        let local = crate::app::lighting_outputs::Local {
+            version: 1,
+            devices: [(
+                "lcd".into(),
+                crate::devices::Binding::Hid {
+                    path: "bound-interface".into(),
+                },
+            )]
+            .into(),
+            monitors: Default::default(),
+            door_brightness: 60,
+        };
+        let revision = runtime
+            .request_startup_outputs_for(
+                &dir,
+                &local,
+                document,
+                OutputPlan {
+                    lcd: vec![("lcd".into(), keys, factory)],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        runtime.tick(0, 1_800_000_000).unwrap();
+        assert_eq!(runtime.output_revision(), revision);
+    }
+    #[cfg(not(windows))]
+    {
+        runtime.attach_lcd("lcd", keys, factory).unwrap();
+        runtime.enable_output_recovery("lcd").unwrap();
+    }
     (runtime, dir)
 }
 
