@@ -71,6 +71,8 @@ try {
     }
     $buildExit = $compile.ExitCode
     if ($buildExit -ne 0) { throw "Compilation failed ($buildExit); inspect build.log" }
+    # Import the utility module from this PowerShell installation.
+    Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1')
     Get-FileHash -LiteralPath 'release/OpenRGB.exe'
     # Runtime dependency staging, licenses and source verification are separate
     # gates. This script does not install, run, or approve the built component.
