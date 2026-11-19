@@ -124,6 +124,24 @@ impl Editor {
     }
 
     #[cfg(any(windows, test))]
+    pub(super) fn selected_output_id(&self) -> Option<&str> {
+        match self.page {
+            Page::Lcd => self
+                .document
+                .lcd
+                .get(self.index)
+                .map(|lcd| lcd.device.as_str()),
+            Page::Ambient => self
+                .document
+                .ambient
+                .routes
+                .get(self.index)
+                .map(|route| route.device.as_str()),
+            _ => None,
+        }
+    }
+
+    #[cfg(any(windows, test))]
     pub(super) fn device_index_in(&self, document: &Document) -> usize {
         self.selected_device_id()
             .and_then(|id| Self::device_index(document, id))
@@ -1634,6 +1652,20 @@ mod tests {
         editor.document = next;
         assert!(editor.selected_device_id().is_none());
         assert!(editor.fields().is_empty());
+    }
+
+    #[test]
+    fn output_editor_reports_logical_ids_for_draft_fields() {
+        let mut editor = Editor {
+            document: document(),
+            page: Page::Lcd,
+            index: 0,
+        };
+        assert_eq!(editor.selected_output_id(), Some("lcd"));
+        editor.page = Page::Ambient;
+        assert_eq!(editor.selected_output_id(), Some("screen"));
+        editor.index = 1;
+        assert_eq!(editor.selected_output_id(), None);
     }
 
     #[test]

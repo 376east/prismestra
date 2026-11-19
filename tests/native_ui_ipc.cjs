@@ -432,7 +432,7 @@ receiveDeviceState('snapshot', navFixture([], {editor: {page:'devices',index:0,t
  page:'devices',fields:[{id:714,label:'Семейство',kind:'select',enabled:true,value:'lcd',choices:[]}],actions:[],notes:[],
 }}));
 assert.ok(mainMarkup.includes('data-action="focus-device-setup"'));
-assert.ok(mainMarkup.includes('Поиск и подключения'));
+assert.ok(mainMarkup.includes('data-view="connections"'));
 openView('connections');
 assert.deepEqual(commands.at(-1), {op:'page',page:'connections'});
 receiveDeviceState('snapshot', navFixture([navLcd, navAmbient], {deviceActivity:{labels:{lcd:'Нет связи'}}}));
@@ -456,3 +456,47 @@ openView('schedule');
 assert.deepEqual(commands.at(-1), {op:'page',page:'schedule'});
 assert.ok(find('nav').innerHTML.includes('data-view="settings" class="active"'));
 console.log('PASS: hidden output links, discovery access, configured offline routes, removal fallback, settings and schedule');
+
+vm.runInContext('formStages.clear();view="devices";pendingView=null', context);
+receiveDeviceState('snapshot', navFixture([], {status:'Ищу поддерживаемые устройства…'}));
+assert.ok(find('#player-status').textContent.includes('Ищу поддерживаемые устройства'));
+assert.ok(navHas('devices') && !navHas('lcd') && !navHas('ambient'));
+receiveDeviceState('status', {status:'Автопоиск завершён'});
+assert.ok(!navHas('lcd') && !navHas('ambient'));
+for (const output of [navLcd, navAmbient]) {
+ const role=output.role;
+ const editorFor = (id, index=0) => ({
+  page:role,index,deviceId:id,targets:['Same label','Same label'],
+  fields:[{key:'label',label:'Label',value:'Original',choices:[]}],dirty:false,
+ });
+ receiveDeviceState('snapshot', navFixture([output]));
+ openView(role);
+ receiveDeviceState('snapshot', navFixture([output], {editor:editorFor(output.id)}));
+ const editing=find('#field-0');
+ editing.value='Keep this input';
+ events.input({target:editing});
+ receiveDeviceState('status', {deviceActivity:{labels:{[output.id]:'Недоступно'}}});
+ assert.equal(find('#field-0').value,'Keep this input','Transport loss keeps the active form');
+ assert.ok(navHas(role));
+ const replacement={...output,id:output.id+'-other'};
+ events.compositionstart({});
+ receiveDeviceState('snapshot', navFixture([replacement], {editor:editorFor(replacement.id)}));
+ editing.value='Keep this composed input';
+ events.input({target:editing});
+ events.compositionend({});
+ while(rafQueue.length)rafQueue.shift()();
+ assert.ok(mainMarkup.includes('Незавершённый ввод сохранён'));
+ assert.ok(!mainMarkup.includes('id="field-0"'),'Do not offer replacement fields while the original input is retained');
+ const beforeRepair=commands.length;
+ vm.runInContext('send({op:"apply_fields"},true)',context);
+ assert.equal(commands.length,beforeRepair,'Pending fields cannot be sent to a replacement at the same index');
+ receiveDeviceState('snapshot', navFixture([replacement,output], {editor:editorFor(output.id,1)}));
+ assert.equal(find('#field-0').value,'Keep this composed input','Original ID restores input after a reorder');
+ receiveDeviceState('snapshot', navFixture([], {editor:null}));
+ assert.equal(viewNow(),role,'Explicit removal cannot navigate away from unsaved input');
+ assert.ok(!navHas(role));
+ vm.runInContext('discardPageFields()',context);
+ assert.equal(viewNow(),'devices','Explicit discard lets the normal empty-page fallback run');
+ receiveDeviceState('snapshot',navFixture([]));
+}
+console.log('PASS: startup waiting, detached output input, no wrong-target mutation, reconnect and explicit discard');

@@ -63,7 +63,10 @@ function controlDisabled(node) {
 }
 const advancedPage = () => ['connections','sources','schedule'].includes(view);
 function nativeFormForView() {return advancedPage()?state?.nativeForm:state?.nativeAux;}
-function stageKey(kind,key) {return JSON.stringify(kind==='generic'?[kind,state?.editor?.page,state?.editor?.index,key]:[kind,view,String(key)]);}
+const outputPage = page => page==='lcd' || page==='ambient';
+const fieldTarget = editor => editor?.deviceId ?? editor?.index;
+let renderedOutputEditor = null;
+function stageKey(kind,key,editor=state?.editor) {return JSON.stringify(kind==='generic'?[kind,editor?.page,fieldTarget(editor),key]:[kind,view,String(key)]);}
 function genericValue(field) {return formStages.get(stageKey('generic',field.key))?.value??String(field.value??'');}
 function nativeValue(field) {return formStages.get(stageKey('native',field.id))?.value??String(field.value??'');}
 function currentGenericStages() {return (state?.editor?.page===view?state.editor.fields:[]).filter(field=>!field.choices?.length&&formStages.has(stageKey('generic',field.key))).map(field=>({key:field.key,value:genericValue(field)}));}
@@ -75,14 +78,21 @@ function stageText(input) {
   const field=nativeFormForView()?.fields.find(field=>String(field.id)===input.dataset.nativeField);if(!field)return false;
   key=stageKey('native',field.id);baseline=field.kind==='secret'?'':String(field.value??'');record={kind:'native',page:view,id:field.id,value:input.value,secret:field.kind==='secret'};
  }else if(input.dataset?.field&&input.tagName==='INPUT'){
-  const field=state?.editor?.fields.find(field=>field.key===input.dataset.field);if(!field)return false;
-  key=stageKey('generic',field.key);baseline=String(field.value??'');record={kind:'generic',page:state.editor.page,index:state.editor.index,key:field.key,value:input.value};
+  const editor=outputPage(view)?renderedOutputEditor:state?.editor;
+  const field=editor?.fields.find(field=>field.key===input.dataset.field);if(!field)return false;
+  key=stageKey('generic',field.key,editor);baseline=String(field.value??'');record={kind:'generic',page:editor.page,target:fieldTarget(editor),key:field.key,value:input.value};
  }else return false;
  if(record.value===baseline)formStages.delete(key);else formStages.set(key,record);
  syncControls();return true;
 }
 function stagedDirty() {return formStages.size>0;}
 function currentPageStaged() {return [...formStages.values()].some(record=>record.page===view);}
+function detachedOutputEdits() {
+ if(!outputPage(view))return false;
+ const editor = state?.editor;
+ return [...formStages.values()].some(record=>record.kind==='generic' && record.page===view &&
+  (editor?.page!==view || fieldTarget(editor)!==record.target));
+}
 function discardPageFields() {const removed=new Set();for(const [key,record] of formStages)if(record.page===view){formStages.delete(key);removed.add(key);}submittedStages=submittedStages.filter(([key])=>!removed.has(key));render();}
 function completeStageAck() {for(const [key,value] of submittedStages)if(formStages.get(key)?.value===value)formStages.delete(key);submittedStages=[];}
 function selectTarget(command,input=null) {if(stagedDirty()){if(input)input.value=state.editor.index<state.editor.targets.length?String(state.editor.index):'';showError('Примените или отмените незавершённый ввод перед выбором другого объекта.');return;}send(command,true);}
@@ -96,6 +106,8 @@ function nativeControlDisabled(node) {
 function showError(message,fromCommand=false) {errorIsCommand=fromCommand;error=String(message);const box=$('#native-error');box.hidden=false;box.innerHTML=`<button class="icon-button" data-action="dismiss-error" aria-label="Закрыть сообщение">×</button><p>${esc(error)}</p>${stagedDirty()?'<button class="button" data-action="discard-fields">Отменить незавершённый ввод</button>':''}<button class="button" data-action="retry-document" data-mutation>Повторить</button>`;}
 function send(command, mutation=false) {
  if(closing)return false;
+ if(outputPage(view)&&['apply_fields','set_field','asset'].includes(command.op)&&
+  (detachedOutputEdits() || fieldTarget(renderedOutputEditor)!==fieldTarget(state?.editor)))return false;
  const nativeCommand=['native_field','native_action'].includes(command.op);
  if(nativeCommand){const node={dataset:{[command.op==='native_field'?'nativeField':'nativeAction']:String(command.id)}};if(nativeControlDisabled(node))return false;const items=command.op==='native_field'?nativeFormForView().fields:nativeFormForView().actions;command.id=items.find(item=>String(item.id)===String(command.id)).id;}
  else if(mutation && busy() && !recoveryOperation(command.op)) return false;
@@ -208,7 +220,7 @@ function pageButton(page, label=pages[page]) {
 }
 
 function outputPageAvailable(page) {
- return (page!=='lcd' && page!=='ambient') || !!state?.devices.some(device=>device.role===page);
+ return !outputPage(page) || !!state?.devices.some(device=>device.role===page);
 }
 
 function renderDevices() {
@@ -228,7 +240,7 @@ function renderDevices() {
  const add = state.nativeAux?.page==='devices' && state.nativeAux.fields.some(field=>field.id===devicePresetField && field.enabled)
   ? action('Добавить устройство','focus-device-setup',true)
   : '';
- const shortcuts = add + pageButton('connections','Поиск и подключения')
+ const shortcuts = add + pageButton('connections')
   + (outputPageAvailable('lcd') ? pageButton('lcd','Настроить LCD') : '')
   + (outputPageAvailable('ambient') ? pageButton('ambient','Настроить экран') : '');
  return heading('Устройства','Изменения действуют после «Применить». Профиль сохраняется отдельно.',shortcuts)
@@ -256,7 +268,11 @@ function renderSettings() {
 
 function renderProfilePage() {
  if (view==='settings') return renderSettings();
- if (view==='lcd'||view==='ambient') {
+ if (outputPage(view)) {
+  if(detachedOutputEdits()){
+   return heading(pages[view],'Выход больше не выбран. Незавершённый ввод сохранён для этого выхода.')
+    + `<div class="native-property-actions">${action('Отменить незавершённый ввод','discard-page-fields')}</div>`;
+  }
   const available = outputPageAvailable(view);
   const actions = (available ? pageButton('connections','Проверить подключение') : '')
    + (available && view==='lcd' ? pageButton('temperatures') : '') + pageButton('devices','К устройствам');
@@ -281,6 +297,7 @@ function render() {
  const key=focusKey(),node=document.activeElement,selection=typeof node?.selectionStart==='number'?[node.selectionStart,node.selectionEnd]:null;
  const headingFocused = node === $('#main h1');
  const hiddenNavFocused = node?.closest?.('nav') && !outputPageAvailable(node.dataset.view);
+ renderedOutputEditor = outputPage(view)&&state?.editor?.page===view?state.editor:null;
  const selectedPage = settingsPages.includes(view)?'settings':view;
  $('nav').innerHTML=Object.entries(pages).filter(([key])=>!settingsPages.includes(key)&&outputPageAvailable(key)).map(([key,title])=>`<button data-view="${key}" class="${selectedPage===key?'active':''}" aria-label="${title}" title="${title}" ${selectedPage===key?'aria-current="page"':''}>${icon(key)}<span>${title}</span></button>`).join('');
  if(!state)$('#main').innerHTML='<div class="native-wait"><h1>Подключение к Prismestra…</h1><p>Ожидание локального профиля.</p></div>';
@@ -288,7 +305,7 @@ function render() {
  document.querySelectorAll('[data-native-kind="secret"]').forEach(input=>{const staged=formStages.get(stageKey('native',input.dataset.nativeField));if(staged)input.value=staged.value;});
  if(view==='devices')window.outputMap?.mount(state,send,currentGenericStages);
  syncControls();paintPreview();paintLibraryPreviews();
- if(headingFocused)focusHeading();
+ if(headingFocused || (node?.dataset?.field && detachedOutputEdits()))focusHeading();
  else if(hiddenNavFocused)$('nav [data-view="devices"]')?.focus({preventScroll:true});
  else restoreFocus(key,selection);
 }
