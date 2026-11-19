@@ -93,6 +93,10 @@ impl RgbDriver for HomeAssistant {
         }
         .and_then(|()| self.client.set_color(rgb, deadline, || cancel.cancelled()));
         if let Err(error) = result {
+            use crate::transport::home_assistant::Error;
+            if matches!(error, Error::Authentication | Error::Http(403)) {
+                return Ok(WriteResult::RequiresAction(error.to_string()));
+            }
             let Some(seconds) = error.transient_delay() else {
                 return Err(error.to_string());
             };
