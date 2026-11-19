@@ -174,6 +174,64 @@ vm.runInContext('window.prismestraReceive({kind:"status",state:{error:null,pendi
 vm.runInContext('send({op:"native_action",id:410},true);window.prismestraReceive(payload)',context);assert.equal(find('#native-error').hidden,true,'new successful command snapshot clears old command error');assert.equal(find('#native-error').innerHTML,'','stale notice actions are removed');assert.equal(vm.runInContext('stagedDirty()',context),false);
 context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeAux:structuredClone(aux),error:'Provider still unavailable'}};vm.runInContext('send({op:"native_action",id:410},true);window.prismestraReceive(payload)',context);assert.equal(find('#native-error').hidden,false);assert.ok(find('#native-error').innerHTML.includes('Provider still unavailable'),'successful ack cannot hide an actual backend error');
 console.log('PASS: failed snapshot/status retain command error; causal successful ack removes stale error/actions; current backend error remains');
+
+// The cards show applied outputs, whereas the properties selector edits the draft.
+const appliedDevices = ['first','second','third'].map(id=>({
+ id,label:id,role:'canvas',driver:{type:'stub'},leds:10,rate_hz:48,enabled:true
+}));
+context.payload={kind:'snapshot',state:{
+ ...structuredClone(initial),devices:appliedDevices,draftDevices:appliedDevices.slice(1),
+ editor:{page:'devices',index:0,targets:['second','third'],fields:[],dirty:true}
+}};
+vm.runInContext('formStages.clear();view="devices";window.prismestraReceive(payload)',context);
+const secondButtonMarkup=find('#main').innerHTML.match(/<button[^>]*aria-label="Свойства: second"[^>]*>/)[0];
+const secondButton=new Node();
+for(const [,name,value] of secondButtonMarkup.matchAll(/data-(device-index|device-id)="([^"]+)"/g)){
+ secondButton.dataset[name==='device-index'?'deviceIndex':'deviceId']=value;
+}
+const beforeDeviceSelection=commands.length;
+events.click({target:{closest:()=>secondButton}});
+assert.equal(commands.length,beforeDeviceSelection+1);
+assert.deepEqual(commands.at(-1),{op:'select_device',id:'second'},
+ 'Open the same output after an earlier device was removed in the draft');
+vm.runInContext('window.prismestraReceive(payload)',context);
+const objectSelector=new Node();objectSelector.dataset.target='';objectSelector.value='1';
+events.change({target:objectSelector});
+assert.deepEqual(commands.at(-1),{op:'select_item',index:1},'Native draft dropdown still selects by its own index');
+vm.runInContext('window.prismestraReceive(payload);pendingView={previous:"library",next:"devices"}',context);
+const beforePendingPage=commands.length;
+events.click({target:{closest:()=>secondButton}});
+assert.equal(commands.length,beforePendingPage,'Do not send a card selection before native navigation is acknowledged');
+vm.runInContext('pendingView=null',context);
+console.log('PASS: device cards select by logical identity and the draft dropdown still uses indices');
+
+const candidateFixtures = require('./fixtures/device-candidates.json');
+const [foundRgb, foundLcd] = candidateFixtures.proposal.deviceCandidates;
+const foundState = {
+ ...initial,
+ editor: {page: 'devices', index: 0, targets: [], fields: [], dirty: false},
+ ...candidateFixtures.proposal,
+};
+const receiveDeviceState = (kind, state) => {
+ context.payload = {kind, state};
+ vm.runInContext('window.prismestraReceive(payload)', context);
+};
+const hasCandidate = id => mainMarkup.includes(`data-candidate-id="${id}"`);
+receiveDeviceState('snapshot', foundState);
+assert.ok(hasCandidate(foundRgb.id) && hasCandidate(foundLcd.id), 'same-label candidates keep separate IDs');
+receiveDeviceState('status', {detail: 'Keep current candidates'});
+assert.ok(hasCandidate(foundRgb.id) && hasCandidate(foundLcd.id));
+receiveDeviceState('snapshot', {...foundState, devices: [{...foundRgb, leds: 1}], editor: {
+ page: 'devices', index: 1, targets: ['Fixture'], fields: [], dirty: false,
+}});
+assert.ok(!hasCandidate(foundRgb.id) && hasCandidate(foundLcd.id), 'applied ID replaces a matching candidate');
+assert.ok(mainMarkup.includes('<option value="" disabled selected>Выберите устройство…</option>'));
+receiveDeviceState('status', candidateFixtures.cancelled);
+assert.ok(!hasCandidate(foundLcd.id), 'empty metadata removes stale candidate rows');
+receiveDeviceState('status', candidateFixtures.replacement);
+assert.ok(hasCandidate(candidateFixtures.replacement.deviceCandidates[0].id));
+console.log('PASS: candidate identity, applied precedence, metadata replacement, empty device selection');
+
 vm.runInContext('view="devices";state.editor={page:"devices",index:0,targets:["Strip"],fields:[],dirty:false};state.detail="Ошибка RGB: <test>";render()',context);
 assert.ok(find('#main').innerHTML.includes('Ошибка RGB: &lt;test&gt;'));
 

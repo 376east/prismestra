@@ -96,6 +96,9 @@ enum Command {
     SelectItem {
         index: usize,
     },
+    SelectDevice {
+        id: String,
+    },
     SetField {
         key: String,
         value: String,
@@ -498,17 +501,7 @@ fn draft_map_input(app: &App) -> Option<(u64, &crate::devices::Setup, &Scene)> {
     ))
 }
 fn selected_map_device(app: &App) -> Option<&str> {
-    let editor = app
-        .editor
-        .as_ref()
-        .filter(|editor| editor.page == Page::Devices)?;
-    editor
-        .document
-        .lighting
-        .setup
-        .devices
-        .get(editor.index)
-        .map(|device| device.id.as_str())
+    app.editor.as_ref()?.selected_device_id()
 }
 
 fn map_connection(app: &App) -> Value {
@@ -874,6 +867,16 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                         return Err("Объект не найден".into());
                     }
                     e.index = index;
+                    a.refresh_editor(true);
+                }
+                Command::SelectDevice { id } => {
+                    if a.runtime.pending_configuration() {
+                        return Err("Дождитесь применения".into());
+                    }
+                    a.editor
+                        .as_mut()
+                        .ok_or("Нет параметров")?
+                        .select_device(&id)?;
                     a.refresh_editor(true);
                 }
                 Command::SetField {

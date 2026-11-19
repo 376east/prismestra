@@ -33,7 +33,8 @@ const unsavedDraft = () => !!draft && (!draftOrigin || !same(draft,draftOrigin.s
 function focusKey(node=document.activeElement) {
  if(!node) return null;
  if(node.id) return '#'+CSS.escape(node.id);
- for(const key of ['view','action','edit','apply','remove','field','param','color','target','group','effect','asset','device-index','remove-color','native-field','native-action']) if(node.dataset?.[key] !== undefined) return `[data-${key}="${CSS.escape(node.dataset[key])}"]`;
+ if(node.dataset?.deviceId!==undefined)return `[data-device-id="${CSS.escape(node.dataset.deviceId)}"]`;
+ for(const key of ['view','action','edit','apply','remove','field','param','color','target','group','effect','asset','remove-color','native-field','native-action']) if(node.dataset?.[key] !== undefined) return `[data-${key}="${CSS.escape(node.dataset[key])}"]`;
  return null;
 }
 function restoreFocus(key, selection) {
@@ -81,7 +82,7 @@ function stagedDirty() {return formStages.size>0;}
 function currentPageStaged() {return [...formStages.values()].some(record=>record.page===view);}
 function discardPageFields() {const removed=new Set();for(const [key,record] of formStages)if(record.page===view){formStages.delete(key);removed.add(key);}submittedStages=submittedStages.filter(([key])=>!removed.has(key));render();}
 function completeStageAck() {for(const [key,value] of submittedStages)if(formStages.get(key)?.value===value)formStages.delete(key);submittedStages=[];}
-function selectTarget(index,input=null) {if(stagedDirty()){if(input)input.value=String(state.editor.index);showError('Примените или отмените незавершённый ввод перед выбором другого объекта.');return;}send({op:'select_item',index},true);}
+function selectTarget(command,input=null) {if(stagedDirty()){if(input)input.value=state.editor.index<state.editor.targets.length?String(state.editor.index):'';showError('Примените или отмените незавершённый ввод перед выбором другого объекта.');return;}send(command,true);}
 function deferRender() {if(pointerGesture||keyGesture||composing){renderQueued=true;return true;}return false;}
 function releaseGesture() {requestAnimationFrame(()=>{if(renderQueued&&!pointerGesture&&!keyGesture&&!composing){renderQueued=false;render();}});}
 function nativeControlDisabled(node) {
@@ -115,7 +116,7 @@ function syncControls() {
  $('#player-status').textContent=state?.status||'Подключение к приложению…';
  const runtimeDetail=$('#native-runtime-detail');if(runtimeDetail)runtimeDetail.textContent=state?.detail||'';
  document.querySelectorAll('[data-output-status]').forEach(node=>{
-  const status=deviceStatus(state?.devices[Number(node.dataset.outputStatus)]);
+  const status=deviceStatus(state?.devices.find(device=>device.id===node.dataset.outputStatus));
   if(node.textContent!==status)node.textContent=status;
  });
  $('#save-status').textContent=busy()&&state?'Выполняется…':state?.dirty?'Профиль изменён':'Локальный профиль';
@@ -191,7 +192,7 @@ function renderScene() {
 function nativeProperties() {
  const editor=state.editor;
  if(!editor || editor.page!==view)return state.nativeAux?.page===view?renderNativeForm(state.nativeAux):'<div class="native-wait">Настройки загружаются…</div>';
- return `<section class="native-properties"><div class="native-inline"><label for="native-target">Объект</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select></div><div class="parameter-panel"><p class="parameter-note" role="status" id="native-runtime-detail">${esc(state.detail||'')}</p><div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>Выбрать…</button>`:''}</div>`}${field.hint?`<small>${esc(field.hint)}</small>`:''}</div>`).join('')||'<p class="muted">Параметров объекта нет.</p>'}</div><div class="native-property-actions">${action('Применить','apply-document',true,'data-needs-change="document"')}${action('Отменить изменения','revert-document')}${action('Повторить','retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
+ return `<section class="native-properties"><div class="native-inline"><label for="native-target">Объект</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${view==='devices'&&editor.index>=editor.targets.length?'<option value="" disabled selected>Выберите устройство…</option>':''}${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select></div><div class="parameter-panel"><p class="parameter-note" role="status" id="native-runtime-detail">${esc(state.detail||'')}</p><div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>Выбрать…</button>`:''}</div>`}${field.hint?`<small>${esc(field.hint)}</small>`:''}</div>`).join('')||'<p class="muted">Параметров объекта нет.</p>'}</div><div class="native-property-actions">${action('Применить','apply-document',true,'data-needs-change="document"')}${action('Отменить изменения','revert-document')}${action('Повторить','retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
 }
 function deviceStatus(device) {
  if(!device)return '';
@@ -200,15 +201,16 @@ function deviceStatus(device) {
  return !device.enabled?'Выключено':state.native?'Недоступно':'Предпросмотр';
 }
 function renderDevices() {
- const devices=state.devices.map((d,index)=>`<article class="device">
+ const devices=state.devices.map(d=>`<article class="device">
   <div class="device-symbol">${icon('devices')}</div>
   <div class="device-info"><h2>${esc(d.label)}</h2><p>${esc(d.driver?.type)} · ${esc(d.role)}</p></div>
-  <div class="device-meta"><span>${esc(d.leds)} LED · ${esc(d.rate_hz)} Гц</span><small data-output-status="${index}">${esc(deviceStatus(d))}</small></div>
-  <button class="icon-button" data-device-index="${index}" data-mutation ${disabled()} aria-label="Свойства: ${esc(d.label)}">${icon('edit')}</button>
+  <div class="device-meta"><span>${esc(d.leds)} LED · ${esc(d.rate_hz)} Гц</span><small data-output-status="${esc(d.id)}">${esc(deviceStatus(d))}</small></div>
+  <button class="icon-button" data-device-id="${esc(d.id)}" data-mutation ${disabled()} aria-label="Свойства: ${esc(d.label)}">${icon('edit')}</button>
  </article>`);
- const found=(state.deviceActivity?.found||[]).map(label=>`<article class="device">
+ const appliedIds=new Set(state.devices.map(device=>device.id));
+ const found=(state.deviceCandidates??[]).filter(candidate=>!appliedIds.has(candidate.id)).map(candidate=>`<article class="device" data-candidate-id="${esc(candidate.id)}">
   <div class="device-symbol">${icon('devices')}</div>
-  <div class="device-info"><h2>${esc(label)}</h2></div>
+  <div class="device-info"><h2>${esc(candidate.label)}</h2><p>${esc(candidate.role)}</p></div>
   <div class="device-meta"><small>Найдено</small></div>
  </article>`);
  const entries=[...devices,...found].join('')||'<div class="empty"><h2>В профиле нет устройств</h2><p>Добавьте устройство в свойствах профиля.</p></div>';
@@ -354,7 +356,7 @@ window.prismestraReceive = message => {
    followActiveScene();
    render();if(!busy())flushPreview();
   } else if(message.kind==='status'&&state) {
-   const foundChanged=view==='devices'&&Object.hasOwn(message.state,'deviceActivity')&&!same(state.deviceActivity?.found,message.state.deviceActivity.found);
+   const foundChanged=view==='devices'&&Object.hasOwn(message.state,'deviceCandidates')&&!same(state.deviceCandidates,message.state.deviceCandidates);
    const nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));Object.assign(state,message.state);
    if(state.pending||Object.hasOwn(message.state,'mapConnection'))window.outputMap?.update(state);
    followActiveScene();
@@ -382,7 +384,12 @@ document.addEventListener('click',event=>{
   render();requestPreview();return;
  }
  if(b.dataset.asset)return void send({op:'asset',key:b.dataset.asset},true);
- if(b.dataset.deviceIndex!==undefined)return void selectTarget(+b.dataset.deviceIndex);
+ if(b.dataset.deviceId!==undefined){
+  if(!pendingView && !renderQueued && view==='devices' && state?.editor?.page==='devices'){
+   selectTarget({op:'select_device',id:b.dataset.deviceId});
+  }
+  return;
+ }
  switch(b.dataset.action){
  case 'new':case 'clone':case 'rename':return nameDialog(b.dataset.action);
  case 'save-scene':return nameDialog('save');
@@ -418,7 +425,7 @@ document.addEventListener('change',event=>{
  if(input.dataset.nativeField!==undefined){if(['text','secret'].includes(input.dataset.nativeKind)){stageText(input);return;}if(nativeControlDisabled(input))return;send({op:'native_field',id:input.dataset.nativeField,value:input.dataset.nativeKind==='checkbox'?String(input.checked):input.value},true);return;}
  if(busy())return;
  if(input.dataset.group){send({op:'groups',...state.groups,[input.dataset.group]:input.checked},true);return;}
- if(input.hasAttribute('data-target'))return void selectTarget(+input.value,input);
+ if(input.hasAttribute('data-target')){if(input.value!=='')selectTarget({op:'select_item',index:+input.value},input);return;}
  if(input.dataset.field){if(input.tagName==='INPUT'){stageText(input);return;}return void send({op:'set_field',key:input.dataset.field,value:input.value},true);}
  if(input.id==='palette-position'){
   const index=Number(input.value);

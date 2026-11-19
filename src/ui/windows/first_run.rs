@@ -325,7 +325,7 @@ impl App {
             self.first_run.context = self.context_revision;
             self.was_pending = false;
             self.dirty = false;
-            self.reset_editor(0);
+            self.reset_editor_preserving_device(0);
             self.sync();
             if self.page == Page::Connections {
                 self.open_connections()?;
