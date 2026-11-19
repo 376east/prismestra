@@ -6,12 +6,16 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string]$ManifestSha256,
     [Parameter(Mandatory)][string]$ReportDirectory,
     [string]$PreviousInstaller,
+    [switch]$ExerciseVcDownload,
     [switch]$DisposableRunner
 )
 
 $ErrorActionPreference = 'Stop'
 if (-not $DisposableRunner -or $env:GITHUB_ACTIONS -cne 'true') {
     throw 'Use this installer test only on a disposable GitHub Actions runner.'
+}
+if ($ExerciseVcDownload -and ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $PreviousInstaller)) {
+    throw 'VC Runtime removal requires a dedicated GitHub-hosted fresh-install job.'
 }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -241,11 +245,22 @@ $receipt = [ordered]@{
     network_isolation_exercised = $false
 }
 $setupAttempted = $false
+$vcRecovery = $null
+$restoreVc = $false
 $savedData = [ordered]@{}
 $receiptName = 'offline-setup.json'
 if ($PreviousInstaller) {
     $receipt.scope = 'production_upgrade_lifecycle'
     $receiptName = 'production-upgrade.json'
+} elseif ($ExerciseVcDownload) {
+    $receipt.scope = 'production_vc_download_lifecycle'
+    $receiptName = 'vc-download.json'
+    $receipt.vc_test = [ordered]@{
+        before = $null
+        after_removal = $null
+        removal_exit = $null
+        restored = $false
+    }
 }
 try {
     $installerPath = (Resolve-Path -LiteralPath $Installer).Path
@@ -304,6 +319,33 @@ try {
         }
         $receipt.saved_data_sha256 = $savedData
     }
+    if ($ExerciseVcDownload) {
+        $lock = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'prerequisites.lock.json') -Raw | ConvertFrom-Json
+        $pin = $lock.packages.vc_redist_x64
+        $minimum = [version]$lock.minimum_vc_runtime
+        $receipt.vc_test.before = Get-Runtimes
+        if ($receipt.vc_test.before.vc_version -and [version]$receipt.vc_test.before.vc_version -ge $minimum) {
+            Assert-Expected ($receipt.vc_test.before.vc_version -ceq $pin.version) (
+                'The hosted image uses a different VC version. Refusing removal without identical recovery media.')
+            $vcRecovery = Join-Path $env:RUNNER_TEMP $pin.file
+            Invoke-WebRequest -Uri $pin.source -OutFile $vcRecovery -TimeoutSec 90
+            $signature = Get-AuthenticodeSignature -LiteralPath $vcRecovery
+            Assert-Expected ((Get-Item -LiteralPath $vcRecovery).Length -eq $pin.size -and
+                (Get-Sha256 $vcRecovery) -ceq $pin.sha256 -and $signature.Status -eq 'Valid' -and
+                $signature.SignerCertificate.GetNameInfo('SimpleName', $false) -ceq $pin.publisher) (
+                'The exact Microsoft VC Runtime recovery installer could not be verified.')
+            $restoreVc = $true
+            $remove = Start-Process -FilePath $vcRecovery -WindowStyle Hidden -Wait -PassThru -ArgumentList @(
+                '/uninstall', '/quiet', '/norestart', '/log', ('"' + (Join-Path $report 'vc-remove.log') + '"'))
+            try { $receipt.vc_test.removal_exit = $remove.ExitCode } finally { $remove.Dispose() }
+            Assert-Expected ($receipt.vc_test.removal_exit -eq 0) 'Microsoft VC Runtime removal did not complete without a restart.'
+        }
+        $receipt.vc_test.after_removal = Get-Runtimes
+        $remaining = $receipt.vc_test.after_removal
+        Assert-Expected ((-not $remaining.vc_version -or [version]$remaining.vc_version -lt $minimum) -and
+            $remaining.vc_files.Count -eq 0) 'A supported registration or shared x64 VC DLL survived; clean download was not exercised.'
+        $receipt.runtimes_before = $remaining
+    }
     $vcBeforeCandidate = (Get-Runtimes).vc_version
     $setupAttempted = $true
     $receipt.setup_exit_code = Invoke-Installer $installerPath ($options + ' /ACCEPTWEBVIEW2TERMS') $setupLog
@@ -342,6 +384,12 @@ try {
     $receipt.vc_download_verified = $log -match '(?m)Verified Microsoft Visual C\+\+ Runtime download\.'
     $vcNeeded = [string]::IsNullOrEmpty($vcBeforeCandidate) -or [version]$vcBeforeCandidate -lt $minimumVc
     Assert-Expected ($receipt.vc_download_verified -eq $vcNeeded) 'Setup did not follow the expected VC Runtime download/reuse path.'
+    if ($ExerciseVcDownload) {
+        Assert-Expected ($receipt.vc_download_verified -and -not $receipt.reboot_required -and
+            $receipt.runtimes_installed.vc_version -ceq $manifest.vc_runtime_download.version -and
+            $log -match '(?im)\bvc_redist\.x64\.exe exit code 0\b') (
+            'The candidate did not download and install the exact VC Runtime before installing Prismestra.')
+    }
     Assert-Expected (Test-RuntimesReady $receipt.runtimes_installed $minimumVc) (
         'Installed shared runtime registration or runtime binaries are missing.')
     $null = Get-RegisteredUninstaller
@@ -390,6 +438,20 @@ try {
                 ($receipt.pawnio_after | ConvertTo-Json -Depth 8 -Compress)) 'PawnIO service registration or state changed.'
         } catch { $failures.Add($_.Exception.Message) }
         try { Copy-PrerequisiteLogs $started $report } catch { $failures.Add($_.Exception.Message) }
+    }
+    if ($restoreVc) {
+        try {
+            $restored = Get-Runtimes
+            if ($restored.vc_version -cne $pin.version -or $restored.vc_files.Count -ne 3) {
+                $recover = Start-Process -FilePath $vcRecovery -WindowStyle Hidden -Wait -PassThru -ArgumentList @(
+                    '/install', '/quiet', '/norestart', '/log', ('"' + (Join-Path $report 'vc-recovery.log') + '"'))
+                try { $recoveryExit = $recover.ExitCode } finally { $recover.Dispose() }
+                Assert-Expected ($recoveryExit -eq 0) "VC Runtime recovery failed with exit $recoveryExit."
+                $restored = Get-Runtimes
+            }
+            $receipt.vc_test.restored = $restored.vc_version -ceq $pin.version -and $restored.vc_files.Count -eq 3
+            Assert-Expected $receipt.vc_test.restored 'The original runner VC Runtime could not be restored.'
+        } catch { $failures.Add($_.Exception.Message) }
     }
     if ($failures.Count -eq 0 -and $receipt.install_verified -and $receipt.uninstall_verified) {
         $receipt.result = if ($receipt.reboot_required) { 'passed_with_restart_pending' } else { 'passed' }

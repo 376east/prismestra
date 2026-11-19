@@ -67,4 +67,12 @@ The run stores the compiled Setup, source companion, installation manifest and c
 
 The publisher is responsible for the WebView2 license obligations that apply to distribution. Those obligations include the commitments in section 2 of the Microsoft license. [Microsoft license at download](https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download).
 
+### Visual C++ download pin
+
+Each released Setup embeds the exact version-specific Microsoft CDN URL and SHA-256 from [the prerequisite lock](../scripts/installer/prerequisites.lock.json). Microsoft publishes a moving [latest x64 link](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/#latest-supported-version) and makes some older versions available in Dev Essentials. Microsoft does not document a retention period for the pinned CDN URL. The build fetches that exact URL and verifies size, SHA-256 and Microsoft Authenticode before every candidate. Recheck the exact URL before releasing the candidate.
+
+If Microsoft removes the URL or returns different bytes, Setup stops before launching the download or closing Prismestra. An existing compatible runtime still works. A user can install the current x64 runtime from Microsoft and retry the same Setup. To recover automatic download in a subsequent release, update the version, URL, size and SHA-256 together, rebuild Setup and verify the missing-runtime path again.
+
+The dedicated VC download job runs on a fresh GitHub-hosted VM. Before using Microsoft's uninstaller it verifies recovery media for the same installed version. It requires the shared x64 runtime DLLs to be absent before running the candidate, and checks verified download, runtime installation and Prismestra uninstall without a restart. Recovery uses the same Microsoft package if the candidate did not restore it.
+
 Only after all required jobs pass does the run retain `prismestra-verified-candidate-<attempt>` with the tested bytes. This workflow has read-only repository permissions and does not publish a release. A newly compiled or signed EXE requires its own installation checks.
