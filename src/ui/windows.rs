@@ -2953,9 +2953,12 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     if unsafe { InitCommonControlsEx(&init) } == 0 {
         return Err(last("Initialize native controls"));
     }
+    let modern_enabled = !o.classic_editor && resident_mode;
+    #[cfg(test)]
+    let modern_enabled = modern_enabled || webview_recovery_stand::enabled();
     let state = Box::new(State {
         icon: brand_icon::Icon::new()?,
-        modern_enabled: !o.classic_editor && resident_mode,
+        modern_enabled,
         webview: RefCell::new(None),
         modern_session: RefCell::new(None),
         app: RefCell::new(None),
@@ -3148,6 +3151,10 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         if o.selftest {
+            #[cfg(test)]
+            if webview_recovery_stand::enabled() {
+                return webview_recovery_stand::exercise(&state);
+            }
             selftest(raw, &state)?;
         }
         let raw = state.editor_window.get();
@@ -3329,6 +3336,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
                 DispatchMessageW(&msg);
             }
         }
+        modern::recover_failed_browser(&state);
     }
     drop(window);
     Ok(())
@@ -4022,6 +4030,9 @@ fn native_device_setup(hwnd: HWND, state: &State) -> Result<(), String> {
     }
     Ok(())
 }
+#[cfg(test)]
+mod webview_recovery_stand;
+
 #[cfg(test)]
 mod tests {
     use super::*;
