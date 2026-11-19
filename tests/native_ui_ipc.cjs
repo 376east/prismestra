@@ -147,7 +147,10 @@ vm.runInContext('changeView("settings")',context);
 assert.deepEqual(commands.at(-1),{op:'page',page:'settings'});
 settingsSnapshot({enabled:false,paused:true});
 assert.ok(!main.innerHTML.includes('data-view="schedule"'),'Disabled schedule can be left without reopening or reactivating it');
-vm.runInContext('view="lcd";render()',context);
+context.payload={kind:'snapshot',state:{...structuredClone(initial),devices:[
+ {id:'known-lcd',label:'LCD',role:'lcd',driver:{type:'tt_lcd'},leds:0,rate_hz:30,enabled:false}
+]}};
+vm.runInContext('window.prismestraReceive(payload);changeView("lcd");window.prismestraReceive(payload)',context);
 assert.ok(main.innerHTML.includes('Проверить температуры'));
 console.log('PASS: settings routes, existing active and paused schedules, draft protection and LCD diagnostics shortcut');
 
