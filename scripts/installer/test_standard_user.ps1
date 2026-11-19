@@ -156,6 +156,7 @@ try {
     $command = '"' + (Join-Path $Install Prismestra.exe) + '" --installed --autostart'
     $helper = Start-Process -FilePath $ps -ArgumentList ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
         (Join-Path $Install 'original-user.ps1') + '" EnableStartup "' + $Install + '" ' + $value) -PassThru -WindowStyle Hidden
+    $null = $helper.Handle
     if (-not $helper.WaitForExit(20000)) { $helper.Kill(); throw 'Startup registration timed out.' }
     if ($helper.ExitCode -ne 0) { throw 'Standard-user startup registration failed.' }
     $prior = Get-ItemPropertyValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' $value
@@ -165,6 +166,7 @@ try {
     if ($null -ne $manifest.data_namespace) { throw 'Expected the installed production manifest.' }
     $image = Join-Path $Install 'Prismestra.exe'
     $app = Start-Process -FilePath $image -ArgumentList '--installed', '--autostart' -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $PSScriptRoot 'app.stderr.log') -RedirectStandardOutput (Join-Path $PSScriptRoot 'app.stdout.log')
+    $null = $app.Handle
     $documentPath = Join-Path $profile 'profile.json'
     $configPath = Join-Path $profile 'state\managed-openrgb.json'
     $bindingPath = Join-Path $profile 'state\lighting-local.json'
@@ -249,6 +251,7 @@ public static class PrismestraCiShell {
             if ([PrismestraCiShell]::Observe($app.Id)) {
                 $result.resident_shell = 'observed_drain_unverified'
                 $stop = Start-Process -FilePath $image -ArgumentList '--shutdown-installed' -WindowStyle Hidden -PassThru
+                $null = $stop.Handle
                 if ($stop.WaitForExit(50000) -and $stop.ExitCode -eq 0 -and $app.WaitForExit(3000) -and $app.ExitCode -eq 0) {
                     $result.resident_shell = 'process_drained_by_shutdown'
                 }
