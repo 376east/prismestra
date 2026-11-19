@@ -99,7 +99,8 @@ impl Editor {
             scan: Default::default(),
             workspace: None,
             targets: vec![],
-            selected: None,
+            // Select the first entry when a target list is first available.
+            selected: Some(0),
             inventory: None,
             scan_endpoint: None,
             controllers: BTreeMap::new(),
@@ -141,8 +142,7 @@ impl Editor {
                 (BindingTarget::Monitor(old), BindingTarget::Monitor(new)) => old == new,
                 _ => false,
             }),
-            None if self.targets.is_empty() && !targets.is_empty() => Some(0),
-            None => None,
+            None => self.selected,
         };
         self.targets = targets;
     }
@@ -1334,6 +1334,10 @@ mod activation_tests {
 
         editor.replace_targets(vec![monitor.clone(), lcd("other")]);
         assert!(editor.current().is_none());
+        editor.replace_targets(vec![lcd("other"), monitor.clone()]);
+        assert!(editor.current().is_none());
+
+        editor.replace_targets(Vec::new());
         editor.replace_targets(vec![lcd("other"), monitor.clone()]);
         assert!(editor.current().is_none());
 
