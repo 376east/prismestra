@@ -285,12 +285,17 @@ fn apply(
             continue;
         }
         let path = source.state.join(name);
-        let Some(bytes) = read_optional(&path, limit)? else {
+        let Some(mut bytes) = read_optional(&path, limit)? else {
             continue;
         };
         match name {
             "sensor-sources.json" => {
-                sensor_bindings::Catalog::decode(&bytes)?;
+                bytes = rekey_sensor_catalog(
+                    bytes,
+                    &source.profile,
+                    &root.join("profile.json"),
+                    &document,
+                )?;
             }
             "scene-library.json" => {
                 Catalog::load(&path, &document.lighting.scene)?;
@@ -368,6 +373,43 @@ fn apply(
     receipt.source_running = source_running;
     write_receipt(root, &receipt)?;
     Ok(receipt.outcome(source_running))
+}
+
+fn rekey_sensor_catalog(
+    bytes: Vec<u8>,
+    source: &Path,
+    target: &Path,
+    document: &Document,
+) -> Result<Vec<u8>, String> {
+    use sensor_bindings::Scope;
+
+    let mut catalog = sensor_bindings::Catalog::decode(&bytes)?;
+    let source = source.to_string_lossy();
+    // The portable UI can use an ordinary DOS path. Migration canonicalizes the path.
+    let plain = source.strip_prefix(r"\\?\").unwrap_or(&source);
+    let old = Scope::lighting(&source, document).ok();
+    let plain = Scope::lighting(plain, document).ok();
+    let Ok(target) = Scope::lighting(&target.to_string_lossy(), document) else {
+        return Ok(bytes);
+    };
+    if catalog.routes.iter().any(|route| route.scope == target) {
+        return Ok(bytes);
+    }
+    let mut inputs = BTreeSet::new();
+    for route in &mut catalog.routes {
+        if old.as_ref() == Some(&route.scope) || plain.as_ref() == Some(&route.scope) {
+            // Two aliases with the same input have no unambiguous authority.
+            if !inputs.insert(route.input.clone()) {
+                return Ok(bytes);
+            }
+            route.scope = target.clone();
+        }
+    }
+    if inputs.is_empty() {
+        Ok(bytes)
+    } else {
+        catalog.encode()
+    }
 }
 
 fn copy_assets(source: &Path, target: &Path, document: &Document) -> Result<(), String> {
@@ -1536,6 +1578,91 @@ mod tests {
             sensors
         );
         assert!(!installed.join("backend-task.json").exists());
+    }
+
+    #[test]
+    fn rekeys_only_the_imported_profile_temperature_routes() {
+        use crate::app::sensor_pci::Pci;
+        use crate::app::sensors::{Source, Value};
+        use sensor_bindings::{Catalog, Scope, Target};
+
+        let fixture = Fixture::new();
+        let mut doc = document(true);
+        doc.temperatures.sources.push(Source {
+            key: "gpu_view".into(),
+            value: Value::Sensor {
+                input: "gpu".into(),
+            },
+        });
+        fixture.populate(&doc, "127.0.0.1:6742".parse().unwrap());
+
+        let legacy_path = fixture.source.profile.to_str().unwrap();
+        let legacy_path = legacy_path.strip_prefix(r"\\?\").unwrap_or(legacy_path);
+        let old = Scope::lighting(legacy_path, &doc).unwrap();
+        let other = Scope::lighting("other-profile", &doc).unwrap();
+        let stale = Scope::lighting(legacy_path, &document(true)).unwrap();
+        let destination =
+            Scope::lighting(fixture.target.join("profile.json").to_str().unwrap(), &doc).unwrap();
+        let inputs = ["gpu".to_owned()];
+        let mut catalog = Catalog::default();
+        catalog
+            .set_source(
+                "gpu-sensor",
+                Target::Nvidia {
+                    pci: Pci {
+                        device_id: 0x280310de,
+                        subsystem_id: 0x12345678,
+                        revision_id: 0xa1,
+                        extended_device_id: 0x77,
+                    },
+                },
+            )
+            .unwrap();
+        for scope in [&old, &other, &stale] {
+            catalog
+                .set_routes(scope, &[("gpu".into(), "gpu-sensor".into())])
+                .unwrap();
+        }
+        let path = fixture.source.state.join("sensor-sources.json");
+        let target = fixture.target.join("state/sensor-sources.json");
+        let source_bytes = catalog.encode().unwrap();
+        for competing in [
+            Scope::lighting(fixture.source.profile.to_str().unwrap(), &doc).unwrap(),
+            destination.clone(),
+        ]
+        .into_iter()
+        .filter(|scope| *scope != old)
+        {
+            let mut conflicted = catalog.clone();
+            conflicted
+                .set_routes(&competing, &[("gpu".into(), "gpu-sensor".into())])
+                .unwrap();
+            let bytes = conflicted.encode().unwrap();
+            assert_eq!(
+                rekey_sensor_catalog(
+                    bytes.clone(),
+                    &fixture.source.profile,
+                    &fixture.target.join("profile.json"),
+                    &doc,
+                )
+                .unwrap(),
+                bytes
+            );
+        }
+        fs::write(&path, &source_bytes).unwrap();
+
+        fixture.migrate(false).unwrap();
+        let installed = Catalog::load(&target).unwrap();
+        let resolved = catalog.prepare(&old, &inputs).unwrap();
+        assert_eq!(installed.prepare(&destination, &inputs).unwrap(), resolved);
+        assert!(installed.prepare(&old, &inputs).is_err());
+        assert_eq!(installed.prepare(&other, &inputs).unwrap(), resolved);
+        assert_eq!(installed.prepare(&stale, &inputs).unwrap(), resolved);
+        assert_eq!(fs::read(&path).unwrap(), source_bytes);
+
+        let installed_bytes = fs::read(&target).unwrap();
+        assert_eq!(fixture.migrate(false).unwrap(), MigrationOutcome::None);
+        assert_eq!(fs::read(target).unwrap(), installed_bytes);
     }
 
     #[test]
