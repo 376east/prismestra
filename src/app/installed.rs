@@ -577,9 +577,17 @@ pub(crate) fn backend_default_owned(state: &Path) -> Result<bool, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    pub(crate) fn fresh_profile() -> (Fixture, PathBuf, PathBuf, Vec<OsString>) {
+        let fixture = Fixture::new();
+        let (exe, manifest) = fixture.payload(b"fixture backend");
+        let user = fixture.0.join("user");
+        let args = bootstrap(&manifest, &exe, &user).unwrap();
+        (fixture, user.join("profile.json"), user.join("state"), args)
+    }
 
     // Bootstrap fixtures never inspect the developer's real sessions or copy their data.
     fn bootstrap(
@@ -595,7 +603,7 @@ mod tests {
         })
     }
 
-    struct Fixture(PathBuf);
+    pub(crate) struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
             let stamp = SystemTime::now()
@@ -674,12 +682,7 @@ mod tests {
 
     #[test]
     fn first_launch_builds_valid_profile_and_defers_activation_until_handover() {
-        let fixture = Fixture::new();
-        let (exe, manifest) = fixture.payload(b"fixture backend");
-        let user = fixture.0.join("user");
-        let args = bootstrap(&manifest, &exe, &user).unwrap();
-        let state = user.join("state");
-        let profile = user.join("profile.json");
+        let (fixture, profile, state, args) = fresh_profile();
         let document = Document::load(&profile).unwrap();
         let local = Local::read(&state.join("lighting-local.json"), &document).unwrap();
         assert!(document.lighting.setup.devices.is_empty());
@@ -702,7 +705,10 @@ mod tests {
             .unwrap();
         assert_eq!(config.endpoint().to_string(), "127.0.0.1:17422");
         config
-            .require_identity(&fixture.0.join(BACKEND_PATH), &manifest.backend.sha256)
+            .require_identity(
+                &fixture.0.join(BACKEND_PATH),
+                &fingerprint(b"fixture backend"),
+            )
             .unwrap();
     }
 
