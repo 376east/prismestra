@@ -13,6 +13,7 @@ pub mod sensors;
 pub mod storage;
 pub mod transport;
 pub mod ui;
+pub mod yandex_lamp;
 
 #[cfg(windows)]
 pub mod credentials_windows;

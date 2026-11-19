@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Home Assistant token storage in the current user's Windows Credential Manager.
+//! Provider token storage in the current user's Windows Credential Manager.
 //! Requires windows-sys 0.61 features Win32_Security_Credentials and
 //! Win32_Foundation; register this module only on Windows.
 //!
@@ -12,7 +12,7 @@
 //! Generic credentials persist for this user on this PC, without enterprise
 //! roaming. Windows targets are case-insensitive; callers should generate stable
 //! opaque IDs, preferably lowercase UUIDs, and store only IDs in local bindings.
-//! No enumeration, alternate target prefix, file fallback or credential logging.
+//! Fixed provider prefixes, with no enumeration, file fallback or credential logging.
 //! Returned Strings and caller-provided tokens remain ordinary process memory;
 //! callers must not log them. Credential Manager is not isolation from other
 //! processes running as the same Windows user.
@@ -24,6 +24,7 @@ use windows_sys::Win32::Security::Credentials::{
 };
 
 const TARGET_PREFIX: &str = "Prismestra/HomeAssistant/v1/";
+const YANDEX_PREFIX: &str = "Prismestra/YandexSmartHome/v1/";
 pub const MAX_ID_BYTES: usize = 128;
 pub const MAX_TOKEN_BYTES: usize = CRED_MAX_CREDENTIAL_BLOB_SIZE as usize;
 
@@ -46,7 +47,15 @@ impl std::error::Error for Error {}
 /// Save or replace exactly this application's credential for `id`.
 /// The generic blob stores visible ASCII bytes directly, without a terminator.
 pub fn save(id: &str, token: &str) -> Result<(), Error> {
-    let mut target = target(id)?;
+    save_in(TARGET_PREFIX, id, token)
+}
+
+pub(crate) fn save_yandex(id: &str, token: &str) -> Result<(), Error> {
+    save_in(YANDEX_PREFIX, id, token)
+}
+
+fn save_in(prefix: &str, id: &str, token: &str) -> Result<(), Error> {
+    let mut target = target(prefix, id)?;
     validate_token(token.as_bytes())?;
     let credential = CREDENTIALW {
         Type: CRED_TYPE_GENERIC,
@@ -67,7 +76,15 @@ pub fn save(id: &str, token: &str) -> Result<(), Error> {
 
 /// Read only the exact namespaced target. Missing is distinct from OS failure.
 pub fn read(id: &str) -> Result<Option<String>, Error> {
-    let target = target(id)?;
+    read_in(TARGET_PREFIX, id)
+}
+
+pub(crate) fn read_yandex(id: &str) -> Result<Option<String>, Error> {
+    read_in(YANDEX_PREFIX, id)
+}
+
+fn read_in(prefix: &str, id: &str) -> Result<Option<String>, Error> {
+    let target = target(prefix, id)?;
     let mut raw = std::ptr::null_mut();
     if unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut raw) } == 0 {
         return missing_or_error(None);
@@ -98,7 +115,15 @@ pub fn read(id: &str) -> Result<Option<String>, Error> {
 
 /// Delete only the exact namespaced target; false means it was already absent.
 pub fn delete(id: &str) -> Result<bool, Error> {
-    let target = target(id)?;
+    delete_in(TARGET_PREFIX, id)
+}
+
+pub(crate) fn delete_yandex(id: &str) -> Result<bool, Error> {
+    delete_in(YANDEX_PREFIX, id)
+}
+
+fn delete_in(prefix: &str, id: &str) -> Result<bool, Error> {
+    let target = target(prefix, id)?;
     if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
         missing_or_error(false)
     } else {
@@ -106,7 +131,7 @@ pub fn delete(id: &str) -> Result<bool, Error> {
     }
 }
 
-fn target(id: &str) -> Result<Vec<u16>, Error> {
+fn target(prefix: &str, id: &str) -> Result<Vec<u16>, Error> {
     if id.is_empty()
         || id.len() > MAX_ID_BYTES
         || !id
@@ -115,7 +140,7 @@ fn target(id: &str) -> Result<Vec<u16>, Error> {
     {
         return Err(Error::InvalidId);
     }
-    Ok(TARGET_PREFIX
+    Ok(prefix
         .encode_utf16()
         .chain(id.encode_utf16())
         .chain(Some(0))
@@ -172,19 +197,27 @@ mod tests {
         for id in [
             "", ".", "..", "a/b", "a\\b", "a:b", "a b", "a\0b", "a\nb", "тест",
         ] {
-            assert_eq!(target(id), Err(Error::InvalidId));
+            assert_eq!(target(TARGET_PREFIX, id), Err(Error::InvalidId));
             assert_eq!(read(id), Err(Error::InvalidId));
             assert_eq!(delete(id), Err(Error::InvalidId));
             assert_eq!(save(id, "fake-token"), Err(Error::InvalidId));
         }
-        assert_eq!(target(&"a".repeat(MAX_ID_BYTES + 1)), Err(Error::InvalidId));
-        let wide = target("own_test-123").unwrap();
+        assert_eq!(
+            target(TARGET_PREFIX, &"a".repeat(MAX_ID_BYTES + 1)),
+            Err(Error::InvalidId)
+        );
+        let wide = target(TARGET_PREFIX, "own_test-123").unwrap();
         assert_eq!(wide.last(), Some(&0));
         assert_eq!(
             String::from_utf16(&wide[..wide.len() - 1]).unwrap(),
             "Prismestra/HomeAssistant/v1/own_test-123"
         );
-        assert!(target(&"a".repeat(MAX_ID_BYTES)).is_ok());
+        assert!(target(TARGET_PREFIX, &"a".repeat(MAX_ID_BYTES)).is_ok());
+        let yandex = target(YANDEX_PREFIX, "own_test-123").unwrap();
+        assert_eq!(
+            String::from_utf16(&yandex[..yandex.len() - 1]).unwrap(),
+            "Prismestra/YandexSmartHome/v1/own_test-123"
+        );
     }
 
     #[test]
