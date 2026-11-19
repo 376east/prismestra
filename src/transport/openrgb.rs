@@ -70,6 +70,32 @@ impl ControllerInfo {
     }
 }
 
+pub(crate) struct InventoryEntry {
+    pub(crate) identity_fields: [String; 5],
+    pub(crate) description: OpenRgbResult<ControllerInfo>,
+}
+
+fn kind(controller: &Controller) -> String {
+    if controller
+        .flags()
+        .is_some_and(|flags| flags.contains(openrgb2::ControllerFlags::IsVirtual))
+    {
+        "Virtual".into()
+    } else {
+        format!("{:?}", controller.device_type())
+    }
+}
+
+fn identity_fields<'a>(controller: &'a Controller, kind: &'a str) -> [&'a str; 5] {
+    [
+        controller.name(),
+        controller.vendor(),
+        controller.serial(),
+        controller.location(),
+        kind,
+    ]
+}
+
 fn describe(c: &Controller) -> OpenRgbResult<ControllerInfo> {
     let mut offset = 0usize;
     let mut mapped = vec![false; c.colors().len()];
@@ -144,14 +170,7 @@ fn describe(c: &Controller) -> OpenRgbResult<ControllerInfo> {
         vendor: c.vendor().into(),
         serial: c.serial().into(),
         location: c.location().into(),
-        kind: if c
-            .flags()
-            .is_some_and(|flags| flags.contains(openrgb2::ControllerFlags::IsVirtual))
-        {
-            "Virtual".into()
-        } else {
-            format!("{:?}", c.device_type())
-        },
+        kind: kind(c),
         leds: c.colors().len(),
         led_names: c.led_iter().map(|l| l.name().to_owned()).collect(),
         zones,
@@ -227,12 +246,34 @@ impl OpenRgbSession {
         deadline: Instant,
         cancelled: &impl Fn() -> bool,
     ) -> Result<Vec<ControllerInfo>, String> {
+        let entries = self.scan_inventory(deadline, cancelled)?;
+        let result = entries
+            .into_iter()
+            .map(|entry| entry.description)
+            .collect::<OpenRgbResult<_>>();
+        self.finish(result.map_err(|error| format!("OpenRGB: {error}")))
+    }
+
+    /// A decoded controller can have invalid geometry. Retain its ownership
+    /// fields for ambiguity checks, and surface its description error separately.
+    pub(crate) fn scan_inventory(
+        &mut self,
+        deadline: Instant,
+        cancelled: &impl Fn() -> bool,
+    ) -> Result<Vec<InventoryEntry>, String> {
         let result = {
             let client = self.client.as_ref().ok_or("OpenRGB connection discarded")?;
             self.runtime.block_on(bounded(
                 async {
                     let group = client.get_all_controllers().await?;
-                    group.iter().map(describe).collect()
+                    Ok(group
+                        .iter()
+                        .map(|controller| InventoryEntry {
+                            identity_fields: identity_fields(controller, &kind(controller))
+                                .map(str::to_owned),
+                            description: describe(controller),
+                        })
+                        .collect())
                 },
                 deadline,
                 cancelled,
@@ -316,24 +357,23 @@ fn exact_controller<'a>(
 ) -> OpenRgbResult<&'a Controller> {
     let mut candidate = None;
     for controller in group.iter() {
-        let info = describe(controller)?;
-        if info.physical_identity() == expected.physical_identity() {
+        if identity_fields(controller, &kind(controller)) == expected.physical_identity() {
             if candidate.is_some() {
                 return Err(openrgb2::OpenRgbError::ProtocolError(
                     "OpenRGB controller identity is ambiguous; no output activated".into(),
                 ));
             }
-            candidate = Some((info, controller));
+            candidate = Some(controller);
         }
     }
-    candidate
-        .filter(|(info, _)| info == expected)
-        .map(|(_, controller)| controller)
-        .ok_or_else(|| {
-            openrgb2::OpenRgbError::ProtocolError(
-                "OpenRGB controller identity or topology changed; rescan and bind again".into(),
-            )
-        })
+    if let Some(controller) = candidate
+        && describe(controller)? == *expected
+    {
+        return Ok(controller);
+    }
+    Err(openrgb2::OpenRgbError::ProtocolError(
+        "OpenRGB controller identity or topology changed; rescan and bind again".into(),
+    ))
 }
 
 #[cfg(test)]
