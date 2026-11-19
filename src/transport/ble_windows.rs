@@ -831,6 +831,19 @@ mod tests {
         assert_eq!(*received.lock().unwrap(), None);
     }
     #[test]
+    fn truncated_non_status_notification_does_not_hide_ea81_reply() {
+        let armed = AtomicBool::new(true);
+        let received = Mutex::new(None);
+        for packet in [
+            br#"prefix{"payload":"e1030"}"#.as_slice(),
+            br#"prefix{"payload":"ea810100aa0b23240150f00064030000010099ffffffff01000001"}"#,
+        ] {
+            receive_pixel_capacity(&armed, &received, || ble::parse_pixel_capacity(packet));
+        }
+        assert_eq!(*received.lock().unwrap(), Some(Ok(153)));
+    }
+
+    #[test]
     fn unrelated_notification_is_ignored_and_first_result_is_preserved() {
         let armed = AtomicBool::new(true);
         let received = Mutex::new(None);

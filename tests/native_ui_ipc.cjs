@@ -1,5 +1,6 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict'),path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'..','src','ui','windows','web','app.js'),'utf8');
+const outputMapSource=fs.readFileSync(path.join(__dirname,'..','src','ui','windows','web','output-map.js'),'utf8');
 const nodes=new Map(),commands=[],events={},rafQueue=[];
 class Node {constructor(){this.tagName='INPUT';this.validity={valid:true};this.dataset={};this.width=104;this.height=72;this.value='';this.disabled=false;this.innerHTML='';this.textContent='';}setAttribute(){}focus(){document.activeElement=this;}select(){}hasAttribute(name){return name==='data-target'&&this.dataset.target!==undefined;}before(){}append(){}addEventListener(){}setCustomValidity(){}reportValidity(){}showModal(){this.open=true;}close(){this.open=false;}getContext(){return {fillRect(){},clearRect(){},createImageData:(w,h)=>({data:new Uint8ClampedArray(w*h*4)}),putImageData:pixels=>{this.lastPixels=pixels;}};}}
 const find=s=>{if(!nodes.has(s))nodes.set(s,new Node());return nodes.get(s);};
@@ -85,6 +86,54 @@ vm.runInContext('changeView("schedule");window.prismestraReceive(payload)',conte
 vm.runInContext('view="devices";state.editor={page:"devices",index:0,targets:["Device"],fields:[],dirty:true};render()',context);const beforeDirtyNavigation=commands.length;vm.runInContext('changeView("sources")',context);assert.equal(vm.runInContext('view',context),'devices');assert.equal(commands.length,beforeDirtyNavigation);assert.ok(find('#native-error').innerHTML.includes('Примените или отмените'));
 // Additional controls use details, keeping basic controls visible and open state across render.
 vm.runInContext('state.editor.dirty=false;view="editor";advancedOpen=false;render()',context);let markup=find('#main').innerHTML;assert.ok(markup.indexOf('data-param="brightness"')<markup.indexOf('<details'));assert.ok(markup.indexOf('data-param="speed"')<markup.indexOf('<details'));assert.ok(markup.indexOf('data-param="fps"')>markup.indexOf('<details'));assert.ok(markup.includes('Основной свет'));assert.ok(markup.includes('Дополнительный свет'));assert.ok(!markup.includes('Дверная лента'));events.toggle({target:{id:'advanced-scene',open:true}});vm.runInContext('render()',context);assert.ok(find('#main').innerHTML.includes('<details id="advanced-scene" open>'));
+// Palette structure edits reuse scene preview and leave the authoritative profile alone.
+const paletteScene={...structuredClone(scene),colors:[0x081426,0x154760,0x2db6ae,0xe3b769,0xf2d9a2]};
+context.paletteScene=paletteScene;
+vm.runInContext('draft=clone(paletteScene);palettePosition=0;render()',context);
+const paletteAction=action=>events.click({target:{closest:()=>({dataset:{action},disabled:false,hasAttribute:name=>name==='data-mutation'})}});
+const paletteControl=action=>{context.paletteControl={dataset:{action}};return vm.runInContext('controlDisabled(paletteControl)',context);};
+const beforePalette=commands.length;
+assert.ok(find('#main').innerHTML.includes('id="palette-position"'));
+assert.equal(paletteControl('move-palette-earlier'),true);
+events.change({target:Object.assign(new Node(),{id:'palette-position',value:'1',dataset:{}})});
+paletteAction('insert-palette-color');
+vm.runInContext('flushPreview()',context);
+assert.deepEqual(commands.at(-1).scene,{...paletteScene,colors:[0x081426,0x154760,0x154760,0x2db6ae,0xe3b769,0xf2d9a2]});
+assert.equal(vm.runInContext('palettePosition',context),2);
+events.change({target:Object.assign(new Node(),{id:'palette-position',value:'3',dataset:{}})});
+paletteAction('move-palette-earlier');
+vm.runInContext('flushPreview()',context);
+assert.deepEqual(commands.at(-1).scene,{...paletteScene,colors:[0x081426,0x154760,0x2db6ae,0x154760,0xe3b769,0xf2d9a2]});
+assert.equal(vm.runInContext('palettePosition',context),2);
+assert.ok(commands.slice(beforePalette).every(command=>command.op==='preview_scene'));
+assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(state.scene)',context)),scene);
+assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(state.library[0].scene)',context)),scene);
+vm.runInContext('send({op:"save_scene",name:"Palette copy",scene:clone(draft)},true)',context);
+assert.equal(commands.at(-1).op,'save_scene');
+assert.equal(commands.at(-1).id,undefined,'copy has no existing catalog ID');
+assert.deepEqual(commands.at(-1).scene,{...paletteScene,colors:[0x081426,0x154760,0x2db6ae,0x154760,0xe3b769,0xf2d9a2]});
+vm.runInContext('commandPending=false;awaitingCommandAck=false',context);
+vm.runInContext('draft.colors=Array.from({length:8},(_,index)=>index);palettePosition=7;render()',context);
+assert.equal(paletteControl('insert-palette-color'),true);
+assert.equal(paletteControl('move-palette-later'),true);
+paletteAction('insert-palette-color');paletteAction('move-palette-later');
+assert.equal(vm.runInContext('draft.colors.length',context),8);
+vm.runInContext('draft=clone(paletteScene);draft.colors=[0x081426];render()',context);
+assert.equal(vm.runInContext('palettePosition',context),0,'position clamps when opening a shorter palette');
+assert.equal(paletteControl('move-palette-earlier'),true);assert.equal(paletteControl('move-palette-later'),true);
+events.change({target:Object.assign(new Node(),{id:'noise-palette',dataset:{sceneSelect:'noise_palette'},value:'rainbow'})});
+assert.ok(!find('#main').innerHTML.includes('id="palette-position"'));
+paletteAction('insert-palette-color');assert.equal(vm.runInContext('draft.colors.length',context),1);
+events.change({target:Object.assign(new Node(),{id:'noise-palette',dataset:{sceneSelect:'noise_palette'},value:'custom'})});
+assert.ok(find('#main').innerHTML.includes('id="palette-position"'));
+vm.runInContext('draft.effect="rainbow_wave";render()',context);
+assert.ok(!find('#main').innerHTML.includes('id="palette-position"'));
+vm.runInContext('draft=clone(paletteScene);draft.effect="breathing";state.pending=true;render()',context);
+assert.equal(paletteControl('insert-palette-color'),true);
+paletteAction('insert-palette-color');assert.equal(vm.runInContext('draft.colors.length',context),5);
+vm.runInContext('state.pending=false;draft=null;previewQueued=false',context);
+console.log('PASS: palette insertion and reorder preview ordered RGB, scene untouched, palette mode and bounds respected');
+
 // Native library frames go through the same pixel painter; missing frames keep a palette fallback.
 context.payload={kind:'snapshot',state:{...structuredClone(initial),library:[{id:'saved',name:'Native frame',scene,preview:{width:2,height:1,colors:[0xff0000,0x00ff00]}},{id:'fallback',name:'No cached frame',scene}]}};vm.runInContext('view="library";window.prismestraReceive(payload)',context);
 assert.ok(find('#main').innerHTML.includes('data-library-preview="saved"'));assert.ok(find('#main').innerHTML.includes('Палитра сцены'));const artwork=find('library-canvas-saved');assert.equal(artwork.width,2);assert.equal(artwork.height,1);assert.deepEqual([...artwork.lastPixels.data],[255,0,0,255,0,255,0,255]);assert.ok(find('#main').innerHTML.includes('параметры RGB'));
@@ -125,8 +174,148 @@ vm.runInContext('window.prismestraReceive({kind:"status",state:{error:null,pendi
 vm.runInContext('send({op:"native_action",id:410},true);window.prismestraReceive(payload)',context);assert.equal(find('#native-error').hidden,true,'new successful command snapshot clears old command error');assert.equal(find('#native-error').innerHTML,'','stale notice actions are removed');assert.equal(vm.runInContext('stagedDirty()',context),false);
 context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeAux:structuredClone(aux),error:'Provider still unavailable'}};vm.runInContext('send({op:"native_action",id:410},true);window.prismestraReceive(payload)',context);assert.equal(find('#native-error').hidden,false);assert.ok(find('#native-error').innerHTML.includes('Provider still unavailable'),'successful ack cannot hide an actual backend error');
 console.log('PASS: failed snapshot/status retain command error; causal successful ack removes stale error/actions; current backend error remains');
+
+// The cards show applied outputs, whereas the properties selector edits the draft.
+const appliedDevices = ['first','second','third'].map(id=>({
+ id,label:id,role:'canvas',driver:{type:'stub'},leds:10,rate_hz:48,enabled:true
+}));
+context.payload={kind:'snapshot',state:{
+ ...structuredClone(initial),devices:appliedDevices,draftDevices:appliedDevices.slice(1),
+ editor:{page:'devices',index:0,targets:['second','third'],fields:[],dirty:true}
+}};
+vm.runInContext('formStages.clear();view="devices";window.prismestraReceive(payload)',context);
+const secondButtonMarkup=find('#main').innerHTML.match(/<button[^>]*aria-label="Свойства: second"[^>]*>/)[0];
+const secondButton=new Node();
+for(const [,name,value] of secondButtonMarkup.matchAll(/data-(device-index|device-id)="([^"]+)"/g)){
+ secondButton.dataset[name==='device-index'?'deviceIndex':'deviceId']=value;
+}
+const beforeDeviceSelection=commands.length;
+events.click({target:{closest:()=>secondButton}});
+assert.equal(commands.length,beforeDeviceSelection+1);
+assert.deepEqual(commands.at(-1),{op:'select_device',id:'second'},
+ 'Open the same output after an earlier device was removed in the draft');
+vm.runInContext('window.prismestraReceive(payload)',context);
+const objectSelector=new Node();objectSelector.dataset.target='';objectSelector.value='1';
+events.change({target:objectSelector});
+assert.deepEqual(commands.at(-1),{op:'select_item',index:1},'Native draft dropdown still selects by its own index');
+vm.runInContext('window.prismestraReceive(payload);pendingView={previous:"library",next:"devices"}',context);
+const beforePendingPage=commands.length;
+events.click({target:{closest:()=>secondButton}});
+assert.equal(commands.length,beforePendingPage,'Do not send a card selection before native navigation is acknowledged');
+vm.runInContext('pendingView=null',context);
+console.log('PASS: device cards select by logical identity and the draft dropdown still uses indices');
+
+const candidateFixtures = require('./fixtures/device-candidates.json');
+const [foundRgb, foundLcd] = candidateFixtures.proposal.deviceCandidates;
+const foundState = {
+ ...initial,
+ editor: {page: 'devices', index: 0, targets: [], fields: [], dirty: false},
+ ...candidateFixtures.proposal,
+};
+const receiveDeviceState = (kind, state) => {
+ context.payload = {kind, state};
+ vm.runInContext('window.prismestraReceive(payload)', context);
+};
+const hasCandidate = id => mainMarkup.includes(`data-candidate-id="${id}"`);
+receiveDeviceState('snapshot', foundState);
+assert.ok(hasCandidate(foundRgb.id) && hasCandidate(foundLcd.id), 'same-label candidates keep separate IDs');
+receiveDeviceState('status', {detail: 'Keep current candidates'});
+assert.ok(hasCandidate(foundRgb.id) && hasCandidate(foundLcd.id));
+receiveDeviceState('snapshot', {...foundState, devices: [{...foundRgb, leds: 1}], editor: {
+ page: 'devices', index: 1, targets: ['Fixture'], fields: [], dirty: false,
+}});
+assert.ok(!hasCandidate(foundRgb.id) && hasCandidate(foundLcd.id), 'applied ID replaces a matching candidate');
+assert.ok(mainMarkup.includes('<option value="" disabled selected>Выберите устройство…</option>'));
+receiveDeviceState('status', candidateFixtures.cancelled);
+assert.ok(!hasCandidate(foundLcd.id), 'empty metadata removes stale candidate rows');
+receiveDeviceState('status', candidateFixtures.replacement);
+assert.ok(hasCandidate(candidateFixtures.replacement.deviceCandidates[0].id));
+console.log('PASS: candidate identity, applied precedence, metadata replacement, empty device selection');
+
 vm.runInContext('view="devices";state.editor={page:"devices",index:0,targets:["Strip"],fields:[],dirty:false};state.detail="Ошибка RGB: <test>";render()',context);
 assert.ok(find('#main').innerHTML.includes('Ошибка RGB: &lt;test&gt;'));
+
+// Map replies, connection changes and focus all belong to the current logical output.
+const mapEvents = {};
+const mapNodes = new Map();
+const mapNode = id => {
+ if (!mapNodes.has(id)) mapNodes.set(id, new Node());
+ return mapNodes.get(id);
+};
+const mapDocument = {
+ getElementById: mapNode,
+ createElement: () => Object.assign(new Node(), {style: {}, insertCell: () => new Node()}),
+};
+const mapDialog = mapNode('output-map');
+mapDialog.addEventListener = (event, handler) => { mapEvents[event] = handler; };
+const mapTable = mapNode('output-map-table');
+mapTable.tBodies = [{replaceChildren(...rows) { this.rows = rows; }}];
+mapNode('native-target').after = (...buttons) => {
+ for (const button of buttons) mapNodes.set(button.id, button);
+};
+const mapWindow = {};
+vm.runInNewContext(outputMapSource, {window: mapWindow, document: mapDocument});
+const map = mapWindow.outputMap;
+const strip = {id: 'strip', role: 'canvas', leds: 1};
+const other = {...strip, id: 'other'};
+const mapState = {
+ profilePath: 'fixture',
+ editor: {page: 'devices', index: 1},
+ devices: [other, strip],
+ draftDevices: [other, strip],
+ draftMapRevision: '12',
+ mapConnection: {device: 'strip', state: 'ready'},
+};
+const mapRequests = [];
+const mountMap = () => map.mount(mapState, command => !!mapRequests.push(command), () => []);
+const reply = (command, extra = {}) => ({
+ request: command.request, device: command.device, source: command.source,
+ revision: command.revision, availability: 'ready',
+ preview: {device: command.device, label: 'Strip', width: 1, height: 1, total: 1, offset: 0,
+  entries: [{led: 0, x: 0, y: 0, color: 0xff0000}]},
+ ...extra,
+});
+mountMap();
+mapNode('draft-output-map-open').onclick();
+const draftRequest = mapRequests.at(-1);
+assert.equal(draftRequest.device, 'strip');
+map.receive(reply(draftRequest, {revision: '11'}));
+map.receive(reply(draftRequest, {device: 'other'}));
+assert.equal(mapTable.hidden, true);
+map.receive(reply(draftRequest));
+assert.equal(mapTable.hidden, false);
+assert.equal(mapNode('output-map-mode').hidden, false);
+map.update({...mapState, mapConnection: {device: 'other', state: 'offline'}});
+assert.equal(mapNode('output-map-connection').hidden, true);
+mapState.mapConnection.state = 'offline';
+map.update(mapState);
+assert.equal(mapNode('output-map-connection').textContent, 'Выход отключён.');
+assert.equal(mapTable.hidden, false, 'offline transport leaves draft rows visible');
+mapNode('output-map-applied').onclick();
+assert.equal(mapNode('output-map-mode').hidden, true);
+assert.equal(document.activeElement, mapNode('output-map-refresh'));
+assert.equal(mapRequests.length, 1, 'offline return does not request a buffered frame');
+map.receive(reply(draftRequest));
+assert.equal(mapTable.hidden, true);
+mapState.mapConnection.state = 'ready';
+map.update(mapState);
+const appliedRequest = mapRequests.at(-1);
+assert.equal(appliedRequest.source, 'applied');
+assert.equal(appliedRequest.offset, 0);
+map.receive(reply(appliedRequest));
+assert.equal(mapTable.hidden, false);
+mapState.mapConnection.state = 'offline';
+map.update(mapState);
+map.receive(reply(appliedRequest));
+assert.equal(mapTable.hidden, true, 'late applied reply cannot restore an offline frame');
+const originalOpener = mapNode('draft-output-map-open');
+mountMap();
+mapEvents.cancel({preventDefault() {}});
+assert.equal(mapDialog.open, false);
+assert.notEqual(mapNode('draft-output-map-open'), originalOpener);
+assert.equal(document.activeElement, mapNode('draft-output-map-open'));
+assert.ok(mapRequests.every(command => command.op === 'preview_output' && command.device === 'strip'));
+console.log('PASS: one map output, draft revision, offline draft, return and reconnect, stale replies, focus after remount');
 context.payload={kind:'status',state:{detail:'RGB: передано кадров 153'}};
 vm.runInContext('window.prismestraReceive(payload)',context);
 assert.equal(find('#native-runtime-detail').textContent,'RGB: передано кадров 153');

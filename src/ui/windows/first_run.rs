@@ -4,7 +4,35 @@ use crate::app::{
     first_run::{self, Plan, Worker},
     lighting_outputs::Local,
 };
+use crate::devices::{Device, Role};
 use std::{thread::JoinHandle, time::Duration};
+
+#[derive(serde::Serialize)]
+pub(super) struct DeviceCandidate<'a> {
+    id: &'a str,
+    role: Role,
+    label: &'a str,
+}
+
+impl<'a> From<&'a Device> for DeviceCandidate<'a> {
+    fn from(device: &'a Device) -> Self {
+        Self {
+            id: &device.id,
+            role: device.role,
+            label: &device.label,
+        }
+    }
+}
+
+fn new_devices<'a>(
+    current: &'a [Device],
+    proposal: Option<&'a [Device]>,
+) -> impl Iterator<Item = &'a Device> {
+    proposal
+        .into_iter()
+        .flatten()
+        .filter(|candidate| !current.iter().any(|device| device.id == candidate.id))
+}
 
 struct Applying {
     revision: u64,
@@ -68,20 +96,27 @@ impl Startup {
 }
 
 impl App {
-    pub(super) fn newly_found_devices(&self) -> impl Iterator<Item = &crate::devices::Device> {
-        self.first_run
-            .applying
-            .iter()
-            .flat_map(|pending| pending.plan.document.lighting.setup.devices.iter())
-            .filter(|candidate| {
-                !self
-                    .runtime
-                    .project()
-                    .setup
-                    .devices
-                    .iter()
-                    .any(|device| device.id == candidate.id)
-            })
+    fn pending_plan_matches(&self, pending: &Applying) -> bool {
+        self.path.as_ref() == Some(&pending.path)
+            && self.context_revision == pending.context
+            && !self.dirty
+            && !self.editor_dirty
+            && self.pending_open.is_none()
+            && !self.connection_switching()
+            && self.guard_connections_close().is_ok()
+            && self.connections.scan.is_idle()
+            && (self.runtime.document() == &pending.previous_document
+                || self.runtime.document() == &pending.plan.document)
+    }
+
+    pub(super) fn newly_found_devices(&self) -> impl Iterator<Item = &Device> {
+        let proposal = self.first_run.applying.as_ref().filter(|pending| {
+            self.first_run.enabled && !self.shutdown.active() && self.pending_plan_matches(pending)
+        });
+        new_devices(
+            &self.runtime.project().setup.devices,
+            proposal.map(|pending| pending.plan.document.lighting.setup.devices.as_slice()),
+        )
     }
 
     fn startup_output_labels(&mut self) {
@@ -243,17 +278,7 @@ impl App {
             return Ok(true);
         }
         if let Some(pending) = &self.first_run.applying {
-            if self.path.as_ref() != Some(&pending.path)
-                || self.context_revision != pending.context
-                || self.dirty
-                || self.editor_dirty
-                || self.pending_open.is_some()
-                || self.connection_switching()
-                || self.guard_connections_close().is_err()
-                || !self.connections.scan.is_idle()
-                || (self.runtime.document() != &pending.previous_document
-                    && self.runtime.document() != &pending.plan.document)
-            {
+            if !self.pending_plan_matches(pending) {
                 let pending = self.first_run.applying.take().unwrap();
                 if self.path.as_ref() == Some(&pending.path)
                     && self.runtime.output_revision() == pending.revision
@@ -300,7 +325,7 @@ impl App {
             self.first_run.context = self.context_revision;
             self.was_pending = false;
             self.dirty = false;
-            self.reset_editor(0);
+            self.reset_editor_preserving_device(0);
             self.sync();
             if self.page == Page::Connections {
                 self.open_connections()?;
@@ -393,5 +418,72 @@ impl App {
         self.first_run.phase = "discovering";
         self.status = "Ищу поддерживаемые устройства. Сцена включится автоматически…".into();
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::devices::Driver;
+
+    #[test]
+    fn discovery_dto_follows_only_the_current_proposal() {
+        fn device(id: &str, role: Role, driver: Driver, leds: usize) -> Device {
+            Device {
+                id: id.into(),
+                label: "Fixture".into(),
+                role,
+                driver,
+                leds,
+                enabled: true,
+                rate_hz: 25,
+            }
+        }
+
+        let rgb = device(
+            "auto-rgb-0000000000000000000000000000000000000001",
+            Role::Canvas,
+            Driver::OpenRgb,
+            3,
+        );
+        let lcd = device(
+            "auto-lcd-0000000000000000000000000000000000000002",
+            Role::Lcd,
+            Driver::TtLcd,
+            0,
+        );
+        let replacement = device(
+            "auto-rgb-0000000000000000000000000000000000000003",
+            Role::Canvas,
+            Driver::OpenRgb,
+            3,
+        );
+        let initial = [rgb.clone(), lcd.clone()];
+        let saved = [rgb];
+        let replaced = [replacement];
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/device-candidates.json"
+        ))
+        .unwrap();
+        let empty: &[Device] = &[];
+        let cases = [
+            ("discover", empty, None),
+            ("proposal", empty, Some(initial.as_slice())),
+            ("savedRgb", saved.as_slice(), Some(initial.as_slice())),
+            ("cancelled", empty, None),
+            ("replacement", empty, Some(replaced.as_slice())),
+            ("rediscovered", saved.as_slice(), Some(initial.as_slice())),
+            ("installed", initial.as_slice(), Some(initial.as_slice())),
+        ];
+        for (name, applied, proposal) in cases {
+            let rows: Vec<_> = new_devices(applied, proposal)
+                .map(DeviceCandidate::from)
+                .collect();
+            assert_eq!(
+                serde_json::json!({"deviceCandidates": rows}),
+                fixture[name],
+                "{name}"
+            );
+        }
     }
 }

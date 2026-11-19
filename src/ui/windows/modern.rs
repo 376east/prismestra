@@ -8,6 +8,15 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 
+mod output_preview;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MapSource {
+    Applied,
+    Draft,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EditValue {
@@ -24,6 +33,15 @@ struct NativeValue {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
     Snapshot,
+    PreviewOutput {
+        request: u32,
+        device: String,
+        offset: usize,
+        source: Option<MapSource>,
+        revision: Option<String>,
+        #[serde(default)]
+        fields: Vec<EditValue>,
+    },
     NativeField {
         id: i32,
         value: String,
@@ -61,6 +79,10 @@ enum Command {
     DeleteScene {
         id: String,
     },
+    SceneFile {
+        request: u32,
+        operation: scene_files::Operation,
+    },
     Groups {
         pc: bool,
         door: bool,
@@ -73,6 +95,9 @@ enum Command {
     },
     SelectItem {
         index: usize,
+    },
+    SelectDevice {
+        id: String,
     },
     SetField {
         key: String,
@@ -102,6 +127,9 @@ struct CloseRequest {
     confirm: bool,
     started: Instant,
 }
+
+mod scene_files;
+
 pub(super) struct Session {
     close_request: Option<CloseRequest>,
     close_id: u32,
@@ -111,6 +139,7 @@ pub(super) struct Session {
     catalog_path: PathBuf,
     draft: Option<Draft>,
     draft_path: PathBuf,
+    portable_preview: Option<scene_files::Running>,
     preview: Option<crate::runtime::scene::Renderer>,
     canvas: crate::devices::Canvas,
     last_send: Instant,
@@ -119,6 +148,7 @@ pub(super) struct Session {
     pending: bool,
     configuration_error: Option<String>,
     snapshot_requested: bool,
+    draft_map: output_preview::DraftRevision,
 }
 impl Session {
     fn new(app: &App) -> Result<Self, String> {
@@ -154,6 +184,7 @@ impl Session {
             catalog_path,
             draft,
             draft_path,
+            portable_preview: None,
             preview: None,
             canvas,
             last_send: Instant::now(),
@@ -162,6 +193,7 @@ impl Session {
             pending: false,
             configuration_error: None,
             snapshot_requested: false,
+            draft_map: Default::default(),
         };
         let scene = result
             .draft
@@ -222,9 +254,21 @@ fn assets(path: &str) -> Option<(&'static str, &'static [u8])> {
             "text/javascript; charset=utf-8",
             include_bytes!("web/app.js"),
         ),
+        "/scene-file.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("web/scene-file.js"),
+        ),
+        "/scene-file.css" => (
+            "text/css; charset=utf-8",
+            include_bytes!("web/scene-file.css"),
+        ),
         "/theme.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("web/theme.js"),
+        ),
+        "/output-map.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("web/output-map.js"),
         ),
         "/ui.css" => ("text/css; charset=utf-8", include_bytes!("web/ui.css")),
         "/assets/SourceSans3.ttf" => ("font/ttf", include_bytes!("web/assets/SourceSans3.ttf")),
@@ -415,6 +459,12 @@ fn busy(app: &App) -> bool {
         || app.connection_switching()
         || app.shutdown.active()
 }
+fn device_candidates(app: &App) -> Vec<first_run::DeviceCandidate<'_>> {
+    app.newly_found_devices()
+        .map(first_run::DeviceCandidate::from)
+        .collect()
+}
+
 fn device_activity(app: &App) -> Value {
     let labels = app.runtime.read(|runtime| {
         runtime
@@ -439,15 +489,44 @@ fn device_activity(app: &App) -> Value {
     })
 }
 
+fn draft_map_input(app: &App) -> Option<(u64, &crate::devices::Setup, &Scene)> {
+    let editor = app
+        .editor
+        .as_ref()
+        .filter(|editor| editor.page == Page::Devices)?;
+    Some((
+        app.context_revision,
+        &editor.document.lighting.setup,
+        &editor.document.lighting.scene,
+    ))
+}
+fn selected_map_device(app: &App) -> Option<&str> {
+    app.editor.as_ref()?.selected_device_id()
+}
+
+fn map_connection(app: &App) -> Value {
+    let Some(device) = selected_map_device(app) else {
+        return Value::Null;
+    };
+    let connection = app.runtime.read(|runtime| {
+        output_preview::connection(&runtime.document().lighting.setup, device, || {
+            runtime.host().status(device).map(|status| status.phase)
+        })
+    });
+    json!({"device":device,"state":connection})
+}
+
 fn snapshot(state: &State) -> Result<Value, String> {
     let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
     let app = slot.as_ref().ok_or("Нет сессии")?;
-    let session = state.modern_session.borrow();
-    let session = session.as_ref().ok_or("Нет интерфейса")?;
+    let mut session = state.modern_session.borrow_mut();
+    let session = session.as_mut().ok_or("Нет интерфейса")?;
+    let draft_map_revision = session.draft_map.observe(draft_map_input(app));
     let editor=app.editor.as_ref().map(|e|json!({"page":page_name(e.page),"index":e.index,"targets":super::super::editor::Editor::targets(&e.document,e.page),"fields":e.fields().iter().map(|f|json!({"key":f.key,"label":f.label,"value":f.value,"hint":f.hint,"file":f.file,"choices":f.choices.iter().map(|(label,value)|json!({"label":if f.key=="group"{match value.as_str(){"pc"=>"Основной свет","door"=>"Дополнительный свет",_=>label.as_str()}}else{label.as_str()},"value":value})).collect::<Vec<_>>()})).collect::<Vec<_>>(),"dirty":app.editor_dirty}));
-    Ok(
-        json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":session.catalog.entries.iter().filter_map(|entry|session.catalog_view.get(&entry.id)).collect::<Vec<_>>(),"devices":app.runtime.document().lighting.setup.devices,"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}}),
-    )
+    let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":session.catalog.entries.iter().filter_map(|entry|session.catalog_view.get(&entry.id)).collect::<Vec<_>>(),"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
+    value["state"]["draftMapRevision"] = json!(draft_map_revision);
+    value["state"]["mapConnection"] = map_connection(app);
+    Ok(value)
 }
 fn send(state: &State, value: &Value) -> Result<(), String> {
     let slot = state.webview.try_borrow().map_err(|_| "Интерфейс занят")?;
@@ -460,13 +539,23 @@ fn stage_fields(app: &mut App, fields: &[EditValue]) -> Result<(), String> {
     if fields.is_empty() {
         return Ok(());
     }
-    if fields.len() > 64 {
-        return Err("Слишком много полей".into());
-    }
     if app.runtime.pending_configuration() {
         return Err("Дождитесь применения параметров".into());
     }
     let current = app.editor.as_ref().ok_or("Нет параметров")?;
+    app.editor = Some(edited_fields(current, fields)?);
+    app.editor_dirty = true;
+    app.dirty = true;
+    app.refresh_editor(false);
+    Ok(())
+}
+fn edited_fields(
+    current: &super::super::editor::Editor,
+    fields: &[EditValue],
+) -> Result<super::super::editor::Editor, String> {
+    if fields.len() > 64 {
+        return Err("Слишком много полей".into());
+    }
     let mut next = super::super::editor::Editor {
         document: current.document.clone(),
         page: current.page,
@@ -490,11 +579,7 @@ fn stage_fields(app: &mut App, fields: &[EditValue]) -> Result<(), String> {
         }
         next.set(&field.key, &field.value)?;
     }
-    app.editor = Some(next);
-    app.editor_dirty = true;
-    app.dirty = true;
-    app.refresh_editor(false);
-    Ok(())
+    Ok(next)
 }
 fn stage_native(app: &mut App, fields: &[NativeValue]) -> Result<(), String> {
     let fields = fields
@@ -505,9 +590,16 @@ fn stage_native(app: &mut App, fields: &[NativeValue]) -> Result<(), String> {
 }
 fn execute(state: &State, command: Command) -> Result<bool, String> {
     let hwnd = state.editor_window.get();
+    if let Command::SceneFile { request, operation } = command {
+        scene_files::execute(state, hwnd, request, operation)?;
+        return Ok(false);
+    }
     if !matches!(
         &command,
-        Command::Snapshot | Command::PreviewScene { .. } | Command::CloseReady { .. }
+        Command::Snapshot
+            | Command::PreviewOutput { .. }
+            | Command::PreviewScene { .. }
+            | Command::CloseReady { .. }
     ) {
         let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
         if slot
@@ -580,6 +672,88 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             if let Some(session) = state.modern_session.borrow_mut().as_mut() {
                 session.snapshot_requested = true;
             }
+        }
+        Command::PreviewOutput {
+            request,
+            device,
+            offset,
+            source,
+            revision,
+            fields,
+        } => {
+            let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
+            let app = slot.as_ref().ok_or("Нет сессии")?;
+            if matches!(source, Some(MapSource::Draft)) {
+                let mut session = state.modern_session.borrow_mut();
+                let session = session.as_mut().ok_or("Нет интерфейса")?;
+                let current = session.draft_map.observe(draft_map_input(app));
+                let mut reply = json!({"kind":"output_preview","request":request,"source":"draft","device":device,"revision":revision});
+                let (availability, error) = if busy(app)
+                    || current.is_none()
+                    || current != revision
+                    || selected_map_device(app) != Some(device.as_str())
+                {
+                    (
+                        "stale",
+                        "Черновик изменился. Откройте предпросмотр снова.".into(),
+                    )
+                } else if let Some(editor) = app.editor.as_ref() {
+                    match edited_fields(editor, &fields)
+                        .map_err(|error| ("invalid_draft", error))
+                        .and_then(|edited| {
+                            let input = &edited.document.lighting;
+                            output_preview::draft_snapshot(
+                                &input.setup,
+                                &input.scene,
+                                &device,
+                                offset,
+                            )
+                        }) {
+                        Ok(preview) => {
+                            reply["availability"] = json!("ready");
+                            reply["preview"] = json!(preview);
+                            send(state, &reply)?;
+                            return Ok(false);
+                        }
+                        Err(error) => error,
+                    }
+                } else {
+                    ("no_map", "Нет LED-карты черновика".into())
+                };
+                reply["availability"] = json!(availability);
+                reply["error"] = json!(error);
+                send(state, &reply)?;
+                return Ok(false);
+            }
+            let mut value = json!({"kind":"output_preview","request":request,"source":"applied","device":device});
+            if selected_map_device(app) != Some(device.as_str()) {
+                value["error"] = json!("Выбран другой выход. Откройте предпросмотр снова.");
+            } else {
+                app.runtime.read(|runtime| {
+                    use output_preview::Connection;
+                    let setup = &runtime.document().lighting.setup;
+                    let result = match output_preview::connection(setup, &device, || {
+                        runtime.host().status(&device).map(|status| status.phase)
+                    }) {
+                        Connection::Ready => output_preview::snapshot(
+                            setup,
+                            &device,
+                            runtime.host().frame(&device),
+                            offset,
+                        ),
+                        Connection::Connecting => Err("Выход подключается…"),
+                        Connection::Offline => Err("Выход отключён. Применённый кадр недоступен."),
+                        Connection::Disabled => Err("Выход выключен в применённом профиле."),
+                        Connection::NoMap => Err("У выбранного выхода нет применённой LED-карты."),
+                    };
+                    match result {
+                        Ok(preview) => value["preview"] = json!(preview),
+                        Err(error) => value["error"] = json!(error),
+                    }
+                });
+            }
+            send(state, &value)?;
+            return Ok(false);
         }
         Command::Open | Command::Save | Command::Export => {
             let id = match command {
@@ -693,6 +867,16 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                         return Err("Объект не найден".into());
                     }
                     e.index = index;
+                    a.refresh_editor(true);
+                }
+                Command::SelectDevice { id } => {
+                    if a.runtime.pending_configuration() {
+                        return Err("Дождитесь применения".into());
+                    }
+                    a.editor
+                        .as_mut()
+                        .ok_or("Нет параметров")?
+                        .select_device(&id)?;
                     a.refresh_editor(true);
                 }
                 Command::SetField {
@@ -826,9 +1010,11 @@ pub(super) fn maintain(state: &State) {
         let mut value = json!({"kind":"status","state":{"scene":app.runtime.project().scene,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"preview":{"width":36,"height":18,"colors":colors}}});
         if session.last_native_send.elapsed() >= Duration::from_millis(250) {
             session.last_native_send = Instant::now();
+            value["state"]["deviceCandidates"] = json!(device_candidates(app));
             if app.page == Page::Devices {
                 value["state"]["deviceActivity"] = device_activity(app);
             }
+            value["state"]["mapConnection"] = map_connection(app);
             if let Some(form) = native_forms::snapshot(app) {
                 value["state"]["nativeForm"] = form;
             }
@@ -838,6 +1024,7 @@ pub(super) fn maintain(state: &State) {
     if let Ok(Some(value)) = value {
         let _ = send(state, &value);
     }
+    scene_files::publish(state);
 }
 pub(super) fn return_to_editor(state: &State) -> Result<(), String> {
     if !state.modern_enabled {

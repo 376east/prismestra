@@ -1223,6 +1223,16 @@ impl App {
         self.editor_dirty = false;
         self.refresh_editor(true);
     }
+    fn reset_editor_preserving_device(&mut self, index: usize) {
+        let index = self
+            .editor
+            .as_ref()
+            .filter(|editor| self.page == Page::Devices && editor.page == Page::Devices)
+            .map_or(index, |editor| {
+                editor.device_index_in(self.runtime.document())
+            });
+        self.reset_editor(index);
+    }
     fn selected_field(&self) -> Option<super::editor::Field> {
         let row = unsafe { SendMessageW(self.h(E_LIST), LB_GETCURSEL, 0, 0) };
         self.editor.as_ref()?.fields().get(row as usize).cloned()
@@ -1551,7 +1561,7 @@ impl App {
                     self.runtime.cancel_configuration()?;
                 } else {
                     let index = self.editor.as_ref().map_or(0, |e| e.index);
-                    self.reset_editor(index);
+                    self.reset_editor_preserving_device(index);
                 }
                 self.status = "Изменения параметров отменены.".into();
             }
@@ -2021,7 +2031,7 @@ impl App {
             self.context_revision = self.context_revision.wrapping_add(1);
             self.attach_outputs()?;
             let index = self.editor.as_ref().map_or(0, |e| e.index);
-            self.reset_editor(index);
+            self.reset_editor_preserving_device(index);
             self.sync();
             self.status = if self.native_lighting.is_some() {
                 "Параметры обновлены. Проверяйте статусы передачи устройств.".into()
