@@ -32,12 +32,22 @@ fn grad(hash: i32, x: f32, y: f32, z: f32) -> f32 {
     (if h & 1 != 0 { -u } else { u }) + (if h & 2 != 0 { -v } else { v })
 }
 pub fn noise(x: f32, y: f32, z: f32) -> f32 {
-    if [x, y, z]
+    const DIRECT_LIMIT: f32 = 100_000_000.0;
+    let coordinates = [x, y, z];
+    let [x, y, z] = if coordinates
         .iter()
-        .any(|c| !c.is_finite() || c.abs() > 100_000_000.0)
+        .all(|c| (-DIRECT_LIMIT..=DIRECT_LIMIT).contains(c))
     {
-        return f32::NAN;
-    }
+        coordinates
+    } else {
+        if coordinates.iter().any(|c| !c.is_finite()) {
+            return f32::NAN;
+        }
+        // Along one axis, 768 world units shift the skewed lattice by
+        // 1024 on that axis and 256 on the other two. All are exact periods
+        // of the 256-entry hash. Reduce only beyond the legacy safe range.
+        coordinates.map(|c| c % 768.0)
+    };
     let s = (x + y + z) * (1.0f32 / 3.0);
     let (i, j, k) = (
         (x + s).floor() as i32,
@@ -97,6 +107,65 @@ impl Fractal {
             a *= self.persistence;
         }
         sum / denom
+    }
+}
+
+#[test]
+fn large_finite_coordinates_use_the_same_periodic_field() {
+    let sample = noise(16.25, -24.5, 32.75);
+    for shifted in [
+        noise(784.25, -24.5, 32.75),
+        noise(16.25, -792.5, 32.75),
+        noise(16.25, -24.5, 800.75),
+    ] {
+        assert!((sample - shifted).abs() < 0.0001);
+    }
+
+    // The distant axis has a float32 spacing of 16. Keep its residual
+    // representable and sample subcell positions on the two other axes.
+    let offset = 768.0 * 262_144.0;
+    assert_eq!(
+        noise(offset + 16.0, -24.5, 32.75),
+        noise(16.0, -24.5, 32.75)
+    );
+    assert_eq!(
+        noise(16.25, -offset - 32.0, 32.75),
+        noise(16.25, -32.0, 32.75)
+    );
+    assert_eq!(
+        noise(16.25, -24.5, offset + 32.0),
+        noise(16.25, -24.5, 32.0)
+    );
+    assert!(noise(f32::MAX, -f32::MAX, 0.0).is_finite());
+    assert!(noise(f32::INFINITY, 0.0, 0.0).is_nan());
+    assert!(noise(0.0, f32::NAN, 0.0).is_nan());
+}
+
+#[test]
+fn valid_noise_map_settings_can_render_twenty_wide_octaves() {
+    use super::{
+        color::Rgb,
+        patterns::{NoiseColors, NoiseMap, Playback},
+    };
+    let noise = Fractal {
+        frequency: 0.5,
+        amplitude: 1.0,
+        lacunarity: 5.0,
+        persistence: 0.5,
+        octaves: 20,
+    };
+    let palette =
+        NoiseColors::from_palette(&[Rgb::new(1, 16, 54), Rgb::new(32, 215, 198)]).unwrap();
+    let playback = Playback {
+        speed: 50,
+        fps: 25,
+        brightness: 0.75,
+        temperature: 0,
+        tint: 0,
+    };
+    let mut effect = NoiseMap::new(noise, 0, 0, palette).unwrap();
+    for _ in 0..26 {
+        assert_eq!(effect.step(playback, &[(0, 0), (1, 0)]).unwrap().len(), 2);
     }
 }
 
