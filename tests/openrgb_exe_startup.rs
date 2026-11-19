@@ -208,7 +208,9 @@ fn saved_loopback_profile_delivers_sdk6_frames_from_the_application() {
                 }
                 assert!(frames.iter().any(|call| {
                     call.2[6..]
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .any(|color| color[..3] != [0, 0, 0])
                 }));
                 assert_eq!(calls.iter().find(|call| call.1 == 1101).unwrap().0, 8);
