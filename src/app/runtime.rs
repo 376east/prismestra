@@ -173,11 +173,17 @@ enum ConfigurationPhase {
 }
 struct Configuration {
     outputs: Option<OutputPlan>,
+    live_rgb: Option<LiveRgbPlan>,
     #[cfg(windows)]
     startup_managed_ids: Option<BTreeSet<String>>,
     document: Document,
     phase: ConfigurationPhase,
     journal_override: Option<PathBuf>,
+}
+#[derive(Clone)]
+struct LiveRgbPlan {
+    retained: BTreeSet<String>,
+    retiring: BTreeSet<String>,
 }
 #[derive(PartialEq, Eq)]
 struct RgbView {
@@ -587,18 +593,90 @@ impl Runtime {
         {
             return Ok(());
         }
+        let live_rgb = outputs
+            .as_ref()
+            .and_then(|plan| self.live_rgb_plan(&document, plan));
+        if let Some(live) = &live_rgb {
+            self.host.stop_rgb_outputs(&live.retiring);
+        } else {
+            self.stop_channels();
+        }
         self.pending = Some(Configuration {
             outputs,
+            live_rgb,
             #[cfg(windows)]
             startup_managed_ids: None,
             document,
             phase: ConfigurationPhase::Draining,
             journal_override,
         });
-        self.stop_channels();
         self.error = None;
         self.bump_view();
         Ok(())
+    }
+
+    fn live_rgb_plan(&self, document: &Document, outputs: &OutputPlan) -> Option<LiveRgbPlan> {
+        // This transaction changes RGB layout/routes only. The full path still
+        // handles changes that require rebuilding capture, LCD or sensor state.
+        if self.power.error().is_some()
+            || self.capture_factory.is_some()
+            || self.capture.is_some()
+            || outputs.capture.is_some()
+            || !self.lcd_specs.is_empty()
+            || !self.lcd.is_empty()
+            || !outputs.lcd.is_empty()
+            || !self.sensor_specs.is_empty()
+            || !self.sensors.is_empty()
+            || !self.document.ambient.routes.is_empty()
+        {
+            return None;
+        }
+        let mut layout = self.document.clone();
+        layout.lighting.setup = document.lighting.setup.clone();
+        layout.lighting.groups = document.lighting.groups.clone();
+        if layout != *document {
+            return None;
+        }
+        let retained: BTreeSet<_> = outputs
+            .rgb
+            .iter()
+            .filter_map(|(id, keys, factory)| {
+                let previous = self.rgb_specs.get(id)?;
+                let old = self
+                    .document
+                    .lighting
+                    .setup
+                    .devices
+                    .iter()
+                    .find(|device| device.id == *id)?;
+                let new = document
+                    .lighting
+                    .setup
+                    .devices
+                    .iter()
+                    .find(|device| device.id == *id)?;
+                (old.driver == new.driver
+                    && old.leds == new.leds
+                    && old.role == Role::Canvas
+                    && new.role == Role::Canvas
+                    && previous.keys == *keys
+                    && Arc::ptr_eq(&previous.factory, factory)
+                    && self.host.status(id).is_some_and(|snapshot| {
+                        snapshot.phase == crate::runtime::output::Phase::Ready
+                    }))
+                .then(|| id.clone())
+            })
+            .collect();
+        if retained.is_empty() {
+            return None;
+        }
+        let retiring = self
+            .rgb_specs
+            .keys()
+            .filter(|id| !retained.contains(*id))
+            .cloned()
+            .collect();
+        Some(LiveRgbPlan { retained, retiring })
     }
     /// Save As storage barrier. Never changes a model or starts/restarts a factory.
     /// Pending saves retain the applied journal until that proposal actually commits.
@@ -634,8 +712,11 @@ impl Runtime {
             return Err("Pending configuration has not failed".into());
         }
         pending.phase = ConfigurationPhase::Draining;
+        let live = pending.live_rgb.is_some();
         self.error = None;
-        self.stop_channels();
+        if !live {
+            self.stop_channels();
+        }
         self.bump_view();
         Ok(())
     }
@@ -645,8 +726,11 @@ impl Runtime {
         }
         let pending = self.pending.as_mut().ok_or("No pending configuration")?;
         pending.phase = ConfigurationPhase::Cancelling;
+        let live = pending.live_rgb.is_some();
         self.error = None;
-        self.stop_channels();
+        if !live {
+            self.stop_channels();
+        }
         self.bump_view();
         Ok(())
     }
@@ -655,7 +739,16 @@ impl Runtime {
         let Some(pending) = &self.pending else {
             return Ok(false);
         };
-        if matches!(pending.phase, ConfigurationPhase::Fault(_)) || !self.lighting_drained() {
+        let live = pending.live_rgb.clone();
+        if matches!(pending.phase, ConfigurationPhase::Fault(_)) {
+            return Ok(false);
+        }
+        let drained = if let Some(live) = &live {
+            self.host.rgb_outputs_drained(&live.retiring)
+        } else {
+            self.lighting_drained()
+        };
+        if !drained {
             return Ok(false);
         }
         if matches!(
@@ -677,23 +770,28 @@ impl Runtime {
         } else {
             let prepared = (|| {
                 let document = &self.pending.as_ref().unwrap().document;
-                let mut host = Host::new(
-                    document.lighting.setup.clone(),
-                    document.lighting.scene.clone(),
-                )?;
-                for d in &document.lighting.setup.devices {
-                    if d.role != Role::Lcd {
-                        let target = if document.lighting.groups.door.contains(&d.id) {
-                            Target::Door
-                        } else {
-                            Target::Pc
-                        };
-                        host.mute(&d.id, !self.desired.on(target))?;
+                let host = if live.is_some() {
+                    None
+                } else {
+                    let mut host = Host::new(
+                        document.lighting.setup.clone(),
+                        document.lighting.scene.clone(),
+                    )?;
+                    for d in &document.lighting.setup.devices {
+                        if d.role != Role::Lcd {
+                            let target = if document.lighting.groups.door.contains(&d.id) {
+                                Target::Door
+                            } else {
+                                Target::Pc
+                            };
+                            host.mute(&d.id, !self.desired.on(target))?;
+                        }
                     }
-                }
-                if self.autonomous_rgb {
-                    host.enable_autonomous()?;
-                }
+                    if self.autonomous_rgb {
+                        host.enable_autonomous()?;
+                    }
+                    Some(host)
+                };
                 let path = self
                     .pending
                     .as_ref()
@@ -773,6 +871,14 @@ impl Runtime {
             }
             self.output_recovery
                 .retain(|id, _| self.rgb_specs.contains_key(id) || self.lcd_specs.contains_key(id));
+            if let Some(live) = &live {
+                for id in &live.retiring {
+                    self.reset_output_recovery(id);
+                    if let Some(recovery) = self.output_recovery.get_mut(id) {
+                        recovery.start_error = None;
+                    }
+                }
+            }
             #[cfg(windows)]
             if let Some(ids) = pending.startup_managed_ids {
                 self.managed_backend_ids = ids;
@@ -780,7 +886,18 @@ impl Runtime {
             }
             self.document = proposal;
             self.document_revision = self.document_revision.wrapping_add(1);
-            self.host = host;
+            if let Some(host) = host {
+                self.host = host;
+            } else if let Some(live) = &live {
+                let setup = self.document.lighting.setup.clone();
+                let muted = setup
+                    .devices
+                    .iter()
+                    .filter(|device| device.role != Role::Lcd)
+                    .map(|device| (device.id.clone(), !self.desired.on(self.target(&device.id))))
+                    .collect();
+                self.host.install_rgb_setup(setup, &live.retiring, muted);
+            }
             self.store = store;
             self.schedule = schedule;
             self.revision = revision;
@@ -810,9 +927,14 @@ impl Runtime {
             self.refresh = None;
             self.refresh_started = false;
         }
-        if restart && let Err(error) = self.restart_registered() {
-            self.stop_channels();
-            return Err(error);
+        if restart {
+            if let Some(live) = &live {
+                self.restart_registered_rgb(&live.retained)?;
+                self.bump()?;
+            } else if let Err(error) = self.restart_registered() {
+                self.stop_channels();
+                return Err(error);
+            }
         }
         Ok(true)
     }
@@ -1258,6 +1380,9 @@ impl Runtime {
         // A resume can be delivered without a preceding suspend notification.
         // Its old owners must still drain before new factories are invoked.
         if suspended || self.power.resumes != resumes {
+            if let Some(pending) = &mut self.pending {
+                pending.live_rgb = None;
+            }
             self.stop_channels();
             for d in &self.document.lighting.setup.devices {
                 if d.role == Role::Ambient {
@@ -1277,18 +1402,29 @@ impl Runtime {
         self.error = None;
         Ok(())
     }
-    fn restart_registered(&mut self) -> Result<(), String> {
-        // Called only after all previous owners have been reaped. Never reuse a
-        // native handle across suspend; every factory revalidates its binding.
+    fn restart_registered_rgb(&mut self, retained: &BTreeSet<String>) -> Result<(), String> {
         let rgb = self
             .rgb_specs
             .iter()
+            .filter(|(id, _)| !retained.contains(*id))
             .map(|(id, s)| (id.clone(), s.keys.clone(), s.factory.clone()))
             .collect::<Vec<_>>();
+        let mut first_error = None;
         for (id, keys, f) in rgb {
             let result = self.host.attach_claimed(&id, keys, move |c| f(c));
-            self.handle_output_start(&id, result)?;
+            if let Err(error) = self.handle_output_start(&id, result) {
+                if retained.is_empty() {
+                    return Err(error);
+                }
+                first_error.get_or_insert(error);
+            }
         }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    fn restart_registered(&mut self) -> Result<(), String> {
+        // Called only after all previous owners have been reaped.
+        self.restart_registered_rgb(&BTreeSet::new())?;
         let lcd = self
             .lcd_specs
             .iter()
@@ -1559,7 +1695,11 @@ impl Runtime {
             });
             if self.pending.is_some() && !self.suspended && !self.power.pending() {
                 self.configuration_tick(true)?;
-                if self.pending.is_some() {
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.live_rgb.is_none())
+                {
                     return Ok(());
                 }
             }

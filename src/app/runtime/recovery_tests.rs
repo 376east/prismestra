@@ -764,6 +764,7 @@ struct Held {
     block: AtomicBool,
     entered: AtomicBool,
     release: AtomicBool,
+    ignore_cancel: bool,
     dropped: AtomicUsize,
     calls: AtomicUsize,
 }
@@ -783,13 +784,139 @@ impl RgbDriver for HeldDriver {
     fn write(&mut self, _: &[Rgb], cancel: &Cancellation) -> Result<WriteResult, String> {
         if self.0.block.load(Ordering::SeqCst) {
             self.0.entered.store(true, Ordering::SeqCst);
-            while !self.0.release.load(Ordering::SeqCst) && !cancel.cancelled() {
+            while !self.0.release.load(Ordering::SeqCst)
+                && (self.0.ignore_cancel || !cancel.cancelled())
+            {
                 std::thread::sleep(Duration::from_millis(1));
             }
             return Err("Held stand I/O released".into());
         }
         Ok(WriteResult::Submitted)
     }
+}
+
+#[test]
+fn live_plan_adds_an_independent_rgb_output_while_an_existing_write_is_held() {
+    assert_plan_preserves_neighbor(PlanChange::Add);
+}
+
+#[test]
+fn live_plan_waits_for_rgb_owner_release_without_stopping_its_neighbor() {
+    assert_plan_preserves_neighbor(PlanChange::Replace);
+}
+
+#[test]
+fn live_plan_cancel_restores_the_original_owner_without_stopping_its_neighbor() {
+    assert_plan_preserves_neighbor(PlanChange::Cancel);
+}
+
+#[derive(Debug)]
+enum PlanChange {
+    Add,
+    Replace,
+    Cancel,
+}
+
+fn assert_plan_preserves_neighbor(change: PlanChange) {
+    struct Release(Arc<Held>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.block.store(false, Ordering::SeqCst);
+            self.0.release.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let mut runtime = runtime();
+    let held = Arc::new(Held {
+        block: AtomicBool::new(true),
+        ignore_cancel: true,
+        ..Held::default()
+    });
+    let release = Release(held.clone());
+    let healthy = Arc::new(Link::default());
+    let new = Arc::new(Link::default());
+    let key = format!("live-plan-held-{}-{change:?}", std::process::id());
+    let held_factory = held.clone();
+    runtime
+        .attach_rgb(
+            "a",
+            vec![key],
+            Arc::new(move |_| {
+                held_factory.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(HeldDriver(held_factory.clone())))
+            }),
+        )
+        .unwrap();
+    runtime.attach_rgb("b", vec![], factory(&healthy)).unwrap();
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        held.entered.load(Ordering::SeqCst)
+    });
+    let healthy_generation = runtime.host.status("b").unwrap().generation;
+    let mut document = runtime.document().clone();
+    let mut plan = runtime.output_plan();
+    let new_id = if !matches!(change, PlanChange::Add) {
+        let (_, _, replacement) = plan.rgb.iter_mut().find(|(id, _, _)| id == "a").unwrap();
+        let old = held.clone();
+        let next = factory(&new);
+        *replacement = Arc::new(move |cancel| {
+            assert_eq!(old.dropped.load(Ordering::SeqCst), 1);
+            next(cancel)
+        });
+        "a"
+    } else {
+        let mut device = document.lighting.setup.devices[1].clone();
+        device.id = "added".into();
+        document.lighting.setup.devices.push(device);
+        document.lighting.setup.canvas.width = 3;
+        document.lighting.setup.canvas.points.push(Point {
+            device: "added".into(),
+            led: 0,
+            x: 2,
+            y: 0,
+        });
+        document.lighting.groups.pc.push("added".into());
+        plan.rgb.push(("added".into(), vec![], factory(&new)));
+        "added"
+    };
+    let revision = runtime.request_outputs_for(document, plan).unwrap();
+    let frames_before = healthy.frames.lock().unwrap().len();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        healthy.frames.lock().unwrap().len() >= frames_before + 3
+    });
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        healthy_generation
+    );
+    assert_eq!(held.dropped.load(Ordering::SeqCst), 0);
+    #[cfg(windows)]
+    assert!(matches!(
+        runtime.output_activity(&runtime.document().lighting.setup.devices[1]),
+        OutputActivity::Sent(_)
+    ));
+    if !matches!(change, PlanChange::Add) {
+        assert_eq!(new.calls.load(Ordering::SeqCst), 0);
+        if matches!(change, PlanChange::Cancel) {
+            runtime.cancel_configuration().unwrap();
+        }
+        drop(release);
+    }
+    working(&mut runtime, new_id, &mut now);
+    if matches!(change, PlanChange::Cancel) {
+        assert_eq!(runtime.output_revision(), 0);
+        assert_eq!(new.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(held.calls.load(Ordering::SeqCst), 2);
+    } else {
+        assert_eq!(runtime.output_revision(), revision);
+        assert_eq!(new.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(held.calls.load(Ordering::SeqCst), 1);
+    }
+    assert_eq!(healthy.calls.load(Ordering::SeqCst), 1);
+    held.release.store(true, Ordering::SeqCst);
+    drain(&mut runtime);
 }
 
 #[test]

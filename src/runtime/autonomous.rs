@@ -233,6 +233,55 @@ impl Host {
         self.frame = core.frame.clone();
         Ok(())
     }
+    pub(crate) fn stop_rgb_outputs(&self, ids: &std::collections::BTreeSet<String>) {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        for id in ids {
+            if let Some(output) = core.outputs.get(id) {
+                output.stop();
+            }
+        }
+    }
+
+    pub(crate) fn rgb_outputs_drained(&self, ids: &std::collections::BTreeSet<String>) -> bool {
+        let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.reap();
+        ids.iter()
+            .all(|id| core.outputs.get(id).is_none_or(|output| output.is_reaped()))
+    }
+
+    /// The runtime validates the setup and drains the changed owners before committing.
+    pub(crate) fn install_rgb_setup(
+        &mut self,
+        setup: Setup,
+        retired: &std::collections::BTreeSet<String>,
+        muted: BTreeMap<String, bool>,
+    ) {
+        let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        for id in retired {
+            debug_assert!(core.outputs.get(id).is_none_or(|output| output.is_reaped()));
+            core.outputs.remove(id);
+            core.endpoint_leases.remove(id);
+            core.cadences.remove(id);
+            core.requested.remove(id);
+            core.muted.remove(id);
+            core.external.remove(id);
+        }
+        let Core {
+            muted: current_muted,
+            cadences,
+            ..
+        } = &mut *core;
+        let previous_muted = std::mem::replace(current_muted, muted);
+        cadences.retain(|id, _| previous_muted.get(id) == current_muted.get(id));
+        core.setup = Arc::new(setup);
+        core.frame = Default::default();
+        core.scene_cadence = Default::default();
+        self.setup = core.setup.clone();
+        self.frame = core.frame.clone();
+        drop(core);
+        self.notify();
+    }
+
     pub fn attach<F>(&mut self, id: &str, factory: F) -> Result<(), String>
     where
         F: FnOnce(Cancellation) -> Result<Box<dyn RgbDriver>, String> + Send + 'static,

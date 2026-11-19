@@ -78,7 +78,13 @@ impl Runtime {
         {
             return OutputActivity::Off;
         }
-        if self.suspended || self.pending.is_some() || self.power.pending() {
+        let pending_output = self.pending.as_ref().is_some_and(|pending| {
+            pending
+                .live_rgb
+                .as_ref()
+                .is_none_or(|live| !live.retained.contains(id))
+        });
+        if self.suspended || pending_output || self.power.pending() {
             return OutputActivity::Connecting;
         }
         if let Some(error) = self
