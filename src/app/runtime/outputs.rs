@@ -5,6 +5,7 @@ use super::*;
 pub(crate) enum OutputActivity {
     Off,
     Connecting,
+    Retrying(String),
     Sent(u64),
     Unavailable(Option<String>),
 }
@@ -112,7 +113,8 @@ impl Runtime {
         };
         match phase {
             Phase::Ready if frames > 0 => OutputActivity::Sent(frames),
-            Phase::Connecting | Phase::Ready => OutputActivity::Connecting,
+            Phase::Connecting => error.map_or(OutputActivity::Connecting, OutputActivity::Retrying),
+            Phase::Ready => OutputActivity::Connecting,
             Phase::Failed | Phase::Stopping | Phase::Stopped => OutputActivity::Unavailable(error),
         }
     }

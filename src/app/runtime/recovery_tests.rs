@@ -17,6 +17,7 @@ struct Link {
     calls: AtomicUsize,
     fail: AtomicBool,
     fail_open: AtomicBool,
+    retry: AtomicBool,
     frames: Mutex<Vec<Vec<Rgb>>>,
 }
 struct RgbLink(Arc<Link>);
@@ -28,6 +29,12 @@ impl RgbDriver for RgbLink {
         1
     }
     fn write(&mut self, colors: &[Rgb], _: &Cancellation) -> Result<WriteResult, String> {
+        if self.0.retry.load(Ordering::SeqCst) {
+            return Ok(WriteResult::Retrying(
+                Duration::from_millis(20),
+                "Temporary stand transport error".into(),
+            ));
+        }
         if self.0.fail.load(Ordering::SeqCst) {
             return Err("Disconnected stand output".into());
         }
@@ -120,6 +127,35 @@ fn disconnected(runtime: &mut Runtime, link: &Link, id: &str, now: &mut u64) {
 fn drain(runtime: &mut Runtime) {
     runtime.stop();
     wait(|| runtime.drained());
+}
+
+#[cfg(windows)]
+#[test]
+fn output_activity_keeps_retry_reason_until_the_next_submission() {
+    let mut runtime = runtime();
+    let link = Arc::new(Link::default());
+    runtime.attach_rgb("a", vec![], factory(&link)).unwrap();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+    let generation = runtime.host.status("a").unwrap().generation;
+    link.retry.store(true, Ordering::SeqCst);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.host.status("a").unwrap().phase == Phase::Connecting
+    });
+    let device = runtime.document().lighting.setup.devices[0].clone();
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Retrying(error) if error == "Temporary stand transport error"
+    ));
+    link.retry.store(false, Ordering::SeqCst);
+    working(&mut runtime, "a", &mut now);
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Sent(_)
+    ));
+    assert_eq!(runtime.host.status("a").unwrap().generation, generation);
+    drain(&mut runtime);
 }
 
 #[test]
