@@ -4,7 +4,7 @@ The download is a single `Prismestra-Setup-<version>-x64.exe` for Windows 10/11 
 
 ## Install and use
 
-Run Setup from your ordinary Windows account and approve Windows elevation for installation. Setup places protected application files under Program Files and adds a Start-menu entry and Windows uninstall registration. The sign-in startup option starts one resident session; closing its editor keeps the saved scene running. The first resident launch restores a verified existing Prismestra profile, or discovers supported local devices and saves a working scene and initial map automatically. Subsequent sign-ins restore saved outputs and run a bounded discovery pass for additional supported devices. Existing device placement and disabled outputs are preserved.
+Run Setup from your ordinary Windows account, approve Windows elevation, and review and accept the Microsoft WebView2 Runtime terms in Setup. Setup places protected application files under Program Files and adds a Start-menu entry and Windows uninstall registration. The sign-in startup option starts one resident session; closing its editor keeps the saved scene running. The first resident launch restores a verified existing Prismestra profile, or discovers supported local devices and saves a working scene and initial map automatically. Subsequent sign-ins restore saved outputs and run a bounded discovery pass for additional supported devices. Existing device placement and disabled outputs are preserved.
 
 Setup reuses Visual C++ 14.51.36247.0 or newer and WebView2 105 or newer. If Visual C++ is missing or too old, Setup downloads the x64 package directly from Microsoft and verifies its SHA-256 before running it. A PC without internet access needs the compatible x64 runtime installed in advance. [Microsoft Visual C++ downloads](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/#latest-supported-version) · [Microsoft VC++ Runtime license](https://visualstudio.microsoft.com/license-terms/vs2026-ga-visualcpp-v14-redist-runtime/). When Windows requests a restart, Setup saves the verified portable source location but does not launch the application or retire prior portable startup tasks. After the restart, the selected sign-in startup launches the app and can import that source; otherwise open it from the Start menu. Rerun Setup after restarting to finish verified retirement of prior portable startup tasks.
 
@@ -39,6 +39,12 @@ The editor runs without administrator privileges. For the installing user's own 
 
 This installer does not import another RGB application's scene or take ownership of all discovered hardware. Multiple writers can still conflict on the same lighting controller. Support for additional models requires compatible protocols and independent hardware validation.
 
+## Microsoft WebView2
+
+Prismestra uses WebView2 with Microsoft Defender SmartScreen. SmartScreen collects and sends user information to Microsoft. [Microsoft Privacy Statement](https://aka.ms/privacy) · [Microsoft Edge privacy documentation](https://learn.microsoft.com/en-us/legal/microsoft-edge/privacy#smartscreen).
+
+Review the Microsoft WebView2 Runtime license by selecting x64 under Evergreen Standalone Installer on the Microsoft download page. Unattended Setup requires `/ACCEPTWEBVIEW2TERMS` after review and acceptance. [Microsoft license at download](https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download).
+
 ## Build and verification
 
 Maintained sources: [`scripts/package_installer.py`](../scripts/package_installer.py), [`scripts/installer`](../scripts/installer), and the protected task provisioner. Prerequisite downloads are locked by size, SHA-256, official origin and Authenticode publisher in `prerequisites.lock.json`. Build dependencies are not installed on the end user's machine.
@@ -58,5 +64,7 @@ Use **Windows checks** → **Run workflow** on the intended revision and provide
 Update the VC Runtime CDN URL, SHA-256, size and version together in `prerequisites.lock.json`. The build verifies Microsoft's signature on the exact downloadable VC Runtime while staging only WebView2 and PawnIO as embedded prerequisites. If the WebView2 permalink changes bytes, `PRISMESTRA_WEBVIEW2_X64_URL` can supply the exact pinned file. Size, SHA-256 and Authenticode checks still apply.
 
 The run stores the compiled Setup, source companion, installation manifest and checksums as an Actions artifact. Separate artifacts contain synthetic repair/upgrade inputs and lifecycle evidence. The fresh-install and fresh-account jobs run the **same production Setup SHA-256** on separate disposable runners. The fresh account checks HKCU registration and executes the installed command under a standard token. Setup itself runs under the elevated CI account. True interactive UAC, a reboot or Windows sign-in, missing runtimes, optional driver provisioning and physical devices require separate acceptance. The production-upgrade job installs published Preview 6 verified against the baseline lock, writes a synthetic per-user profile, and upgrades using the same candidate Setup SHA-256. It verifies version, installed manifest and app/backend hashes, and data preservation after update and uninstall. No app session runs during this job. The synthetic repair/upgrade cases check files and saved data through a separate AppId.
+
+The publisher is responsible for the WebView2 license obligations that apply to distribution. Those obligations include the commitments in section 2 of the Microsoft license. [Microsoft license at download](https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download).
 
 Only after all required jobs pass does the run retain `prismestra-verified-candidate-<attempt>` with the tested bytes. This workflow has read-only repository permissions and does not publish a release. A newly compiled or signed EXE requires its own installation checks.

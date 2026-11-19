@@ -293,6 +293,7 @@ def package(args):
     release_source = stage_app_notices(args.release_dir, payload, args.app_sha256, args.expected_commit) if args.release_dir else None
     if not test_mode:
         stage_prerequisites(packages, args.prerequisite_dir, stage / "prerequisites")
+        shutil.copyfile(ROOT / "installer/webview2-notice.txt", payload / "licenses/Microsoft-WebView2.txt")
         policy = ROOT / "installer_policy.ps1"
         if policy.is_symlink() or not policy.is_file():
             raise ValueError("Missing maintained installer policy provisioner")

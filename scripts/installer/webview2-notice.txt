@@ -1,0 +1,8 @@
+Microsoft Edge WebView2 Runtime
+
+To continue, accept the Microsoft Software License Terms for the Microsoft Edge WebView2 Runtime. Review them by selecting x64 under Evergreen Standalone Installer on Microsoft's download page:
+https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download
+
+Prismestra uses WebView2 with Microsoft Defender SmartScreen. SmartScreen collects and sends user information to Microsoft. See the Microsoft Privacy Statement and Microsoft Edge privacy documentation for details:
+https://aka.ms/privacy
+https://learn.microsoft.com/en-us/legal/microsoft-edge/privacy#smartscreen
