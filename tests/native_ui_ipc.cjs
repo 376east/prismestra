@@ -86,6 +86,54 @@ vm.runInContext('changeView("schedule");window.prismestraReceive(payload)',conte
 vm.runInContext('view="devices";state.editor={page:"devices",index:0,targets:["Device"],fields:[],dirty:true};render()',context);const beforeDirtyNavigation=commands.length;vm.runInContext('changeView("sources")',context);assert.equal(vm.runInContext('view',context),'devices');assert.equal(commands.length,beforeDirtyNavigation);assert.ok(find('#native-error').innerHTML.includes('Примените или отмените'));
 // Additional controls use details, keeping basic controls visible and open state across render.
 vm.runInContext('state.editor.dirty=false;view="editor";advancedOpen=false;render()',context);let markup=find('#main').innerHTML;assert.ok(markup.indexOf('data-param="brightness"')<markup.indexOf('<details'));assert.ok(markup.indexOf('data-param="speed"')<markup.indexOf('<details'));assert.ok(markup.indexOf('data-param="fps"')>markup.indexOf('<details'));assert.ok(markup.includes('Основной свет'));assert.ok(markup.includes('Дополнительный свет'));assert.ok(!markup.includes('Дверная лента'));events.toggle({target:{id:'advanced-scene',open:true}});vm.runInContext('render()',context);assert.ok(find('#main').innerHTML.includes('<details id="advanced-scene" open>'));
+// Palette structure edits reuse scene preview and leave the authoritative profile alone.
+const paletteScene={...structuredClone(scene),colors:[0x081426,0x154760,0x2db6ae,0xe3b769,0xf2d9a2]};
+context.paletteScene=paletteScene;
+vm.runInContext('draft=clone(paletteScene);palettePosition=0;render()',context);
+const paletteAction=action=>events.click({target:{closest:()=>({dataset:{action},disabled:false,hasAttribute:name=>name==='data-mutation'})}});
+const paletteControl=action=>{context.paletteControl={dataset:{action}};return vm.runInContext('controlDisabled(paletteControl)',context);};
+const beforePalette=commands.length;
+assert.ok(find('#main').innerHTML.includes('id="palette-position"'));
+assert.equal(paletteControl('move-palette-earlier'),true);
+events.change({target:Object.assign(new Node(),{id:'palette-position',value:'1',dataset:{}})});
+paletteAction('insert-palette-color');
+vm.runInContext('flushPreview()',context);
+assert.deepEqual(commands.at(-1).scene,{...paletteScene,colors:[0x081426,0x154760,0x154760,0x2db6ae,0xe3b769,0xf2d9a2]});
+assert.equal(vm.runInContext('palettePosition',context),2);
+events.change({target:Object.assign(new Node(),{id:'palette-position',value:'3',dataset:{}})});
+paletteAction('move-palette-earlier');
+vm.runInContext('flushPreview()',context);
+assert.deepEqual(commands.at(-1).scene,{...paletteScene,colors:[0x081426,0x154760,0x2db6ae,0x154760,0xe3b769,0xf2d9a2]});
+assert.equal(vm.runInContext('palettePosition',context),2);
+assert.ok(commands.slice(beforePalette).every(command=>command.op==='preview_scene'));
+assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(state.scene)',context)),scene);
+assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(state.library[0].scene)',context)),scene);
+vm.runInContext('send({op:"save_scene",name:"Palette copy",scene:clone(draft)},true)',context);
+assert.equal(commands.at(-1).op,'save_scene');
+assert.equal(commands.at(-1).id,undefined,'copy has no existing catalog ID');
+assert.deepEqual(commands.at(-1).scene,{...paletteScene,colors:[0x081426,0x154760,0x2db6ae,0x154760,0xe3b769,0xf2d9a2]});
+vm.runInContext('commandPending=false;awaitingCommandAck=false',context);
+vm.runInContext('draft.colors=Array.from({length:8},(_,index)=>index);palettePosition=7;render()',context);
+assert.equal(paletteControl('insert-palette-color'),true);
+assert.equal(paletteControl('move-palette-later'),true);
+paletteAction('insert-palette-color');paletteAction('move-palette-later');
+assert.equal(vm.runInContext('draft.colors.length',context),8);
+vm.runInContext('draft=clone(paletteScene);draft.colors=[0x081426];render()',context);
+assert.equal(vm.runInContext('palettePosition',context),0,'position clamps when opening a shorter palette');
+assert.equal(paletteControl('move-palette-earlier'),true);assert.equal(paletteControl('move-palette-later'),true);
+events.change({target:Object.assign(new Node(),{id:'noise-palette',dataset:{sceneSelect:'noise_palette'},value:'rainbow'})});
+assert.ok(!find('#main').innerHTML.includes('id="palette-position"'));
+paletteAction('insert-palette-color');assert.equal(vm.runInContext('draft.colors.length',context),1);
+events.change({target:Object.assign(new Node(),{id:'noise-palette',dataset:{sceneSelect:'noise_palette'},value:'custom'})});
+assert.ok(find('#main').innerHTML.includes('id="palette-position"'));
+vm.runInContext('draft.effect="rainbow_wave";render()',context);
+assert.ok(!find('#main').innerHTML.includes('id="palette-position"'));
+vm.runInContext('draft=clone(paletteScene);draft.effect="breathing";state.pending=true;render()',context);
+assert.equal(paletteControl('insert-palette-color'),true);
+paletteAction('insert-palette-color');assert.equal(vm.runInContext('draft.colors.length',context),5);
+vm.runInContext('state.pending=false;draft=null;previewQueued=false',context);
+console.log('PASS: palette insertion and reorder preview ordered RGB, scene untouched, palette mode and bounds respected');
+
 // Native library frames go through the same pixel painter; missing frames keep a palette fallback.
 context.payload={kind:'snapshot',state:{...structuredClone(initial),library:[{id:'saved',name:'Native frame',scene,preview:{width:2,height:1,colors:[0xff0000,0x00ff00]}},{id:'fallback',name:'No cached frame',scene}]}};vm.runInContext('view="library";window.prismestraReceive(payload)',context);
 assert.ok(find('#main').innerHTML.includes('data-library-preview="saved"'));assert.ok(find('#main').innerHTML.includes('Палитра сцены'));const artwork=find('library-canvas-saved');assert.equal(artwork.width,2);assert.equal(artwork.height,1);assert.deepEqual([...artwork.lastPixels.data],[255,0,0,255,0,255,0,255]);assert.ok(find('#main').innerHTML.includes('параметры RGB'));

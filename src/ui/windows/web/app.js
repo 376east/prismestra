@@ -50,6 +50,11 @@ function controlDisabled(node) {
  if(code==='classic')return !state;
  if(code==='revert-document')return !state || !(busy()||state.editor?.dirty||stagedDirty());
  if(code==='retry-document')return !state || !(busy()||error||state.error);
+ if(['insert-palette-color','move-palette-earlier','move-palette-later'].includes(code)){
+  if(busy()||!paletteHasOrder(draft))return true;
+  if(code==='insert-palette-color')return draft.colors.length>=8;
+  return code==='move-palette-earlier'?paletteIndex()===0:paletteIndex()===draft.colors.length-1;
+ }
  return busy() || (node.dataset.needsChange==='scene'&&!changed()) || (node.dataset.needsChange==='document'&&!(state?.editor?.dirty||currentGenericStages().length)) || (code==='add-color'&&draft?.colors.length>=8) || (node.dataset.removeColor!==undefined&&draft?.colors.length<=1);
 }
 const advancedPage = () => ['connections','sources','schedule'].includes(view);
@@ -135,9 +140,53 @@ function range(key,label,min,max,step=1,suffix='') {
  const value=key.startsWith('noise.')?draft.noise[key.slice(6)]:draft[key];
  return `<div class="control-block"><label class="control-label" for="param-${key}"><span>${label}</span><output id="value-${key}">${value}${suffix}</output></label><input id="param-${key}" type="range" data-param="${key}" data-suffix="${suffix}" min="${min}" max="${max}" step="${step}" value="${value}" data-mutation ${disabled()}></div>`;
 }
+function paletteHasOrder(scene) {
+ return scene?.effect==='breathing'||(scene?.effect==='noise_map'&&scene.noise_palette==='custom');
+}
+let palettePosition=0;
+function paletteIndex() {return Math.min(palettePosition,draft.colors.length-1);}
+function palettePositionLabel(color,index) {return `${index+1} · ${hex(color)}`;}
+function paletteOrderMarkup() {
+ palettePosition=paletteIndex();
+ if(!paletteHasOrder(draft))return '';
+ const options=draft.colors.map((color,i)=>
+  `<option value="${i}" ${i===palettePosition?'selected':''}>${palettePositionLabel(color,i)}</option>`
+ ).join('');
+ return `<div class="native-palette-order">
+   <div class="native-field">
+     <label for="palette-position">Позиция цвета</label>
+     <select id="palette-position" data-mutation ${disabled()}>${options}</select>
+   </div>
+   <div class="native-palette-order-actions" role="group" aria-label="Порядок цветов">
+     ${action('Вставить после','insert-palette-color',false,'title="Вставить копию выбранного цвета"')}
+     ${action('← Раньше','move-palette-earlier')}
+     ${action('Позже →','move-palette-later')}
+   </div>
+ </div>`;
+}
+function reorderPalette(actionCode) {
+ if(!paletteHasOrder(draft)||busy())return;
+ const index=paletteIndex();
+ if(actionCode==='insert-palette-color'){
+  if(draft.colors.length>=8)return;
+  palettePosition=index+1;
+  draft.colors.splice(palettePosition,0,draft.colors[index]);
+  render();
+  $(`#palette-color-${palettePosition}`)?.focus();
+ }else{
+  const direction=actionCode==='move-palette-earlier'?-1:1;
+  const target=index+direction;
+  if(target<0||target>=draft.colors.length)return;
+  [draft.colors[index],draft.colors[target]]=[draft.colors[target],draft.colors[index]];
+  palettePosition=target;
+  if(target+direction<0||target+direction>=draft.colors.length)$('#palette-position')?.focus();
+  render();
+ }
+ requestPreview();
+}
 function renderScene() {
  const noise=draft.effect==='noise_map';
- return heading(draftName,'Изменения остаются в черновике до нажатия «Применить».',action('Сохранить сцену','save-scene')+action('Создать копию','clone')+(selectedId?action('Переименовать','rename'):'')+action('Применить','apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status"></p><div class="editor-layout"><section class="preview-panel" aria-label="Предпросмотр"><div class="stage"><canvas id="stage" aria-label="Предпросмотр сцены из движка Prismestra"></canvas><div class="stage-bar"><span class="stage-chip">Предпросмотр</span></div><div class="stage-caption">Кадр движка · черновик</div></div><p class="preview-description">Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.</p><div class="effect-strip-label">Эффект</div><div class="effect-strip">${Object.entries(effects).map(([key,name])=>`<button class="strip-item native-effect-choice ${draft.effect===key?'active':''}" data-effect="${key}" aria-pressed="${draft.effect===key}" data-mutation ${disabled()}><span>${name}</span></button>`).join('')}</div><div class="parameter-panel" style="margin-top:20px"><h2>Выходы</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> Основной свет · RGB и LCD</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> Дополнительный свет</label><button class="button" data-view="devices">Устройства и свойства</button></div></section><aside class="parameter-panel" aria-label="Параметры сцены"><div class="control-block"><div class="control-label">Палитра <small>${draft.colors.length} / 8</small></div><div class="native-palette">${draft.colors.map((c,i)=>`<div class="native-palette-item"><label class="color-control"><input type="color" data-color="${i}" value="${hex(c)}" aria-label="Цвет ${i+1}" data-mutation ${disabled()}></label><button class="icon-button" data-remove-color="${i}" data-mutation aria-label="Удалить цвет ${i+1}" ${draft.colors.length===1?'disabled':disabled()}>×</button></div>`).join('')}<button class="icon-button" data-action="add-color" aria-label="Добавить цвет" data-mutation ${draft.colors.length>=8?'disabled':disabled()}>${icon('plus')}</button></div></div>${range('speed','Скорость',draft.effect==='breathing'?10:1,draft.effect==='breathing'?200:100)}${range('brightness','Яркость',0,100,1,'%')}<details id="advanced-scene" ${advancedOpen?'open':''}><summary>Дополнительно</summary>${range('fps','Частота кадров',1,144,1,' fps')}${range('temperature','Температура',-100,100)}${range('tint','Оттенок',-100,100)}${draft.effect==='rainbow_wave'?range('rainbow_width','Ширина волны',1,50):''}${noise?`<div class="native-field control-block"><label for="noise-palette">Палитра шума</label><select id="noise-palette" data-scene-select="noise_palette" data-mutation ${disabled()}>${Object.entries({custom:'Своя палитра',rainbow:'Радуга',inverse_rainbow:'Обратная радуга'}).map(([v,t])=>`<option value="${v}" ${draft.noise_palette===v?'selected':''}>${t}</option>`).join('')}</select></div>${range('noise.frequency','Частота шума',0.0001,0.5,0.0001)}${range('noise.amplitude','Амплитуда',0.0001,5,0.0001)}${range('noise.lacunarity','Лакунарность',0.0001,5,0.0001)}${range('noise.persistence','Затухание',0.0001,5,0.0001)}${range('noise.octaves','Октавы',1,20)}${range('noise.motion','Направление движения',0,3)}${range('noise.motion_speed','Скорость движения',0,99)}`:''}</details></aside></div>`;
+ return heading(draftName,'Изменения остаются в черновике до нажатия «Применить».',action('Сохранить сцену','save-scene')+action('Создать копию','clone')+(selectedId?action('Переименовать','rename'):'')+action('Применить','apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status"></p><div class="editor-layout"><section class="preview-panel" aria-label="Предпросмотр"><div class="stage"><canvas id="stage" aria-label="Предпросмотр сцены из движка Prismestra"></canvas><div class="stage-bar"><span class="stage-chip">Предпросмотр</span></div><div class="stage-caption">Кадр движка · черновик</div></div><p class="preview-description">Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.</p><div class="effect-strip-label">Эффект</div><div class="effect-strip">${Object.entries(effects).map(([key,name])=>`<button class="strip-item native-effect-choice ${draft.effect===key?'active':''}" data-effect="${key}" aria-pressed="${draft.effect===key}" data-mutation ${disabled()}><span>${name}</span></button>`).join('')}</div><div class="parameter-panel" style="margin-top:20px"><h2>Выходы</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> Основной свет · RGB и LCD</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> Дополнительный свет</label><button class="button" data-view="devices">Устройства и свойства</button></div></section><aside class="parameter-panel" aria-label="Параметры сцены"><div class="control-block"><div class="control-label">Палитра <small>${draft.colors.length} / 8</small></div><div class="native-palette">${draft.colors.map((c,i)=>`<div class="native-palette-item"><label class="color-control"><input type="color" id="palette-color-${i}" data-color="${i}" value="${hex(c)}" aria-label="Цвет ${i+1}" data-mutation ${disabled()}></label><button class="icon-button" data-remove-color="${i}" data-mutation aria-label="Удалить цвет ${i+1}" ${draft.colors.length===1?'disabled':disabled()}>×</button></div>`).join('')}<button class="icon-button" data-action="add-color" aria-label="Добавить цвет" data-mutation ${draft.colors.length>=8?'disabled':disabled()}>${icon('plus')}</button></div>${paletteOrderMarkup()}</div>${range('speed','Скорость',draft.effect==='breathing'?10:1,draft.effect==='breathing'?200:100)}${range('brightness','Яркость',0,100,1,'%')}<details id="advanced-scene" ${advancedOpen?'open':''}><summary>Дополнительно</summary>${range('fps','Частота кадров',1,144,1,' fps')}${range('temperature','Температура',-100,100)}${range('tint','Оттенок',-100,100)}${draft.effect==='rainbow_wave'?range('rainbow_width','Ширина волны',1,50):''}${noise?`<div class="native-field control-block"><label for="noise-palette">Палитра шума</label><select id="noise-palette" data-scene-select="noise_palette" data-mutation ${disabled()}>${Object.entries({custom:'Своя палитра',rainbow:'Радуга',inverse_rainbow:'Обратная радуга'}).map(([v,t])=>`<option value="${v}" ${draft.noise_palette===v?'selected':''}>${t}</option>`).join('')}</select></div>${range('noise.frequency','Частота шума',0.0001,0.5,0.0001)}${range('noise.amplitude','Амплитуда',0.0001,5,0.0001)}${range('noise.lacunarity','Лакунарность',0.0001,5,0.0001)}${range('noise.persistence','Затухание',0.0001,5,0.0001)}${range('noise.octaves','Октавы',1,20)}${range('noise.motion','Направление движения',0,3)}${range('noise.motion_speed','Скорость движения',0,99)}`:''}</details></aside></div>`;
 }
 function nativeProperties() {
  const editor=state.editor;
@@ -323,13 +372,22 @@ document.addEventListener('click',event=>{
  if(b.dataset.apply){const entry=state.library.find(e=>e.id===b.dataset.apply);if(entry)send({op:'apply_scene',scene:clone(entry.scene)},true);return;}
  if(b.dataset.remove){const entry=state.library.find(e=>e.id===b.dataset.remove);if(entry){dialogReturn=focusKey();$('#remove-description').textContent=`Удалить сцену «${entry.name}» из профиля? Запущенный эффект продолжит работать.`;$('#remove-dialog').dataset.id=entry.id;$('#remove-dialog').showModal();$('#cancel-remove').focus();}return;}
  if(b.dataset.effect){draft.effect=b.dataset.effect;draft.speed=Math.min(draft.effect==='breathing'?200:100,Math.max(draft.effect==='breathing'?10:1,draft.speed));render();requestPreview();return;}
- if(b.dataset.removeColor!==undefined){if(draft.colors.length>1)draft.colors.splice(+b.dataset.removeColor,1);render();requestPreview();return;}
+ if(b.dataset.removeColor!==undefined){
+  if(draft.colors.length>1){
+   const index=+b.dataset.removeColor;
+   if(index<paletteIndex())palettePosition=paletteIndex()-1;
+   draft.colors.splice(index,1);
+   palettePosition=paletteIndex();
+  }
+  render();requestPreview();return;
+ }
  if(b.dataset.asset)return void send({op:'asset',key:b.dataset.asset},true);
  if(b.dataset.deviceIndex!==undefined)return void selectTarget(+b.dataset.deviceIndex);
  switch(b.dataset.action){
  case 'new':case 'clone':case 'rename':return nameDialog(b.dataset.action);
  case 'save-scene':return nameDialog('save');
  case 'apply-scene':send({op:'apply_scene',scene:clone(draft)},true);break;
+ case 'insert-palette-color':case 'move-palette-earlier':case 'move-palette-later':return reorderPalette(b.dataset.action);
  case 'add-color':if(draft.colors.length<8)draft.colors.push(draft.colors.at(-1));render();requestPreview();break;
  case 'apply-document':send({op:'apply_fields'},true);break;
  case 'revert-document':formStages.clear();submittedStages=[];if(state.editor?.dirty||state.pending||commandPending)send({op:'revert_document'},true);else render();break;
@@ -346,7 +404,13 @@ document.addEventListener('input',event=>{
  const input=event.target;if(stageText(input))return;if(busy()||!draft)return;
  if(input.id==='search'){search=input.value;render();return;}
  if(input.dataset.param){const n=Number(input.value);if(!Number.isFinite(n))return;const key=input.dataset.param;if(key.startsWith('noise.'))draft.noise[key.slice(6)]=n;else draft[key]=n;document.getElementById('value-'+key).textContent=n+input.dataset.suffix;editDraft();}
- if(input.dataset.color!==undefined){draft.colors[+input.dataset.color]=parseInt(input.value.slice(1),16);editDraft();}
+ if(input.dataset.color!==undefined){
+  const index=+input.dataset.color;
+  draft.colors[index]=parseInt(input.value.slice(1),16);
+  const option=$('#palette-position')?.options?.[index];
+  if(option)option.textContent=palettePositionLabel(draft.colors[index],index);
+  editDraft();
+ }
  if(input.id==='master-brightness'){draft.brightness=+input.value;const slider=$('[data-param="brightness"]');if(slider){slider.value=draft.brightness;document.getElementById('value-brightness').textContent=draft.brightness+'%';}editDraft();}
 });
 document.addEventListener('change',event=>{
@@ -356,7 +420,12 @@ document.addEventListener('change',event=>{
  if(input.dataset.group){send({op:'groups',...state.groups,[input.dataset.group]:input.checked},true);return;}
  if(input.hasAttribute('data-target'))return void selectTarget(+input.value,input);
  if(input.dataset.field){if(input.tagName==='INPUT'){stageText(input);return;}return void send({op:'set_field',key:input.dataset.field,value:input.value},true);}
- if(input.dataset.sceneSelect){draft[input.dataset.sceneSelect]=input.value;editDraft();}
+ if(input.id==='palette-position'){
+  const index=Number(input.value);
+  if(Number.isInteger(index)&&index>=0&&index<draft.colors.length){palettePosition=index;syncControls();}
+  return;
+ }
+ if(input.dataset.sceneSelect){draft[input.dataset.sceneSelect]=input.value;if(input.dataset.sceneSelect==='noise_palette')render();editDraft();}
 });
 $('#play').onclick=()=>{if(!state)return;const on=!(state.groups.pc||state.groups.door);send({op:'groups',pc:on,door:on},true);};
 $('#footer-apply').onclick=()=>{if(draft)send({op:'apply_scene',scene:clone(draft)},true);};
