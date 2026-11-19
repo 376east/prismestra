@@ -951,6 +951,32 @@ fn create_tray_menu() -> Option<HMENU> {
     Some(menu)
 }
 
+fn tray_menu_placement(
+    cursor: POINT,
+    icon: Option<RECT>,
+    align_right: bool,
+) -> (POINT, u32, Option<TPMPARAMS>) {
+    let alignment = if align_right {
+        TPM_RIGHTALIGN
+    } else {
+        TPM_LEFTALIGN
+    };
+    let Some(rect) = icon else {
+        return (cursor, alignment, None);
+    };
+    (
+        POINT {
+            x: if align_right { rect.right } else { rect.left },
+            y: rect.bottom,
+        },
+        alignment,
+        Some(TPMPARAMS {
+            cbSize: size_of::<TPMPARAMS>() as u32,
+            rcExclude: rect,
+        }),
+    )
+}
+
 fn menu(state: &State, hwnd: HWND, anchor_to_icon: bool) {
     let Some(menu) = create_tray_menu() else {
         return;
@@ -964,28 +990,22 @@ fn menu(state: &State, hwnd: HWND, anchor_to_icon: bool) {
         ..Default::default()
     };
     let mut rect = RECT::default();
-    let mut point = POINT::default();
-    let params = if anchor_to_icon && unsafe { Shell_NotifyIconGetRect(&icon, &mut rect) } == 0 {
-        point.x = rect.left;
-        point.y = rect.bottom;
-        Some(TPMPARAMS {
-            cbSize: size_of::<TPMPARAMS>() as u32,
-            rcExclude: rect,
-        })
-    } else {
-        if unsafe { GetCursorPos(&mut point) } == 0 {
-            unsafe { DestroyMenu(menu) };
-            return;
-        }
-        None
-    };
+    let icon_rect = (anchor_to_icon && unsafe { Shell_NotifyIconGetRect(&icon, &mut rect) } == 0)
+        .then_some(rect);
+    let mut cursor = POINT::default();
+    if icon_rect.is_none() && unsafe { GetCursorPos(&mut cursor) } == 0 {
+        unsafe { DestroyMenu(menu) };
+        return;
+    }
+    let align_right = unsafe { GetSystemMetrics(SM_MENUDROPALIGNMENT) } != 0;
+    let (point, alignment, params) = tray_menu_placement(cursor, icon_rect, align_right);
     unsafe {
         SetForegroundWindow(hwnd);
     }
     let id = unsafe {
         TrackPopupMenuEx(
             menu,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON | alignment,
             point.x,
             point.y,
             hwnd,
@@ -1849,6 +1869,39 @@ mod tests {
                 anchor_to_icon: false
             })
         );
+    }
+
+    #[test]
+    fn tray_menu_placement_matches_system_alignment_for_icon_and_cursor() {
+        let icon = RECT {
+            left: -120,
+            top: 730,
+            right: -96,
+            bottom: 754,
+        };
+        let cursor = POINT { x: 200, y: 100 };
+        for (align_right, expected_x, expected_flag) in [
+            (false, icon.left, TPM_LEFTALIGN),
+            (true, icon.right, TPM_RIGHTALIGN),
+        ] {
+            let (point, flag, params) = tray_menu_placement(cursor, Some(icon), align_right);
+            assert_eq!(
+                (point.x, point.y, flag),
+                (expected_x, icon.bottom, expected_flag)
+            );
+            let params = params.expect("icon rectangle excluded from menu");
+            let rect = params.rcExclude;
+            assert_eq!(
+                (rect.left, rect.top, rect.right, rect.bottom),
+                (icon.left, icon.top, icon.right, icon.bottom)
+            );
+            let (point, flag, params) = tray_menu_placement(cursor, None, align_right);
+            assert_eq!(
+                (point.x, point.y, flag),
+                (cursor.x, cursor.y, expected_flag)
+            );
+            assert!(params.is_none());
+        }
     }
 
     #[test]
