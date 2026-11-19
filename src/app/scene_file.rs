@@ -1,7 +1,11 @@
 //! Portable authoring data. Contains no local mappings, providers or activation state.
 use crate::{devices::MAX_AXIS, runtime::scene::Scene, storage};
 use serde::{Deserialize, Serialize};
-use std::{fs::File, io::Read, path::Path};
+use std::{
+    fs::{self, File},
+    io::{self, Read},
+    path::Path,
+};
 
 pub mod preview;
 
@@ -182,6 +186,15 @@ impl SceneFile {
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
         self.validate()?;
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() => {
+                Self::load(path)
+                    .map_err(|_| "Выберите новый путь или существующий файл сцены Prismestra.")?;
+            }
+            Ok(_) => return Err("Выберите обычный файл сцены.".into()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.to_string()),
+        }
         let bytes = serde_json::to_vec_pretty(self).map_err(|err| err.to_string())?;
         storage::atomic_write(path, &bytes, MAX_BYTES).map_err(|err| err.to_string())
     }
@@ -191,7 +204,6 @@ impl SceneFile {
 mod tests {
     use super::*;
     use crate::runtime::scene::example;
-    use std::fs;
 
     #[test]
     fn portable_file_preserves_layers_and_logical_assignments_without_bindings() {
@@ -227,6 +239,14 @@ mod tests {
             std::env::temp_dir().join(format!("prismestra-scene-file-{}", std::process::id()));
         fs::create_dir(&directory).unwrap();
         let path = directory.join("scene.json");
+        let profile_json = br#"{"version":1,"lighting":{}}"#;
+        fs::write(&path, profile_json).unwrap();
+        assert!(scene.save(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), profile_json);
+        fs::remove_file(&path).unwrap();
+        scene.save(&path).unwrap();
+        assert_eq!(SceneFile::load(&path).unwrap(), scene);
+        scene.name = "Обновлённая сцена".into();
         scene.save(&path).unwrap();
         assert_eq!(SceneFile::load(&path).unwrap(), scene);
         let before = fs::read(&path).unwrap();
