@@ -6,6 +6,7 @@ pub(super) struct Recovery {
     attempts: usize,
     failed_generation: Option<u64>,
     due_us: Option<u64>,
+    pub(super) start_error: Option<String>,
 }
 impl Recovery {
     fn observe(&mut self, generation: u64, failed: bool, now: u64) {
@@ -57,7 +58,7 @@ impl Runtime {
         for (id, spec) in &self.lcd_specs {
             if spec.keys.contains(&key)
                 && self.output_recovery.contains_key(id)
-                && self.lcd.get(id).is_some_and(|worker| {
+                && self.lcd.get(id).is_none_or(|worker| {
                     reappeared || worker.snapshot().phase != lcd_worker::Phase::Ready
                 })
             {
@@ -89,8 +90,50 @@ impl Runtime {
     pub(super) fn reset_output_recovery(&mut self, id: &str) {
         self.lcd_arrivals.remove(id);
         if let Some(state) = self.output_recovery.get_mut(id) {
-            *state = Recovery::default();
+            *state = Recovery {
+                start_error: state.start_error.take(),
+                ..Recovery::default()
+            };
         }
+    }
+
+    pub(super) fn handle_output_start(
+        &mut self,
+        id: &str,
+        result: Result<(), String>,
+    ) -> Result<(), String> {
+        if let Some(state) = self.output_recovery.get_mut(id) {
+            state.start_error = result.err();
+            Ok(())
+        } else {
+            result
+        }
+    }
+
+    pub(super) fn start_registered_lcd(
+        &mut self,
+        id: &str,
+        keys: Vec<String>,
+        factory: LcdFactory,
+    ) -> Result<(), String> {
+        let config = self
+            .document
+            .lcd
+            .iter()
+            .find(|entry| entry.device == id)
+            .ok_or("Missing registered LCD configuration")?
+            .config
+            .clone();
+        let generation = self.next_generation()?;
+        let worker = lcd_worker::Worker::start_claimed(generation, keys, move |cancel| {
+            let (controller, transport) = factory(config.clone(), cancel)?;
+            if controller.config() != &config {
+                return Err("LCD factory configuration changed".into());
+            }
+            Ok((controller, transport))
+        })?;
+        self.lcd.insert(id.to_owned(), worker);
+        Ok(())
     }
 
     pub(super) fn recover_failed_outputs(&mut self, now: u64) -> Result<(), String> {
@@ -107,59 +150,48 @@ impl Runtime {
         let mut lcd = Vec::new();
         for (id, state) in &mut self.output_recovery {
             if let Some(spec) = self.rgb_specs.get(id) {
-                let Some(snapshot) = self.host.status(id) else {
-                    continue;
-                };
-                let failed = snapshot.phase == crate::runtime::output::Phase::Failed;
-                state.observe(snapshot.generation, failed, now);
-                if failed && state.take_attempt(now, self.host.output_reaped(id)) {
+                let snapshot = self.host.status(id);
+                let failed = state.start_error.is_some()
+                    || snapshot
+                        .as_ref()
+                        .is_some_and(|s| s.phase == crate::runtime::output::Phase::Failed);
+                state.observe(snapshot.as_ref().map_or(0, |s| s.generation), failed, now);
+                if failed
+                    && state.take_attempt(now, snapshot.is_none() || self.host.output_reaped(id))
+                {
                     rgb.push((id.clone(), spec.keys.clone(), spec.factory.clone()));
                 }
-            } else if let (Some(spec), Some(worker)) = (self.lcd_specs.get(id), self.lcd.get(id)) {
-                let snapshot = worker.snapshot();
-                let failed = snapshot.phase == lcd_worker::Phase::Failed;
-                // A removal/arrival can precede the I/O error on an old, idle
-                // handle. Keep its single credit while Ready/Connecting, and
-                // consume it only when that owner fails; never restart it here.
+            } else if let Some(spec) = self.lcd_specs.get(id) {
+                let worker = self.lcd.get(id);
+                let snapshot = worker.map(lcd_worker::Worker::snapshot);
+                let failed = state.start_error.is_some()
+                    || snapshot
+                        .as_ref()
+                        .is_some_and(|s| s.phase == lcd_worker::Phase::Failed);
+                // Arrival can precede failure on an idle handle. Keep the credit
+                // until it fails without restarting the healthy owner.
                 if failed && self.lcd_arrivals.remove(id) {
-                    *state = Recovery::default();
+                    *state = Recovery {
+                        start_error: state.start_error.take(),
+                        ..Recovery::default()
+                    };
                 }
-                state.observe(snapshot.generation, failed, now);
-                if failed && state.take_attempt(now, worker.is_reaped()) {
+                state.observe(snapshot.as_ref().map_or(0, |s| s.generation), failed, now);
+                if failed
+                    && state.take_attempt(now, worker.is_none_or(lcd_worker::Worker::is_reaped))
+                {
                     lcd.push((id.clone(), spec.keys.clone(), spec.factory.clone()));
                 }
             }
         }
         for (id, keys, factory) in rgb {
-            if let Err(error) = self.host.attach_claimed(&id, keys, move |c| factory(c)) {
-                self.error = Some(error);
-            }
+            let result = self.host.attach_claimed(&id, keys, move |c| factory(c));
+            self.handle_output_start(&id, result)?;
             self.bump_view();
         }
         for (id, keys, factory) in lcd {
-            let config = self
-                .document
-                .lcd
-                .iter()
-                .find(|entry| entry.device == id)
-                .ok_or("Missing LCD configuration during recovery")?
-                .config
-                .clone();
-            let generation = self.next_generation()?;
-            match lcd_worker::Worker::start_claimed(generation, keys, move |cancel| {
-                let (controller, transport) = factory(config.clone(), cancel)?;
-                if controller.config() != &config {
-                    return Err("LCD factory configuration changed during recovery".into());
-                }
-                Ok((controller, transport))
-            }) {
-                Ok(worker) => {
-                    self.lcd.insert(id, worker);
-                }
-                Err(error) => {
-                    self.error = Some(error);
-                }
-            }
+            let result = self.start_registered_lcd(&id, keys, factory);
+            self.handle_output_start(&id, result)?;
             self.bump_view();
         }
         Ok(())

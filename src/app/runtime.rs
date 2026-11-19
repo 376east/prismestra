@@ -30,6 +30,8 @@ mod managed_backend;
 mod outputs;
 mod recovery;
 mod registry_input;
+#[cfg(windows)]
+pub(crate) use outputs::OutputActivity;
 pub use outputs::{LcdOutput, OutputPlan, RgbOutput};
 mod temperature_stream;
 
@@ -171,6 +173,8 @@ enum ConfigurationPhase {
 }
 struct Configuration {
     outputs: Option<OutputPlan>,
+    #[cfg(windows)]
+    startup_managed_ids: Option<BTreeSet<String>>,
     document: Document,
     phase: ConfigurationPhase,
     journal_override: Option<PathBuf>,
@@ -585,6 +589,8 @@ impl Runtime {
         }
         self.pending = Some(Configuration {
             outputs,
+            #[cfg(windows)]
+            startup_managed_ids: None,
             document,
             phase: ConfigurationPhase::Draining,
             journal_override,
@@ -767,6 +773,11 @@ impl Runtime {
             }
             self.output_recovery
                 .retain(|id, _| self.rgb_specs.contains_key(id) || self.lcd_specs.contains_key(id));
+            #[cfg(windows)]
+            if let Some(ids) = pending.startup_managed_ids {
+                self.managed_backend_ids = ids;
+                self.enable_registered_output_recovery();
+            }
             self.document = proposal;
             self.document_revision = self.document_revision.wrapping_add(1);
             self.host = host;
@@ -1275,7 +1286,8 @@ impl Runtime {
             .map(|(id, s)| (id.clone(), s.keys.clone(), s.factory.clone()))
             .collect::<Vec<_>>();
         for (id, keys, f) in rgb {
-            self.host.attach_claimed(&id, keys, move |c| f(c))?;
+            let result = self.host.attach_claimed(&id, keys, move |c| f(c));
+            self.handle_output_start(&id, result)?;
         }
         let lcd = self
             .lcd_specs
@@ -1283,25 +1295,8 @@ impl Runtime {
             .map(|(id, s)| (id.clone(), s.keys.clone(), s.factory.clone()))
             .collect::<Vec<_>>();
         for (id, keys, f) in lcd {
-            let config = self
-                .document
-                .lcd
-                .iter()
-                .find(|l| l.device == id)
-                .unwrap()
-                .config
-                .clone();
-            let generation = self.next_generation()?;
-            self.lcd.insert(
-                id,
-                lcd_worker::Worker::start_claimed(generation, keys, move |cancel| {
-                    let (controller, transport) = f(config.clone(), cancel)?;
-                    if controller.config() != &config {
-                        return Err("LCD factory configuration changed during refresh".into());
-                    }
-                    Ok((controller, transport))
-                })?,
-            );
+            let result = self.start_registered_lcd(&id, keys, f);
+            self.handle_output_start(&id, result)?;
         }
         if let Some(f) = self.capture_factory.clone() {
             let generation = self.next_generation()?;
@@ -1336,6 +1331,13 @@ impl Runtime {
     }
     fn ready(&self) -> Result<bool, String> {
         let mut ready = true;
+        if let Some(error) = self
+            .output_recovery
+            .values()
+            .find_map(|state| state.start_error.as_ref())
+        {
+            return Err(error.clone());
+        }
         // This is lighting-output readiness. Optional temperature readers may
         // connect/fail independently; absence is not a temperature reading.
         for id in self.rgb_specs.keys() {

@@ -10,7 +10,6 @@ struct Applying {
     revision: u64,
     plan: Plan,
     previous_document: Document,
-    previous_outputs: crate::app::runtime::OutputPlan,
     path: PathBuf,
     context: u64,
 }
@@ -69,6 +68,22 @@ impl Startup {
 }
 
 impl App {
+    pub(super) fn newly_found_devices(&self) -> impl Iterator<Item = &crate::devices::Device> {
+        self.first_run
+            .applying
+            .iter()
+            .flat_map(|pending| pending.plan.document.lighting.setup.devices.iter())
+            .filter(|candidate| {
+                !self
+                    .runtime
+                    .project()
+                    .setup
+                    .devices
+                    .iter()
+                    .any(|device| device.id == candidate.id)
+            })
+    }
+
     fn startup_output_labels(&mut self) {
         self.set_text(PC_ON, "Подсветка ПК");
         self.set_text(DOOR_ON, "Дополнительный свет");
@@ -192,15 +207,9 @@ impl App {
                     self.runtime.document(),
                 )?;
                 let document = self.runtime.document().clone();
-                let mut outputs = local.prepare(&document, &self.asset_root)?;
+                let outputs = local.prepare(&document, &self.asset_root)?;
                 self.first_run.restoring = Some(self.runtime.with(|runtime, _| {
-                    runtime.prepare_managed_outputs(
-                        &self.state_dir,
-                        &local,
-                        &document,
-                        &mut outputs,
-                    )?;
-                    runtime.request_outputs_for(document, outputs)
+                    runtime.request_startup_outputs_for(&self.state_dir, &local, document, outputs)
                 })?);
                 self.first_run.phase = "restoring";
                 self.native_lighting = Some(local);
@@ -223,7 +232,8 @@ impl App {
                 self.start_bound_sources()?;
             }
             self.status =
-                "Сохранённая сцена включена. Статусы передачи доступны в устройствах.".into();
+                "Сохранённые подключения восстановлены. Статусы передачи доступны в устройствах."
+                    .into();
             return Ok(true);
         }
         if self.first_run.applying.is_none()
@@ -275,8 +285,19 @@ impl App {
             }
             let applied = self.first_run.applying.take().unwrap();
             if let Err(error) = first_run::persist(&self.state_dir, &applied.path, &applied.plan) {
-                self.runtime
-                    .request_outputs_for(applied.previous_document, applied.previous_outputs)?;
+                let local = self
+                    .native_lighting
+                    .as_ref()
+                    .ok_or("Не загружены прежние подключения")?;
+                let outputs = local.prepare(&applied.previous_document, &self.asset_root)?;
+                self.runtime.with(|runtime, _| {
+                    runtime.request_startup_outputs_for(
+                        &self.state_dir,
+                        local,
+                        applied.previous_document,
+                        outputs,
+                    )
+                })?;
                 return Err(error);
             }
             self.native_lighting = Some(applied.plan.local);
@@ -323,28 +344,25 @@ impl App {
                 self.first_run.next = Instant::now() + Duration::from_secs(30);
                 return Ok(true);
             }
-            let mut outputs = plan.local.prepare(&plan.document, &self.asset_root)?;
+            let outputs = plan.local.prepare(&plan.document, &self.asset_root)?;
             let previous_document = self.runtime.document().clone();
-            let previous_outputs = self.runtime.output_plan();
             let revision = self.runtime.with(|runtime, _| {
-                runtime.prepare_managed_outputs(
+                runtime.request_startup_outputs_for(
                     &self.state_dir,
                     &plan.local,
-                    &plan.document,
-                    &mut outputs,
-                )?;
-                runtime.request_outputs_for(plan.document.clone(), outputs)
+                    plan.document.clone(),
+                    outputs,
+                )
             })?;
             self.first_run.applying = Some(Applying {
                 revision,
                 plan,
                 previous_document,
-                previous_outputs,
                 path: self.path.clone().ok_or("Нет пути профиля")?,
                 context: self.context_revision,
             });
             self.first_run.phase = "applying";
-            self.status = "Устройства найдены. Включаю общую сцену и сохраняю карту…".into();
+            self.status = "Устройства найдены. Подключаю к общей сцене…".into();
             return Ok(true);
         }
         if !self.first_run.worker.is_idle() || Instant::now() < self.first_run.next {
@@ -370,7 +388,7 @@ impl App {
         let endpoint = "127.0.0.1:17422".parse().unwrap();
         let guard = self
             .runtime
-            .with(|runtime, _| runtime.managed_discovery_guard(&self.state_dir, endpoint))?;
+            .with(|runtime, _| runtime.managed_discovery_guard(&self.state_dir, endpoint));
         self.first_run.worker.start(
             document,
             local,

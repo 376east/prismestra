@@ -56,7 +56,7 @@ impl Worker {
         local: Local,
         asset_root: PathBuf,
         endpoint: SocketAddr,
-        guard: Option<Guard>,
+        guard: Result<Option<Guard>, String>,
         baseline: Baseline,
     ) -> Result<(), String> {
         if !self.is_idle() {
@@ -135,7 +135,7 @@ struct Discovery {
 
 fn discover(
     endpoint: SocketAddr,
-    guard: Option<Guard>,
+    guard: Result<Option<Guard>, String>,
     cancel: &Cancellation,
     local: &Local,
 ) -> Result<Discovery, String> {
@@ -186,7 +186,7 @@ fn discover(
 
 fn discover_local(
     endpoint: SocketAddr,
-    guard: Option<Guard>,
+    guard: Result<Option<Guard>, String>,
     cancel: &Cancellation,
     deadline: Cancellation,
     started: Instant,
@@ -208,7 +208,7 @@ fn discover_local(
     if cancel.cancelled() {
         return Err(cancelled());
     }
-    if let Some(guard) = guard {
+    if let Ok(Some(guard)) = guard {
         let rgb = (|| {
             if !endpoint.ip().is_loopback() || endpoint.port() == 0 {
                 return Err("Для автопоиска нужен локальный управляемый OpenRGB.".into());
@@ -253,9 +253,10 @@ fn discover_local(
             Err(error) => result.issues.push(format!("OpenRGB: {error}")),
         }
     } else {
-        result
-            .issues
-            .push("Управляемый OpenRGB недоступен для первичного поиска.".into());
+        result.issues.push(match guard {
+            Err(error) => format!("OpenRGB: {error}"),
+            _ => "Управляемый OpenRGB недоступен для первичного поиска.".into(),
+        });
     }
     if cancel.cancelled() {
         return Err(cancelled());
@@ -1332,7 +1333,12 @@ mod tests {
             }))
         });
         let revision = runtime
-            .request_outputs_for(plan.document.clone(), outputs)
+            .request_startup_outputs_for(
+                &fixture.state,
+                &plan.local,
+                plan.document.clone(),
+                outputs,
+            )
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while frames.load(Ordering::SeqCst) < 3 && Instant::now() < deadline {
@@ -1345,6 +1351,10 @@ mod tests {
         assert!(nonblack.load(Ordering::SeqCst) > 0);
         assert_eq!(runtime.output_revision(), revision);
         assert_eq!(runtime.document(), &plan.document);
+        assert!(matches!(
+            runtime.output_activity(&plan.document.lighting.setup.devices[0]),
+            crate::app::runtime::OutputActivity::Sent(frames) if frames > 0
+        ));
         persist(&fixture.state, &fixture.profile, &plan).unwrap();
         let reloaded = Document::load(&fixture.profile).unwrap();
         let local = Local::read(&fixture.state.join(LOCAL_NAME), &reloaded).unwrap();
