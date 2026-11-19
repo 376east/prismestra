@@ -205,6 +205,62 @@ assert.equal(commands.length,beforePendingPage,'Do not send a card selection bef
 vm.runInContext('pendingView=null',context);
 console.log('PASS: device cards select by logical identity and the draft dropdown still uses indices');
 
+// An active device inspection announces transitions once and follows its logical ID.
+{
+ const wled = {id:'desk rgb',label:'WLED',role:'canvas',leds:32,rate_hz:30,enabled:true};
+ const other = appliedDevices[0];
+ const deviceSnapshot = {
+  ...initial, devices:[other,wled], draftDevices:[other,wled],
+  editor:{page:'devices',index:0,targets:[other.label,wled.label],fields:[],dirty:false},
+  deviceActivity:{labels:{[wled.id]:'Недоступно',[other.id]:'Выключено'}},
+};
+ const updateDeviceStatus = (selected, unrelated) => {
+  context.payload={kind:'status',state:{deviceActivity:{labels:{[wled.id]:selected,[other.id]:unrelated}}}};
+  vm.runInContext('window.prismestraReceive(payload)',context);
+};
+ context.payload={kind:'snapshot',state:deviceSnapshot};
+ vm.runInContext('window.prismestraReceive(payload)',context);
+ assert.match(mainMarkup,/id="device-status-desk%20rgb" data-output-status="desk rgb"/);
+ assert.match(mainMarkup,/aria-label="Свойства: WLED" aria-describedby="device-status-desk%20rgb"/);
+ assert.match(mainMarkup,/<p class="parameter-note" id="native-runtime-detail">/);
+ const live = find('#device-status-announcement');
+ const announcements = [];
+ let liveText = live.textContent;
+ Object.defineProperty(live,'textContent',{
+  get:()=>liveText,
+  set:value=>{liveText=value; if(value)announcements.push(value);},
+ });
+ const inspectedRow = find('[data-device-id="desk rgb"]');
+ inspectedRow.dataset.deviceId=wled.id;
+ inspectedRow.focus();
+ events.click({target:{closest:()=>inspectedRow}});
+ assert.deepEqual(commands.at(-1),{op:'select_device',id:wled.id});
+ context.payload={kind:'snapshot',state:{...deviceSnapshot,editor:{...deviceSnapshot.editor,index:1}}};
+ vm.runInContext('window.prismestraReceive(payload)',context);
+ assert.deepEqual(announcements,[],'Activation and the initial state are silent');
+ updateDeviceStatus('Подключается','Недоступно');
+ updateDeviceStatus('Подключается','Выключено');
+ const properties = new Node();
+ properties.closest = selector=>selector==='#device-properties'?properties:null;
+ properties.focus();
+ events.focusin();
+ updateDeviceStatus('Кадры отправлены','Выключено');
+ assert.deepEqual(announcements,['WLED. Подключается.','WLED. Кадры отправлены.']);
+ const escapeProperties = () => events.keydown({key:'Escape',target:properties,preventDefault(){}});
+ escapeProperties();
+ assert.equal(document.activeElement,inspectedRow);
+ properties.focus();
+ events.focusin();
+ inspectedRow.disabled=true; // The selector mock keeps detached nodes; the browser test removes the row.
+ escapeProperties();
+ assert.equal(document.activeElement,find('h1'));
+ events.focusin();
+ updateDeviceStatus('Недоступно','Выключено');
+ assert.equal(announcements.length,2,'Status changes outside the inspection stay silent');
+ vm.runInContext('deviceInspection=null',context);
+ console.log('PASS: selected device status changes only, spoken description, and logical focus return');
+}
+
 const candidateFixtures = require('./fixtures/device-candidates.json');
 const [foundRgb, foundLcd] = candidateFixtures.proposal.deviceCandidates;
 const foundState = {
