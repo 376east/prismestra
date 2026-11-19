@@ -197,6 +197,10 @@ fn ha_rebinds_before_resending_latest_color_and_leaves_auth_failure_terminal() {
     );
     driver.next = None;
     assert!(matches!(
+        driver.write(&black, &cancel),
+        Ok(WriteResult::Deferred(_))
+    ));
+    assert!(matches!(
         driver.write(&blue, &cancel),
         Ok(WriteResult::Submitted)
     ));
@@ -589,4 +593,78 @@ fn assert_ha_authorization_recovery(
             .all(|(request, prefix)| request.starts_with(prefix))
     );
     runtime.stop();
+}
+
+#[test]
+fn ha_retry_receives_new_scene_before_next_one_hz_sample() {
+    use crate::{
+        devices::{Canvas, Point, Setup},
+        runtime::{Host, output::Phase, scene},
+    };
+    const AVAILABLE: &str =
+        r#"{"entity_id":"light.room","state":"on","attributes":{"supported_color_modes":["rgb"]}}"#;
+    let (url, peer) = start_peer(vec![
+        ("200 OK", AVAILABLE),
+        ("503 Service Unavailable", "{}"),
+        ("200 OK", AVAILABLE),
+        ("200 OK", "[]"),
+    ]);
+    let mut device = crate::app::device_setup::preset("home-assistant-light")
+        .unwrap()
+        .device("ha")
+        .unwrap();
+    device.enabled = true;
+    let mut scene = scene::example();
+    scene.colors.fill(0x5a1e00);
+    scene.brightness = 100;
+    let mut host = Host::new(
+        Setup {
+            version: 1,
+            devices: vec![device],
+            canvas: Canvas {
+                width: 1,
+                height: 1,
+                points: vec![Point {
+                    device: "ha".into(),
+                    led: 0,
+                    x: 0,
+                    y: 0,
+                }],
+            },
+        },
+        scene.clone(),
+    )
+    .unwrap();
+    host.attach_claimed("ha", vec![], move |_| {
+        HomeAssistant::with_token(&url, "light.room", Some("fake.test-token".into()))
+            .map(|driver| Box::new(driver) as Box<dyn RgbDriver>)
+    })
+    .unwrap();
+    host.tick(0).unwrap();
+    let original = host.requested("ha").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !host
+        .status("ha")
+        .unwrap()
+        .error
+        .as_deref()
+        .is_some_and(|err| err.contains("503"))
+    {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(host.status("ha").unwrap().phase, Phase::Connecting);
+    scene.colors.fill(0x00145a);
+    host.configure_scene(scene).unwrap();
+    host.tick(40_000).unwrap();
+    let latest = host.requested("ha").unwrap();
+    assert!(latest.sequence > original.sequence);
+    let requests = peer.join().unwrap();
+    assert!(requests[2].starts_with("GET /ha/api/states/light.room "));
+    let payload: serde_json::Value =
+        serde_json::from_str(requests[3].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(
+        payload,
+        serde_json::json!({"entity_id":"light.room","brightness":90,"rgb_color":[0,57,255]})
+    );
 }

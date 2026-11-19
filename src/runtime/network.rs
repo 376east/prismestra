@@ -17,6 +17,7 @@ pub struct HomeAssistant {
     last: Option<[u8; 3]>,
     next: Option<Instant>,
     retry_step: usize,
+    rebound_deadline: Option<Instant>,
 }
 #[cfg(windows)]
 impl HomeAssistant {
@@ -49,6 +50,7 @@ impl HomeAssistant {
             last: None,
             next: None,
             retry_step: 0,
+            rebound_deadline: None,
         })
     }
 }
@@ -101,13 +103,20 @@ impl RgbDriver for HomeAssistant {
                 (next - now).min(Duration::from_secs(30)),
             ));
         }
-        let deadline = now + Duration::from_secs(3);
-        let result = if self.retry_step == 0 {
-            Ok(())
+        let rebound = self.rebound_deadline.take();
+        let deadline = rebound.unwrap_or(now + Duration::from_secs(3));
+        let result = if self.retry_step == 0 || rebound.is_some() {
+            client.set_color(rgb, deadline, || cancel.cancelled())
         } else {
-            client.bind_light(&self.entity, deadline, || cancel.cancelled())
-        }
-        .and_then(|()| client.set_color(rgb, deadline, || cancel.cancelled()));
+            match client.bind_light(&self.entity, deadline, || cancel.cancelled()) {
+                Ok(()) => {
+                    // Let the mailbox pick up frames submitted while GET was in flight.
+                    self.rebound_deadline = Some(deadline);
+                    return Ok(WriteResult::Deferred(Duration::from_millis(1)));
+                }
+                Err(error) => Err(error),
+            }
+        };
         if let Err(error) = result {
             if error.authorization_rejected() {
                 return Ok(WriteResult::RequiresAction(error.to_string()));
