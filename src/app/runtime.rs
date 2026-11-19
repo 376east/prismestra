@@ -261,6 +261,8 @@ pub struct Runtime {
     #[cfg(windows)]
     managed_backend: Option<super::backend_helper::Backend>,
     #[cfg(windows)]
+    managed_startup_guard: Option<managed_backend::StartupGuard>,
+    #[cfg(windows)]
     managed_backend_ids: BTreeSet<String>,
     #[cfg(windows)]
     managed_backend_generation: u64,
@@ -336,6 +338,8 @@ impl Runtime {
             sample_freshness: vec![],
             #[cfg(windows)]
             managed_backend: None,
+            #[cfg(windows)]
+            managed_startup_guard: None,
             #[cfg(windows)]
             managed_backend_ids: BTreeSet::new(),
             #[cfg(windows)]
