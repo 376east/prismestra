@@ -5,6 +5,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 
+mod output_preview;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EditValue {
@@ -21,6 +23,11 @@ struct NativeValue {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
     Snapshot,
+    PreviewOutput {
+        request: u32,
+        device: String,
+        offset: usize,
+    },
     NativeField {
         id: i32,
         value: String,
@@ -234,6 +241,10 @@ fn assets(path: &str) -> Option<(&'static str, &'static [u8])> {
             "text/javascript; charset=utf-8",
             include_bytes!("web/theme.js"),
         ),
+        "/output-map.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("web/output-map.js"),
+        ),
         "/ui.css" => ("text/css; charset=utf-8", include_bytes!("web/ui.css")),
         "/assets/SourceSans3.ttf" => ("font/ttf", include_bytes!("web/assets/SourceSans3.ttf")),
         "/assets/favicon.svg" => ("image/svg+xml", include_bytes!("web/assets/favicon.svg")),
@@ -444,7 +455,10 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
     let hwnd = state.editor_window.get();
     if !matches!(
         &command,
-        Command::Snapshot | Command::PreviewScene { .. } | Command::CloseReady { .. }
+        Command::Snapshot
+            | Command::PreviewOutput { .. }
+            | Command::PreviewScene { .. }
+            | Command::CloseReady { .. }
     ) {
         let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
         if slot
@@ -513,6 +527,28 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             native_forms::action(state, id)?;
         }
         Command::Snapshot => {}
+        Command::PreviewOutput {
+            request,
+            device,
+            offset,
+        } => {
+            let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
+            let app = slot.as_ref().ok_or("Нет сессии")?;
+            let preview = app.runtime.read(|runtime| {
+                output_preview::snapshot(
+                    &runtime.document().lighting.setup,
+                    &device,
+                    runtime.host().frame(&device),
+                    offset,
+                )
+            });
+            let value = match preview {
+                Ok(preview) => json!({"kind":"output_preview","request":request,"preview":preview}),
+                Err(error) => json!({"kind":"output_preview","request":request,"error":error}),
+            };
+            send(state, &value)?;
+            return Ok(false);
+        }
         Command::Open | Command::Save | Command::Export => {
             let id = match command {
                 Command::Open => OPEN,
