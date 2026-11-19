@@ -32,6 +32,7 @@ fn main() -> std::process::ExitCode {
                 Ok(pc_control::app::installed::Dispatch::Ui(args)) => {
                     pc_control::ui::windows::run(args)
                 }
+                Ok(pc_control::app::installed::Dispatch::InstalledUi(launch)) => launch.run(),
                 Ok(pc_control::app::installed::Dispatch::Exit(code)) => {
                     return std::process::ExitCode::from(code as u8);
                 }

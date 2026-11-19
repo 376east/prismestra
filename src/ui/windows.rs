@@ -42,7 +42,7 @@ mod first_run;
 mod modern;
 mod native_forms;
 mod resident;
-pub(crate) use resident::shutdown_installed;
+pub(crate) use resident::{Instance, shutdown_installed};
 mod runtime_client;
 mod web_shell;
 const MODERN_RETURN: i32 = 109;
@@ -2198,6 +2198,8 @@ struct State {
     resident: Cell<bool>,
     editor_window: Rc<Cell<HWND>>,
     shell_window: Cell<HWND>,
+    activation_message: Cell<u32>,
+    activation_requested: Cell<bool>,
     session_action: Cell<resident::Action>,
     tray_enabled: Cell<bool>,
     tray_registration: Cell<resident::TrayRegistration>,
@@ -2499,7 +2501,7 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize);
         }
-        return 1;
+        return unsafe { DefWindowProcW(hwnd, msg, w, l) };
     }
     let raw = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const State;
     if raw.is_null() {
@@ -2831,12 +2833,23 @@ impl Drop for Window {
     }
 }
 pub fn run(args: Vec<OsString>) -> Result<(), String> {
+    run_with_instance(args, None)
+}
+
+pub(crate) fn run_installed(args: Vec<OsString>, instance: Instance) -> Result<(), String> {
+    run_with_instance(args, Some(instance))
+}
+
+fn run_with_instance(
+    args: Vec<OsString>,
+    installed_instance: Option<Instance>,
+) -> Result<(), String> {
     let diagnostic = args.iter().any(|a| a == "--snapshot" || a == "--selftest");
     let error_dir = args
         .windows(2)
         .find(|pair| pair[0] == "--state-dir")
         .map(|pair| PathBuf::from(&pair[1]));
-    let result = run_inner(args);
+    let result = run_inner(args, installed_instance);
     if !diagnostic && let Err(error) = &result {
         startup_ack::failed(error);
         if let Some(dir) = error_dir {
@@ -2867,7 +2880,7 @@ fn output_activity_label(activity: &crate::app::runtime::OutputActivity) -> &'st
 fn native_sources_allowed(snapshot: bool, selftest: bool) -> bool {
     !snapshot && !selftest
 }
-fn run_inner(args: Vec<OsString>) -> Result<(), String> {
+fn run_inner(args: Vec<OsString>, installed_instance: Option<Instance>) -> Result<(), String> {
     let mut o = options(args)?;
     let state_dir = if let Some(path) = &o.state_dir {
         path.clone()
@@ -2900,7 +2913,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         o.snapshot = Some(state_dir.join("diagnostics/selftest.png"));
     }
     let resident_mode = o.snapshot.is_none() && !o.selftest;
-    let _single_instance = if resident_mode {
+    let _portable_instance = if resident_mode && installed_instance.is_none() {
         Some(resident::Instance::acquire(&state_dir)?)
     } else {
         None
@@ -2960,6 +2973,8 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         resident: Cell::new(resident_mode),
         editor_window: Rc::new(Cell::new(null_mut())),
         shell_window: Cell::new(null_mut()),
+        activation_message: Cell::new(0),
+        activation_requested: Cell::new(false),
         session_action: Cell::new(resident::Action::None),
         tray_enabled: Cell::new(false),
         tray_registration: Cell::new(resident::TrayRegistration::default()),
@@ -3297,8 +3312,16 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     if !o.selftest {
         startup_ack::ready();
     }
+    if let Some(instance) = &installed_instance
+        && let Err(error) = instance.enable_activation(&state)
+    {
+        eprintln!("{error}");
+    }
     let mut msg = MSG::default();
     loop {
+        if let Err(error) = resident::open_requested_editor(&state) {
+            resident::report(&state, error);
+        }
         let got = unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) };
         if got == 0 {
             break;
