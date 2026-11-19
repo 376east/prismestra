@@ -32,7 +32,7 @@ SetupLogging=yes
 Name: "autostart"; Description: "Start Prismestra when I sign in"
 Name: "launch"; Description: "Open Prismestra after installation"
 #ifdef IncludePawnIO
-Name: "pawnio"; Description: "Install the shared PawnIO driver for supported PC lighting"; Flags: unchecked
+Name: "pawnio"; Description: "Enable supported RAM and motherboard lighting (shared PawnIO driver)"
 #endif
 
 [Files]
@@ -223,6 +223,42 @@ begin
   if not Policy('Install', SID) then
     Log('Managed PC task unavailable; retained ownership intent for safe cleanup.');
 end;
+
+function LegacyStartup(const Action, SID: String): Boolean;
+var
+  Code: Integer;
+begin
+  Result := GuardInstall('Check') and ExecAndLogOutput(PowerShell,
+    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + ProtectedModules +
+    '& ' + PSQuote(InstallPath + '\retire-legacy-startup.ps1') +
+    ' -OriginalSid ' + PSQuote(SID) + ' -Action ' + PSQuote(Action) + '; exit $LASTEXITCODE"',
+    ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code, nil) and (Code = 0);
+end;
+
+procedure RetireLegacyStartup;
+var
+  SID: String;
+begin
+  SID := CurrentSID;
+  if not ValidSID(SID) or not OriginalUser('Probe', SID) then begin
+    Log('Legacy startup migration requires matching original and elevated user identities.');
+    Exit;
+  end;
+  if not LegacyStartup('Prepare', SID) then begin
+    Log('Legacy startup source could not be prepared; previous startup entries kept.');
+    Exit;
+  end;
+  if RebootRequired then begin
+    Log('Verified legacy source saved for next launch; profile preparation and prior task retirement require Setup after restart.');
+    Exit;
+  end;
+  if not OriginalUser('PrepareProfile', SID) then begin
+    Log('Legacy profile could not be prepared as the original ordinary user; previous startup entries kept.');
+    Exit;
+  end;
+  if not LegacyStartup('Disable', SID) then
+    Log('Legacy startup migration was deferred; previous startup definitions were preserved.');
+end;
 #endif
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -278,6 +314,8 @@ begin
 end;
 
 procedure CurStepChanged(Step: TSetupStep);
+var
+  StartupReady: Boolean;
 begin
   if Step = ssPostInstall then begin
     if not GuardInstall('Check') then
@@ -285,11 +323,20 @@ begin
 #ifndef LifecycleTest
     InstallPolicy;
 #endif
+    StartupReady := False;
     if WizardIsTaskSelected('autostart') then begin
-      if not OriginalUser('EnableStartup', '') then
+      StartupReady := OriginalUser('EnableStartup', '');
+      if not StartupReady then
         Log('Could not enable sign-in startup for the original ordinary user.');
-    end else if not OriginalUser('DisableStartup', '') then
-      Log('Could not check sign-in startup for the original ordinary user.');
+    end else begin
+      StartupReady := OriginalUser('DisableStartup', '');
+      if not StartupReady then
+        Log('Could not check sign-in startup for the original ordinary user.');
+    end;
+#ifndef LifecycleTest
+    if StartupReady then RetireLegacyStartup
+    else Log('Previous startup kept because the new startup preference could not be applied.');
+#endif
   end;
   if (Step = ssDone) and not WizardSilent and not RebootRequired and
     WizardIsTaskSelected('launch') and not OriginalUser('Launch', '') then

@@ -14,7 +14,11 @@ pub mod config;
 pub mod device_setup;
 pub mod document;
 #[cfg(windows)]
+pub(crate) mod first_run;
+#[cfg(windows)]
 pub mod installed;
+#[cfg(windows)]
+pub(crate) mod installed_migration;
 #[cfg(windows)]
 pub(crate) mod installed_policy;
 pub mod lcd;

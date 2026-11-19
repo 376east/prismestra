@@ -3,7 +3,7 @@
   "repository": "https://github.com/hello-nexus/openrgb-headless",
   "revision": "6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43",
   "patch": "prismestra-pc.patch",
-  "patch_sha256": "56a7996f5bc0739611eac46477fb67caa15185b8918133285f1de26b62632e84",
+  "patch_sha256": "ae6b8079a9ac05934867b9019ddbe574ae3b84cab58d4d8872f442f15f998995",
   "configuration": [
     "release",
     "prismestra_pc_backend"
@@ -23,7 +23,8 @@
   "optional_capabilities": [
     "PRISMESTRA_PARENT_PIPE=1 cooperative shutdown; managed opt-in defaults false",
     "terminal managed-owner EOF cancels queued I2C discovery before shutdown wait",
-    "--lighting-only strict SDK6 RGB allowlist; excludes cooling, plugins, profiles, settings and rescan"
+    "--lighting-only strict SDK6 RGB allowlist; excludes cooling, plugins, profiles, settings and rescan",
+    "leased application startup bypasses Windows service dispatcher; standalone and service entrypoints unchanged"
   ],
   "timer_policy": {
     "resolution_ms": 1,

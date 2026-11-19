@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Explicitly invoked Windows backend. Construction/import alone performs no WinRT/device calls.
 use super::ble::{self, Backend, Control, Event, Link};
+use crate::runtime::output::Lease;
 use std::{
+    collections::{BTreeMap, BTreeSet},
     future::{Future, IntoFuture},
     marker::PhantomData,
     rc::Rc,
@@ -181,6 +183,18 @@ struct Discovery {
     watcher: BluetoothLEAdvertisementWatcher,
     token: Option<i64>,
 }
+impl Discovery {
+    fn passive() -> Result<Self, String> {
+        let scan = Self {
+            watcher: BluetoothLEAdvertisementWatcher::new().map_err(error)?,
+            token: None,
+        };
+        scan.watcher
+            .SetScanningMode(BluetoothLEScanningMode::Passive)
+            .map_err(error)?;
+        Ok(scan)
+    }
+}
 impl Drop for Discovery {
     fn drop(&mut self) {
         let _ = self.watcher.Stop();
@@ -191,14 +205,7 @@ impl Drop for Discovery {
 }
 fn discover(target: u64, control: &mut dyn Control) -> Result<(), String> {
     let seen = Arc::new(AtomicBool::new(false));
-    let watcher = BluetoothLEAdvertisementWatcher::new().map_err(error)?;
-    let mut scan = Discovery {
-        watcher,
-        token: None,
-    };
-    scan.watcher
-        .SetScanningMode(BluetoothLEScanningMode::Passive)
-        .map_err(error)?;
+    let mut scan = Discovery::passive()?;
     let callback_seen = seen.clone();
     let callback = TypedEventHandler::<
         BluetoothLEAdvertisementWatcher,
@@ -233,6 +240,175 @@ fn discover(target: u64, control: &mut dyn Control) -> Result<(), String> {
     }
     Ok(())
 }
+
+const PIXEL_SCAN_WINDOW: Duration = Duration::from_secs(3);
+const MAX_PIXEL_ADVERTISERS: usize = 8;
+const MAX_PIXEL_PROBES: usize = 4;
+const MAX_PIXEL_NAME: usize = 64;
+const PIXEL_ADVERTISEMENT_LENGTH: usize = 27;
+
+fn pixel_company(company: u16) -> bool {
+    (0x5a00..=0x5aff).contains(&company)
+}
+
+fn conflicting_pixel_name(name: &str) -> bool {
+    name.trim_start()
+        .as_bytes()
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"IOTBT"))
+}
+
+fn pixel_advertisement(company: u16, data: &[u8], name: &str) -> bool {
+    // Distinguish product AA / LED protocol 0B in the standard 5Axx format.
+    // The manufacturer buffer furnished by WinRT excludes the company ID.
+    pixel_company(company)
+        && data.len() == PIXEL_ADVERTISEMENT_LENGTH
+        && data[8..10] == [0x00, 0xaa]
+        && data[11] == 0x0b
+        && name.chars().take(MAX_PIXEL_NAME + 1).count() <= MAX_PIXEL_NAME
+        && !conflicting_pixel_name(name)
+}
+
+fn observe_pixel_advertisement(args: &BluetoothLEAdvertisementReceivedEventArgs) -> Option<bool> {
+    let advertisement = args.Advertisement().ok()?;
+    let raw_name = advertisement.LocalName().ok()?;
+    let name = String::from_utf16_lossy(&raw_name[..raw_name.len().min(MAX_PIXEL_NAME * 2)]);
+    if conflicting_pixel_name(&name) {
+        return Some(false);
+    }
+    if raw_name.len() > MAX_PIXEL_NAME * 2 {
+        return None;
+    }
+    let entries = advertisement.ManufacturerData().ok()?;
+    for index in 0..entries.Size().ok()?.min(8) {
+        let entry = entries.GetAt(index).ok()?;
+        let company = entry.CompanyId().ok()?;
+        if !pixel_company(company) {
+            continue;
+        }
+        let data = entry.Data().ok()?;
+        if data.Length().ok()? as usize != PIXEL_ADVERTISEMENT_LENGTH {
+            continue;
+        }
+        let reader = DataReader::FromBuffer(&data).ok()?;
+        let mut payload = [0; PIXEL_ADVERTISEMENT_LENGTH];
+        let read = reader.ReadBytes(&mut payload);
+        let _ = reader.Close();
+        if read.is_ok() && pixel_advertisement(company, &payload, &name) {
+            return Some(true);
+        }
+    }
+    None
+}
+
+fn record_pixel_address(addresses: &mut BTreeMap<u64, bool>, address: u64, supported: bool) {
+    if let Some(previous) = addresses.get_mut(&address) {
+        // A conflicting name observed in any frame disqualifies this address.
+        *previous &= supported;
+    } else if addresses.len() < MAX_PIXEL_ADVERTISERS {
+        addresses.insert(address, supported);
+    }
+}
+
+fn scan_pixel_addresses(
+    control: &mut dyn Control,
+    exclude: &BTreeSet<u64>,
+) -> Result<BTreeMap<u64, bool>, String> {
+    let started = control.now();
+    ble::check_wait(control, started)?;
+    let _apartment = Apartment::new()?;
+    let mut scan = Discovery::passive()?;
+    let addresses = Arc::new(Mutex::new(Some(BTreeMap::new())));
+    let callback_addresses = addresses.clone();
+    let exclude = exclude.clone();
+    let callback = TypedEventHandler::<
+        BluetoothLEAdvertisementWatcher,
+        BluetoothLEAdvertisementReceivedEventArgs,
+    >::new(move |_, args| {
+        if let Some(args) = args.as_ref()
+            && let Ok(address) = args.BluetoothAddress()
+            && crate::lighting::door::allowed(address)
+            && !exclude.contains(&address)
+            && let Some(supported) = observe_pixel_advertisement(args)
+            && let Some(addresses) = callback_addresses
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_mut()
+        {
+            record_pixel_address(addresses, address, supported);
+        }
+        Ok(())
+    });
+    scan.token = Some(scan.watcher.Received(&callback).map_err(error)?);
+    scan.watcher.Start().map_err(error)?;
+    loop {
+        ble::check_wait(control, started)?;
+        if scan.watcher.Status().map_err(error)? == BluetoothLEAdvertisementWatcherStatus::Aborted {
+            return Err("Passive BLE advertisement scan aborted".into());
+        }
+        let remaining = PIXEL_SCAN_WINDOW.saturating_sub(control.now().saturating_sub(started));
+        if remaining.is_zero() {
+            break;
+        }
+        control.sleep(ble::POLL.min(remaining));
+    }
+    // Freeze before revocation: a late callback cannot alter the probe list.
+    let snapshot = addresses
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+        .unwrap_or_default();
+    drop(scan);
+    Ok(snapshot)
+}
+
+/// Passive discovery followed by a read-only EA81 capability query for
+/// advertisement-verified pixel controllers only.
+pub fn discover_pixel_controllers(
+    control: &mut dyn ble::Control,
+    exclude: &BTreeSet<u64>,
+) -> Result<Vec<(u64, usize)>, String> {
+    let addresses = scan_pixel_addresses(control, exclude)?;
+    let mut result = Vec::new();
+    let mut first_error = None;
+    let mut probes = 0;
+    for (address, supported) in addresses {
+        if !supported || exclude.contains(&address) {
+            continue;
+        }
+        if probes == MAX_PIXEL_PROBES {
+            break;
+        }
+        let started = control.now();
+        ble::check_wait(control, started)?;
+        let Ok(_lease) = Lease::acquire(vec![format!("ble:{address}")]) else {
+            continue;
+        };
+        probes += 1;
+        // Share one eight-second budget across connection and capability probing.
+        let mut budget = ble::FrameControl {
+            inner: control,
+            started,
+        };
+        match WindowsBackend
+            .connect(address, &mut budget, &mut |_| {})
+            .and_then(|mut link| link.pixel_capacity(&mut budget))
+        {
+            Ok(points) => result.push((address, points)),
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    ble::check_wait(control, control.now())?;
+    if result.is_empty()
+        && let Some(error) = first_error
+    {
+        return Err(error);
+    }
+    Ok(result)
+}
+
 fn lookup(target: u64, control: &mut dyn Control) -> Result<Option<BluetoothLEDevice>, String> {
     ble::check_wait(control, control.now())?;
     let operation = BluetoothLEDevice::FromBluetoothAddressAsync(target).map_err(error)?;
@@ -570,6 +746,65 @@ impl WindowsLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn product_advertisement() -> [u8; 27] {
+        let mut bytes = [0; 27];
+        bytes[9] = 0xaa;
+        bytes[11] = 0x0b;
+        bytes
+    }
+
+    #[test]
+    fn positive_pixel_signature_accepts_company_bounds_without_needing_a_name() {
+        let bytes = product_advertisement();
+        for company in [0x5a00, 0x5aaf, 0x5aff] {
+            assert!(pixel_advertisement(company, &bytes, ""));
+            assert!(pixel_advertisement(company, &bytes, "Unknown controller"));
+        }
+        for company in [0, 0x59ff, 0x5b00, 0xffff] {
+            assert!(!pixel_advertisement(company, &bytes, "Surplife"));
+        }
+    }
+
+    #[test]
+    fn truncated_oversized_or_unrelated_advertisements_never_pass() {
+        let bytes = product_advertisement();
+        for length in 0..bytes.len() {
+            assert!(!pixel_advertisement(0x5a00, &bytes[..length], "Surplife"));
+        }
+        let mut oversized = bytes.to_vec();
+        oversized.push(0);
+        assert!(!pixel_advertisement(0x5a00, &oversized, "Surplife"));
+        for (index, value) in [(8, 1), (9, 0), (11, 10), (11, 12)] {
+            let mut unrelated = bytes;
+            unrelated[index] = value;
+            assert!(!pixel_advertisement(0x5a00, &unrelated, "Surplife"));
+        }
+    }
+
+    #[test]
+    fn pixel_name_is_bounded_and_iotbt_vetoes_the_signature() {
+        let bytes = product_advertisement();
+        assert!(pixel_advertisement(0x5a00, &bytes, &"я".repeat(64)));
+        assert!(!pixel_advertisement(0x5a00, &bytes, &"я".repeat(65)));
+        for name in ["IOTBT", "iotbt-0001", "  IoTbT Controller"] {
+            assert!(!pixel_advertisement(0x5a00, &bytes, name));
+        }
+    }
+
+    #[test]
+    fn advertisement_slots_are_bounded_and_conflicting_addresses_stay_vetoed() {
+        let mut addresses = BTreeMap::new();
+        for address in 1..=20 {
+            record_pixel_address(&mut addresses, address, true);
+        }
+        assert_eq!(addresses.len(), 8);
+        assert!(!addresses.contains_key(&9));
+        record_pixel_address(&mut addresses, 1, false);
+        record_pixel_address(&mut addresses, 1, true);
+        assert_eq!(addresses.get(&1), Some(&false));
+        assert_eq!(addresses.get(&2), Some(&true));
+    }
     use std::time::Duration;
     #[test]
     fn notification_read_error_reaches_capacity_wait_without_sleeping() {

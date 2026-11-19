@@ -1,4 +1,4 @@
-//! Native editor and persistent session. Hardware activation is an explicit user action.
+//! Native editor and persistent session. Installed startup restores saved hardware routes.
 use super::{CONTENT_LEFT, MIN_HEIGHT, MIN_WIDTH, Page, View, paint::Painter, right_panel};
 use crate::{
     app::{
@@ -38,10 +38,11 @@ use windows_sys::Win32::{
 const TBM_GETPOS: u32 = WM_USER;
 mod brand_icon;
 mod connections;
+mod first_run;
 mod modern;
 mod native_forms;
 mod resident;
-pub(crate) use resident::shutdown_installed;
+pub(crate) use resident::{Instance, shutdown_installed};
 mod runtime_client;
 mod web_shell;
 const MODERN_RETURN: i32 = 109;
@@ -49,6 +50,7 @@ mod sources;
 mod startup_ack;
 use runtime_client::Client;
 const CLASS: &str = "PrismestraWindow";
+const PRODUCT_NAME: &str = "Prismestra";
 const NAV_SCENE: i32 = 101;
 const NAV_DEVICES: i32 = 102;
 const NAV_SCHEDULE: i32 = 103;
@@ -500,6 +502,7 @@ impl Drop for Bitmap {
 }
 struct App {
     web_mode: bool,
+    first_run: first_run::Startup,
     connections: connections::Editor,
     native_lighting: Option<crate::app::lighting_outputs::Local>,
     sources: sources::Editor,
@@ -1088,6 +1091,7 @@ impl App {
         self.begin_shutdown();
     }
     fn begin_shutdown(&mut self) {
+        self.first_run.cancel();
         self.sources.release_lighting();
         self.connections.scan.cancel();
         self.sources.scan.cancel();
@@ -1103,6 +1107,7 @@ impl App {
     }
     fn close_ready(&mut self) -> bool {
         self.shutdown.phase() == crate::app::shutdown::Phase::Ready
+            && self.first_run.drained()
             && self.runtime.drained()
             && self.sources.scan.is_idle()
             && self.connections.scan.is_idle()
@@ -1797,31 +1802,18 @@ impl App {
                 let Some(applied) = applied else {
                     return "Новое устройство в черновике. Примените параметры.".into();
                 };
-                if !applied.enabled {
-                    return "Выключено в применённом профиле. Аппаратные выходы не используются."
-                        .into();
+                if self.native_lighting.is_none() && applied.enabled {
+                    return "Предпросмотр".into();
                 }
-                if applied.role == crate::devices::Role::Lcd {
-                    self.runtime.lcd_status(&applied.id).map_or_else(
-                        || "LCD: не запущен".into(),
-                        |s| {
-                            s.error.map_or_else(
-                                || format!("LCD: передано кадров {}", s.frames_sent),
-                                |e| format!("Ошибка LCD: {e}"),
-                            )
-                        },
-                    )
-                } else {
-                    self.runtime.rgb_status(&applied.id).map_or_else(
-                        || "RGB: не запущен".into(),
-                        |s| {
-                            s.error.map_or_else(
-                                || format!("RGB: передано кадров {}", s.submitted),
-                                |e| format!("Ошибка RGB (передано кадров {}): {e}", s.submitted),
-                            )
-                        },
-                    )
-                }
+                self.runtime.read(|runtime| {
+                    let activity = runtime.output_activity(applied);
+                    use crate::app::runtime::OutputActivity;
+                    match activity {
+                        OutputActivity::Sent(frames) => format!("Кадры отправлены: {frames}"),
+                        OutputActivity::Unavailable(Some(error)) => format!("Недоступно: {error}"),
+                        _ => output_activity_label(&activity).into(),
+                    }
+                })
             },
         );
     }
@@ -1979,13 +1971,16 @@ impl App {
     }
     fn tick(&mut self) -> Result<bool, String> {
         self.runtime.refresh();
+        let startup_changed = self.poll_first_run();
         self.runtime.maintenance(|r, _| self.sources.poll(r))?;
         if self.sources.last_status.elapsed() >= std::time::Duration::from_millis(500) {
             self.refresh_source_status();
             self.sources.last_status = Instant::now();
         }
-        let scan_changed =
-            self.poll_source_discovery() | self.poll_connections() | self.poll_connection_switch();
+        let scan_changed = self.poll_source_discovery()
+            | self.poll_connections()
+            | self.poll_connection_switch()
+            | startup_changed;
         if self.shutdown.active() {
             let previous = self.status.clone();
             self.runtime.poll_shutdown(&mut self.shutdown)?;
@@ -2018,7 +2013,7 @@ impl App {
             }
         }
         let previous = self.runtime.view_revision();
-        let connection_switching = self.connection_switching();
+        let connection_switching = self.connection_switching() || self.first_run.configuring();
         self.runtime.tick(crate::clock::monotonic_us(), wall())?;
         let mut changed = self.runtime.view_revision() != previous || scan_changed;
         changed |= self.poll_connection_switch();
@@ -2035,7 +2030,7 @@ impl App {
             };
             changed = true;
         }
-        self.was_pending = self.runtime.pending_configuration();
+        self.was_pending = self.runtime.pending_configuration() && !self.first_run.configuring();
         if let Some(error) = self.runtime.configuration_error() {
             self.status = format!("Не удалось применить: {error}");
             self.editor_buttons();
@@ -2204,6 +2199,8 @@ struct State {
     resident: Cell<bool>,
     editor_window: Rc<Cell<HWND>>,
     shell_window: Cell<HWND>,
+    activation_message: Cell<u32>,
+    activation_requested: Cell<bool>,
     session_action: Cell<resident::Action>,
     tray_enabled: Cell<bool>,
     tray_registration: Cell<resident::TrayRegistration>,
@@ -2505,7 +2502,7 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize);
         }
-        return 1;
+        return unsafe { DefWindowProcW(hwnd, msg, w, l) };
     }
     let raw = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const State;
     if raw.is_null() {
@@ -2837,12 +2834,23 @@ impl Drop for Window {
     }
 }
 pub fn run(args: Vec<OsString>) -> Result<(), String> {
+    run_with_instance(args, None)
+}
+
+pub(crate) fn run_installed(args: Vec<OsString>, instance: Instance) -> Result<(), String> {
+    run_with_instance(args, Some(instance))
+}
+
+fn run_with_instance(
+    args: Vec<OsString>,
+    installed_instance: Option<Instance>,
+) -> Result<(), String> {
     let diagnostic = args.iter().any(|a| a == "--snapshot" || a == "--selftest");
     let error_dir = args
         .windows(2)
         .find(|pair| pair[0] == "--state-dir")
         .map(|pair| PathBuf::from(&pair[1]));
-    let result = run_inner(args);
+    let result = run_inner(args, installed_instance);
     if !diagnostic && let Err(error) = &result {
         startup_ack::failed(error);
         if let Some(dir) = error_dir {
@@ -2860,10 +2868,20 @@ pub fn run(args: Vec<OsString>) -> Result<(), String> {
     }
     result
 }
+fn output_activity_label(activity: &crate::app::runtime::OutputActivity) -> &'static str {
+    use crate::app::runtime::OutputActivity;
+    match activity {
+        OutputActivity::Off => "Выключено",
+        OutputActivity::Connecting => "Подключается",
+        OutputActivity::Sent(_) => "Кадры отправлены",
+        OutputActivity::Unavailable(_) => "Недоступно",
+    }
+}
+
 fn native_sources_allowed(snapshot: bool, selftest: bool) -> bool {
     !snapshot && !selftest
 }
-fn run_inner(args: Vec<OsString>) -> Result<(), String> {
+fn run_inner(args: Vec<OsString>, installed_instance: Option<Instance>) -> Result<(), String> {
     let mut o = options(args)?;
     let state_dir = if let Some(path) = &o.state_dir {
         path.clone()
@@ -2896,7 +2914,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         o.snapshot = Some(state_dir.join("diagnostics/selftest.png"));
     }
     let resident_mode = o.snapshot.is_none() && !o.selftest;
-    let _single_instance = if resident_mode {
+    let _portable_instance = if resident_mode && installed_instance.is_none() {
         Some(resident::Instance::acquire(&state_dir)?)
     } else {
         None
@@ -2946,9 +2964,12 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     if unsafe { InitCommonControlsEx(&init) } == 0 {
         return Err(last("Initialize native controls"));
     }
+    let modern_enabled = !o.classic_editor && resident_mode;
+    #[cfg(test)]
+    let modern_enabled = modern_enabled || webview_recovery_stand::enabled();
     let state = Box::new(State {
         icon: brand_icon::Icon::new()?,
-        modern_enabled: !o.classic_editor && resident_mode,
+        modern_enabled,
         webview: RefCell::new(None),
         modern_session: RefCell::new(None),
         app: RefCell::new(None),
@@ -2956,6 +2977,8 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         resident: Cell::new(resident_mode),
         editor_window: Rc::new(Cell::new(null_mut())),
         shell_window: Cell::new(null_mut()),
+        activation_message: Cell::new(0),
+        activation_requested: Cell::new(false),
         session_action: Cell::new(resident::Action::None),
         tray_enabled: Cell::new(false),
         tray_registration: Cell::new(resident::TrayRegistration::default()),
@@ -3000,12 +3023,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         CreateWindowExW(
             WS_EX_CONTROLPARENT,
             class.as_ptr(),
-            wide(if native_lighting.is_some() {
-                "Prismestra · Подсветка устройств"
-            } else {
-                "Prismestra · Предпросмотр"
-            })
-            .as_ptr(),
+            wide(PRODUCT_NAME).as_ptr(),
             style,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -3024,6 +3042,9 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     let window = Window(state.editor_window.clone());
     let mut app = App {
         web_mode: false,
+        first_run: first_run::Startup::new(
+            resident_mode && crate::app::installed::session().is_some(),
+        ),
         connections: connections::Editor::new(
             o.native_lighting
                 .clone()
@@ -3138,6 +3159,10 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         if o.selftest {
+            #[cfg(test)]
+            if webview_recovery_stand::enabled() {
+                return webview_recovery_stand::exercise(&state);
+            }
             selftest(raw, &state)?;
         }
         let raw = state.editor_window.get();
@@ -3290,8 +3315,16 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     if !o.selftest {
         startup_ack::ready();
     }
+    if let Some(instance) = &installed_instance
+        && let Err(error) = instance.enable_activation(&state)
+    {
+        eprintln!("{error}");
+    }
     let mut msg = MSG::default();
     loop {
+        if let Err(error) = resident::open_requested_editor(&state) {
+            resident::report(&state, error);
+        }
         let got = unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) };
         if got == 0 {
             break;
@@ -3319,6 +3352,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
                 DispatchMessageW(&msg);
             }
         }
+        modern::recover_failed_browser(&state);
     }
     drop(window);
     Ok(())
@@ -4012,6 +4046,9 @@ fn native_device_setup(hwnd: HWND, state: &State) -> Result<(), String> {
     }
     Ok(())
 }
+#[cfg(test)]
+mod webview_recovery_stand;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -39,7 +39,19 @@ static SESSION: OnceLock<Session> = OnceLock::new();
 
 pub enum Dispatch {
     Ui(Vec<OsString>),
+    InstalledUi(InstalledLaunch),
     Exit(i32),
+}
+
+pub struct InstalledLaunch {
+    args: Vec<OsString>,
+    instance: windows::Instance,
+}
+
+impl InstalledLaunch {
+    pub fn run(self) -> Result<(), String> {
+        windows::run_installed(self.args, self.instance)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +68,7 @@ pub(crate) fn session() -> Option<Session> {
 enum Command {
     Legacy,
     Start(Session),
+    Prepare,
     Shutdown,
 }
 
@@ -66,11 +79,15 @@ fn command(args: &[OsString]) -> Result<Command, String> {
             Ok(Command::Start(Session::Autostart))
         }
         [flag] if flag == "--shutdown-installed" => Ok(Command::Shutdown),
-        _ if args
-            .iter()
-            .any(|a| a == "--installed" || a == "--autostart" || a == "--shutdown-installed") =>
+        [flag] if flag == "--prepare-installed" => Ok(Command::Prepare),
+        _ if args.iter().any(|a| {
+            a == "--installed"
+                || a == "--autostart"
+                || a == "--shutdown-installed"
+                || a == "--prepare-installed"
+        }) =>
         {
-            Err("Use --installed [--autostart] or --shutdown-installed".into())
+            Err("Use --installed [--autostart], --prepare-installed or --shutdown-installed".into())
         }
         _ => Ok(Command::Legacy),
     }
@@ -90,16 +107,29 @@ pub fn dispatch(args: Vec<OsString>) -> Result<Dispatch, String> {
             windows::shutdown_installed(&executable)?;
             Ok(Dispatch::Exit(0))
         }
-        Command::Start(mode) => {
+        Command::Start(_) | Command::Prepare => {
             require_ordinary_user()?;
             let manifest = Manifest::read(&executable)?;
+            verify_backend(&manifest, &executable)?;
             let local = env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA unavailable")?;
             let local = checked_local_path(Path::new(&local)).map_err(|e| e.to_string())?;
-            let launch = bootstrap(&manifest, &executable, &local.join("Prismestra"))?;
+            let user_root = profile_root(&manifest, &local.join("Prismestra"))?;
+            let state = directory(&user_root.join("state"))?;
+            let Command::Start(mode) = command else {
+                bootstrap(&manifest, &executable, &user_root, &state)?;
+                return Ok(Dispatch::Exit(0)); // Setup prepares user data, never hardware or a UI.
+            };
+            // Repeated launches must resolve the resident before touching its
+            // profile, recovery journal or backend configuration.
+            let Some(instance) = windows::Instance::start_installed(&state, &executable, mode)?
+            else {
+                return Ok(Dispatch::Exit(0));
+            };
+            let args = bootstrap(&manifest, &executable, &user_root, &state)?;
             SESSION
                 .set(mode)
                 .map_err(|_| "Installed frontend already dispatched")?;
-            Ok(Dispatch::Ui(launch))
+            Ok(Dispatch::InstalledUi(InstalledLaunch { args, instance }))
         }
     }
 }
@@ -270,15 +300,39 @@ fn bootstrap(
     manifest: &Manifest,
     executable: &Path,
     user_root: &Path,
+    state: &Path,
+) -> Result<Vec<OsString>, String> {
+    bootstrap_with_migration(manifest, executable, user_root, state, |root| {
+        super::installed_migration::migrate_if_pristine(
+            root,
+            &empty_document()?,
+            "127.0.0.1:17422".parse().unwrap(),
+        )
+    })
+}
+
+fn profile_root(manifest: &Manifest, user_root: &Path) -> Result<PathBuf, String> {
+    let root = directory(user_root)?;
+    match &manifest.data_namespace {
+        Some(namespace) => directory(&directory(&root.join("Instances"))?.join(namespace)),
+        None => Ok(root),
+    }
+}
+
+fn verify_backend(manifest: &Manifest, executable: &Path) -> Result<(), String> {
+    let backend = install_root(executable)?.join(BACKEND_PATH);
+    verify_hash(&backend, &manifest.backend.sha256)
+}
+
+fn bootstrap_with_migration(
+    manifest: &Manifest,
+    executable: &Path,
+    user_root: &Path,
+    state: &Path,
+    migrate: impl FnOnce(&Path) -> Result<super::installed_migration::MigrationOutcome, String>,
 ) -> Result<Vec<OsString>, String> {
     let backend = install_root(executable)?.join(BACKEND_PATH);
-    verify_hash(&backend, &manifest.backend.sha256)?;
 
-    let mut user_root = directory(user_root)?;
-    if let Some(namespace) = &manifest.data_namespace {
-        let instances = directory(&user_root.join("Instances"))?;
-        user_root = directory(&instances.join(namespace))?;
-    }
     let _guard = OpenOptions::new()
         .read(true)
         .write(true)
@@ -287,29 +341,58 @@ fn bootstrap(
         .share_mode(0)
         .open(user_root.join(".installed-bootstrap.lock"))
         .map_err(|e| format!("Installed profile bootstrap: {e}"))?;
-    let state = directory(&user_root.join("state"))?;
     let profile = user_root.join("profile.json");
     let local = state.join("lighting-local.json");
     directory(&state.join("assets"))?;
+    super::first_run::recover(state, &profile)?;
 
+    let migration = if manifest.data_namespace.is_none() {
+        migrate(user_root)?
+    } else {
+        super::installed_migration::MigrationOutcome::None
+    };
+    let imported_owned_backend = matches!(
+        migration,
+        super::installed_migration::MigrationOutcome::Imported {
+            used_bundled_backend: true,
+            ..
+        }
+    );
+    let imported_external_port = matches!(
+        migration,
+        super::installed_migration::MigrationOutcome::Imported {
+            external_uses_bundled_endpoint: true,
+            ..
+        }
+    );
     let new_profile = absent(&profile)?;
     let new_local = absent(&local)?;
     configure_default_backend(
-        &state,
+        state,
         &backend,
         &manifest.backend.sha256,
-        new_profile && new_local,
+        (new_profile && new_local && !imported_external_port) || imported_owned_backend,
     )?;
+    if imported_external_port && backend_default_owned(state)? {
+        // An imported external SDK already uses this port. Never claim it with our worker.
+        let path = state.join("managed-openrgb.json");
+        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        config["enabled"] = false.into();
+        let bytes = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
+        storage::atomic_write(&path, &bytes, CONFIG_LIMIT).map_err(|e| e.to_string())?;
+    }
     if manifest.data_namespace.is_none()
         && let Err(error) =
-            super::backend_helper::configure_installed_client(&state, install_root(executable)?)
+            super::backend_helper::configure_installed_client(state, install_root(executable)?)
     {
         eprintln!("Installed OpenRGB helper unavailable: {error}");
     }
     if new_profile {
         empty_document()?.save(&profile)?;
     }
-    let document = Document::load(&profile)
+    Document::load(&profile)
         .or_else(|_| Project::load(&profile).and_then(Document::from_lighting))
         .map_err(|e| format!("Installed profile: {e}"))?;
     if new_local {
@@ -322,16 +405,14 @@ fn bootstrap(
         let bytes = serde_json::to_vec_pretty(&bindings).map_err(|e| e.to_string())?;
         storage::atomic_write(&local, &bytes, document::MAX_BYTES).map_err(|e| e.to_string())?;
     }
-    let mut args = vec![
+    let args = vec![
         "--state-dir".into(),
-        state.into_os_string(),
+        state.as_os_str().to_owned(),
         "--project".into(),
         profile.into_os_string(),
     ];
-    // A saved draft may be incomplete. Let the editor open it without activating outputs.
-    if Local::read(&local, &document).is_ok() {
-        args.push("--start-connected".into());
-    }
+    // The resident startup coordinator activates saved outputs after the previous
+    // session AND its owned helper/backend have drained. A draft still opens for repair.
     Ok(args)
 }
 
@@ -500,6 +581,20 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    // Bootstrap fixtures never inspect the developer's real sessions or copy their data.
+    fn bootstrap(
+        manifest: &Manifest,
+        executable: &Path,
+        user_root: &Path,
+    ) -> Result<Vec<OsString>, String> {
+        verify_backend(manifest, executable)?;
+        let user_root = profile_root(manifest, user_root)?;
+        let state = directory(&user_root.join("state"))?;
+        bootstrap_with_migration(manifest, executable, &user_root, &state, |_| {
+            Ok(super::super::installed_migration::MigrationOutcome::None)
+        })
+    }
+
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
@@ -559,11 +654,13 @@ mod tests {
             Ok(Command::Start(Session::Autostart))
         );
         assert_eq!(parse(&["--shutdown-installed"]), Ok(Command::Shutdown));
+        assert_eq!(parse(&["--prepare-installed"]), Ok(Command::Prepare));
         for args in [
             &["--autostart"][..],
             &["--installed", "--project", "foreign.json"],
             &["--shutdown-installed", "--installed"],
             &["--installed", "--installed"],
+            &["--prepare-installed", "--installed"],
         ] {
             assert!(parse(args).is_err());
         }
@@ -576,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn first_launch_builds_valid_connected_empty_profile_and_pins_backend() {
+    fn first_launch_builds_valid_profile_and_defers_activation_until_handover() {
         let fixture = Fixture::new();
         let (exe, manifest) = fixture.payload(b"fixture backend");
         let user = fixture.0.join("user");
@@ -598,7 +695,6 @@ mod tests {
                 state.clone().into_os_string(),
                 "--project".into(),
                 profile.into_os_string(),
-                "--start-connected".into()
             ]
         );
         let config = super::super::managed_backend::Config::read_optional(&state)

@@ -1,4 +1,6 @@
 //! Named native scenes. This catalog never contains bindings or credentials.
+pub(crate) mod draft;
+
 use crate::{lighting::scene::Effect, runtime::scene::Scene, storage};
 use serde::{Deserialize, Serialize};
 use std::{fs::File, io::Read, path::Path};
@@ -22,6 +24,9 @@ fn valid_name(name: &str) -> bool {
         && name == name.trim()
         && name.chars().count() <= 128
         && !name.chars().any(char::is_control)
+}
+fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 80 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 impl Catalog {
     pub fn seeded(current: &Scene) -> Self {
@@ -56,15 +61,7 @@ impl Catalog {
         }
         let mut ids = std::collections::BTreeSet::new();
         for entry in &self.entries {
-            if !valid_name(&entry.name)
-                || entry.id.is_empty()
-                || entry.id.len() > 80
-                || !entry
-                    .id
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                || !ids.insert(&entry.id)
-            {
+            if !valid_name(&entry.name) || !valid_id(&entry.id) || !ids.insert(&entry.id) {
                 return Err("Некорректное имя или идентификатор сцены".into());
             }
             entry.scene.validate()?;

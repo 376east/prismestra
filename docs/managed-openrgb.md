@@ -2,7 +2,9 @@
 
 Prismestra can own a local OpenRGB SDK server without its window or tray icon. Executable, configuration directory and numeric loopback endpoint are machine settings; device models/counts and personal paths are not compiled in. Remote or manually managed servers remain external.
 
-## Configure once
+The Windows installer bundles and configures a private backend automatically, including its protected authorization policy. Its first-run coordinator can discover devices before saved bindings exist. See [the installed startup path](windows-installer.md). The manual configuration below applies to source builds and older portable packages.
+
+## Configure a portable backend
 
 Select an OpenRGB SDK6 executable and an isolated configuration directory. Disable unrelated plugins and detectors for devices driven directly by Prismestra. Exit any server using the intended endpoint. From the extracted Prismestra folder, substitute your paths:
 
@@ -20,9 +22,13 @@ The native manager requests `--server` with the configured loopback host/port, `
 
 It checks SDK readiness and listener PID, refuses foreign occupied endpoints and uses crash-limited backoff. Output guards run through connection setup and immediately before device-mode writes. A genuinely recovered backend renews only its output retries with current scene/Off intent. Unrelated outputs keep their lifecycle. Closing the editor keeps the engine/backend alive; Stop suppresses respawn and drains outputs before release; Exit releases the backend. Windows kill-on-close jobs also terminate it after owner failure. Creation is suspended until job assignment. No service or persistent PowerShell watchdog is added. [Runtime integration](../src/app/runtime/managed_backend.rs).
 
+The private component recognizes its existing opt-in plus an inherited parent pipe before probing Windows service startup. That leased application path enters normal headless initialization directly; standalone and actual service startup retain their original entrypoint. This avoids aborting ordinary-user launches when the service dispatcher returns access denied. It does not grant new privileges or relax SDK ownership checks. [Pinned component patch](../components/openrgb/prismestra-pc.patch), [Windows dispatcher contract](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-startservicectrldispatchera).
+
 ## Administrator access
 
-Default management uses ordinary permissions. Some controller paths require elevation. An administrator may provision an authorized task/helper, selected through `backend-task.json` and setup's `-AuthorizedTaskName`. This is configurable, not a hardcoded personal task. The task launches the same Prismestra EXE with `--backend-helper <state-directory> <authorized-OpenRGB-executable> <authorized-SHA256>`, with pins supplied by the authorized action rather than scene data. The action must pin the helper EXE too. The administrator must trust/protect the action, binaries, dependencies and isolated configuration: EXE pinning alone does not protect a writable plugin tree. This preview does not ship a general elevated-task installer or claim to establish that trust automatically.
+Default management uses ordinary permissions. Some controller paths require elevation. Windows Setup provisions the installed product's protected task and per-user policy during its installation elevation; the editor stays unelevated. [Installed permissions](windows-installer.md).
+
+For a portable build, an administrator may provision an authorized task/helper, selected through `backend-task.json` and setup's `-AuthorizedTaskName`. This is configurable, not a hardcoded personal task. The task launches the same Prismestra EXE with `--backend-helper <state-directory> <authorized-OpenRGB-executable> <authorized-SHA256>`, with pins supplied by the authorized action rather than scene data. The action must pin the helper EXE too. The administrator must trust/protect the action, binaries, dependencies and isolated configuration: EXE pinning alone does not protect a writable plugin tree. Portable configuration does not establish that trust automatically.
 
 The helper verifies the parent's PID, creation time and executable path. Nonce-bound heartbeat, status and cancel files reject stale sessions. The private controls use protocol2 and a boot-relative active-time clock, excluding sleep/hibernation and UTC corrections; deploy the helper launcher and application together. Parent death, cancellation or active heartbeat loss releases only its owned child. A bounded diagnostic history survives helper restarts. [Helper](../src/app/backend_helper.rs), [clock contract, diagnostics and actual boot gates](startup-recovery.md).
 

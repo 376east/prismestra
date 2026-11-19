@@ -51,16 +51,21 @@ try {
         if ($identity.User.Value -eq $ExpectedSid) { exit 0 }
         exit 1
     }
-    if ($Action -notin @('Launch', 'WebView', 'EnableStartup', 'DisableStartup')) { exit 1 }
+    if ($ExpectedSid -and $identity.User.Value -cne $ExpectedSid) { exit 1 }
+    if ($Action -notin @('Launch', 'PrepareProfile', 'WebView', 'EnableStartup', 'DisableStartup')) { exit 1 }
 
     $api = New-TokenApi
     $buffer = [Runtime.InteropServices.Marshal]::AllocHGlobal([IntPtr]::Size)
     $admin = [Security.Principal.WindowsBuiltInRole]::Administrator
     $elevated = (Get-TokenFlag $api $identity.Token 20 $buffer) -ne 0 -or
         [Security.Principal.WindowsPrincipal]::new($identity).IsInRole($admin)
-    if ($Action -eq 'Launch') {
+    if ($Action -in @('Launch', 'PrepareProfile')) {
         if ($elevated) { exit 1 }
         $image = Join-Path $InstallRoot 'Prismestra.exe'
+        if ($Action -eq 'PrepareProfile') {
+            $prepared = Start-Process -FilePath $image -ArgumentList '--prepare-installed' -WorkingDirectory $InstallRoot -WindowStyle Hidden -Wait -PassThru
+            exit $prepared.ExitCode
+        }
         Start-Process -FilePath $image -ArgumentList '--installed' -WorkingDirectory $InstallRoot
         exit 0
     }
