@@ -1,5 +1,6 @@
 use pc_control::yandex_lamp::{
-    Adapter, Apply, Assignment, Binding, Credentials, Error, Provider, ProviderUnavailable, Request,
+    Adapter, Apply, Assignment, Binding, Credentials, Error, Provider, ProviderUnavailable,
+    Request, SelectionStatus,
 };
 use serde_json::{Value, json};
 use std::{
@@ -10,7 +11,9 @@ use std::{
 };
 
 const TOKEN: &str = "fake-yandex-lamp-fixture";
+const REPLACED_TOKEN: &str = "fake-yandex-lamp-replaced-fixture";
 const TARGET: &str = "lamp-cabinet";
+const SECOND: &str = "lamp-cabinet-spare";
 const NEIGHBOR: &str = "lamp-kitchen";
 const CAPABILITIES: &[(&str, &str)] = &[
     ("devices.capabilities.on_off", "on"),
@@ -55,6 +58,7 @@ fn response(result: &str) -> Value {
 struct Observed {
     request: String,
     body: Value,
+    new_grant: bool,
 }
 
 fn peer(responses: Vec<Option<Value>>) -> (FixtureHttp, JoinHandle<Vec<Observed>>) {
@@ -84,6 +88,7 @@ fn peer(responses: Vec<Option<Value>>) -> (FixtureHttp, JoinHandle<Vec<Observed>
             let mut request = String::new();
             reader.read_line(&mut request).unwrap();
             let mut auth = false;
+            let mut new_grant = false;
             let mut len = 0;
             for _ in 0..12 {
                 let mut header = String::new();
@@ -92,7 +97,8 @@ fn peer(responses: Vec<Option<Value>>) -> (FixtureHttp, JoinHandle<Vec<Observed>
                     break;
                 }
                 if let Some(value) = header.strip_prefix("Authorization: Bearer ") {
-                    auth = value.trim() == TOKEN;
+                    new_grant = value.trim() == REPLACED_TOKEN;
+                    auth = value.trim() == TOKEN || new_grant;
                 }
                 if let Some(value) = header.strip_prefix("Content-Length: ") {
                     len = value.trim().parse::<usize>().unwrap();
@@ -109,6 +115,7 @@ fn peer(responses: Vec<Option<Value>>) -> (FixtureHttp, JoinHandle<Vec<Observed>
             observed.push(Observed {
                 request: request.trim_end().into(),
                 body,
+                new_grant,
             });
             if let Some(value) = response {
                 let body = value.to_string();
@@ -165,8 +172,11 @@ impl Provider for FixtureHttp {
 struct FixtureCredentials;
 impl Credentials for FixtureCredentials {
     fn read(&mut self, reference: &str) -> Result<Option<String>, Error> {
-        assert_eq!(reference, "fixture-grant");
-        Ok(Some(TOKEN.into()))
+        Ok(match reference {
+            "fixture-grant" => Some(TOKEN.into()),
+            "new-fixture-grant" => Some(REPLACED_TOKEN.into()),
+            _ => None,
+        })
     }
 }
 
@@ -246,6 +256,108 @@ fn lost_or_failed_reply_is_never_replayed() {
                 .starts_with("POST /v1.0/devices/actions ")
         );
     }
+}
+
+#[test]
+fn reauthorization_requires_fresh_choice_and_switching_targets_only_the_new_selection() {
+    let mut two_names = catalog(false);
+    two_names["rooms"][0]["devices"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!(SECOND));
+    let mut duplicate_name = two_names["devices"][1].clone();
+    duplicate_name["id"] = json!(SECOND);
+    two_names["devices"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate_name);
+    let mut selected_reply = response("DONE");
+    selected_reply["devices"][0]["id"] = json!(SECOND);
+    let (http, server) = peer(vec![
+        Some(two_names.clone()),
+        Some(two_names.clone()),
+        Some(two_names.clone()),
+        Some(selected_reply),
+        Some(two_names.clone()),
+        Some(two_names),
+        Some(response("DONE")),
+    ]);
+    let mut adapter = Adapter::new(binding(), http, FixtureCredentials);
+    let before = adapter.choose_lamp("home", "cabinet").unwrap();
+    assert_eq!(
+        before
+            .iter()
+            .map(|row| (row.name(), row.device_id()))
+            .collect::<Vec<_>>(),
+        [("Лампа", TARGET), ("Лампа", SECOND)]
+    );
+    assert_eq!(adapter.selection_status(), SelectionStatus::NeedsSelection);
+    adapter.replace_authorization("new-fixture-grant").unwrap();
+    let mut after = adapter.choose_lamp("home", "cabinet").unwrap();
+    let stale = before
+        .into_iter()
+        .find(|choice| choice.device_id() == SECOND)
+        .unwrap();
+    assert_eq!(adapter.confirm_lamp(stale), Err(Error::SelectionRequired));
+
+    let assignment = Assignment::new(0x0055ff, 35).unwrap();
+    let id = |value: u64| value.try_into().unwrap();
+    assert_eq!(
+        adapter.apply_explicit(id(1), &assignment),
+        Err(Error::SelectionRequired)
+    );
+    adapter.confirm_lamp(after.pop().unwrap()).unwrap();
+    assert_eq!(adapter.selection_status(), SelectionStatus::Ready);
+    assert_eq!(
+        adapter.apply_explicit(id(1), &assignment),
+        Ok(Apply::AlreadyAttempted)
+    );
+    assert_eq!(
+        adapter.apply_explicit(id(2), &assignment),
+        Ok(Apply::Submitted)
+    );
+
+    let next = adapter.choose_lamp("home", "cabinet").unwrap();
+    assert_eq!(
+        adapter.confirm_lamp(after.pop().unwrap()),
+        Err(Error::SelectionRequired)
+    );
+    assert_eq!(
+        adapter.apply_explicit(id(3), &assignment),
+        Err(Error::SelectionRequired)
+    );
+    adapter
+        .confirm_lamp(
+            next.into_iter()
+                .find(|row| row.device_id() == TARGET)
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        adapter.apply_explicit(id(3), &assignment),
+        Ok(Apply::AlreadyAttempted)
+    );
+    assert_eq!(
+        adapter.apply_explicit(id(4), &assignment),
+        Ok(Apply::Submitted)
+    );
+
+    adapter.replace_authorization("fixture-grant").unwrap();
+    assert_eq!(adapter.selection_status(), SelectionStatus::NeedsSelection);
+    assert_eq!(
+        adapter.apply_explicit(id(5), &assignment),
+        Err(Error::SelectionRequired)
+    );
+
+    let observed = server.join().unwrap();
+    assert!(!observed[0].new_grant);
+    assert!(observed[1..].iter().all(|row| row.new_grant));
+    let written: Vec<_> = observed
+        .iter()
+        .filter(|row| row.request.starts_with("POST "))
+        .map(|row| row.body["devices"][0]["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(written, [SECOND, TARGET]);
 }
 
 #[cfg(windows)]
