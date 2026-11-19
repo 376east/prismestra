@@ -1329,12 +1329,12 @@ impl Runtime {
         self.sensor_stamps.clear();
         self.bump()
     }
-    fn ready(&self, will_retry: impl Fn(&str) -> bool) -> Result<bool, String> {
+    fn ready(&self, recovers_independently: impl Fn(&str) -> bool) -> Result<bool, String> {
         let mut ready = true;
         if let Some(error) = self
             .output_recovery
             .iter()
-            .filter(|(id, _)| !will_retry(id))
+            .filter(|(id, _)| !recovers_independently(id))
             .find_map(|(_, state)| state.start_error.as_ref())
         {
             return Err(error.clone());
@@ -1342,7 +1342,7 @@ impl Runtime {
         // A failed synchronous start may leave the old stopped worker as the
         // only snapshot. Its committed route still has a retry budget.
         let retry_start = |id: &str| {
-            will_retry(id)
+            recovers_independently(id)
                 && self
                     .output_recovery
                     .get(id)
@@ -1360,8 +1360,10 @@ impl Runtime {
                 .ok_or("RGB owner missing after refresh")?;
             match s.phase {
                 crate::runtime::output::Phase::Ready => {}
+                crate::runtime::output::Phase::Connecting
+                | crate::runtime::output::Phase::Failed
+                    if recovers_independently(id) => {}
                 crate::runtime::output::Phase::Connecting => ready = false,
-                crate::runtime::output::Phase::Failed if will_retry(id) => {}
                 _ => return Err(s.error.unwrap_or_else(|| "RGB refresh stopped".into())),
             }
         }
@@ -1372,8 +1374,9 @@ impl Runtime {
             let s = worker.snapshot();
             match s.phase {
                 lcd_worker::Phase::Ready => {}
+                lcd_worker::Phase::Connecting | lcd_worker::Phase::Failed
+                    if recovers_independently(id) => {}
                 lcd_worker::Phase::Connecting => ready = false,
-                lcd_worker::Phase::Failed if will_retry(id) => {}
                 _ => return Err(s.error.unwrap_or_else(|| "LCD refresh stopped".into())),
             }
         }
@@ -1400,8 +1403,8 @@ impl Runtime {
                 self.stop_channels();
                 return Ok(false);
             }
-            // A known output with its own finite retry budget can recover
-            // after resume without discarding successfully reopened owners.
+            // A known output can finish connecting or use its retry budget
+            // after resume while successfully reopened owners submit frames.
             match self.ready(|id| self.output_recovery.contains_key(id)) {
                 Ok(true) => {
                     self.power
