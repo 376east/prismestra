@@ -4,7 +4,10 @@ use crate::app::installed;
 use sha2::{Digest, Sha256};
 use std::{
     fs::OpenOptions,
-    os::windows::{ffi::OsStringExt, fs::OpenOptionsExt},
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        fs::OpenOptionsExt,
+    },
     sync::atomic::{AtomicU32, Ordering},
     time::Duration,
 };
@@ -19,6 +22,9 @@ use windows_sys::Win32::{
 };
 const CLASS: &str = "PrismestraSessionShell";
 const INSTALLED_EXIT: &str = "Prismestra.Installed.Exit.v1";
+const ACTIVATE_PROBE: WPARAM = 0;
+const ACTIVATE_EDITOR: WPARAM = 1;
+const ACTIVATE_ACCEPTED: usize = 1;
 const EXIT_ACCEPTED: usize = 1;
 const EXIT_BUSY: usize = 2;
 const CALLBACK: u32 = WM_APP + 31;
@@ -262,6 +268,52 @@ pub(crate) fn shutdown_installed(executable: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn activate_installed(executable: &Path, message: u32, deadline: Instant) -> Result<bool, String> {
+    for (hwnd, pid) in resident_windows()? {
+        let Ok(process) = Process::open(pid) else {
+            continue;
+        };
+        let Ok(image) = process.image_path().and_then(|path| {
+            installed::checked_local_path(&path).map_err(|error| error.to_string())
+        }) else {
+            continue;
+        };
+        if !same_target(executable, &image, pid, shell_pid(hwnd))
+            || unsafe { WaitForSingleObject(process.0, 0) } != WAIT_TIMEOUT
+            || !send_activation(hwnd, message, ACTIVATE_PROBE, deadline)
+        {
+            continue;
+        }
+        // The scoped probe identified the lock owner's installed shell. Windows
+        // can still deny foreground access, in which case the editor flashes.
+        unsafe { AllowSetForegroundWindow(pid) };
+        if send_activation(hwnd, message, ACTIVATE_EDITOR, deadline) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn send_activation(hwnd: HWND, message: u32, action: WPARAM, deadline: Instant) -> bool {
+    let timeout = deadline.saturating_duration_since(Instant::now());
+    if timeout.is_zero() {
+        return false;
+    }
+    let mut response = 0;
+    let sent = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            message,
+            action,
+            0,
+            SMTO_BLOCK | SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
+            timeout.as_millis().clamp(1, 250) as u32,
+            &mut response,
+        )
+    };
+    sent != 0 && response == ACTIVATE_ACCEPTED
+}
+
 // Microsoft documents retrying failed NIM_ADD on TaskbarCreated; PowerToys
 // additionally handles missed initial broadcasts. Reuse that API pattern with
 // our existing maintenance timer, not a dependency or an Explorer-window probe.
@@ -401,11 +453,25 @@ fn flush_power(state: &State) -> Result<(), String> {
     Ok(())
 }
 /// The OS file handle supplies exclusion even after a crash; a stale filename does not lock.
-pub(super) struct Instance {
-    _file: File,
+pub(crate) struct Instance {
+    _lock: File,
+    scope: InstanceScope,
 }
-impl Instance {
-    pub(super) fn acquire(state_dir: &Path) -> Result<Self, String> {
+
+const INSTANCE_BUSY: &str =
+    "Prismestra уже работает с этой папкой настроек. Откройте её через значок в трее.";
+
+struct InstanceScope(PathBuf);
+
+fn scope_digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+impl InstanceScope {
+    fn new(state_dir: &Path) -> Result<Self, String> {
         let mut raw = null_mut();
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
             return Err(last("Read session identity"));
@@ -445,10 +511,7 @@ impl Instance {
             return Err("Invalid user SID size".into());
         }
         let sid = unsafe { std::slice::from_raw_parts(user.User.Sid.cast::<u8>(), length) };
-        let hash = Sha256::digest(sid)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
+        let hash = scope_digest(sid);
         let mut session = 0u32;
         if unsafe {
             GetTokenInformation(
@@ -462,11 +525,84 @@ impl Instance {
         {
             return Err(last("Read logon session"));
         }
-        let path = state_dir.join(format!(".prismestra-session-{hash}-{session}.lock"));
-        let file=OpenOptions::new().read(true).write(true).create(true).truncate(false).share_mode(0).open(path).map_err(|e|{
-            if e.raw_os_error()==Some(ERROR_SHARING_VIOLATION as i32){"Prismestra уже работает с этой папкой настроек. Откройте её через значок в трее.".into()}else{format!("Session lock: {e}")}
-        })?;
-        Ok(Self { _file: file })
+        Ok(Self(state_dir.join(format!(
+            ".prismestra-session-{hash}-{session}.lock"
+        ))))
+    }
+
+    fn try_lock(&self) -> Result<Option<File>, String> {
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(&self.0)
+        {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => Ok(None),
+            Err(error) => Err(format!("Session lock: {error}")),
+        }
+    }
+
+    fn activation_message(&self) -> Result<u32, String> {
+        // Installed callers use a canonical state directory. The lock name
+        // also includes the current Windows user and logon session.
+        let bytes: Vec<_> = self
+            .0
+            .as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let name = format!("Prismestra.Installed.Open.v1.{}", scope_digest(&bytes));
+        let message = unsafe { RegisterWindowMessageW(wide(&name).as_ptr()) };
+        if message == 0 {
+            return Err(last("Register installed editor activation message"));
+        }
+        Ok(message)
+    }
+}
+
+impl Instance {
+    pub(super) fn acquire(state_dir: &Path) -> Result<Self, String> {
+        let scope = InstanceScope::new(state_dir)?;
+        let lock = scope.try_lock()?.ok_or(INSTANCE_BUSY)?;
+        Ok(Self { _lock: lock, scope })
+    }
+
+    pub(crate) fn start_installed(
+        state_dir: &Path,
+        executable: &Path,
+        mode: installed::Session,
+    ) -> Result<Option<Self>, String> {
+        let scope = InstanceScope::new(state_dir)?;
+        if let Some(lock) = scope.try_lock()? {
+            return Ok(Some(Self { _lock: lock, scope }));
+        }
+        if mode == installed::Session::Autostart {
+            return Ok(None);
+        }
+        let message = scope.activation_message()?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if activate_installed(executable, message, deadline)? {
+                return Ok(None);
+            }
+            // If the prior owner exited during startup or shutdown, this
+            // launch may become the owner. Never bypass the exclusive lock.
+            if let Some(lock) = scope.try_lock()? {
+                return Ok(Some(Self { _lock: lock, scope }));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err(INSTANCE_BUSY.into())
+    }
+
+    pub(super) fn enable_activation(&self, state: &State) -> Result<(), String> {
+        state
+            .activation_message
+            .set(self.scope.activation_message()?);
+        Ok(())
     }
 }
 pub(super) struct Shell<'a> {
@@ -570,11 +706,7 @@ fn tray_data(hwnd: HWND, icon: HICON) -> NOTIFYICONDATAW {
         },
         ..Default::default()
     };
-    for (out, input) in data
-        .szTip
-        .iter_mut()
-        .zip("Prismestra · подсветка и температуры".encode_utf16())
-    {
+    for (out, input) in data.szTip.iter_mut().zip(PRODUCT_NAME.encode_utf16()) {
         *out = input;
     }
     data
@@ -634,14 +766,35 @@ pub(super) fn close_editor(state: &State) -> Result<(), String> {
         Ok(())
     }
 }
+fn activate_editor_window(hwnd: HWND) {
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        if SetForegroundWindow(hwnd) == 0 && IsWindowVisible(hwnd) != 0 {
+            FlashWindowEx(&FLASHWINFO {
+                cbSize: size_of::<FLASHWINFO>() as u32,
+                hwnd,
+                dwFlags: FLASHW_TRAY,
+                uCount: 3,
+                dwTimeout: 0,
+            });
+        }
+    }
+}
+
+pub(super) fn open_requested_editor(state: &State) -> Result<(), String> {
+    if state.activation_requested.replace(false) && state.session_action.get() == Action::None {
+        open_editor(state)?;
+    }
+    Ok(())
+}
+
 pub(super) fn open_editor(state: &State) -> Result<(), String> {
     let existing = state.editor_window.get();
     if !existing.is_null() {
         if !state.snapshot {
-            unsafe {
-                ShowWindow(existing, SW_RESTORE);
-                SetForegroundWindow(existing);
-            }
+            activate_editor_window(existing);
         }
         return Ok(());
     }
@@ -676,16 +829,11 @@ pub(super) fn open_editor(state: &State) -> Result<(), String> {
         if unsafe { AdjustWindowRectExForDpi(&mut rect, style, 0, WS_EX_CONTROLPARENT, dpi) } == 0 {
             return Err(last("Size editor"));
         }
-        let title = if app.native_lighting.is_some() {
-            "Prismestra · Подсветка устройств"
-        } else {
-            "Prismestra · Предпросмотр"
-        };
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_CONTROLPARENT,
                 wide(super::CLASS).as_ptr(),
-                wide(title).as_ptr(),
+                wide(PRODUCT_NAME).as_ptr(),
                 style,
                 if state.snapshot {
                     -32000
@@ -764,6 +912,9 @@ pub(super) fn open_editor(state: &State) -> Result<(), String> {
             ShowWindow(hwnd, SW_SHOWNORMAL);
             UpdateWindow(hwnd);
         }
+    }
+    if !state.snapshot {
+        activate_editor_window(hwnd);
     }
     Ok(())
 }
@@ -1082,6 +1233,21 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
             }
         };
     }
+    if msg != 0 && msg == state.activation_message.get() {
+        if l != 0 || state.session_action.get() != Action::None {
+            return 0;
+        }
+        if w == ACTIVATE_PROBE {
+            return ACTIVATE_ACCEPTED as LRESULT;
+        }
+        // Wake the outer message loop. Creating an editor in this callback
+        // could reenter a WebView initialization or close already in flight.
+        if w == ACTIVATE_EDITOR && unsafe { PostMessageW(hwnd, WM_NULL, 0, 0) } != 0 {
+            state.activation_requested.set(true);
+            return ACTIVATE_ACCEPTED as LRESULT;
+        }
+        return 0;
+    }
     if msg == TASKBAR_CREATED.load(Ordering::Relaxed) && msg != 0 && state.tray_enabled.get() {
         let mut registration = state.tray_registration.get();
         registration.taskbar_created(crate::clock::monotonic_ms());
@@ -1355,6 +1521,17 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     // A missing icon must not turn the only editor into an unreachable hidden
     // session. Inject API outcomes; snapshot mode never calls the real tray.
     let editor_before = state.editor_window.get();
+    let expected_name = "Prismestra";
+    let mut title = [0u16; 128];
+    let len = unsafe { GetWindowTextW(editor_before, title.as_mut_ptr(), title.len() as i32) };
+    if String::from_utf16_lossy(&title[..len as usize]) != expected_name {
+        return Err("Initial editor did not retain its native caption".into());
+    }
+    let expected_tip = wide(expected_name);
+    let tip = tray_data(shell.hwnd, state.icon.handle()).szTip;
+    if tip[..expected_tip.len()] != expected_tip {
+        return Err("Unexpected tray tooltip".into());
+    }
     state.tray_enabled.set(true);
     state.tray_registration.set(TrayRegistration::default());
     for (msg, w) in [(WM_SYSCOMMAND, SC_CLOSE as usize), (WM_CLOSE, 0)] {
@@ -1382,7 +1559,61 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     }
     state.tray_enabled.set(false);
     state.tray_registration.set(TrayRegistration::default());
-    open_editor(state)?;
+    let state_dir = std::fs::canonicalize(&state.app.borrow().as_ref().unwrap().state_dir)
+        .map_err(|error| error.to_string())?;
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let exe = installed::checked_local_path(&exe).map_err(|error| error.to_string())?;
+    let instance = Instance::acquire(&state_dir)?;
+    instance.enable_activation(state)?;
+    let wrong_scope = InstanceScope::new(&state_dir.join("other-profile"))?;
+    if activate_installed(
+        &exe,
+        wrong_scope.activation_message()?,
+        Instant::now() + Duration::from_secs(1),
+    )? || state.activation_requested.get()
+    {
+        return Err("Activation for another profile reached this editor".into());
+    }
+    if Instance::start_installed(&state_dir, &exe, installed::Session::Autostart)?.is_some()
+        || state.activation_requested.get()
+    {
+        return Err("Duplicate autostart activated an editor or took the lock".into());
+    }
+    for _ in 0..2 {
+        if Instance::start_installed(&state_dir, &exe, installed::Session::Interactive)?.is_some()
+            || !state.activation_requested.get()
+            || !state.editor_window.get().is_null()
+        {
+            return Err("Rapid interactive launches did not queue for the same resident".into());
+        }
+    }
+    open_requested_editor(state)?;
+    let reopened = state.editor_window.get();
+    let len = unsafe { GetWindowTextW(reopened, title.as_mut_ptr(), title.len() as i32) };
+    if String::from_utf16_lossy(&title[..len as usize]) != expected_name {
+        return Err("Reopened editor did not retain its native caption".into());
+    }
+    if Instance::start_installed(&state_dir, &exe, installed::Session::Interactive)?.is_some() {
+        return Err("Visible editor lost the resident session lock".into());
+    }
+    open_requested_editor(state)?;
+    if state.editor_window.get() != reopened {
+        return Err("Second interactive launch created a duplicate editor".into());
+    }
+    let owner = unsafe { GetCurrentProcessId() };
+    if resident_windows()?
+        .iter()
+        .filter(|(_, pid)| *pid == owner)
+        .count()
+        != 1
+    {
+        return Err("Rapid activation created a duplicate resident shell".into());
+    }
+    state.activation_message.set(0);
+    drop(instance);
+    println!(
+        "Installed activation stand PASS: scoped Win32 request, silent duplicate autostart, one reopened editor, native captions and Prismestra tray tooltip"
+    );
 
     for (msg, w, selection) in [
         (WM_SYSCOMMAND, SC_CLOSE as usize, NIN_KEYSELECT),

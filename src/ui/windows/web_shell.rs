@@ -1,11 +1,17 @@
 //! Embedded WebView2 transport. COM callbacks only enqueue bounded messages.
-use std::{cell::RefCell, collections::VecDeque, path::Path, rc::Rc, sync::mpsc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::VecDeque,
+    path::Path,
+    rc::Rc,
+    sync::mpsc,
+};
 use webview2_com::{
     AddScriptToExecuteOnDocumentCreatedCompletedHandler,
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
     DownloadStartingEventHandler, Microsoft::Web::WebView2::Win32::*,
     NavigationStartingEventHandler, NewWindowRequestedEventHandler,
-    PermissionRequestedEventHandler, WebMessageReceivedEventHandler,
+    PermissionRequestedEventHandler, ProcessFailedEventHandler, WebMessageReceivedEventHandler,
     WebResourceRequestedEventHandler, take_pwstr, wait_with_pump,
 };
 use windows::{
@@ -37,6 +43,7 @@ pub struct WebShell {
     controller: ICoreWebView2Controller,
     _environment: ICoreWebView2Environment,
     messages: Rc<RefCell<VecDeque<String>>>,
+    browser_failed: Rc<Cell<bool>>,
     _apartment: Apartment,
 }
 impl Drop for WebShell {
@@ -82,6 +89,7 @@ impl WebShell {
             controller,
             _environment: environment,
             messages: Rc::new(RefCell::new(VecDeque::new())),
+            browser_failed: Rc::new(Cell::new(false)),
             _apartment: apartment,
         };
         shell.configure(assets).map_err(error)?;
@@ -111,6 +119,21 @@ impl WebShell {
                 controller4.SetAllowExternalDrop(false)?;
             }
             let mut token = 0;
+            let browser_failed = Rc::clone(&self.browser_failed);
+            self.core.add_ProcessFailed(
+                &ProcessFailedEventHandler::create(Box::new(move |_, args| {
+                    if let Some(args) = args {
+                        let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+                        if args.ProcessFailedKind(&mut kind).is_ok()
+                            && kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED
+                        {
+                            browser_failed.set(true);
+                        }
+                    }
+                    Ok(())
+                })),
+                &mut token,
+            )?;
             self.core.add_NavigationStarting(
                 &NavigationStartingEventHandler::create(Box::new(|_, args| {
                     if let Some(args) = args {
@@ -278,6 +301,9 @@ impl WebShell {
     pub fn drain(&self) -> Vec<String> {
         self.messages.borrow_mut().drain(..).collect()
     }
+    pub fn browser_failed(&self) -> bool {
+        self.browser_failed.get()
+    }
     pub fn set_visible(&self, visible: bool) -> Result<(), String> {
         unsafe { self.controller.SetIsVisible(visible) }.map_err(error)
     }
@@ -287,6 +313,11 @@ impl WebShell {
                 .MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)
         }
         .map_err(error)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_core(&self) -> ICoreWebView2 {
+        self.core.clone()
     }
 }
 

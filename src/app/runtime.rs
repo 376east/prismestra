@@ -30,6 +30,8 @@ mod managed_backend;
 mod outputs;
 mod recovery;
 mod registry_input;
+#[cfg(windows)]
+pub(crate) use outputs::OutputActivity;
 pub use outputs::{LcdOutput, OutputPlan, RgbOutput};
 mod temperature_stream;
 
@@ -171,6 +173,8 @@ enum ConfigurationPhase {
 }
 struct Configuration {
     outputs: Option<OutputPlan>,
+    #[cfg(windows)]
+    startup_managed_ids: Option<BTreeSet<String>>,
     document: Document,
     phase: ConfigurationPhase,
     journal_override: Option<PathBuf>,
@@ -585,6 +589,8 @@ impl Runtime {
         }
         self.pending = Some(Configuration {
             outputs,
+            #[cfg(windows)]
+            startup_managed_ids: None,
             document,
             phase: ConfigurationPhase::Draining,
             journal_override,
@@ -767,6 +773,11 @@ impl Runtime {
             }
             self.output_recovery
                 .retain(|id, _| self.rgb_specs.contains_key(id) || self.lcd_specs.contains_key(id));
+            #[cfg(windows)]
+            if let Some(ids) = pending.startup_managed_ids {
+                self.managed_backend_ids = ids;
+                self.enable_registered_output_recovery();
+            }
             self.document = proposal;
             self.document_revision = self.document_revision.wrapping_add(1);
             self.host = host;
@@ -1275,7 +1286,8 @@ impl Runtime {
             .map(|(id, s)| (id.clone(), s.keys.clone(), s.factory.clone()))
             .collect::<Vec<_>>();
         for (id, keys, f) in rgb {
-            self.host.attach_claimed(&id, keys, move |c| f(c))?;
+            let result = self.host.attach_claimed(&id, keys, move |c| f(c));
+            self.handle_output_start(&id, result)?;
         }
         let lcd = self
             .lcd_specs
@@ -1283,25 +1295,8 @@ impl Runtime {
             .map(|(id, s)| (id.clone(), s.keys.clone(), s.factory.clone()))
             .collect::<Vec<_>>();
         for (id, keys, f) in lcd {
-            let config = self
-                .document
-                .lcd
-                .iter()
-                .find(|l| l.device == id)
-                .unwrap()
-                .config
-                .clone();
-            let generation = self.next_generation()?;
-            self.lcd.insert(
-                id,
-                lcd_worker::Worker::start_claimed(generation, keys, move |cancel| {
-                    let (controller, transport) = f(config.clone(), cancel)?;
-                    if controller.config() != &config {
-                        return Err("LCD factory configuration changed during refresh".into());
-                    }
-                    Ok((controller, transport))
-                })?,
-            );
+            let result = self.start_registered_lcd(&id, keys, f);
+            self.handle_output_start(&id, result)?;
         }
         if let Some(f) = self.capture_factory.clone() {
             let generation = self.next_generation()?;
@@ -1334,11 +1329,31 @@ impl Runtime {
         self.sensor_stamps.clear();
         self.bump()
     }
-    fn ready(&self) -> Result<bool, String> {
+    fn ready(&self, will_retry: impl Fn(&str) -> bool) -> Result<bool, String> {
         let mut ready = true;
+        if let Some(error) = self
+            .output_recovery
+            .iter()
+            .filter(|(id, _)| !will_retry(id))
+            .find_map(|(_, state)| state.start_error.as_ref())
+        {
+            return Err(error.clone());
+        }
+        // A failed synchronous start may leave the old stopped worker as the
+        // only snapshot. Its committed route still has a retry budget.
+        let retry_start = |id: &str| {
+            will_retry(id)
+                && self
+                    .output_recovery
+                    .get(id)
+                    .is_some_and(|state| state.start_error.is_some())
+        };
         // This is lighting-output readiness. Optional temperature readers may
         // connect/fail independently; absence is not a temperature reading.
         for id in self.rgb_specs.keys() {
+            if retry_start(id) {
+                continue;
+            }
             let s = self
                 .host
                 .status(id)
@@ -1346,14 +1361,19 @@ impl Runtime {
             match s.phase {
                 crate::runtime::output::Phase::Ready => {}
                 crate::runtime::output::Phase::Connecting => ready = false,
+                crate::runtime::output::Phase::Failed if will_retry(id) => {}
                 _ => return Err(s.error.unwrap_or_else(|| "RGB refresh stopped".into())),
             }
         }
-        for w in self.lcd.values() {
-            let s = w.snapshot();
+        for (id, worker) in &self.lcd {
+            if retry_start(id) {
+                continue;
+            }
+            let s = worker.snapshot();
             match s.phase {
                 lcd_worker::Phase::Ready => {}
                 lcd_worker::Phase::Connecting => ready = false,
+                lcd_worker::Phase::Failed if will_retry(id) => {}
                 _ => return Err(s.error.unwrap_or_else(|| "LCD refresh stopped".into())),
             }
         }
@@ -1380,7 +1400,9 @@ impl Runtime {
                 self.stop_channels();
                 return Ok(false);
             }
-            match self.ready() {
+            // A known output with its own finite retry budget can recover
+            // after resume without discarding successfully reopened owners.
+            match self.ready(|id| self.output_recovery.contains_key(id)) {
                 Ok(true) => {
                     self.power
                         .refreshed(generation, now / 1000, Ok(()))

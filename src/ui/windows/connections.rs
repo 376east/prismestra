@@ -1106,17 +1106,6 @@ impl App {
                 self.status =
                     "Подключения выбраны; ожидаю открытия устройств. Файл привязок не изменён."
                         .into();
-                unsafe {
-                    SetWindowTextW(
-                        GetParent(self.h(PC_ON)),
-                        wide(if self.native_lighting.is_some() {
-                            "Prismestra · Подсветка устройств"
-                        } else {
-                            "Prismestra · Предпросмотр"
-                        })
-                        .as_ptr(),
-                    );
-                }
                 self.set_text(
                     PC_ON,
                     if self.native_lighting.is_some() {

@@ -1,6 +1,14 @@
 //! A prepared set of deferred lighting capabilities. Preparation opens no devices.
 use super::*;
 
+#[cfg(windows)]
+pub(crate) enum OutputActivity {
+    Off,
+    Connecting,
+    Sent(u64),
+    Unavailable(Option<String>),
+}
+
 pub type RgbOutput = (String, Vec<String>, RgbFactory);
 pub type LcdOutput = (String, Vec<String>, LcdFactory);
 #[derive(Clone, Default)]
@@ -52,6 +60,59 @@ impl OutputPlan {
     }
 }
 impl Runtime {
+    #[cfg(windows)]
+    pub(crate) fn output_activity(&self, device: &crate::devices::Device) -> OutputActivity {
+        use crate::runtime::output::Phase;
+
+        let id = &device.id;
+        let is_lcd = device.role == Role::Lcd;
+        if !device.enabled
+            || self.stopped
+            || !self.desired.on(self.target(id))
+            || (is_lcd
+                && self
+                    .document
+                    .lcd
+                    .iter()
+                    .any(|entry| entry.device == *id && !entry.config.enabled))
+        {
+            return OutputActivity::Off;
+        }
+        if self.suspended || self.pending.is_some() || self.power.pending() {
+            return OutputActivity::Connecting;
+        }
+        if let Some(error) = self
+            .output_recovery
+            .get(id)
+            .and_then(|state| state.start_error.clone())
+        {
+            return OutputActivity::Unavailable(Some(error));
+        }
+        let (phase, frames, error) = if is_lcd {
+            let Some(status) = self.lcd_status(id) else {
+                return OutputActivity::Unavailable(None);
+            };
+            let phase = match status.phase {
+                lcd_worker::Phase::Connecting => Phase::Connecting,
+                lcd_worker::Phase::Ready => Phase::Ready,
+                lcd_worker::Phase::Stopping => Phase::Stopping,
+                lcd_worker::Phase::Stopped => Phase::Stopped,
+                lcd_worker::Phase::Failed => Phase::Failed,
+            };
+            (phase, status.frames_sent, status.error)
+        } else {
+            let Some(status) = self.host.status(id) else {
+                return OutputActivity::Unavailable(None);
+            };
+            (status.phase, status.submitted, status.error)
+        };
+        match phase {
+            Phase::Ready if frames > 0 => OutputActivity::Sent(frames),
+            Phase::Connecting | Phase::Ready => OutputActivity::Connecting,
+            Phase::Failed | Phase::Stopping | Phase::Stopped => OutputActivity::Unavailable(error),
+        }
+    }
+
     /// Retain factories, not live handles. Reversion also drains current owners first.
     pub fn output_plan(&self) -> OutputPlan {
         OutputPlan {
@@ -72,7 +133,7 @@ impl Runtime {
         self.output_revision
     }
     pub fn outputs_ready(&self) -> Result<bool, String> {
-        self.ready()
+        self.ready(|_| false)
     }
     /// Reuse the configuration drain/persistence barrier.
     pub fn request_outputs(&mut self, outputs: OutputPlan) -> Result<u64, String> {

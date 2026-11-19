@@ -113,16 +113,21 @@ impl OpenRgb {
         let deadline = || Instant::now() + Duration::from_secs(3);
         let cancelled = || cancel.cancelled();
         let mut session = OpenRgbSession::connect(endpoint, deadline(), &cancelled)?;
-        let inventory = session.scan(deadline(), &cancelled)?;
-        let mut matching = inventory
-            .iter()
-            .filter(|c| metadata::identity(c) == identity);
+        let inventory = session.scan_inventory(deadline(), &cancelled)?;
+        let mut matching = inventory.iter().filter(|entry| {
+            metadata::identity_from_fields(entry.identity_fields.each_ref().map(String::as_str))
+                == identity
+        });
         let controller = matching
             .next()
             .ok_or("OpenRGB controller identity is no longer available; rediscover before Apply")?;
         if matching.next().is_some() {
             return Err("OpenRGB controller identity is ambiguous; no output activated".into());
         }
+        let controller = controller
+            .description
+            .as_ref()
+            .map_err(|error| format!("OpenRGB: {error}"))?;
         if controller.kind.eq_ignore_ascii_case("virtual") {
             return Err("OpenRGB virtual controllers cannot own physical lighting outputs".into());
         }
