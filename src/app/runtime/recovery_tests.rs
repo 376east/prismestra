@@ -122,6 +122,220 @@ fn drain(runtime: &mut Runtime) {
     wait(|| runtime.drained());
 }
 
+#[test]
+fn surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame() {
+    use crate::{
+        lighting::{
+            door::{PIXEL_LEDS, pixel_payload_for_points},
+            scene::Effect,
+        },
+        runtime::adapters::Ble,
+        transport::ble::{self, Control},
+    };
+
+    #[derive(Default)]
+    struct Attempt {
+        probes: usize,
+        packets: Vec<Vec<u8>>,
+        first_frame: Vec<Rgb>,
+        dropped: bool,
+    }
+
+    struct E1Link {
+        attempt: usize,
+        traces: Arc<Mutex<Vec<Attempt>>>,
+    }
+
+    impl Drop for E1Link {
+        fn drop(&mut self) {
+            self.traces.lock().unwrap()[self.attempt].dropped = true;
+        }
+    }
+
+    impl ble::Link for E1Link {
+        fn address(&self) -> Result<u64, String> {
+            Ok(if self.attempt == 1 { 2 } else { 1 })
+        }
+
+        fn max_pdu(&self) -> Result<u32, String> {
+            Ok(200)
+        }
+
+        fn connected(&self) -> Result<bool, String> {
+            Ok(true)
+        }
+
+        fn write(&mut self, _: &[u8], _: &mut dyn Control) -> Result<(), String> {
+            panic!("E1 must not fall back to legacy output");
+        }
+
+        fn pixel_capacity(&mut self, _: &mut dyn Control) -> Result<usize, String> {
+            self.traces.lock().unwrap()[self.attempt].probes += 1;
+            let response = if self.attempt == 2 {
+                br#"{"payload":"ea810100aa0b23240150f00064030000010098ffffffff01000001"}"#
+            } else {
+                br#"{"payload":"ea810100aa0b23240150f00064030000010099ffffffff01000001"}"#
+            };
+            ble::parse_pixel_capacity(response)?.ok_or_else(|| "Missing EA81".into())
+        }
+
+        fn write_e1_pixels(
+            &mut self,
+            colors: &[Rgb],
+            brightness: i32,
+            sequence: u8,
+            control: &mut dyn Control,
+        ) -> Result<(), String> {
+            {
+                let mut traces = self.traces.lock().unwrap();
+                let attempt = &mut traces[self.attempt];
+                if attempt.packets.is_empty() {
+                    attempt.first_frame.extend_from_slice(colors);
+                }
+            }
+            ble::write_e1_pixel_frame(
+                colors,
+                brightness,
+                sequence,
+                self.max_pdu()?,
+                control,
+                &mut |packet, _| {
+                    let mut traces = self.traces.lock().unwrap();
+                    let packets = &mut traces[self.attempt].packets;
+                    packets.push(packet.to_vec());
+                    if self.attempt == 0 && packets.len() == 2 {
+                        return Err("Fixture disconnected during fragment 2".into());
+                    }
+                    Ok(())
+                },
+            )
+        }
+    }
+
+    let mut project = runtime().document().lighting.clone();
+    project.setup.devices.truncate(1);
+    project.setup.devices[0].driver = Driver::SurplifeE1Pixels;
+    project.setup.devices[0].leds = PIXEL_LEDS;
+    project.setup.canvas.width = PIXEL_LEDS as u32;
+    project.setup.canvas.points = (0..PIXEL_LEDS)
+        .map(|led| Point {
+            device: "a".into(),
+            led,
+            x: led as u32,
+            y: 0,
+        })
+        .collect();
+    project.groups.pc.clear();
+    project.groups.door.push("a".into());
+    project.scene.colors.fill(0xff0000);
+    project.scene.brightness = 100;
+    let mut runtime = Runtime::new(Document::from_lighting(project).unwrap(), None).unwrap();
+    let traces = Arc::new(Mutex::new(Vec::<Attempt>::new()));
+    let factory_traces = traces.clone();
+    runtime
+        .attach_rgb(
+            "a",
+            vec!["ble:1".into()],
+            Arc::new(move |cancel| {
+                let attempt = {
+                    let mut traces = factory_traces.lock().unwrap();
+                    assert!(traces.iter().all(|attempt| attempt.dropped));
+                    let attempt = traces.len();
+                    traces.push(Attempt::default());
+                    attempt
+                };
+                let link = E1Link {
+                    attempt,
+                    traces: factory_traces.clone(),
+                };
+                Ok(Box::new(Ble::with_e1(link, 1, 83, PIXEL_LEDS, &cancel)?))
+            }),
+        )
+        .unwrap();
+    runtime.enable_registered_output_recovery();
+
+    let mut now = 0;
+    for (attempt, delay) in [(0, 1_000_000), (1, 5_000_000), (2, 15_000_000)] {
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            runtime.host.status("a").unwrap().phase == Phase::Failed
+                && runtime.host.output_reaped("a")
+                && traces.lock().unwrap().len() == attempt + 1
+        });
+        let status = runtime.host.status("a").unwrap();
+        assert_eq!(status.submitted, 0, "failed attempt {attempt}");
+        if attempt == 0 {
+            assert_eq!(
+                status.error.as_deref(),
+                Some("BLE write 2/5 failed: Fixture disconnected during fragment 2"),
+            );
+            let mut scene = runtime.document().lighting.scene.clone();
+            scene.effect = Effect::RainbowWave;
+            scene.rainbow_width = 2;
+            scene.speed = 1;
+            runtime.set_scene(scene).unwrap();
+        }
+        now += delay;
+        tick(&mut runtime, &mut now);
+    }
+    working(&mut runtime, "a", &mut now);
+    drain(&mut runtime);
+
+    let traces = traces.lock().unwrap();
+    assert_eq!(traces.len(), 4);
+    assert!(traces.iter().all(|attempt| attempt.dropped));
+    let first = &traces[0];
+    assert_eq!(first.probes, 1);
+    assert_eq!(first.packets.len(), 2, "must stop at the failed fragment");
+    assert_eq!(&first.packets[0][..4], &[0x40, 0, 0, 0]);
+    assert_eq!(&first.packets[1][..4], &[0x40, 0, 0, 1]);
+    assert_eq!(first.first_frame, [Rgb::new(255, 0, 0); PIXEL_LEDS]);
+    assert_eq!(traces[1].probes, 0, "wrong address must stop before EA81");
+    assert!(traces[1].packets.is_empty());
+    assert_eq!(traces[2].probes, 1);
+    assert!(
+        traces[2].packets.is_empty(),
+        "wrong count must stop before E104"
+    );
+    let restored = &traces[3];
+    assert_eq!(restored.probes, 1);
+    assert!(restored.packets.len() >= 5);
+    let mut payload = restored.packets[0][8..].to_vec();
+    for (index, (packet, length)) in restored
+        .packets
+        .iter()
+        .zip([196, 196, 196, 196, 18])
+        .enumerate()
+    {
+        let fragment = index as u16 | if index == 4 { 0x8000 } else { 0 };
+        assert_eq!(packet.len(), length);
+        assert_eq!(&packet[..2], &[0x40, 0]);
+        assert_eq!(&packet[2..4], &fragment.to_be_bytes());
+        if index > 0 {
+            payload.extend_from_slice(&packet[5..]);
+        }
+    }
+    assert_eq!(payload.len(), 774);
+    assert_eq!(&payload[..9], &[0xe1, 4, 1, 0, 1, 80, 83, 0, 153]);
+    let stale_prefix = &first.packets[0][8..];
+    assert_ne!(&payload[..stale_prefix.len()], stale_prefix);
+    let (records, remainder) = payload[9..].as_chunks::<5>();
+    assert!(remainder.is_empty());
+    assert_eq!(records.len(), PIXEL_LEDS);
+    assert_eq!(restored.first_frame.len(), PIXEL_LEDS);
+    assert_eq!(
+        records
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        PIXEL_LEDS
+    );
+    for (index, (record, color)) in records.iter().zip(&restored.first_frame).enumerate() {
+        let single = pixel_payload_for_points(std::slice::from_ref(color), 83, 1).unwrap();
+        assert_eq!(record, &single[9..], "restored point {index}");
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn managed_candidate_without_matching_bindings_keeps_live_owner_until_commit() {

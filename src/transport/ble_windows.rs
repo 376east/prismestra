@@ -719,7 +719,7 @@ impl WindowsLink {
             return Err("BLE link lost; disconnected".into());
         }
         if !crate::lighting::door::fits(packet.len(), self.max_pdu()?) {
-            return Err("Packet exceeds negotiated ATT payload; no fragments sent".into());
+            return Err("Packet exceeds negotiated ATT payload".into());
         }
         let writer = DataWriter::new().map_err(error)?;
         let buffer = (|| {
