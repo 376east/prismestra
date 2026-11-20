@@ -31,6 +31,17 @@ impl Inventory {
             issues: vec![],
         }
     }
+    #[cfg(windows)]
+    fn add_wled_candidate(&mut self, candidate: Candidate) {
+        // The controller can be advertised on several addresses. Keep the
+        // user's route choice visible even when those addresses report one MAC.
+        if !self.candidates.iter().any(|known| {
+            known.draft.endpoint == candidate.draft.endpoint
+                && known.draft.identity == candidate.draft.identity
+        }) {
+            self.candidates.push(candidate);
+        }
+    }
     fn validate(&self, target: &Target) -> Result<(), String> {
         if &self.target != target
             || self.candidates.len() > 128
@@ -256,26 +267,31 @@ pub fn openrgb_factory(endpoint: std::net::SocketAddr) -> Factory {
         let deadline = || std::time::Instant::now() + std::time::Duration::from_secs(3);
         let cancelled = || cancel.cancelled();
         let mut session = OpenRgbSession::connect(endpoint, deadline(), &cancelled)?;
-        let controllers = session.scan(deadline(), &cancelled)?;
+        let controllers = session.scan_inventory(deadline(), &cancelled)?;
         let mut counts = std::collections::BTreeMap::new();
-        for c in &controllers {
-            *counts.entry(metadata::identity(c)).or_insert(0usize) += 1;
+        for entry in &controllers {
+            *counts.entry(&entry.identity_fields).or_insert(0usize) += 1;
         }
         let mut inventory = Inventory::empty(target.clone());
-        for controller in controllers {
-            let identity = metadata::identity(&controller);
-            let name = controller
-                .name
+        for entry in &controllers {
+            let name = entry.identity_fields[0]
                 .chars()
                 .filter(|c| !c.is_control())
                 .take(80)
                 .collect::<String>();
-            if counts[&identity] != 1 {
+            if counts[&entry.identity_fields] != 1 {
                 inventory.issues.push(format!(
                     "{name}: неоднозначная идентичность; вывод запрещён."
                 ));
                 continue;
             }
+            let controller = match &entry.description {
+                Ok(info) => info,
+                Err(error) => {
+                    inventory.issues.push(format!("{name}: {error}"));
+                    continue;
+                }
+            };
             if controller.kind.eq_ignore_ascii_case("virtual") {
                 inventory.issues.push(format!("{name}: виртуальный контроллер исключён, чтобы не дублировать физические выходы."));
                 continue;
@@ -286,15 +302,15 @@ pub fn openrgb_factory(endpoint: std::net::SocketAddr) -> Factory {
                     .push(format!("{name}: нет полного Direct-вывода."));
                 continue;
             }
-            metadata::positions(&controller)?;
+            metadata::positions(controller)?;
             inventory.candidates.push(Candidate {
                 wled: None,
                 controller: Some(controller.clone()),
                 label: format!("{name} · {} LED · {endpoint}", controller.leds),
                 draft: Draft {
                     endpoint: endpoint.to_string(),
-                    identity,
-                    serial: metadata::topology(&controller),
+                    identity: metadata::identity(controller),
+                    serial: metadata::topology(controller),
                 },
             });
         }
@@ -385,13 +401,7 @@ pub fn network_factory() -> Factory {
                 ) {
                     Ok(found) => {
                         for candidate in found.candidates {
-                            if !inventory
-                                .candidates
-                                .iter()
-                                .any(|c| c.draft.identity == candidate.draft.identity)
-                            {
-                                inventory.candidates.push(candidate);
-                            }
+                            inventory.add_wled_candidate(candidate);
                         }
                     }
                     Err(_) => inventory.issues.push(format!(
@@ -425,6 +435,46 @@ pub fn network_factory() -> Factory {
         Ok(inventory)
     })
 }
+
+#[cfg(all(test, windows))]
+#[test]
+fn lan_wled_candidates_keep_each_address_for_a_shared_mac() {
+    let target = Target::Device(Device {
+        id: "desk".into(),
+        label: "Desk".into(),
+        role: crate::devices::Role::Canvas,
+        driver: Driver::WledDdp,
+        leds: 20,
+        rate_hz: 20,
+        enabled: true,
+    });
+    let mut inventory = Inventory::empty(target.clone());
+    let info = crate::transport::wled_info::parse_info(
+        br#"{"leds":{"count":20},"mac":"02aabbccddee","name":"Desk"}"#,
+    )
+    .unwrap();
+    for ip in ["192.0.2.11", "192.0.2.11", "192.0.2.12"] {
+        let endpoint = format!("{ip}:4048");
+        inventory.add_wled_candidate(Candidate {
+            wled: Some(info.clone()),
+            controller: None,
+            label: format!("Desk · 20 LED · {endpoint}"),
+            draft: Draft {
+                endpoint,
+                identity: info.stable_id(),
+                serial: format!("http://{ip}:80"),
+            },
+        });
+    }
+    inventory.validate(&target).unwrap();
+    let endpoints: Vec<_> = inventory
+        .candidates
+        .iter()
+        .map(|candidate| candidate.draft.endpoint.as_str())
+        .collect();
+    assert_eq!(endpoints, ["192.0.2.11:4048", "192.0.2.12:4048"]);
+}
+
 #[cfg(windows)]
 pub fn surplife_factory(address: u64) -> Factory {
     Arc::new(move |target, cancel| {

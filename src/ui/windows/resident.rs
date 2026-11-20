@@ -4,7 +4,10 @@ use crate::app::installed;
 use sha2::{Digest, Sha256};
 use std::{
     fs::OpenOptions,
-    os::windows::{ffi::OsStringExt, fs::OpenOptionsExt},
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        fs::OpenOptionsExt,
+    },
     sync::atomic::{AtomicU32, Ordering},
     time::Duration,
 };
@@ -19,9 +22,14 @@ use windows_sys::Win32::{
 };
 const CLASS: &str = "PrismestraSessionShell";
 const INSTALLED_EXIT: &str = "Prismestra.Installed.Exit.v1";
+const ACTIVATE_PROBE: WPARAM = 0;
+const ACTIVATE_EDITOR: WPARAM = 1;
+const ACTIVATE_ACCEPTED: usize = 1;
 const EXIT_ACCEPTED: usize = 1;
 const EXIT_BUSY: usize = 2;
 const CALLBACK: u32 = WM_APP + 31;
+const TRAY_ICON_ID: u32 = 1;
+const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 const OPEN: u32 = 1;
 const STOP: u32 = 2;
 const EXIT: u32 = 3;
@@ -260,6 +268,52 @@ pub(crate) fn shutdown_installed(executable: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn activate_installed(executable: &Path, message: u32, deadline: Instant) -> Result<bool, String> {
+    for (hwnd, pid) in resident_windows()? {
+        let Ok(process) = Process::open(pid) else {
+            continue;
+        };
+        let Ok(image) = process.image_path().and_then(|path| {
+            installed::checked_local_path(&path).map_err(|error| error.to_string())
+        }) else {
+            continue;
+        };
+        if !same_target(executable, &image, pid, shell_pid(hwnd))
+            || unsafe { WaitForSingleObject(process.0, 0) } != WAIT_TIMEOUT
+            || !send_activation(hwnd, message, ACTIVATE_PROBE, deadline)
+        {
+            continue;
+        }
+        // The scoped probe identified the lock owner's installed shell. Windows
+        // can still deny foreground access, in which case the editor flashes.
+        unsafe { AllowSetForegroundWindow(pid) };
+        if send_activation(hwnd, message, ACTIVATE_EDITOR, deadline) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn send_activation(hwnd: HWND, message: u32, action: WPARAM, deadline: Instant) -> bool {
+    let timeout = deadline.saturating_duration_since(Instant::now());
+    if timeout.is_zero() {
+        return false;
+    }
+    let mut response = 0;
+    let sent = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            message,
+            action,
+            0,
+            SMTO_BLOCK | SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
+            timeout.as_millis().clamp(1, 250) as u32,
+            &mut response,
+        )
+    };
+    sent != 0 && response == ACTIVATE_ACCEPTED
+}
+
 // Microsoft documents retrying failed NIM_ADD on TaskbarCreated; PowerToys
 // additionally handles missed initial broadcasts. Reuse that API pattern with
 // our existing maintenance timer, not a dependency or an Explorer-window probe.
@@ -317,6 +371,11 @@ fn poll_tray(
     // The same(hwnd,uID) is used for every operation. MODIFY accepts an existing
     // icon after a duplicate TaskbarCreated without deleting/replacing it first.
     let succeeded = notify(NIM_ADD) || notify(NIM_MODIFY);
+    if succeeded && registration.get().epoch == epoch {
+        // An unsupported version leaves the registered icon usable. Decode
+        // both callback formats, including after Explorer re-registers it.
+        notify(NIM_SETVERSION);
+    }
     let mut pending = registration.get();
     let current = pending.finish(epoch, now_ms, succeeded);
     registration.set(pending);
@@ -394,11 +453,25 @@ fn flush_power(state: &State) -> Result<(), String> {
     Ok(())
 }
 /// The OS file handle supplies exclusion even after a crash; a stale filename does not lock.
-pub(super) struct Instance {
-    _file: File,
+pub(crate) struct Instance {
+    _lock: File,
+    scope: InstanceScope,
 }
-impl Instance {
-    pub(super) fn acquire(state_dir: &Path) -> Result<Self, String> {
+
+const INSTANCE_BUSY: &str =
+    "Prismestra уже работает с этой папкой настроек. Откройте её через значок в трее.";
+
+struct InstanceScope(PathBuf);
+
+fn scope_digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+impl InstanceScope {
+    fn new(state_dir: &Path) -> Result<Self, String> {
         let mut raw = null_mut();
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
             return Err(last("Read session identity"));
@@ -438,10 +511,7 @@ impl Instance {
             return Err("Invalid user SID size".into());
         }
         let sid = unsafe { std::slice::from_raw_parts(user.User.Sid.cast::<u8>(), length) };
-        let hash = Sha256::digest(sid)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
+        let hash = scope_digest(sid);
         let mut session = 0u32;
         if unsafe {
             GetTokenInformation(
@@ -455,11 +525,84 @@ impl Instance {
         {
             return Err(last("Read logon session"));
         }
-        let path = state_dir.join(format!(".prismestra-session-{hash}-{session}.lock"));
-        let file=OpenOptions::new().read(true).write(true).create(true).truncate(false).share_mode(0).open(path).map_err(|e|{
-            if e.raw_os_error()==Some(ERROR_SHARING_VIOLATION as i32){"Prismestra уже работает с этой папкой настроек. Откройте её через значок в трее.".into()}else{format!("Session lock: {e}")}
-        })?;
-        Ok(Self { _file: file })
+        Ok(Self(state_dir.join(format!(
+            ".prismestra-session-{hash}-{session}.lock"
+        ))))
+    }
+
+    fn try_lock(&self) -> Result<Option<File>, String> {
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(&self.0)
+        {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => Ok(None),
+            Err(error) => Err(format!("Session lock: {error}")),
+        }
+    }
+
+    fn activation_message(&self) -> Result<u32, String> {
+        // Installed callers use a canonical state directory. The lock name
+        // also includes the current Windows user and logon session.
+        let bytes: Vec<_> = self
+            .0
+            .as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let name = format!("Prismestra.Installed.Open.v1.{}", scope_digest(&bytes));
+        let message = unsafe { RegisterWindowMessageW(wide(&name).as_ptr()) };
+        if message == 0 {
+            return Err(last("Register installed editor activation message"));
+        }
+        Ok(message)
+    }
+}
+
+impl Instance {
+    pub(super) fn acquire(state_dir: &Path) -> Result<Self, String> {
+        let scope = InstanceScope::new(state_dir)?;
+        let lock = scope.try_lock()?.ok_or(INSTANCE_BUSY)?;
+        Ok(Self { _lock: lock, scope })
+    }
+
+    pub(crate) fn start_installed(
+        state_dir: &Path,
+        executable: &Path,
+        mode: installed::Session,
+    ) -> Result<Option<Self>, String> {
+        let scope = InstanceScope::new(state_dir)?;
+        if let Some(lock) = scope.try_lock()? {
+            return Ok(Some(Self { _lock: lock, scope }));
+        }
+        if mode == installed::Session::Autostart {
+            return Ok(None);
+        }
+        let message = scope.activation_message()?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if activate_installed(executable, message, deadline)? {
+                return Ok(None);
+            }
+            // If the prior owner exited during startup or shutdown, this
+            // launch may become the owner. Never bypass the exclusive lock.
+            if let Some(lock) = scope.try_lock()? {
+                return Ok(Some(Self { _lock: lock, scope }));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err(INSTANCE_BUSY.into())
+    }
+
+    pub(super) fn enable_activation(&self, state: &State) -> Result<(), String> {
+        state
+            .activation_message
+            .set(self.scope.activation_message()?);
+        Ok(())
     }
 }
 pub(super) struct Shell<'a> {
@@ -554,17 +697,16 @@ fn tray_data(hwnd: HWND, icon: HICON) -> NOTIFYICONDATAW {
     let mut data = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
-        uID: 1,
-        uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+        uID: TRAY_ICON_ID,
+        uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
         uCallbackMessage: CALLBACK,
         hIcon: icon,
+        Anonymous: NOTIFYICONDATAW_0 {
+            uVersion: NOTIFYICON_VERSION_4,
+        },
         ..Default::default()
     };
-    for (out, input) in data
-        .szTip
-        .iter_mut()
-        .zip("Prismestra · подсветка и температуры".encode_utf16())
-    {
+    for (out, input) in data.szTip.iter_mut().zip(PRODUCT_NAME.encode_utf16()) {
         *out = input;
     }
     data
@@ -624,14 +766,39 @@ pub(super) fn close_editor(state: &State) -> Result<(), String> {
         Ok(())
     }
 }
+fn activate_editor_window(hwnd: HWND) {
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        if SetForegroundWindow(hwnd) == 0 && IsWindowVisible(hwnd) != 0 {
+            FlashWindowEx(&FLASHWINFO {
+                cbSize: size_of::<FLASHWINFO>() as u32,
+                hwnd,
+                dwFlags: FLASHW_TRAY,
+                uCount: 3,
+                dwTimeout: 0,
+            });
+        }
+    }
+}
+
+pub(super) fn open_requested_editor(state: &State) -> Result<(), String> {
+    if state.activation_requested.replace(false) && state.session_action.get() == Action::None {
+        open_editor(state)?;
+    }
+    Ok(())
+}
+
 pub(super) fn open_editor(state: &State) -> Result<(), String> {
+    // Tray callbacks and a menu already on screen can arrive while Exit drains.
+    if state.session_action.get() == Action::Exit {
+        return Ok(());
+    }
     let existing = state.editor_window.get();
     if !existing.is_null() {
         if !state.snapshot {
-            unsafe {
-                ShowWindow(existing, SW_RESTORE);
-                SetForegroundWindow(existing);
-            }
+            activate_editor_window(existing);
         }
         return Ok(());
     }
@@ -666,16 +833,11 @@ pub(super) fn open_editor(state: &State) -> Result<(), String> {
         if unsafe { AdjustWindowRectExForDpi(&mut rect, style, 0, WS_EX_CONTROLPARENT, dpi) } == 0 {
             return Err(last("Size editor"));
         }
-        let title = if app.native_lighting.is_some() {
-            "Prismestra · Подсветка устройств"
-        } else {
-            "Prismestra · Предпросмотр"
-        };
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_CONTROLPARENT,
                 wide(super::CLASS).as_ptr(),
-                wide(title).as_ptr(),
+                wide(PRODUCT_NAME).as_ptr(),
                 style,
                 if state.snapshot {
                     -32000
@@ -754,6 +916,9 @@ pub(super) fn open_editor(state: &State) -> Result<(), String> {
             ShowWindow(hwnd, SW_SHOWNORMAL);
             UpdateWindow(hwnd);
         }
+    }
+    if !state.snapshot {
+        activate_editor_window(hwnd);
     }
     Ok(())
 }
@@ -899,39 +1064,116 @@ fn maintain(state: &State) -> Result<(), String> {
     }
     Ok(())
 }
-fn menu(state: &State, hwnd: HWND) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrayCommand {
+    Open,
+    Menu { anchor_to_icon: bool },
+}
+
+fn tray_command(w: WPARAM, l: LPARAM) -> Option<TrayCommand> {
+    let payload = l as u32;
+    match (payload >> 16, payload & 0xffff) {
+        (TRAY_ICON_ID, NIN_SELECT | NIN_KEYSELECT) => Some(TrayCommand::Open),
+        (TRAY_ICON_ID, WM_CONTEXTMENU) => Some(TrayCommand::Menu {
+            anchor_to_icon: true,
+        }),
+        (0, WM_LBUTTONUP | WM_LBUTTONDBLCLK) if w == TRAY_ICON_ID as WPARAM => {
+            Some(TrayCommand::Open)
+        }
+        (0, WM_RBUTTONUP) if w == TRAY_ICON_ID as WPARAM => Some(TrayCommand::Menu {
+            anchor_to_icon: false,
+        }),
+        _ => None,
+    }
+}
+
+fn create_tray_menu() -> Option<HMENU> {
     let menu = unsafe { CreatePopupMenu() };
     if menu.is_null() {
-        return;
+        return None;
     }
     for (id, text) in [
-        (OPEN, "Открыть редактор"),
+        (OPEN, "Открыть Prismestra"),
         (STOP, "Остановить работу"),
         (EXIT, "Выйти"),
     ] {
-        unsafe {
-            AppendMenuW(menu, MF_STRING, id as usize, wide(text).as_ptr());
+        if unsafe { AppendMenuW(menu, MF_STRING, id as usize, wide(text).as_ptr()) } == 0 {
+            unsafe { DestroyMenu(menu) };
+            return None;
         }
     }
-    let mut point = POINT::default();
+    unsafe { SetMenuDefaultItem(menu, OPEN, 0) };
+    Some(menu)
+}
+
+fn tray_menu_placement(
+    cursor: POINT,
+    icon: Option<RECT>,
+    align_right: bool,
+) -> (POINT, u32, Option<TPMPARAMS>) {
+    let alignment = if align_right {
+        TPM_RIGHTALIGN
+    } else {
+        TPM_LEFTALIGN
+    };
+    let Some(rect) = icon else {
+        return (cursor, alignment, None);
+    };
+    (
+        POINT {
+            x: if align_right { rect.right } else { rect.left },
+            y: rect.bottom,
+        },
+        alignment,
+        Some(TPMPARAMS {
+            cbSize: size_of::<TPMPARAMS>() as u32,
+            rcExclude: rect,
+        }),
+    )
+}
+
+fn menu(state: &State, hwnd: HWND, anchor_to_icon: bool) {
+    let Some(menu) = create_tray_menu() else {
+        return;
+    };
+    // In version 4, wParam is undefined for WM_CONTEXTMENU. Query the icon
+    // so the keyboard menu appears at its target even on another monitor.
+    let icon = NOTIFYICONIDENTIFIER {
+        cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
+        hWnd: hwnd,
+        uID: TRAY_ICON_ID,
+        ..Default::default()
+    };
+    let mut rect = RECT::default();
+    let icon_rect = (anchor_to_icon && unsafe { Shell_NotifyIconGetRect(&icon, &mut rect) } == 0)
+        .then_some(rect);
+    let mut cursor = POINT::default();
+    if icon_rect.is_none() && unsafe { GetCursorPos(&mut cursor) } == 0 {
+        unsafe { DestroyMenu(menu) };
+        return;
+    }
+    let align_right = unsafe { GetSystemMetrics(SM_MENUDROPALIGNMENT) } != 0;
+    let (point, alignment, params) = tray_menu_placement(cursor, icon_rect, align_right);
     unsafe {
-        GetCursorPos(&mut point);
         SetForegroundWindow(hwnd);
     }
     let id = unsafe {
-        TrackPopupMenu(
+        TrackPopupMenuEx(
             menu,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON | alignment,
             point.x,
             point.y,
-            0,
             hwnd,
-            null(),
+            params.as_ref().map_or(null(), std::ptr::from_ref),
         )
     };
     unsafe {
         DestroyMenu(menu);
         PostMessageW(hwnd, WM_NULL, 0, 0);
+        if id == 0 {
+            let data = tray_data(hwnd, state.icon.handle());
+            Shell_NotifyIconW(NIM_SETFOCUS, &data);
+        }
     }
     let result = match id as u32 {
         OPEN => open_editor(state),
@@ -995,6 +1237,21 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
             }
         };
     }
+    if msg != 0 && msg == state.activation_message.get() {
+        if l != 0 || state.session_action.get() != Action::None {
+            return 0;
+        }
+        if w == ACTIVATE_PROBE {
+            return ACTIVATE_ACCEPTED as LRESULT;
+        }
+        // Wake the outer message loop. Creating an editor in this callback
+        // could reenter a WebView initialization or close already in flight.
+        if w == ACTIVATE_EDITOR && unsafe { PostMessageW(hwnd, WM_NULL, 0, 0) } != 0 {
+            state.activation_requested.set(true);
+            return ACTIVATE_ACCEPTED as LRESULT;
+        }
+        return 0;
+    }
     if msg == TASKBAR_CREATED.load(Ordering::Relaxed) && msg != 0 && state.tray_enabled.get() {
         let mut registration = state.tray_registration.get();
         registration.taskbar_created(crate::clock::monotonic_ms());
@@ -1006,18 +1263,14 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     let result = match msg {
         WM_TIMER => maintain(state),
         WM_CLOSE => request(state, Action::Exit, true),
-        CALLBACK => {
-            match l as u32 {
-                WM_LBUTTONUP | WM_LBUTTONDBLCLK => {
-                    if let Err(e) = open_editor(state) {
-                        report(state, e);
-                    }
-                }
-                WM_RBUTTONUP => menu(state, hwnd),
-                _ => {}
+        CALLBACK => match tray_command(w, l) {
+            Some(TrayCommand::Open) => open_editor(state),
+            Some(TrayCommand::Menu { anchor_to_icon }) => {
+                menu(state, hwnd, anchor_to_icon);
+                Ok(())
             }
-            Ok(())
-        }
+            None => Ok(()),
+        },
         WM_POWERBROADCAST => {
             if matches!(w as u32, PBT_APMSUSPEND | PBT_APMRESUMEAUTOMATIC) {
                 power_message(state, w as u32 == PBT_APMSUSPEND)
@@ -1272,6 +1525,17 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     // A missing icon must not turn the only editor into an unreachable hidden
     // session. Inject API outcomes; snapshot mode never calls the real tray.
     let editor_before = state.editor_window.get();
+    let expected_name = "Prismestra";
+    let mut title = [0u16; 128];
+    let len = unsafe { GetWindowTextW(editor_before, title.as_mut_ptr(), title.len() as i32) };
+    if String::from_utf16_lossy(&title[..len as usize]) != expected_name {
+        return Err("Initial editor did not retain its native caption".into());
+    }
+    let expected_tip = wide(expected_name);
+    let tip = tray_data(shell.hwnd, state.icon.handle()).szTip;
+    if tip[..expected_tip.len()] != expected_tip {
+        return Err("Unexpected tray tooltip".into());
+    }
     state.tray_enabled.set(true);
     state.tray_registration.set(TrayRegistration::default());
     for (msg, w) in [(WM_SYSCOMMAND, SC_CLOSE as usize), (WM_CLOSE, 0)] {
@@ -1299,9 +1563,66 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     }
     state.tray_enabled.set(false);
     state.tray_registration.set(TrayRegistration::default());
-    open_editor(state)?;
+    let state_dir = std::fs::canonicalize(&state.app.borrow().as_ref().unwrap().state_dir)
+        .map_err(|error| error.to_string())?;
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let exe = installed::checked_local_path(&exe).map_err(|error| error.to_string())?;
+    let instance = Instance::acquire(&state_dir)?;
+    instance.enable_activation(state)?;
+    let wrong_scope = InstanceScope::new(&state_dir.join("other-profile"))?;
+    if activate_installed(
+        &exe,
+        wrong_scope.activation_message()?,
+        Instant::now() + Duration::from_secs(1),
+    )? || state.activation_requested.get()
+    {
+        return Err("Activation for another profile reached this editor".into());
+    }
+    if Instance::start_installed(&state_dir, &exe, installed::Session::Autostart)?.is_some()
+        || state.activation_requested.get()
+    {
+        return Err("Duplicate autostart activated an editor or took the lock".into());
+    }
+    for _ in 0..2 {
+        if Instance::start_installed(&state_dir, &exe, installed::Session::Interactive)?.is_some()
+            || !state.activation_requested.get()
+            || !state.editor_window.get().is_null()
+        {
+            return Err("Rapid interactive launches did not queue for the same resident".into());
+        }
+    }
+    open_requested_editor(state)?;
+    let reopened = state.editor_window.get();
+    let len = unsafe { GetWindowTextW(reopened, title.as_mut_ptr(), title.len() as i32) };
+    if String::from_utf16_lossy(&title[..len as usize]) != expected_name {
+        return Err("Reopened editor did not retain its native caption".into());
+    }
+    if Instance::start_installed(&state_dir, &exe, installed::Session::Interactive)?.is_some() {
+        return Err("Visible editor lost the resident session lock".into());
+    }
+    open_requested_editor(state)?;
+    if state.editor_window.get() != reopened {
+        return Err("Second interactive launch created a duplicate editor".into());
+    }
+    let owner = unsafe { GetCurrentProcessId() };
+    if resident_windows()?
+        .iter()
+        .filter(|(_, pid)| *pid == owner)
+        .count()
+        != 1
+    {
+        return Err("Rapid activation created a duplicate resident shell".into());
+    }
+    state.activation_message.set(0);
+    drop(instance);
+    println!(
+        "Installed activation stand PASS: scoped Win32 request, silent duplicate autostart, one reopened editor, native captions and Prismestra tray tooltip"
+    );
 
-    for (msg, w) in [(WM_SYSCOMMAND, SC_CLOSE as usize), (WM_CLOSE, 0)] {
+    for (msg, w, selection) in [
+        (WM_SYSCOMMAND, SC_CLOSE as usize, NIN_KEYSELECT),
+        (WM_CLOSE, 0, NIN_SELECT),
+    ] {
         let retained_status = "Resident diagnostic: preserve the last session status";
         state.app.borrow_mut().as_mut().unwrap().status = retained_status.into();
         unsafe { SendMessageW(state.editor_window.get(), msg, w, 0) };
@@ -1337,7 +1658,29 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
         {
             return Err("Editor close restarted/revoked shared sensor ownership".into());
         }
-        open_editor(state)?;
+        unsafe {
+            SendMessageW(
+                shell.hwnd,
+                CALLBACK,
+                0,
+                ((TRAY_ICON_ID << 16) | selection) as LPARAM,
+            );
+        }
+        let reopened = state.editor_window.get();
+        if reopened.is_null() {
+            return Err("Tray activation did not reopen the resident editor".into());
+        }
+        unsafe {
+            SendMessageW(
+                shell.hwnd,
+                CALLBACK,
+                0,
+                ((TRAY_ICON_ID << 16) | selection) as LPARAM,
+            );
+        }
+        if state.editor_window.get() != reopened {
+            return Err("Repeated tray activation replaced the editor".into());
+        }
         let slot = state.app.borrow();
         let a = slot.as_ref().unwrap();
         if a.status != retained_status {
@@ -1355,6 +1698,9 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
             return Err("Reopen replaced Runtime or lost read-only source state".into());
         }
     }
+    println!(
+        "Tray selection stand PASS: keyboard and mouse callbacks reopened one existing resident editor without restarting its Runtime"
+    );
     {
         let slot = state.app.borrow();
         let a = slot.as_ref().unwrap();
@@ -1610,6 +1956,17 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     if state.session_action.get() != Action::Exit {
         return Err("Exit was ignored after failed Stop".into());
     }
+    // Explorer may still deliver activation until the resident shell is destroyed.
+    for (wparam, lparam) in [
+        (0, ((TRAY_ICON_ID << 16) | NIN_KEYSELECT) as LPARAM),
+        (0, ((TRAY_ICON_ID << 16) | NIN_SELECT) as LPARAM),
+        (TRAY_ICON_ID as WPARAM, WM_LBUTTONUP as LPARAM),
+    ] {
+        unsafe { SendMessageW(shell.hwnd, CALLBACK, wparam, lparam) };
+        if !state.editor_window.get().is_null() {
+            return Err("Tray reopened the editor during Exit".into());
+        }
+    }
     settle(state, "exit", |a| {
         a.shutdown.phase() == crate::app::shutdown::Phase::Ready
             && state.editor_window.get().is_null()
@@ -1695,6 +2052,126 @@ mod tests {
     #[test]
     fn tray_failure_retry_success_and_explorer_restart_use_no_shell_api() {
         exercise_tray_retry().unwrap();
+    }
+    #[test]
+    fn tray_negotiates_keyboard_callbacks_and_keeps_its_standard_tooltip() {
+        let registration = Cell::new(TrayRegistration::default());
+        let mut operations = Vec::new();
+        // Even a failed version negotiation must preserve the one registered
+        // icon and the legacy mouse path.
+        assert_eq!(
+            poll_tray(&registration, 0, |operation| {
+                operations.push(operation);
+                operation == NIM_ADD
+            }),
+            Some(true)
+        );
+        assert_eq!(operations, [NIM_ADD, NIM_SETVERSION]);
+        assert!(registration.get().registered);
+        let mut value = registration.get();
+        value.taskbar_created(1);
+        registration.set(value);
+        operations.clear();
+        assert_eq!(
+            poll_tray(&registration, 1, |operation| {
+                operations.push(operation);
+                operation != NIM_ADD
+            }),
+            Some(true)
+        );
+        assert_eq!(operations, [NIM_ADD, NIM_MODIFY, NIM_SETVERSION]);
+        let data = tray_data(null_mut(), null_mut());
+        assert_eq!(data.uFlags & (NIF_TIP | NIF_SHOWTIP), NIF_TIP | NIF_SHOWTIP);
+        assert_eq!(unsafe { data.Anonymous.uVersion }, NOTIFYICON_VERSION_4);
+    }
+
+    #[test]
+    fn tray_dispatch_uses_the_right_icon_and_one_notification_per_action() {
+        let v4 = |id, event| ((id << 16) | event) as LPARAM;
+        for event in [NIN_KEYSELECT, NIN_SELECT] {
+            assert_eq!(
+                tray_command(0, v4(TRAY_ICON_ID, event)),
+                Some(TrayCommand::Open)
+            );
+        }
+        assert_eq!(
+            tray_command(0, v4(TRAY_ICON_ID, WM_CONTEXTMENU)),
+            Some(TrayCommand::Menu {
+                anchor_to_icon: true
+            })
+        );
+        for event in [WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_RBUTTONUP, NIN_POPUPOPEN] {
+            assert_eq!(tray_command(0, v4(TRAY_ICON_ID, event)), None);
+        }
+        assert_eq!(tray_command(0, v4(2, NIN_KEYSELECT)), None);
+        assert_eq!(tray_command(2, WM_RBUTTONUP as LPARAM), None);
+        assert_eq!(
+            tray_command(TRAY_ICON_ID as WPARAM, WM_LBUTTONUP as LPARAM),
+            Some(TrayCommand::Open)
+        );
+        assert_eq!(
+            tray_command(TRAY_ICON_ID as WPARAM, WM_RBUTTONUP as LPARAM),
+            Some(TrayCommand::Menu {
+                anchor_to_icon: false
+            })
+        );
+    }
+
+    #[test]
+    fn tray_menu_placement_matches_system_alignment_for_icon_and_cursor() {
+        let icon = RECT {
+            left: -120,
+            top: 730,
+            right: -96,
+            bottom: 754,
+        };
+        let cursor = POINT { x: 200, y: 100 };
+        for (align_right, expected_x, expected_flag) in [
+            (false, icon.left, TPM_LEFTALIGN),
+            (true, icon.right, TPM_RIGHTALIGN),
+        ] {
+            let (point, flag, params) = tray_menu_placement(cursor, Some(icon), align_right);
+            assert_eq!(
+                (point.x, point.y, flag),
+                (expected_x, icon.bottom, expected_flag)
+            );
+            let params = params.expect("icon rectangle excluded from menu");
+            let rect = params.rcExclude;
+            assert_eq!(
+                (rect.left, rect.top, rect.right, rect.bottom),
+                (icon.left, icon.top, icon.right, icon.bottom)
+            );
+            let (point, flag, params) = tray_menu_placement(cursor, None, align_right);
+            assert_eq!(
+                (point.x, point.y, flag),
+                (cursor.x, cursor.y, expected_flag)
+            );
+            assert!(params.is_none());
+        }
+    }
+
+    #[test]
+    fn native_tray_menu_marks_open_as_its_first_and_default_command() {
+        let menu = create_tray_menu().expect("native popup menu");
+        let mut label = [0u16; 64];
+        let (first, default, length) = unsafe {
+            let first = GetMenuItemID(menu, 0);
+            let default = GetMenuDefaultItem(menu, 0, 0);
+            let length = GetMenuStringW(
+                menu,
+                OPEN,
+                label.as_mut_ptr(),
+                label.len() as i32,
+                MF_BYCOMMAND,
+            );
+            DestroyMenu(menu);
+            (first, default, length)
+        };
+        assert_eq!((first, default), (OPEN, OPEN));
+        assert_eq!(
+            String::from_utf16_lossy(&label[..length as usize]),
+            "Открыть Prismestra"
+        );
     }
     #[test]
     fn tray_backoff_is_capped_and_repeated_timer_ticks_do_not_add_icons() {

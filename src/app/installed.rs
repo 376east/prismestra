@@ -39,7 +39,20 @@ static SESSION: OnceLock<Session> = OnceLock::new();
 
 pub enum Dispatch {
     Ui(Vec<OsString>),
+    InstalledUi(InstalledLaunch),
     Exit(i32),
+}
+
+pub struct InstalledLaunch {
+    args: Vec<OsString>,
+    instance: windows::Instance,
+    user_root: PathBuf,
+}
+
+impl InstalledLaunch {
+    pub fn run(self) -> Result<(), String> {
+        windows::run_installed(self.args, self.instance, self.user_root)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,16 +111,30 @@ pub fn dispatch(args: Vec<OsString>) -> Result<Dispatch, String> {
         Command::Start(_) | Command::Prepare => {
             require_ordinary_user()?;
             let manifest = Manifest::read(&executable)?;
+            verify_backend(&manifest, &executable)?;
             let local = env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA unavailable")?;
             let local = checked_local_path(Path::new(&local)).map_err(|e| e.to_string())?;
-            let launch = bootstrap(&manifest, &executable, &local.join("Prismestra"))?;
+            let user_root = profile_root(&manifest, &local.join("Prismestra"))?;
+            let state = directory(&user_root.join("state"))?;
             let Command::Start(mode) = command else {
+                bootstrap(&manifest, &executable, &user_root, &state)?;
                 return Ok(Dispatch::Exit(0)); // Setup prepares user data, never hardware or a UI.
             };
+            // Repeated launches must resolve the resident before touching its
+            // profile, recovery journal or backend configuration.
+            let Some(instance) = windows::Instance::start_installed(&state, &executable, mode)?
+            else {
+                return Ok(Dispatch::Exit(0));
+            };
+            let args = bootstrap(&manifest, &executable, &user_root, &state)?;
             SESSION
                 .set(mode)
                 .map_err(|_| "Installed frontend already dispatched")?;
-            Ok(Dispatch::Ui(launch))
+            Ok(Dispatch::InstalledUi(InstalledLaunch {
+                args,
+                instance,
+                user_root,
+            }))
         }
     }
 }
@@ -278,8 +305,9 @@ fn bootstrap(
     manifest: &Manifest,
     executable: &Path,
     user_root: &Path,
+    state: &Path,
 ) -> Result<Vec<OsString>, String> {
-    bootstrap_with_migration(manifest, executable, user_root, |root| {
+    bootstrap_with_migration(manifest, executable, user_root, state, |root| {
         super::installed_migration::migrate_if_pristine(
             root,
             &empty_document()?,
@@ -288,20 +316,41 @@ fn bootstrap(
     })
 }
 
+fn profile_root(manifest: &Manifest, user_root: &Path) -> Result<PathBuf, String> {
+    let root = directory(user_root)?;
+    match &manifest.data_namespace {
+        Some(namespace) => directory(&directory(&root.join("Instances"))?.join(namespace)),
+        None => Ok(root),
+    }
+}
+
+pub(crate) fn webview_profile_path(user_root: &Path, state: &Path) -> Result<PathBuf, String> {
+    let legacy = state.join("webview-editor");
+    // The legacy user data folder can contain a customized editor appearance.
+    match fs::symlink_metadata(&legacy) {
+        Ok(_) => Ok(legacy),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(user_root.join("wv")),
+        Err(error) => Err(format!(
+            "Inspect WebView2 profile {}: {error}",
+            legacy.display()
+        )),
+    }
+}
+
+fn verify_backend(manifest: &Manifest, executable: &Path) -> Result<(), String> {
+    let backend = install_root(executable)?.join(BACKEND_PATH);
+    verify_hash(&backend, &manifest.backend.sha256)
+}
+
 fn bootstrap_with_migration(
     manifest: &Manifest,
     executable: &Path,
     user_root: &Path,
+    state: &Path,
     migrate: impl FnOnce(&Path) -> Result<super::installed_migration::MigrationOutcome, String>,
 ) -> Result<Vec<OsString>, String> {
     let backend = install_root(executable)?.join(BACKEND_PATH);
-    verify_hash(&backend, &manifest.backend.sha256)?;
 
-    let mut user_root = directory(user_root)?;
-    if let Some(namespace) = &manifest.data_namespace {
-        let instances = directory(&user_root.join("Instances"))?;
-        user_root = directory(&instances.join(namespace))?;
-    }
     let _guard = OpenOptions::new()
         .read(true)
         .write(true)
@@ -310,14 +359,13 @@ fn bootstrap_with_migration(
         .share_mode(0)
         .open(user_root.join(".installed-bootstrap.lock"))
         .map_err(|e| format!("Installed profile bootstrap: {e}"))?;
-    let state = directory(&user_root.join("state"))?;
     let profile = user_root.join("profile.json");
     let local = state.join("lighting-local.json");
     directory(&state.join("assets"))?;
-    super::first_run::recover(&state, &profile)?;
+    super::first_run::recover(state, &profile)?;
 
     let migration = if manifest.data_namespace.is_none() {
-        migrate(&user_root)?
+        migrate(user_root)?
     } else {
         super::installed_migration::MigrationOutcome::None
     };
@@ -338,12 +386,12 @@ fn bootstrap_with_migration(
     let new_profile = absent(&profile)?;
     let new_local = absent(&local)?;
     configure_default_backend(
-        &state,
+        state,
         &backend,
         &manifest.backend.sha256,
         (new_profile && new_local && !imported_external_port) || imported_owned_backend,
     )?;
-    if imported_external_port && backend_default_owned(&state)? {
+    if imported_external_port && backend_default_owned(state)? {
         // An imported external SDK already uses this port. Never claim it with our worker.
         let path = state.join("managed-openrgb.json");
         let bytes = fs::read(&path).map_err(|e| e.to_string())?;
@@ -355,7 +403,7 @@ fn bootstrap_with_migration(
     }
     if manifest.data_namespace.is_none()
         && let Err(error) =
-            super::backend_helper::configure_installed_client(&state, install_root(executable)?)
+            super::backend_helper::configure_installed_client(state, install_root(executable)?)
     {
         eprintln!("Installed OpenRGB helper unavailable: {error}");
     }
@@ -377,7 +425,7 @@ fn bootstrap_with_migration(
     }
     let args = vec![
         "--state-dir".into(),
-        state.into_os_string(),
+        state.as_os_str().to_owned(),
         "--project".into(),
         profile.into_os_string(),
     ];
@@ -386,7 +434,7 @@ fn bootstrap_with_migration(
     Ok(args)
 }
 
-fn directory(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn directory(path: &Path) -> Result<PathBuf, String> {
     match fs::create_dir(path) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -547,9 +595,17 @@ pub(crate) fn backend_default_owned(state: &Path) -> Result<bool, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    pub(crate) fn fresh_profile() -> (Fixture, PathBuf, PathBuf, Vec<OsString>) {
+        let fixture = Fixture::new();
+        let (exe, manifest) = fixture.payload(b"fixture backend");
+        let user = fixture.0.join("user");
+        let args = bootstrap(&manifest, &exe, &user).unwrap();
+        (fixture, user.join("profile.json"), user.join("state"), args)
+    }
 
     // Bootstrap fixtures never inspect the developer's real sessions or copy their data.
     fn bootstrap(
@@ -557,12 +613,15 @@ mod tests {
         executable: &Path,
         user_root: &Path,
     ) -> Result<Vec<OsString>, String> {
-        bootstrap_with_migration(manifest, executable, user_root, |_| {
+        verify_backend(manifest, executable)?;
+        let user_root = profile_root(manifest, user_root)?;
+        let state = directory(&user_root.join("state"))?;
+        bootstrap_with_migration(manifest, executable, &user_root, &state, |_| {
             Ok(super::super::installed_migration::MigrationOutcome::None)
         })
     }
 
-    struct Fixture(PathBuf);
+    pub(crate) struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
             let stamp = SystemTime::now()
@@ -609,6 +668,61 @@ mod tests {
     }
 
     #[test]
+    fn fresh_install_keeps_webview_profile_at_the_user_root() {
+        let fixture = Fixture::new();
+        let (_, manifest) = fixture.payload(b"fixture backend");
+        let root = profile_root(&manifest, &fixture.0.join("Prismestra")).unwrap();
+        let state = directory(&root.join("state")).unwrap();
+        let profile = webview_profile_path(&root, &state).unwrap();
+        assert_eq!(profile, root.join("wv"));
+        assert!(!profile.exists());
+        assert_eq!(directory(&profile).unwrap(), profile);
+        assert_eq!(webview_profile_path(&root, &state).unwrap(), profile);
+        assert!(!state.join("webview-editor").exists());
+    }
+
+    #[test]
+    fn namespaced_install_keeps_webview_data_separate() {
+        let fixture = Fixture::new();
+        let (_, mut manifest) = fixture.payload(b"fixture backend");
+        let root = fixture.0.join("Prismestra");
+        let default_root = profile_root(&manifest, &root).unwrap();
+        let default_state = directory(&default_root.join("state")).unwrap();
+        let default_profile = webview_profile_path(&default_root, &default_state).unwrap();
+        let namespace = "81967ed3-4ba4-4b0b-80aa-d2139a423f13";
+        manifest.data_namespace = Some(namespace.into());
+        let scoped_root = profile_root(&manifest, &root).unwrap();
+        let scoped_state = directory(&scoped_root.join("state")).unwrap();
+        let scoped_profile = webview_profile_path(&scoped_root, &scoped_state).unwrap();
+        assert_eq!(
+            scoped_profile,
+            default_root.join("Instances").join(namespace).join("wv")
+        );
+        assert_ne!(
+            directory(&scoped_profile).unwrap(),
+            directory(&default_profile).unwrap()
+        );
+    }
+
+    #[test]
+    fn upgrade_retains_existing_webview_folder_and_its_data() {
+        let fixture = Fixture::new();
+        let (exe, manifest) = fixture.payload(b"old backend");
+        let root = fixture.0.join("Prismestra");
+        bootstrap(&manifest, &exe, &root).unwrap();
+        let state = directory(&root.join("state")).unwrap();
+        let legacy = directory(&state.join("webview-editor")).unwrap();
+        let preferences = legacy.join("preferences-fixture");
+        fs::write(&preferences, b"custom appearance").unwrap();
+        let (exe, manifest) = fixture.payload(b"updated backend");
+        bootstrap(&manifest, &exe, &root).unwrap();
+        let selected = webview_profile_path(&root, &state).unwrap();
+        assert_eq!(directory(&selected).unwrap(), legacy);
+        assert_eq!(fs::read(&preferences).unwrap(), b"custom appearance");
+        assert!(!root.join("wv").exists());
+    }
+
+    #[test]
     fn installed_flags_are_exclusive_and_legacy_args_pass_through() {
         let parse =
             |args: &[&str]| command(&args.iter().copied().map(OsString::from).collect::<Vec<_>>());
@@ -641,12 +755,7 @@ mod tests {
 
     #[test]
     fn first_launch_builds_valid_profile_and_defers_activation_until_handover() {
-        let fixture = Fixture::new();
-        let (exe, manifest) = fixture.payload(b"fixture backend");
-        let user = fixture.0.join("user");
-        let args = bootstrap(&manifest, &exe, &user).unwrap();
-        let state = user.join("state");
-        let profile = user.join("profile.json");
+        let (fixture, profile, state, args) = fresh_profile();
         let document = Document::load(&profile).unwrap();
         let local = Local::read(&state.join("lighting-local.json"), &document).unwrap();
         assert!(document.lighting.setup.devices.is_empty());
@@ -669,7 +778,10 @@ mod tests {
             .unwrap();
         assert_eq!(config.endpoint().to_string(), "127.0.0.1:17422");
         config
-            .require_identity(&fixture.0.join(BACKEND_PATH), &manifest.backend.sha256)
+            .require_identity(
+                &fixture.0.join(BACKEND_PATH),
+                &fingerprint(b"fixture backend"),
+            )
             .unwrap();
     }
 

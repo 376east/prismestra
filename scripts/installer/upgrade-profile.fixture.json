@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "lighting": {
+    "version": 1,
+    "setup": {"version": 1, "devices": [], "canvas": {"width": 120, "height": 80, "points": []}},
+    "scene": {"effect": "noise_map", "colors": [25861], "brightness": 42, "speed": 10, "fps": 30,
+              "temperature": 0, "tint": 0, "noise": {"frequency": 0.01, "amplitude": 1.0,
+              "lacunarity": 2.0, "persistence": 0.5, "octaves": 3, "motion": 0, "motion_speed": 4},
+              "noise_palette": "custom", "rainbow_width": 50},
+    "schedule": {"enabled": false, "paused": false, "timezone": "UTC", "times": [600, 1020, 120]},
+    "groups": {"pc": [], "door": []}
+  },
+  "ambient": {"sources": [], "routes": []},
+  "lcd": [],
+  "temperatures": {"sources": []}
+}

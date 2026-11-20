@@ -1047,7 +1047,13 @@ impl App {
         plan.validate(&document)?;
         let revision = self.runtime.with(|runtime, _| {
             let created = if let Some(local) = &local {
-                runtime.prepare_managed_outputs(&self.state_dir, local, &document, &mut plan)?
+                runtime.prepare_managed_outputs(
+                    &self.state_dir,
+                    previous.local.as_ref(),
+                    local,
+                    &document,
+                    &mut plan,
+                )?
             } else {
                 false
             };
@@ -1106,17 +1112,6 @@ impl App {
                 self.status =
                     "Подключения выбраны; ожидаю открытия устройств. Файл привязок не изменён."
                         .into();
-                unsafe {
-                    SetWindowTextW(
-                        GetParent(self.h(PC_ON)),
-                        wide(if self.native_lighting.is_some() {
-                            "Prismestra · Подсветка устройств"
-                        } else {
-                            "Prismestra · Предпросмотр"
-                        })
-                        .as_ptr(),
-                    );
-                }
                 self.set_text(
                     PC_ON,
                     if self.native_lighting.is_some() {

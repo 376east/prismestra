@@ -7,7 +7,11 @@ use super::{
     lighting_outputs::Local,
     sensor_bindings,
 };
-use crate::{devices::Binding, runtime::scene::Scene, storage, ui::catalog::Catalog};
+use crate::{
+    devices::Binding,
+    storage,
+    ui::catalog::{Catalog, draft},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -274,7 +278,7 @@ fn apply(
     for (name, limit) in [
         ("sensor-sources.json", sensor_bindings::MAX_BYTES),
         ("scene-library.json", 256 * 1024),
-        ("editor-scene-draft.json", 65_536),
+        ("editor-scene-draft.json", draft::MAX_BYTES),
     ] {
         let destination = format!("state/{name}");
         if pending
@@ -295,9 +299,9 @@ fn apply(
             "scene-library.json" => {
                 Catalog::load(&path, &document.lighting.scene)?;
             }
-            _ => serde_json::from_slice::<Scene>(&bytes)
-                .map_err(err)?
-                .validate()?,
+            _ => {
+                draft::Draft::decode(&bytes)?;
+            }
         }
         files.insert(destination, bytes);
     }
@@ -1536,6 +1540,34 @@ mod tests {
             sensors
         );
         assert!(!installed.join("backend-task.json").exists());
+    }
+
+    #[test]
+    fn keeps_legacy_and_versioned_scene_drafts_during_installation() {
+        for versioned in [false, true] {
+            let fixture = Fixture::new();
+            let doc = document(true);
+            fixture.populate(&doc, "127.0.0.1:6742".parse().unwrap());
+            let mut edited = doc.lighting.scene.clone();
+            edited.brightness = 37;
+            let value = if versioned {
+                serde_json::json!({
+                    "version": 1,
+                    "scene": edited,
+                    "origin": {"id": "current", "name": "Saved", "scene": doc.lighting.scene}
+                })
+            } else {
+                serde_json::to_value(edited).unwrap()
+            };
+            let bytes = serde_json::to_vec(&value).unwrap();
+            let name = "editor-scene-draft.json";
+            fs::write(fixture.source.state.join(name), &bytes).unwrap();
+            fixture.migrate(false).unwrap();
+            assert_eq!(
+                fs::read(fixture.target.join("state").join(name)).unwrap(),
+                bytes
+            );
+        }
     }
 
     #[test]

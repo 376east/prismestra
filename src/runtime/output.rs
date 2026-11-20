@@ -83,10 +83,23 @@ pub enum WriteResult {
     /// The last accepted value is unchanged; no transport request was sent.
     Unchanged,
     Deferred(Duration),
+    /// The current owner can recover in place and is waiting to retry.
+    Retrying(Duration, String),
+    /// Reopening with the same configuration cannot fix this failure.
+    RequiresAction(String),
+}
+#[derive(Debug)]
+pub enum PrepareError {
+    Failed(String),
+    RequiresAction(String),
 }
 pub trait RgbDriver {
     fn protocol(&self) -> Driver;
     fn leds(&self) -> usize;
+    /// Validate the route before reporting readiness or consuming frames.
+    fn prepare(&mut self, _: &Cancellation) -> Result<(), PrepareError> {
+        Ok(())
+    }
     /// Submitted is a transport completion, never a physical LED acknowledgement.
     fn write(&mut self, colors: &[Rgb], cancel: &Cancellation) -> Result<WriteResult, String>;
 }
@@ -108,6 +121,7 @@ pub struct Snapshot {
     pub deferred: u64,
     pub last_submitted: Option<Ticket>,
     pub error: Option<String>,
+    pub requires_action: bool,
 }
 struct Frame {
     ticket: Ticket,
@@ -183,6 +197,7 @@ impl Output {
                     deferred: 0,
                     last_submitted: None,
                     error: None,
+                    requires_action: false,
                 },
             }),
             wake: Condvar::new(),
@@ -200,7 +215,12 @@ impl Output {
                 let mut state = worker.state.lock().unwrap_or_else(|e| e.into_inner());
                 state.pending = None;
                 match result {
-                    Ok(Ok(())) => state.snapshot.phase = Phase::Stopped,
+                    Ok(Ok(Stop::Cancelled)) => state.snapshot.phase = Phase::Stopped,
+                    Ok(Ok(Stop::RequiresAction(error))) => {
+                        state.snapshot.phase = Phase::Failed;
+                        state.snapshot.error = Some(error);
+                        state.snapshot.requires_action = true;
+                    }
                     Ok(Err(error)) => {
                         state.snapshot.phase = Phase::Failed;
                         state.snapshot.error = Some(error);
@@ -299,24 +319,34 @@ impl Drop for Output {
         let _ = self.reap();
     }
 }
-fn run<F>(shared: &Arc<Shared>, protocol: Driver, leds: usize, factory: F) -> Result<(), String>
+enum Stop {
+    Cancelled,
+    RequiresAction(String),
+}
+
+fn run<F>(shared: &Arc<Shared>, protocol: Driver, leds: usize, factory: F) -> Result<Stop, String>
 where
     F: FnOnce(Cancellation) -> Result<Box<dyn RgbDriver>, String>,
 {
     if shared.cancel.cancelled() {
-        return Ok(());
+        return Ok(Stop::Cancelled);
     }
     let mut driver = factory(shared.cancel.clone())?;
     if driver.protocol() != protocol || driver.leds() != leds {
         return Err("RGB driver capabilities changed during connection".into());
     }
     if shared.cancel.cancelled() {
-        return Ok(());
+        return Ok(Stop::Cancelled);
+    }
+    match driver.prepare(&shared.cancel) {
+        Ok(()) => {}
+        Err(PrepareError::Failed(error)) => return Err(error),
+        Err(PrepareError::RequiresAction(error)) => return Ok(Stop::RequiresAction(error)),
     }
     {
         let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
         if shared.cancel.cancelled() {
-            return Ok(());
+            return Ok(Stop::Cancelled);
         }
         state.snapshot.phase = Phase::Ready;
     }
@@ -326,7 +356,7 @@ where
             let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if shared.cancel.cancelled() {
-                    return Ok(());
+                    return Ok(Stop::Cancelled);
                 }
                 let now = Instant::now();
                 if now >= retry
@@ -347,21 +377,34 @@ where
             }
         };
         if shared.cancel.cancelled() {
-            return Ok(());
+            return Ok(Stop::Cancelled);
         }
-        match driver.write(&frame.colors, &shared.cancel)? {
+        let result = driver.write(&frame.colors, &shared.cancel)?;
+        match result {
             WriteResult::Submitted => {
                 let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                if state.snapshot.phase == Phase::Connecting {
+                    state.snapshot.phase = Phase::Ready;
+                    state.snapshot.error = None;
+                }
                 state.snapshot.submitted = state.snapshot.submitted.saturating_add(1);
                 state.snapshot.last_submitted = Some(frame.ticket);
             }
             WriteResult::Unchanged => {}
-            WriteResult::Deferred(delay) => {
+            WriteResult::RequiresAction(error) => return Ok(Stop::RequiresAction(error)),
+            WriteResult::Deferred(delay) | WriteResult::Retrying(delay, _) => {
                 if delay.is_zero() || delay > Duration::from_secs(30) {
                     return Err("Invalid RGB driver retry delay".into());
                 }
                 retry = Instant::now() + delay;
                 let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                if shared.cancel.cancelled() {
+                    return Ok(Stop::Cancelled);
+                }
+                if let WriteResult::Retrying(_, error) = result {
+                    state.snapshot.phase = Phase::Connecting;
+                    state.snapshot.error = Some(error);
+                }
                 state.snapshot.deferred = state.snapshot.deferred.saturating_add(1);
                 if state.pending.is_none() {
                     state.pending = Some(frame);

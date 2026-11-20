@@ -1,6 +1,15 @@
 //! A prepared set of deferred lighting capabilities. Preparation opens no devices.
 use super::*;
 
+#[cfg(windows)]
+pub(crate) enum OutputActivity {
+    Off,
+    Connecting,
+    Retrying(String),
+    Sent(u64),
+    Unavailable(Option<String>),
+}
+
 pub type RgbOutput = (String, Vec<String>, RgbFactory);
 pub type LcdOutput = (String, Vec<String>, LcdFactory);
 #[derive(Clone, Default)]
@@ -52,6 +61,81 @@ impl OutputPlan {
     }
 }
 impl Runtime {
+    #[cfg(windows)]
+    pub(crate) fn output_activity(&self, device: &crate::devices::Device) -> OutputActivity {
+        use crate::runtime::output::Phase;
+
+        let id = &device.id;
+        let is_lcd = device.role == Role::Lcd;
+        if !device.enabled
+            || self.stopped
+            || !self.desired.on(self.target(id))
+            || (is_lcd
+                && self
+                    .document
+                    .lcd
+                    .iter()
+                    .any(|entry| entry.device == *id && !entry.config.enabled))
+        {
+            return OutputActivity::Off;
+        }
+        let pending_output = self.pending.as_ref().is_some_and(|pending| {
+            // A live RGB plan leaves every applied LCD worker running.
+            pending
+                .live_rgb
+                .as_ref()
+                .is_none_or(|live| !is_lcd && !live.retained.contains(id))
+        });
+        if self.suspended || pending_output || self.power.pending() {
+            return OutputActivity::Connecting;
+        }
+        if let Some(error) = self
+            .rgb_specs
+            .get(id)
+            .and_then(|spec| spec.action_required_error.as_ref())
+        {
+            return OutputActivity::Unavailable(Some(error.clone()));
+        }
+        let recovery = self.output_recovery.get(id);
+        let retry_scheduled = self.power.error().is_none()
+            && recovery.is_some_and(recovery::Recovery::retry_scheduled);
+        let failed_activity = |error| match error {
+            Some(error) if retry_scheduled => OutputActivity::Retrying(error),
+            error => OutputActivity::Unavailable(error),
+        };
+        if let Some(error) = recovery.and_then(|state| state.start_error.clone()) {
+            return failed_activity(Some(error));
+        }
+        let (phase, frames, error) = if is_lcd {
+            let Some(status) = self.lcd_status(id) else {
+                return OutputActivity::Unavailable(None);
+            };
+            let phase = match status.phase {
+                lcd_worker::Phase::Connecting => Phase::Connecting,
+                lcd_worker::Phase::Ready => Phase::Ready,
+                lcd_worker::Phase::Stopping => Phase::Stopping,
+                lcd_worker::Phase::Stopped => Phase::Stopped,
+                lcd_worker::Phase::Failed => Phase::Failed,
+            };
+            (phase, status.frames_sent, status.error)
+        } else {
+            let Some(status) = self.host.status(id) else {
+                return OutputActivity::Unavailable(None);
+            };
+            if status.requires_action {
+                return OutputActivity::Unavailable(status.error);
+            }
+            (status.phase, status.submitted, status.error)
+        };
+        match phase {
+            Phase::Ready if frames > 0 => OutputActivity::Sent(frames),
+            Phase::Connecting => error.map_or(OutputActivity::Connecting, OutputActivity::Retrying),
+            Phase::Ready => OutputActivity::Connecting,
+            Phase::Failed => failed_activity(error),
+            Phase::Stopping | Phase::Stopped => OutputActivity::Unavailable(error),
+        }
+    }
+
     /// Retain factories, not live handles. Reversion also drains current owners first.
     pub fn output_plan(&self) -> OutputPlan {
         OutputPlan {
@@ -72,7 +156,7 @@ impl Runtime {
         self.output_revision
     }
     pub fn outputs_ready(&self) -> Result<bool, String> {
-        self.ready()
+        self.ready(|_| false)
     }
     /// Reuse the configuration drain/persistence barrier.
     pub fn request_outputs(&mut self, outputs: OutputPlan) -> Result<u64, String> {
