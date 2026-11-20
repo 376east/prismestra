@@ -100,6 +100,7 @@ fn runtime() -> Runtime {
     )
     .unwrap()
 }
+#[track_caller]
 fn wait(mut check: impl FnMut() -> bool) {
     let until = Instant::now() + Duration::from_secs(4);
     while !check() {
@@ -555,7 +556,12 @@ fn startup_registers_managed_outputs_on_commit_and_retries_on_new_inventory() {
         .unwrap();
     assert!(runtime.managed_backend_ids.is_empty());
     let mut now = 0;
-    working(&mut runtime, "b", &mut now);
+    // Queue the first frame without spending A's retry budget while B opens.
+    tick(&mut runtime, &mut now);
+    wait(|| {
+        let status = runtime.host.status("b").unwrap();
+        status.phase == Phase::Ready && status.submitted > 0
+    });
     assert_eq!(runtime.managed_backend_ids, BTreeSet::from(["a".into()]));
     wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
     let initial_error = runtime.host.status("a").unwrap().error.unwrap();
@@ -1507,19 +1513,16 @@ impl crate::lcd::protocol::ReportTransport for Reports {
     }
 }
 
-fn arrival_lcd_runtime(name: &str, link: Arc<Link>) -> (Runtime, std::path::PathBuf) {
-    let mut runtime = runtime();
+const ARRIVAL_LCD_MEDIA: &[u8] = include_bytes!("../../lcd/fixtures/two-frame.apng");
+
+fn arrival_lcd_document(mut document: Document, name: &str) -> (Document, std::path::PathBuf) {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("work")
         .join(format!("arrival-lcd-{}-{name}", std::process::id()));
     let media = Assets::new(dir.clone())
         .unwrap()
-        .put(
-            include_bytes!("../../lcd/fixtures/two-frame.apng"),
-            32 * 1024 * 1024,
-        )
+        .put(ARRIVAL_LCD_MEDIA, 32 * 1024 * 1024)
         .unwrap();
-    let mut document = runtime.document().clone();
     document.lighting.setup.devices.push(Device {
         id: "lcd".into(),
         label: "LCD".into(),
@@ -1538,7 +1541,12 @@ fn arrival_lcd_runtime(name: &str, link: Arc<Link>) -> (Runtime, std::path::Path
             ..lcd::Config::default()
         },
     });
-    runtime = Runtime::new(document.clone(), None).unwrap();
+    (document, dir)
+}
+
+fn arrival_lcd_runtime(name: &str, link: Arc<Link>) -> (Runtime, std::path::PathBuf) {
+    let (document, dir) = arrival_lcd_document(runtime().document().clone(), name);
+    let mut runtime = Runtime::new(document.clone(), None).unwrap();
     let root = dir.clone();
     let factory: LcdFactory = Arc::new(move |config, _| {
         link.calls.fetch_add(1, Ordering::SeqCst);
@@ -1601,14 +1609,25 @@ fn remove_lcd_assets(runtime: Runtime, dir: std::path::PathBuf) {
 
 #[test]
 fn appending_lcd_starts_its_first_frame_without_reopening_existing_rgb() {
-    let lcd = Arc::new(Link::default());
-    let (mut fixture, assets) = arrival_lcd_runtime("append-to-live", lcd);
-    let proposal = fixture.document().clone();
-    let lcd_outputs = fixture.output_plan().lcd;
-    drain(&mut fixture);
-    drop(fixture);
-
     let mut runtime = runtime();
+    let (proposal, assets) = arrival_lcd_document(runtime.document().clone(), "append-to-live");
+    // Prepare the media before timing the plan commit and the first report.
+    let prepared = Arc::new(
+        crate::lcd::media::prepare(
+            Arc::from(ARRIVAL_LCD_MEDIA),
+            proposal.lcd[0].config.rotation,
+            || false,
+        )
+        .unwrap(),
+    );
+    let lcd = Arc::new(Link::default());
+    let lcd_factory: LcdFactory = Arc::new(move |config, _| {
+        Ok((
+            lcd::Controller::with_prepared_test_media(config, prepared.clone())?,
+            Box::new(Reports(lcd.clone())),
+        ))
+    });
+
     let rgb = Arc::new(Link::default());
     runtime
         .attach_rgb("a", vec!["existing-rgb".into()], factory(&rgb))
@@ -1617,7 +1636,9 @@ fn appending_lcd_starts_its_first_frame_without_reopening_existing_rgb() {
     working(&mut runtime, "a", &mut now);
     let before = runtime.host.status("a").unwrap();
     let mut outputs = runtime.output_plan();
-    outputs.lcd = lcd_outputs;
+    outputs
+        .lcd
+        .push(("lcd".into(), vec!["hid:append-to-live".into()], lcd_factory));
     let revision = runtime.request_outputs_for(proposal, outputs).unwrap();
     wait(|| {
         tick(&mut runtime, &mut now);
