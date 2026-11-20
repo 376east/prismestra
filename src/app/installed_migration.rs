@@ -1962,10 +1962,31 @@ mod tests {
         assert_eq!(fs::read(source_catalog).unwrap(), old_catalog);
         let completed = read_receipt(&fixture.target).unwrap().unwrap();
         assert!(completed.complete);
+        let rebased_bytes = fs::read(&target_catalog).unwrap();
         assert_eq!(
             completed.after[INSTALLED_SENSOR_CATALOG],
-            fingerprint(&fs::read(target_catalog).unwrap())
+            fingerprint(&rebased_bytes)
         );
+        assert_eq!(
+            completed.before[INSTALLED_SENSOR_CATALOG],
+            Some(fingerprint(&old_catalog))
+        );
+
+        // A second interruption can leave the newer receipt on disk while
+        // the installed catalog still contains the old, verified bytes.
+        let mut interrupted = completed;
+        interrupted.complete = false;
+        write_receipt(&fixture.target, &interrupted).unwrap();
+        fs::write(&target_catalog, &old_catalog).unwrap();
+        assert!(matches!(
+            fixture.migrate(false).unwrap(),
+            MigrationOutcome::Imported { .. }
+        ));
+        let resumed = read_receipt(&fixture.target).unwrap().unwrap();
+        assert!(resumed.complete);
+        assert_eq!(resumed.before, interrupted.before);
+        assert_eq!(resumed.after, interrupted.after);
+        assert_eq!(fs::read(target_catalog).unwrap(), rebased_bytes);
     }
 
     #[test]
