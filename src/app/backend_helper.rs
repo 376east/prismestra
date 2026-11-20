@@ -725,24 +725,6 @@ fn helper_note(
 }
 
 #[cfg(test)]
-fn supervise_helper(
-    state_dir: &Path,
-    request: &Request,
-    helper: &Identity,
-    snapshot: impl Fn() -> super::managed_backend::Snapshot,
-    stop_restarting: impl Fn(),
-) -> Result<(), String> {
-    supervise_helper_with_clock(
-        state_dir,
-        request,
-        helper,
-        snapshot,
-        stop_restarting,
-        &ActiveClock,
-    )
-}
-
-#[cfg(test)]
 fn supervise_helper_with_clock(
     state_dir: &Path,
     request: &Request,
@@ -1450,7 +1432,31 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn status_and_owner_read_sharing_failures_preserve_supervisor_and_recover() {
-        use std::os::windows::fs::OpenOptionsExt;
+        use std::{os::windows::fs::OpenOptionsExt, sync::mpsc};
+
+        struct SharingClock {
+            now: Cell<Option<u64>>,
+            polled: mpsc::Sender<()>,
+            resume: mpsc::Receiver<u64>,
+        }
+
+        impl Clock for SharingClock {
+            fn now_ms(&self) -> Result<u64, String> {
+                self.now
+                    .get()
+                    .ok_or_else(|| "Sharing fixture closed".into())
+            }
+
+            fn sleep(&self, _: Duration) {
+                self.now.set(
+                    self.polled
+                        .send(())
+                        .ok()
+                        .and_then(|_| self.resume.recv().ok()),
+                );
+            }
+        }
+
         let (directory, request, helper) = sharing_fixture("sharing-recovery");
         let status_path = directory.join("helper-status.json");
         fs::write(&status_path, b"{}").unwrap();
@@ -1464,8 +1470,11 @@ mod tests {
         let paused = Arc::new(AtomicBool::new(false));
         let pause_observed = paused.clone();
         let state_dir = directory.clone();
+        let now = request.timestamp_ms;
+        let (polled, completed) = mpsc::channel();
+        let (resume, command) = mpsc::channel();
         let worker = thread::spawn(move || {
-            supervise_helper(
+            supervise_helper_with_clock(
                 &state_dir,
                 &request,
                 &helper,
@@ -1476,17 +1485,28 @@ mod tests {
                 || {
                     pause_observed.store(true, Ordering::SeqCst);
                 },
+                &SharingClock {
+                    now: Cell::new(Some(now)),
+                    polled,
+                    resume: command,
+                },
             )
         });
-        thread::sleep(Duration::from_millis(750));
-        assert!(!worker.is_finished());
-        assert!(calls.load(Ordering::SeqCst) >= 2);
+        let wait_for_poll = || {
+            completed
+                .recv_timeout(Duration::from_secs(10))
+                .expect("Supervisor did not complete a sharing-fixture poll");
+        };
+        let poll = |now| {
+            resume.send(now).unwrap();
+            wait_for_poll();
+        };
+        wait_for_poll();
+        poll(now);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(fs::read(&status_path).unwrap(), b"{}");
         drop(reader);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while read_json::<Status>(&status_path).is_err() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(20));
-        }
+        poll(now);
         let first = read_json::<Status>(&status_path).unwrap();
         let owner_reader = fs::OpenOptions::new()
             .read(true)
@@ -1502,7 +1522,7 @@ mod tests {
             },
         )
         .unwrap();
-        thread::sleep(Duration::from_millis(250));
+        poll(now);
         assert!(!paused.load(Ordering::SeqCst));
         write_json(
             &directory.join("owner-pause.json"),
@@ -1513,19 +1533,14 @@ mod tests {
             },
         )
         .unwrap();
-        thread::sleep(Duration::from_millis(750));
-        assert!(!worker.is_finished());
+        poll(now);
         assert!(
             paused.load(Ordering::SeqCst),
             "Stop must suppress respawn even while owner reads are blocked"
         );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         drop(owner_reader);
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while read_json::<Status>(&status_path).unwrap().timestamp_ms <= first.timestamp_ms
-            && Instant::now() < deadline
-        {
-            thread::sleep(Duration::from_millis(20));
-        }
+        poll(now + 1);
         assert!(read_json::<Status>(&status_path).unwrap().timestamp_ms > first.timestamp_ms);
         write_json(
             &directory.join("owner-cancel.json"),
@@ -1536,6 +1551,8 @@ mod tests {
             },
         )
         .unwrap();
+        resume.send(now + 1).unwrap();
+        drop(resume);
         worker.join().unwrap().unwrap();
         for name in [
             "owner-request.json",
