@@ -1,4 +1,4 @@
-name: Windows checks
+name: CI
 
 on:
   push:
@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -25,6 +25,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install stable Rust
         shell: pwsh
         run: |
@@ -52,8 +54,6 @@ jobs:
         run: |
           node --check src/ui/windows/web/app.js
           node tests/native_ui_ipc.cjs
-      - name: Check all targets
-        run: cargo check --locked --all-targets
       - name: Test without physical devices
         run: cargo test --locked -- --test-threads=1
       - name: Check Clippy
@@ -62,7 +62,7 @@ jobs:
   package:
     name: Build Windows Setup candidate
     if: >-
-      github.repository == 'malyarq/prismestra' &&
+      github.repository_id == '1450402221' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'push' &&
         ((startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-preview.')) ||
