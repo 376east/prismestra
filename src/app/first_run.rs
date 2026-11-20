@@ -1347,7 +1347,7 @@ mod tests {
             .prepare(&plan.document, &state.join("assets"))
             .unwrap();
         let revision = runtime
-            .request_startup_outputs_for(&state, &plan.local, plan.document.clone(), outputs)
+            .request_startup_outputs_for(&state, None, &plan.local, plan.document.clone(), outputs)
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1453,6 +1453,7 @@ mod tests {
         let revision = runtime
             .request_startup_outputs_for(
                 &fixture.state,
+                None,
                 &plan.local,
                 plan.document.clone(),
                 outputs,

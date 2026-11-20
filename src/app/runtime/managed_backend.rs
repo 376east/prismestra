@@ -1,5 +1,6 @@
 //! Backend lifecycle is a local capability; portable documents never grant it.
 use super::*;
+use crate::{app::lighting_outputs::Local, devices::Binding};
 type BackendGuard = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
 impl Runtime {
@@ -43,10 +44,12 @@ impl Runtime {
     pub fn prepare_managed_outputs(
         &mut self,
         state_dir: &Path,
-        local: &crate::app::lighting_outputs::Local,
+        previous: Option<&Local>,
+        local: &Local,
         document: &Document,
         outputs: &mut OutputPlan,
     ) -> Result<bool, String> {
+        self.reuse_unchanged_native_rgb(previous, local, document, outputs, false);
         let Some(config) = crate::app::managed_backend::Config::read_optional(state_dir)? else {
             return Ok(false);
         };
@@ -66,12 +69,12 @@ impl Runtime {
     pub(crate) fn request_startup_outputs_for(
         &mut self,
         state_dir: &Path,
-        local: &crate::app::lighting_outputs::Local,
+        previous: Option<&Local>,
+        local: &Local,
         document: Document,
         mut outputs: OutputPlan,
     ) -> Result<u64, String> {
-        let config = crate::app::managed_backend::Config::read_optional(state_dir);
-        let ids = match config {
+        let ids = match crate::app::managed_backend::Config::read_optional(state_dir) {
             Ok(Some(config)) => {
                 let ids = matching_ids(local, &document, config.endpoint());
                 if !ids.is_empty() {
@@ -98,9 +101,59 @@ impl Runtime {
                 BTreeSet::new()
             }
         };
+        self.reuse_unchanged_native_rgb(previous, local, &document, &mut outputs, true);
         let revision = self.request_outputs_for(document, outputs)?;
         self.pending.as_mut().unwrap().startup_managed_ids = Some(ids);
         Ok(revision)
+    }
+
+    fn reuse_unchanged_native_rgb(
+        &self,
+        previous: Option<&Local>,
+        local: &Local,
+        document: &Document,
+        outputs: &mut OutputPlan,
+        keep_ha_session: bool,
+    ) {
+        let Some(previous) = previous.filter(|old| old.door_brightness == local.door_brightness)
+        else {
+            return;
+        };
+        for (id, keys, factory) in &mut outputs.rgb {
+            let Some(binding) = local.devices.get(id) else {
+                continue;
+            };
+            // OpenRGB factories carry the backend policy from their preparation.
+            // Manual Apply can reload HA credentials under the same binding ID.
+            if matches!(binding, Binding::OpenRgb { .. })
+                || (!keep_ha_session && matches!(binding, Binding::HomeAssistant { .. }))
+            {
+                continue;
+            }
+            let same_device = document
+                .lighting
+                .setup
+                .devices
+                .iter()
+                .find(|device| device.id == *id)
+                == self
+                    .document
+                    .lighting
+                    .setup
+                    .devices
+                    .iter()
+                    .find(|device| device.id == *id);
+            if same_device
+                && previous.devices.get(id) == Some(binding)
+                && self
+                    .host
+                    .status(id)
+                    .is_some_and(|snapshot| snapshot.phase == crate::runtime::output::Phase::Ready)
+                && let Some(spec) = self.rgb_specs.get(id).filter(|spec| spec.keys == *keys)
+            {
+                *factory = spec.factory.clone();
+            }
+        }
     }
 
     pub fn configure_managed_backend(

@@ -369,7 +369,7 @@ fn managed_candidate_without_matching_bindings_keeps_live_owner_until_commit() {
     let document = runtime.document().clone();
     assert!(
         !runtime
-            .prepare_managed_outputs(&root, &local, &document, &mut OutputPlan::default())
+            .prepare_managed_outputs(&root, None, &local, &document, &mut OutputPlan::default())
             .unwrap()
     );
     assert!(runtime.managed_backend.is_some());
@@ -415,7 +415,7 @@ fn startup_isolates_endpoint_contention_and_retries_the_returned_output() {
     outputs.rgb[1].2 = factory(&b);
     let lease = crate::runtime::output::Lease::acquire(outputs.rgb[0].1.clone()).unwrap();
     let revision = runtime
-        .request_startup_outputs_for(&state, &local, document.clone(), outputs)
+        .request_startup_outputs_for(&state, None, &local, document.clone(), outputs)
         .unwrap();
     let device = &document.lighting.setup.devices[0];
     assert!(matches!(
@@ -512,7 +512,7 @@ fn startup_registers_managed_outputs_on_commit_and_retries_on_new_inventory() {
     outputs.rgb[0].2 = factory(&a);
     outputs.rgb[1].2 = factory(&b);
     runtime
-        .request_startup_outputs_for(&state, &local, document, outputs)
+        .request_startup_outputs_for(&state, None, &local, document, outputs)
         .unwrap();
     assert!(runtime.managed_backend_ids.is_empty());
     let mut now = 0;
@@ -800,6 +800,12 @@ fn live_plan_adds_an_independent_rgb_output_while_an_existing_write_is_held() {
     assert_plan_preserves_neighbor(PlanChange::Add);
 }
 
+#[cfg(windows)]
+#[test]
+fn live_plan_native_discovery_keeps_ready_bindings_when_preparing_fresh_factories() {
+    assert_plan_preserves_neighbor(PlanChange::NativeAdd);
+}
+
 #[test]
 fn live_plan_waits_for_rgb_owner_release_without_stopping_its_neighbor() {
     assert_plan_preserves_neighbor(PlanChange::Replace);
@@ -813,8 +819,21 @@ fn live_plan_cancel_restores_the_original_owner_without_stopping_its_neighbor() 
 #[derive(Debug)]
 enum PlanChange {
     Add,
+    #[cfg(windows)]
+    NativeAdd,
     Replace,
     Cancel,
+}
+
+impl PlanChange {
+    fn adds_output(&self) -> bool {
+        match self {
+            Self::Add => true,
+            #[cfg(windows)]
+            Self::NativeAdd => true,
+            Self::Replace | Self::Cancel => false,
+        }
+    }
 }
 
 fn assert_plan_preserves_neighbor(change: PlanChange) {
@@ -836,18 +855,48 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
     let healthy = Arc::new(Link::default());
     let new = Arc::new(Link::default());
     let key = format!("live-plan-held-{}-{change:?}", std::process::id());
+    #[cfg(windows)]
+    let local = matches!(change, PlanChange::NativeAdd).then(|| {
+        let devices = [("a", 60331), ("b", 60332), ("added", 60333)]
+            .map(|(id, port)| {
+                (
+                    id.to_owned(),
+                    crate::devices::Binding::WledDdp {
+                        endpoint: ([127, 0, 0, 207], port).into(),
+                        controller: None,
+                    },
+                )
+            })
+            .into();
+        crate::app::lighting_outputs::Local {
+            version: 1,
+            devices,
+            monitors: Default::default(),
+            door_brightness: 60,
+        }
+    });
+    let (held_keys, healthy_keys) = (vec![key], Vec::new());
+    #[cfg(windows)]
+    let (held_keys, healthy_keys) = local.as_ref().map_or((held_keys, healthy_keys), |local| {
+        (
+            local.devices["a"].endpoint_keys(),
+            local.devices["b"].endpoint_keys(),
+        )
+    });
     let held_factory = held.clone();
     runtime
         .attach_rgb(
             "a",
-            vec![key],
+            held_keys,
             Arc::new(move |_| {
                 held_factory.calls.fetch_add(1, Ordering::SeqCst);
                 Ok(Box::new(HeldDriver(held_factory.clone())))
             }),
         )
         .unwrap();
-    runtime.attach_rgb("b", vec![], factory(&healthy)).unwrap();
+    runtime
+        .attach_rgb("b", healthy_keys, factory(&healthy))
+        .unwrap();
     let mut now = 0;
     working(&mut runtime, "b", &mut now);
     wait(|| {
@@ -857,7 +906,7 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
     let healthy_generation = runtime.host.status("b").unwrap().generation;
     let mut document = runtime.document().clone();
     let mut plan = runtime.output_plan();
-    let new_id = if !matches!(change, PlanChange::Add) {
+    let new_id = if !change.adds_output() {
         let (_, _, replacement) = plan.rgb.iter_mut().find(|(id, _, _)| id == "a").unwrap();
         let old = held.clone();
         let next = factory(&new);
@@ -881,6 +930,58 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
         plan.rgb.push(("added".into(), vec![], factory(&new)));
         "added"
     };
+    #[cfg(windows)]
+    let revision = if let Some(local) = local {
+        let mut previous = local.clone();
+        previous.devices.remove("added");
+        let state =
+            std::env::temp_dir().join(format!("prismestra-plan-native-{}", std::process::id()));
+        let mut candidate = local.prepare(&document, &state).unwrap();
+        // Keep production keys and construction. Replace the deferred I/O
+        // so an unexpected reopen can never reach a physical device.
+        for (id, _, candidate_factory) in &mut candidate.rgb {
+            *candidate_factory = match id.as_str() {
+                "b" => factory(&healthy),
+                "added" => factory(&new),
+                _ => Arc::new(|_| Err("Existing held device was reopened".into())),
+            };
+        }
+        let mut manual = candidate.clone();
+        runtime
+            .prepare_managed_outputs(&state, Some(&previous), &local, &document, &mut manual)
+            .unwrap();
+        for (id, _, prepared) in &manual.rgb {
+            let source = if id == "added" { &candidate } else { &plan };
+            let original = source
+                .rgb
+                .iter()
+                .find(|(old_id, _, _)| old_id == id)
+                .unwrap();
+            assert!(Arc::ptr_eq(&original.2, prepared));
+        }
+
+        let mut changed = local.clone();
+        let crate::devices::Binding::WledDdp { endpoint, .. } =
+            changed.devices.get_mut("b").unwrap()
+        else {
+            unreachable!();
+        };
+        endpoint.set_port(60334);
+        let mut rebound = changed.prepare(&document, &state).unwrap();
+        let before = rebound.rgb[1].2.clone();
+        runtime
+            .prepare_managed_outputs(&state, Some(&previous), &changed, &document, &mut rebound)
+            .unwrap();
+        assert_eq!(rebound.rgb[1].0, "b");
+        assert!(Arc::ptr_eq(&before, &rebound.rgb[1].2));
+
+        runtime
+            .request_startup_outputs_for(&state, Some(&previous), &local, document, candidate)
+            .unwrap()
+    } else {
+        runtime.request_outputs_for(document, plan).unwrap()
+    };
+    #[cfg(not(windows))]
     let revision = runtime.request_outputs_for(document, plan).unwrap();
     let frames_before = healthy.frames.lock().unwrap().len();
     wait(|| {
@@ -897,7 +998,7 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
         runtime.output_activity(&runtime.document().lighting.setup.devices[1]),
         OutputActivity::Sent(_)
     ));
-    if !matches!(change, PlanChange::Add) {
+    if !change.adds_output() {
         assert_eq!(new.calls.load(Ordering::SeqCst), 0);
         if matches!(change, PlanChange::Cancel) {
             runtime.cancel_configuration().unwrap();
@@ -1082,6 +1183,7 @@ fn arrival_lcd_runtime(name: &str, link: Arc<Link>) -> (Runtime, std::path::Path
         let revision = runtime
             .request_startup_outputs_for(
                 &dir,
+                None,
                 &local,
                 document,
                 OutputPlan {
