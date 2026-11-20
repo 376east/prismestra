@@ -242,10 +242,13 @@ impl Host {
         }
     }
 
-    pub(crate) fn rgb_outputs_drained(&self, ids: &std::collections::BTreeSet<String>) -> bool {
+    pub(crate) fn rgb_outputs_drained<'a>(
+        &self,
+        ids: impl IntoIterator<Item = &'a String>,
+    ) -> bool {
         let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
         core.reap();
-        ids.iter()
+        ids.into_iter()
             .all(|id| core.outputs.get(id).is_none_or(|output| output.is_reaped()))
     }
 
@@ -437,10 +440,13 @@ impl Host {
     }
     pub fn drained(&mut self) -> bool {
         self.reap();
-        if self.clock.as_mut().is_some_and(|c| !c.reap()) {
+        if !self.clock_drained() {
             return false;
         }
         self.try_core().is_some_and(|mut c| c.drained())
+    }
+    pub(crate) fn clock_drained(&mut self) -> bool {
+        self.clock.as_mut().is_none_or(Clock::reap)
     }
 }
 impl Drop for Host {

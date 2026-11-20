@@ -1426,7 +1426,11 @@ impl Runtime {
         lighting && sensors && registry
     }
     fn lighting_drained(&mut self) -> bool {
-        let mut drained = self.host.drained();
+        let rgb_drained = self.host.drained();
+        self.other_channels_drained() && rgb_drained
+    }
+    fn other_channels_drained(&mut self) -> bool {
+        let mut drained = true;
         for w in self.lcd.values_mut() {
             drained = w.reap() && drained;
         }
@@ -1440,6 +1444,18 @@ impl Runtime {
         self.sensors
             .retain(|input, worker| self.sensor_specs.contains_key(input) || !worker.is_reaped());
         drained
+    }
+    fn resume_owners_drained(&mut self) -> bool {
+        if self.pending.is_some() || self.retry_action_required_on_refresh {
+            return self.lighting_drained();
+        }
+        self.host.clock_drained()
+            && self.other_channels_drained()
+            && self.host.rgb_outputs_drained(
+                self.rgb_specs
+                    .keys()
+                    .filter(|id| !self.output_recovery.contains_key(*id)),
+            )
     }
     /// Notifications only; this never calls Windows suspend/reboot/shutdown APIs.
     pub fn notify_power(&mut self, suspended: bool, now_us: u64) -> Result<(), String> {
@@ -1519,7 +1535,15 @@ impl Runtime {
             .collect::<Vec<_>>();
         let mut first_error = None;
         for (id, keys, f) in rgb {
-            let result = self.host.attach_claimed(&id, keys, move |c| f(c));
+            let result = if self.refresh_started
+                && self.output_recovery.contains_key(&id)
+                && !self.host.rgb_outputs_drained(std::iter::once(&id))
+            {
+                // Recovery waits for this worker to reap before it retries the same binding.
+                Err("Previous RGB owner is still stopping".into())
+            } else {
+                self.host.attach_claimed(&id, keys, move |c| f(c))
+            };
             if let Err(error) = self.handle_output_start(&id, result) {
                 if live.is_none() {
                     return Err(error);
@@ -1531,8 +1555,8 @@ impl Runtime {
     }
 
     fn restart_registered(&mut self, retry_action_required: bool) -> Result<(), String> {
-        // Called only after all previous owners have been reaped. Never reuse a
-        // native handle across suspend; every factory revalidates its binding.
+        // Every reopened owner revalidates its binding. A recoverable RGB
+        // owner that is still stopping is deferred to its own recovery.
         self.restart_registered_rgb(None, retry_action_required)?;
         let lcd = self
             .lcd_specs
@@ -1675,7 +1699,7 @@ impl Runtime {
                 }
             }
         }
-        let busy = !self.refresh_started && self.power.pending() && !self.lighting_drained();
+        let busy = !self.refresh_started && self.power.pending() && !self.resume_owners_drained();
         for _ in 0..2 {
             match self
                 .power
