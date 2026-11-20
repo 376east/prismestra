@@ -1842,6 +1842,7 @@ impl App {
                     use crate::app::runtime::OutputActivity;
                     match activity {
                         OutputActivity::Sent(frames) => format!("Кадры отправлены: {frames}"),
+                        OutputActivity::Retrying(error) => format!("Ожидает повтора ({error})"),
                         OutputActivity::Unavailable(Some(error)) => format!("Недоступно: {error}"),
                         _ => output_activity_label(&activity).into(),
                     }
@@ -2923,6 +2924,7 @@ fn output_activity_label(activity: &crate::app::runtime::OutputActivity) -> &'st
     match activity {
         OutputActivity::Off => "Выключено",
         OutputActivity::Connecting => "Подключается",
+        OutputActivity::Retrying(_) => "Ожидает повтора",
         OutputActivity::Sent(_) => "Кадры отправлены",
         OutputActivity::Unavailable(_) => "Недоступно",
     }

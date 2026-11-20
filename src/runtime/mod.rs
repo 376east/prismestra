@@ -14,7 +14,7 @@ use crate::{
     lighting::color::Rgb,
 };
 pub use autonomous::{ClockStatus, Host};
-use output::{Cancellation, Output, RgbDriver, Snapshot, Ticket};
+use output::{Cancellation, Output, Phase, RgbDriver, Snapshot, Ticket};
 use scene::{Renderer, Scene};
 use std::collections::BTreeMap;
 
@@ -278,7 +278,8 @@ impl Core {
         self.last_us = Some(now_us);
         self.refresh_feed(now_us)?;
         self.reap();
-        if self.scene_cadence.due(now_us, self.renderer.scene().fps) {
+        let rendered = self.scene_cadence.due(now_us, self.renderer.scene().fps);
+        if rendered {
             let preview = self.renderer.step(&self.setup.canvas)?;
             let mut frames = BTreeMap::new();
             for device in self.setup.devices.iter().filter(|d| d.role == Role::Canvas) {
@@ -304,20 +305,36 @@ impl Core {
             if output.is_reaped() {
                 continue;
             }
-            if !self
-                .cadences
-                .entry(device.id.clone())
-                .or_default()
-                .due(now_us, device.rate_hz)
-            {
-                continue;
-            }
             let source = if device.role == Role::Ambient {
                 self.external.get(&device.id).map(|v| v.as_ref())
             } else {
                 self.frame.frames.get(&device.id).map(|v| v.as_slice())
             };
             let off = self.muted.get(&device.id) == Some(&true);
+            if device.role == Role::Canvas && !off && source.is_none() {
+                continue;
+            }
+            let due = self
+                .cadences
+                .entry(device.id.clone())
+                .or_default()
+                .due(now_us, device.rate_hz);
+            // Keep the HA retry mailbox current between its one-Hz samples.
+            // The HA driver still owns the network write limit.
+            if !(due
+                || rendered
+                    && device.driver == crate::devices::Driver::HomeAssistant
+                    && matches!(
+                        output.snapshot(),
+                        Snapshot {
+                            phase: Phase::Connecting,
+                            error: Some(_),
+                            ..
+                        }
+                    ))
+            {
+                continue;
+            }
             let black;
             let colors = if off {
                 black = vec![Rgb::default(); device.leds];
