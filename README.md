@@ -20,9 +20,11 @@ Prismestra is a local lighting orchestrator for Windows. Its goal is to bring PC
 
 ## Download for Windows
 
-Download **[Prismestra Setup for Windows x64](https://github.com/malyarq/prismestra/releases/download/v0.1.0-preview.6/Prismestra-Setup-0.1.0.6-x64.exe)** from the [latest preview release](https://github.com/malyarq/prismestra/releases/tag/v0.1.0-preview.6). Run Setup and choose sign-in startup. The app restores an existing Prismestra scene or discovers supported local devices, builds a first map and starts a scene automatically. You can then arrange devices to match their physical positions.
+Download one file, **[Prismestra Setup for Windows x64](https://github.com/malyarq/prismestra/releases/download/v0.1.0-preview.6/Prismestra-Setup-0.1.0.6-x64.exe)** from the [latest preview release](https://github.com/malyarq/prismestra/releases/tag/v0.1.0-preview.6). Run Setup and choose sign-in startup. The app restores an existing Prismestra scene or discovers supported local devices, builds a first map and starts a scene automatically. You can then arrange devices to match their physical positions.
 
-The offline installer includes the application, its private headless OpenRGB backend, Visual C++ and WebView2 installers, and the optional signed PawnIO installer for supported PC lighting. You do not need a separate OpenRGB installation. Updates preserve scenes; uninstall is available in Windows Settings and preserves your data. See [installation and permissions](docs/windows-installer.md) for details and the recorded test scope. Developer source downloads are not installers.
+The published Preview 6 Setup includes Prismestra, its private headless OpenRGB backend, both Microsoft runtime installers and the optional signed PawnIO installer. Updates preserve scenes. Use Windows Settings to uninstall the app and keep your saved data.
+
+The Preview 7 Setup described in this repository bundles Microsoft's signed WebView2 installer. It downloads the signed x64 Visual C++ Redistributable directly from Microsoft only if a compatible runtime is missing, then verifies the download's SHA-256 before running it. The build verifies both Microsoft signatures. If the download fails or the hash differs, Setup stops. See [Visual C++ download errors](docs/windows-installer.md#visual-c-download-errors) to identify the cause in the log and retry.
 
 **Early preview.** The scene engine, native editor and OpenRGB/WLED/Home Assistant setup paths are implemented and have software tests. Home Assistant tokens use Windows Credential Manager. A resident session keeps lighting and sensor subscriptions alive when the editor closes. The [local integration record](docs/validation/windows-local-kit.json) covers transport checks on one PC kit and identifies the tested source revision. Physical colors, firmware behavior and performance require separate checks. See the [compatibility table](docs/compatibility.md) before choosing a device.
 
@@ -42,7 +44,7 @@ Prismestra does not control fans or pumps. Keep your existing cooling software. 
 
 ## Build and run
 
-Packaged Windows x64 builds require Microsoft Edge WebView2 Runtime 105 or newer for the new editor and the x64 Visual C++ v14 runtime. The Setup EXE bundles their offline installers; the older portable ZIPs require a separate runtime installation. See Microsoft's [WebView2 distribution information](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution) and [Visual C++ runtime downloads](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist#latest-supported-redistributable-version). The classic editor does not need WebView2.
+When running a Windows x64 build from source or an older portable ZIP, install the required runtimes separately if they are missing. The WebView2 editor requires WebView2 Runtime 105 or newer. The classic Win32 editor can run without WebView2. Install the x64 Visual C++ v14 runtime for builds that require it. [Microsoft WebView2 distribution](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution) · [Microsoft Visual C++ downloads](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist#latest-supported-version).
 
 Install a current stable [Rust toolchain](https://www.rust-lang.org/tools/install) with the Windows MSVC build tools, then:
 
@@ -59,9 +61,7 @@ When running from source or an older portable ZIP, first launch opens a preview.
 
 For one-program operation, configure a [managed local OpenRGB backend](docs/managed-openrgb.md) once. Prismestra runs its headless server, verifies ownership/readiness, recovers failures and releases it on exit. Default management uses ordinary permissions; equipment requiring administrator access uses a separately authorized helper.
 
-The current ZIP requires an existing OpenRGB executable. A bundled component and fresh-machine installation are part of the proposed [delivery and coexistence contract](docs/delivery-and-compatibility.md), not shipped capabilities. Research and reuse requirements for future changes are recorded in [project rules](AGENTS.md).
-
-The Windows ZIP includes separate portable launchers: `Open Prismestra.cmd` opens a preview, and `Start saved scene.cmd` activates your saved `data/profile.json` with local connections from `data/state`. See [portable setup and launch](docs/portable-launch.md). Personal profiles, bindings and credentials are not bundled. Running the executable directly retains its existing per-user settings behavior.
+Older Windows portable ZIPs require a separately configured OpenRGB executable for PC lighting. They include separate portable launchers: `Open Prismestra.cmd` opens a preview, and `Start saved scene.cmd` activates your saved `data/profile.json` with local connections from `data/state`. See [portable setup and launch](docs/portable-launch.md). Personal profiles, bindings and credentials are not bundled. Running the executable directly retains its existing per-user settings behavior.
 
 Closing the editor leaves the session in the tray. Its menu can reopen the editor, stop outputs or exit. Starting again with the same settings directory shows a tray hint and prevents a duplicate runtime.
 
