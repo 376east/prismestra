@@ -301,6 +301,8 @@ const receiveDeviceState = (kind, state) => {
 const hasCandidate = id => mainMarkup.includes(`data-candidate-id="${id}"`);
 receiveDeviceState('snapshot', foundState);
 assert.ok(hasCandidate(foundRgb.id) && hasCandidate(foundLcd.id), 'same-label candidates keep separate IDs');
+const discoveryAnnouncement = find('#device-discovery-announcement');
+assert.equal(discoveryAnnouncement.textContent, 'Найдено устройств: 2.');
 receiveDeviceState('status', {detail: 'Keep current candidates'});
 assert.ok(hasCandidate(foundRgb.id) && hasCandidate(foundLcd.id));
 receiveDeviceState('snapshot', {...foundState, devices: [{...foundRgb, leds: 1}], editor: {
@@ -310,8 +312,10 @@ assert.ok(!hasCandidate(foundRgb.id) && hasCandidate(foundLcd.id), 'applied ID r
 assert.ok(mainMarkup.includes('<option value="" disabled selected>Выберите устройство…</option>'));
 receiveDeviceState('status', candidateFixtures.cancelled);
 assert.ok(!hasCandidate(foundLcd.id), 'empty metadata removes stale candidate rows');
+assert.equal(discoveryAnnouncement.textContent, '');
 receiveDeviceState('status', candidateFixtures.replacement);
 assert.ok(hasCandidate(candidateFixtures.replacement.deviceCandidates[0].id));
+assert.equal(discoveryAnnouncement.textContent, 'Найдено устройство: Fixture.');
 console.log('PASS: candidate identity, applied precedence, metadata replacement, empty device selection');
 
 vm.runInContext('view="devices";state.editor={page:"devices",index:0,targets:["Strip"],fields:[],dirty:false};state.detail="Ошибка RGB: <test>";render()',context);
