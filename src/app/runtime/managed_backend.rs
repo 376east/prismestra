@@ -1,6 +1,68 @@
 //! Backend lifecycle is a local capability; portable documents never grant it.
 use super::*;
+use crate::{app::lighting_outputs::Local, devices::Binding};
+use std::{
+    net::SocketAddr,
+    sync::{Mutex, Weak},
+};
 type BackendGuard = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
+
+pub(super) struct StartupGuard {
+    endpoint: SocketAddr,
+    current: Arc<Mutex<BackendGuard>>,
+}
+
+impl StartupGuard {
+    fn update(&self, guard: BackendGuard) {
+        *self.current.lock().unwrap_or_else(|e| e.into_inner()) = guard;
+    }
+
+    fn protect(&self, factory: RgbFactory) -> RgbFactory {
+        let current = self.current.clone();
+        Arc::new(move |cancel| {
+            // Pin this owner's guard for the whole worker lifetime.
+            let guard = current.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            guard()?;
+            factory(cancel.with_guard(guard))
+        })
+    }
+}
+
+enum OpenRgbPolicy {
+    External,
+    Managed(Arc<()>),
+}
+
+// Policy follows the factory through commits and cancellation. Remembering it
+// here must not keep a discarded factory or an owned backend alive.
+#[derive(Default)]
+pub(super) struct OpenRgbPolicies(Vec<(Weak<RgbOpen>, OpenRgbPolicy)>);
+
+impl OpenRgbPolicies {
+    fn remember(&mut self, factory: &RgbFactory, policy: OpenRgbPolicy) {
+        let target = Arc::downgrade(factory);
+        self.0
+            .retain(|(known, _)| known.strong_count() != 0 && !known.ptr_eq(&target));
+        self.0.push((target, policy));
+    }
+
+    fn policy(&self, factory: &RgbFactory) -> Option<&OpenRgbPolicy> {
+        let target = Arc::downgrade(factory);
+        self.0
+            .iter()
+            .find_map(|(known, policy)| known.ptr_eq(&target).then_some(policy))
+    }
+
+    fn matches(&self, previous: &RgbFactory, proposed: &RgbFactory) -> bool {
+        match (self.policy(previous), self.policy(proposed)) {
+            (Some(OpenRgbPolicy::External), Some(OpenRgbPolicy::External)) => true,
+            (Some(OpenRgbPolicy::Managed(old)), Some(OpenRgbPolicy::Managed(new))) => {
+                Arc::ptr_eq(old, new)
+            }
+            _ => false,
+        }
+    }
+}
 
 impl Runtime {
     /// Explicit read-only discovery can start the configured backend before binding IDs exist.
@@ -43,20 +105,28 @@ impl Runtime {
     pub fn prepare_managed_outputs(
         &mut self,
         state_dir: &Path,
-        local: &crate::app::lighting_outputs::Local,
+        previous: Option<&Local>,
+        local: &Local,
         document: &Document,
         outputs: &mut OutputPlan,
     ) -> Result<bool, String> {
-        let Some(config) = crate::app::managed_backend::Config::read_optional(state_dir)? else {
-            return Ok(false);
-        };
-        let ids = matching_ids(local, document, config.endpoint());
-        if ids.is_empty() {
-            return Ok(false);
+        let mut ids = BTreeSet::new();
+        let mut owner = None;
+        let mut created = false;
+        if let Some(config) = crate::app::managed_backend::Config::read_optional(state_dir)? {
+            ids = matching_ids(local, document, config.endpoint());
+            if !ids.is_empty() {
+                created = self.managed_backend.is_none();
+                let guard = self.managed_guard_for(state_dir, config.endpoint())?;
+                owner = self
+                    .managed_backend
+                    .as_ref()
+                    .map(|backend| backend.ownership());
+                guard_outputs(outputs, &ids, &guard);
+            }
         }
-        let created = self.managed_backend.is_none();
-        let guard = self.managed_guard_for(state_dir, config.endpoint())?;
-        guard_outputs(outputs, &ids, &guard);
+        self.record_openrgb_policies(local, outputs, &ids, owner);
+        self.reuse_unchanged_native_outputs(previous, local, document, outputs, false);
         Ok(created)
     }
 
@@ -66,23 +136,54 @@ impl Runtime {
     pub(crate) fn request_startup_outputs_for(
         &mut self,
         state_dir: &Path,
-        local: &crate::app::lighting_outputs::Local,
+        previous: Option<&Local>,
+        local: &Local,
         document: Document,
         mut outputs: OutputPlan,
     ) -> Result<u64, String> {
-        let config = crate::app::managed_backend::Config::read_optional(state_dir);
-        let ids = match config {
+        let ids = match crate::app::managed_backend::Config::read_optional(state_dir) {
             Ok(Some(config)) => {
-                let ids = matching_ids(local, &document, config.endpoint());
+                let endpoint = config.endpoint();
+                let ids = matching_ids(local, &document, endpoint);
+                let mut owner = None;
                 if !ids.is_empty() {
-                    let guard = self
-                        .managed_guard_for(state_dir, config.endpoint())
-                        .unwrap_or_else(unavailable_guard);
-                    guard_outputs(&mut outputs, &ids, &guard);
+                    let guard = match self.managed_guard_for(state_dir, endpoint) {
+                        Ok(guard) => {
+                            owner = self
+                                .managed_backend
+                                .as_ref()
+                                .map(|backend| backend.ownership());
+                            guard
+                        }
+                        Err(error) => unavailable_guard(error),
+                    };
+                    if let Some(startup) = self
+                        .managed_startup_guard
+                        .as_ref()
+                        .filter(|g| g.endpoint == endpoint)
+                    {
+                        startup.update(guard);
+                    } else {
+                        self.managed_startup_guard = Some(StartupGuard {
+                            endpoint,
+                            current: Arc::new(Mutex::new(guard)),
+                        });
+                    }
+                    let startup = self.managed_startup_guard.as_ref().unwrap();
+                    for (id, _, factory) in &mut outputs.rgb {
+                        if ids.contains(id) {
+                            *factory = startup.protect(factory.clone());
+                        }
+                    }
                 }
+                self.record_openrgb_policies(local, &outputs, &ids, owner);
                 ids
             }
-            Ok(None) => BTreeSet::new(),
+            Ok(None) => {
+                let ids = BTreeSet::new();
+                self.record_openrgb_policies(local, &outputs, &ids, None);
+                ids
+            }
             Err(error) => {
                 // Without a readable policy we cannot distinguish managed
                 // and external SDK routes. Keep them closed until repaired.
@@ -98,9 +199,81 @@ impl Runtime {
                 BTreeSet::new()
             }
         };
+        self.reuse_unchanged_native_outputs(previous, local, &document, &mut outputs, true);
         let revision = self.request_outputs_for(document, outputs)?;
         self.pending.as_mut().unwrap().startup_managed_ids = Some(ids);
         Ok(revision)
+    }
+
+    fn record_openrgb_policies(
+        &mut self,
+        local: &Local,
+        outputs: &OutputPlan,
+        managed_ids: &BTreeSet<String>,
+        owner: Option<Arc<()>>,
+    ) {
+        for (id, _, factory) in &outputs.rgb {
+            if !matches!(local.devices.get(id), Some(Binding::OpenRgb { .. })) {
+                continue;
+            }
+            if !managed_ids.contains(id) {
+                self.openrgb_policies
+                    .remember(factory, OpenRgbPolicy::External);
+            } else if let Some(owner) = &owner {
+                self.openrgb_policies
+                    .remember(factory, OpenRgbPolicy::Managed(owner.clone()));
+            }
+        }
+    }
+
+    fn reuse_unchanged_native_outputs(
+        &self,
+        previous: Option<&Local>,
+        local: &Local,
+        document: &Document,
+        outputs: &mut OutputPlan,
+        keep_ha_session: bool,
+    ) {
+        let Some(previous) = previous else {
+            return;
+        };
+        for (id, keys, factory) in &mut outputs.lcd {
+            if let Some(binding) = local.devices.get(id)
+                && previous.devices.get(id) == Some(binding)
+                && self.device_unchanged(document, id)
+                && self
+                    .lcd
+                    .get(id)
+                    .is_some_and(|worker| worker.snapshot().phase == lcd_worker::Phase::Ready)
+                && let Some(spec) = self.lcd_specs.get(id).filter(|spec| spec.keys == *keys)
+            {
+                *factory = spec.factory.clone();
+            }
+        }
+        if previous.door_brightness != local.door_brightness {
+            return;
+        }
+        for (id, keys, factory) in &mut outputs.rgb {
+            let Some(binding) = local.devices.get(id) else {
+                continue;
+            };
+            // Manual Apply can reload HA credentials under the same binding ID.
+            if !keep_ha_session && matches!(binding, Binding::HomeAssistant { .. }) {
+                continue;
+            }
+            if self.device_unchanged(document, id)
+                && previous.devices.get(id) == Some(binding)
+                && self
+                    .host
+                    .status(id)
+                    .is_some_and(|snapshot| snapshot.phase == crate::runtime::output::Phase::Ready)
+                && let Some(spec) = self.rgb_specs.get(id).filter(|spec| spec.keys == *keys)
+                && (!matches!(binding, Binding::OpenRgb { .. })
+                    || self.openrgb_policies.matches(&spec.factory, factory))
+            {
+                *factory = spec.factory.clone();
+            }
+        }
     }
 
     pub fn configure_managed_backend(
@@ -142,19 +315,38 @@ impl Runtime {
 
     pub fn release_managed_backend(&mut self) {
         self.managed_backend.take();
+        if let Some(startup) = self.managed_startup_guard.take() {
+            startup.update(unavailable_guard(
+                "Managed OpenRGB backend was released".into(),
+            ));
+        }
         self.managed_backend_ids.clear();
         self.managed_backend_detail = None;
         self.managed_backend_generation = 0;
     }
 
-    pub(super) fn guard_managed_rgb(&self, id: &str, factory: RgbFactory) -> RgbFactory {
+    pub(super) fn guard_managed_rgb(&mut self, id: &str, factory: RgbFactory) -> RgbFactory {
         if !self.managed_backend_ids.contains(id) {
+            if self
+                .document
+                .lighting
+                .setup
+                .devices
+                .iter()
+                .any(|device| device.id == id && device.driver == crate::devices::Driver::OpenRgb)
+            {
+                self.openrgb_policies
+                    .remember(&factory, OpenRgbPolicy::External);
+            }
             return factory;
         }
         let Some(backend) = &self.managed_backend else {
             return factory;
         };
-        guarded(factory, backend.guard())
+        let factory = guarded(factory, backend.guard());
+        self.openrgb_policies
+            .remember(&factory, OpenRgbPolicy::Managed(backend.ownership()));
+        factory
     }
 
     pub(super) fn poll_managed_backend(&mut self) {
@@ -177,6 +369,11 @@ impl Runtime {
             return;
         }
         self.managed_backend_generation = generation;
+        if let (Some(startup), Some(backend)) = (&self.managed_startup_guard, &self.managed_backend)
+            && startup.endpoint == backend.endpoint()
+        {
+            startup.update(backend.guard());
+        }
         // A recovered server renews only its own output retries. Other RGB,
         // BLE, LCD, capture and sensor workers keep their current generations.
         for id in self.managed_backend_ids.clone() {
@@ -228,4 +425,27 @@ fn guarded(
         guard()?;
         factory(cancel.with_guard(guard.clone()))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_managed_factories_match_only_for_the_same_backend() {
+        let factory = || -> RgbFactory { Arc::new(|_| Err("Fixture never opens I/O".into())) };
+        let first = factory();
+        let same_owner = factory();
+        let different_owner = factory();
+        let unknown = factory();
+        let owner = Arc::new(());
+        let mut policies = OpenRgbPolicies::default();
+        policies.remember(&first, OpenRgbPolicy::Managed(owner.clone()));
+        policies.remember(&same_owner, OpenRgbPolicy::Managed(owner));
+        policies.remember(&different_owner, OpenRgbPolicy::Managed(Arc::new(())));
+
+        assert!(policies.matches(&first, &same_owner));
+        assert!(!policies.matches(&first, &different_owner));
+        assert!(!policies.matches(&first, &unknown));
+    }
 }

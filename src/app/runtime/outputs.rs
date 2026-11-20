@@ -5,6 +5,7 @@ use super::*;
 pub(crate) enum OutputActivity {
     Off,
     Connecting,
+    Retrying(String),
     Sent(u64),
     Unavailable(Option<String>),
 }
@@ -78,15 +79,26 @@ impl Runtime {
         {
             return OutputActivity::Off;
         }
-        if self.suspended || self.pending.is_some() || self.power.pending() {
+        let pending_output = self.pending.as_ref().is_some_and(|pending| {
+            // A live RGB plan leaves every applied LCD worker running.
+            pending
+                .live_rgb
+                .as_ref()
+                .is_none_or(|live| !is_lcd && !live.retained.contains(id))
+        });
+        if self.suspended || pending_output || self.power.pending() {
             return OutputActivity::Connecting;
         }
-        if let Some(error) = self
-            .output_recovery
+        let action_required_error = self
+            .rgb_specs
             .get(id)
-            .and_then(|state| state.start_error.clone())
-        {
-            return OutputActivity::Unavailable(Some(error));
+            .and_then(|spec| spec.action_required_error.as_ref());
+        if let Some(error) = action_required_error.or_else(|| {
+            self.output_recovery
+                .get(id)
+                .and_then(|state| state.start_error.as_ref())
+        }) {
+            return OutputActivity::Unavailable(Some(error.clone()));
         }
         let (phase, frames, error) = if is_lcd {
             let Some(status) = self.lcd_status(id) else {
@@ -108,7 +120,8 @@ impl Runtime {
         };
         match phase {
             Phase::Ready if frames > 0 => OutputActivity::Sent(frames),
-            Phase::Connecting | Phase::Ready => OutputActivity::Connecting,
+            Phase::Connecting => error.map_or(OutputActivity::Connecting, OutputActivity::Retrying),
+            Phase::Ready => OutputActivity::Connecting,
             Phase::Failed | Phase::Stopping | Phase::Stopped => OutputActivity::Unavailable(error),
         }
     }

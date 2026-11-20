@@ -1047,7 +1047,13 @@ impl App {
         plan.validate(&document)?;
         let revision = self.runtime.with(|runtime, _| {
             let created = if let Some(local) = &local {
-                runtime.prepare_managed_outputs(&self.state_dir, local, &document, &mut plan)?
+                runtime.prepare_managed_outputs(
+                    &self.state_dir,
+                    previous.local.as_ref(),
+                    local,
+                    &document,
+                    &mut plan,
+                )?
             } else {
                 false
             };

@@ -74,6 +74,41 @@ fn client(url: &str) -> Client {
 }
 
 #[test]
+fn retry_after_is_read_from_rate_limit_and_busy_responses() {
+    let (url, peer) = server(vec![
+        response("429 Too Many Requests\r\nRetry-After: 120", b"{}"),
+        response("503 Service Unavailable\r\nRetry-After: nonsense", b"{}"),
+        response("403 Forbidden", b"{}"),
+    ]);
+    let client = client(&url);
+    for (expected, delay) in [
+        (
+            Error::RetryAfter {
+                status: 429,
+                seconds: 120,
+            },
+            Some(120),
+        ),
+        (Error::Http(503), Some(0)),
+        (Error::Http(403), None),
+    ] {
+        let error = client.lights(deadline(), || false).unwrap_err();
+        assert_eq!(error, expected);
+        assert_eq!(error.transient_delay(), delay);
+    }
+    assert_eq!(peer.join().unwrap().len(), 3);
+    let now = std::time::UNIX_EPOCH + Duration::from_millis(1_500);
+    assert_eq!(
+        retry_after_seconds("Thu, 01 Jan 1970 00:00:04 GMT", now),
+        Some(3)
+    );
+    assert_eq!(
+        retry_after_seconds("Thu, 01 Jan 1970 00:00:01 GMT", now),
+        Some(0)
+    );
+}
+
+#[test]
 fn validates_urls_tokens_and_entity_names_without_io() {
     for url in [
         "ftp://host",

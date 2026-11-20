@@ -791,6 +791,10 @@ pub(super) fn open_requested_editor(state: &State) -> Result<(), String> {
 }
 
 pub(super) fn open_editor(state: &State) -> Result<(), String> {
+    // Tray callbacks and a menu already on screen can arrive while Exit drains.
+    if state.session_action.get() == Action::Exit {
+        return Ok(());
+    }
     let existing = state.editor_window.get();
     if !existing.is_null() {
         if !state.snapshot {
@@ -1951,6 +1955,17 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     request(state, Action::Exit, false)?;
     if state.session_action.get() != Action::Exit {
         return Err("Exit was ignored after failed Stop".into());
+    }
+    // Explorer may still deliver activation until the resident shell is destroyed.
+    for (wparam, lparam) in [
+        (0, ((TRAY_ICON_ID << 16) | NIN_KEYSELECT) as LPARAM),
+        (0, ((TRAY_ICON_ID << 16) | NIN_SELECT) as LPARAM),
+        (TRAY_ICON_ID as WPARAM, WM_LBUTTONUP as LPARAM),
+    ] {
+        unsafe { SendMessageW(shell.hwnd, CALLBACK, wparam, lparam) };
+        if !state.editor_window.get().is_null() {
+            return Err("Tray reopened the editor during Exit".into());
+        }
     }
     settle(state, "exit", |a| {
         a.shutdown.phase() == crate::app::shutdown::Phase::Ready
