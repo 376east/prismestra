@@ -29,12 +29,29 @@ use windows::{
     },
     Foundation::TypedEventHandler,
     Storage::Streams::{DataReader, DataWriter},
-    Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
+    Win32::{
+        Foundation::E_ACCESSDENIED,
+        System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
+    },
     core::GUID,
 };
 
+const ACCESS_DENIED: &str =
+    "Нет доступа к Bluetooth-контроллеру. Проверьте разрешение или сопряжение в Windows.";
+
 fn error(e: windows::core::Error) -> String {
-    format!("WinRT error: {e}; disconnected")
+    if e.code() == E_ACCESSDENIED {
+        ACCESS_DENIED.into()
+    } else {
+        format!("WinRT error: {e}; disconnected")
+    }
+}
+
+fn gatt_succeeded(status: GattCommunicationStatus) -> Result<bool, String> {
+    if status == GattCommunicationStatus::AccessDenied {
+        return Err(ACCESS_DENIED.into());
+    }
+    Ok(status == GattCommunicationStatus::Success)
 }
 fn uuid(short: u16) -> GUID {
     GUID::from_u128((short as u128) << 96 | 0x00001000800000805f9b34fb)
@@ -468,11 +485,9 @@ impl Backend for WindowsBackend {
             control
         )
         .map_err(error)?;
+        let success = gatt_succeeded(services.Status().map_err(error)?)?;
         let service_list = services.Services().map_err(error)?;
-        ble::validate_service(
-            services.Status().map_err(error)? == GattCommunicationStatus::Success,
-            service_list.Size().map_err(error)?,
-        )?;
+        ble::validate_service(success, service_list.Size().map_err(error)?)?;
         link.service = Some(service_list.GetAt(0).map_err(error)?);
         let chars = bounded!(
             link.service
@@ -485,14 +500,11 @@ impl Backend for WindowsBackend {
             control
         )
         .map_err(error)?;
+        let success = gatt_succeeded(chars.Status().map_err(error)?)?;
         let list = chars.Characteristics().map_err(error)?;
         let count = list.Size().map_err(error)?;
         // Validate uniqueness before indexing. No fallback to an arbitrary service/characteristic.
-        ble::validate_characteristic(
-            chars.Status().map_err(error)? == GattCommunicationStatus::Success,
-            count,
-            true,
-        )?;
+        ble::validate_characteristic(success, count, true)?;
         let characteristic = list.GetAt(0).map_err(error)?;
         ble::validate_characteristic(
             true,
@@ -615,10 +627,9 @@ impl WindowsLink {
                 control
             )
             .map_err(error)?;
+            let success = gatt_succeeded(chars.Status().map_err(error)?)?;
             let list = chars.Characteristics().map_err(error)?;
-            if chars.Status().map_err(error)? != GattCommunicationStatus::Success
-                || list.Size().map_err(error)? != 1
-            {
+            if !success || list.Size().map_err(error)? != 1 {
                 return Err("FF02 notification characteristic unavailable or ambiguous".into());
             }
             let characteristic = list.GetAt(0).map_err(error)?;
@@ -674,7 +685,7 @@ impl WindowsLink {
                 control
             )
             .map_err(error)?;
-            if status != GattCommunicationStatus::Success {
+            if !gatt_succeeded(status)? {
                 return Err("FF02 notification subscription failed".into());
             }
             // No cached notification is accepted. Arm immediately before the fixed query so
@@ -702,7 +713,7 @@ impl WindowsLink {
                     control
                 )
                 .map_err(error)?;
-                if status != GattCommunicationStatus::Success {
+                if !gatt_succeeded(status)? {
                     return Err("FF02 notification unsubscribe failed".into());
                 }
             }
@@ -736,7 +747,7 @@ impl WindowsLink {
             control
         )
         .map_err(error)?;
-        if result.Status().map_err(error)? != GattCommunicationStatus::Success {
+        if !gatt_succeeded(result.Status().map_err(error)?)? {
             return Err("GATT write failed; disconnected".into());
         }
         Ok(())
@@ -746,6 +757,27 @@ impl WindowsLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_message_requires_an_explicit_windows_denial() {
+        assert_eq!(
+            gatt_succeeded(GattCommunicationStatus::AccessDenied).unwrap_err(),
+            ACCESS_DENIED
+        );
+        assert_eq!(
+            error(windows::core::Error::from_hresult(E_ACCESSDENIED)),
+            ACCESS_DENIED
+        );
+        assert_eq!(gatt_succeeded(GattCommunicationStatus::Success), Ok(true));
+        assert_eq!(
+            gatt_succeeded(GattCommunicationStatus::Unreachable),
+            Ok(false)
+        );
+        assert_eq!(
+            gatt_succeeded(GattCommunicationStatus::ProtocolError),
+            Ok(false)
+        );
+    }
 
     fn product_advertisement() -> [u8; 27] {
         let mut bytes = [0; 27];
