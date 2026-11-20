@@ -4,7 +4,7 @@ use super::{
     device_setup,
     document::{Document, Lcd},
     lcd,
-    lighting_bindings::discovery::{Target, native_factory, openrgb_factory},
+    lighting_bindings::discovery::{Inventory, Target, native_factory, openrgb_factory},
     lighting_outputs::Local,
 };
 use crate::{
@@ -223,23 +223,8 @@ fn discover_local(
                     Err(_) => thread::sleep(Duration::from_millis(100)),
                 }
             }
-            let target = device_setup::preset("openrgb-controller")?.device("rgb-search")?;
-            let target = Target::Device(target);
-            let factory = openrgb_factory(endpoint);
-            let scan_cancel = deadline.with_guard(guard);
             let until = (Instant::now() + INVENTORY_WAIT).min(started + DISCOVERY_LIMIT);
-            loop {
-                let inventory = factory(target.clone(), scan_cancel.clone())?;
-                // The SDK listener can become ready before detectors publish
-                // physical controllers. Retry an empty inventory within budget.
-                if !inventory.candidates.is_empty() || Instant::now() >= until {
-                    break Ok(inventory);
-                }
-                if scan_cancel.cancelled() {
-                    break Err("Поиск OpenRGB прерван.".into());
-                }
-                thread::sleep(Duration::from_millis(250));
-            }
+            discover_openrgb_inventory(endpoint, guard, deadline, until)
         })();
         match rgb {
             Ok(inventory) => {
@@ -262,6 +247,48 @@ fn discover_local(
         return Err(cancelled());
     }
     Ok(result)
+}
+
+fn discover_openrgb_inventory(
+    endpoint: SocketAddr,
+    guard: Guard,
+    deadline: Cancellation,
+    until: Instant,
+) -> Result<Inventory, String> {
+    let target = Target::Device(device_setup::preset("openrgb-controller")?.device("rgb-search")?);
+    let factory = openrgb_factory(endpoint);
+    let scan_cancel = deadline.with_guard(guard.clone());
+    let poll_delay = Duration::from_millis(250);
+    let mut retried = false;
+    loop {
+        let inventory = match factory(target.clone(), scan_cancel.clone()) {
+            Err(first)
+                if !retried && Instant::now() + poll_delay < until && !deadline.cancelled() =>
+            {
+                thread::sleep(poll_delay);
+                if deadline.cancelled() || Instant::now() >= until {
+                    return Err(first);
+                }
+                // The original session was discarded. Verify ownership again before reconnecting.
+                guard().map_err(|reason| {
+                    format!("Чтение списка устройств SDK прервано ({first}). Повтор пропущен ({reason}).")
+                })?;
+                retried = true;
+                factory(target.clone(), scan_cancel.clone()).map_err(|error| {
+                    format!("Не удалось прочитать список устройств SDK ({first}). Повтор также завершился ошибкой ({error}).")
+                })?
+            }
+            result => result?,
+        };
+        // The SDK listener can become ready before detectors publish physical controllers.
+        if !inventory.candidates.is_empty() || Instant::now() >= until {
+            return Ok(inventory);
+        }
+        if scan_cancel.cancelled() {
+            return Err("Поиск OpenRGB прерван.".into());
+        }
+        thread::sleep(poll_delay);
+    }
 }
 
 fn logical_id(prefix: &str, identity: &str) -> String {
@@ -1081,6 +1108,67 @@ mod tests {
         transport::openrgb::{MatrixInfo, ZoneInfo},
     };
 
+    #[test]
+    fn sdk_inventory_retries_one_interrupted_read() {
+        let peer = openrgb_peer::Peer::disconnect_inventory(1);
+        let inventory = discover_openrgb_inventory(
+            peer.endpoint,
+            Arc::new(|| Ok(())),
+            Cancellation::default(),
+            Instant::now() + INVENTORY_WAIT,
+        )
+        .unwrap();
+        assert_eq!(inventory.candidates.len(), 1);
+        let calls = peer.calls.lock().unwrap();
+        assert_eq!(calls.iter().filter(|call| call.1 == 0).count(), 2);
+        assert!(calls.iter().all(|call| !matches!(call.1, 1050 | 1101)));
+    }
+
+    #[test]
+    fn sdk_inventory_reports_persistent_failure_after_one_retry() {
+        let peer = openrgb_peer::Peer::disconnect_inventory(3);
+        let Err(error) = discover_openrgb_inventory(
+            peer.endpoint,
+            Arc::new(|| Ok(())),
+            Cancellation::default(),
+            Instant::now() + INVENTORY_WAIT,
+        ) else {
+            panic!("the SDK receiver breaks every read");
+        };
+        assert!(error.contains("Повтор также завершился ошибкой"), "{error}");
+        assert_eq!(error.matches("OpenRGB:").count(), 2, "{error}");
+        let calls = peer.calls.lock().unwrap();
+        assert_eq!(calls.iter().filter(|call| call.1 == 0).count(), 2);
+        assert!(calls.iter().all(|call| !matches!(call.1, 1050 | 1101)));
+    }
+
+    #[test]
+    fn sdk_inventory_does_not_reconnect_after_ownership_loss() {
+        let peer = openrgb_peer::Peer::disconnect_inventory(1);
+        let calls = peer.calls.clone();
+        let guard = Arc::new(move || {
+            if calls.lock().unwrap().iter().any(|call| call.1 == 0) {
+                return Err("Порт больше не принадлежит приложению".into());
+            }
+            Ok(())
+        });
+        let Err(error) = discover_openrgb_inventory(
+            peer.endpoint,
+            guard,
+            Cancellation::default(),
+            Instant::now() + INVENTORY_WAIT,
+        ) else {
+            panic!("the ownership guard closes the route");
+        };
+        assert!(
+            error.contains("Повтор пропущен (Порт больше не принадлежит приложению)"),
+            "{error}"
+        );
+        let calls = peer.calls.lock().unwrap();
+        assert_eq!(calls.iter().filter(|call| call.1 == 40).count(), 1);
+        assert!(calls.iter().all(|call| !matches!(call.1, 1050 | 1101)));
+    }
+
     fn empty() -> (Document, Local) {
         let document = Document::from_lighting(Project {
             version: 1,
@@ -1347,7 +1435,7 @@ mod tests {
             .prepare(&plan.document, &state.join("assets"))
             .unwrap();
         let revision = runtime
-            .request_startup_outputs_for(&state, &plan.local, plan.document.clone(), outputs)
+            .request_startup_outputs_for(&state, None, &plan.local, plan.document.clone(), outputs)
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1453,6 +1541,7 @@ mod tests {
         let revision = runtime
             .request_startup_outputs_for(
                 &fixture.state,
+                None,
                 &plan.local,
                 plan.document.clone(),
                 outputs,

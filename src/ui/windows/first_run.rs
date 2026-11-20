@@ -241,7 +241,13 @@ impl App {
                 let document = self.runtime.document().clone();
                 let outputs = local.prepare(&document, &self.asset_root)?;
                 self.first_run.restoring = Some(self.runtime.with(|runtime, _| {
-                    runtime.request_startup_outputs_for(&self.state_dir, &local, document, outputs)
+                    runtime.request_startup_outputs_for(
+                        &self.state_dir,
+                        None,
+                        &local,
+                        document,
+                        outputs,
+                    )
                 })?);
                 self.first_run.phase = "restoring";
                 self.native_lighting = Some(local);
@@ -315,6 +321,7 @@ impl App {
                 self.runtime.with(|runtime, _| {
                     runtime.request_startup_outputs_for(
                         &self.state_dir,
+                        Some(&applied.plan.local),
                         local,
                         applied.previous_document,
                         outputs,
@@ -371,6 +378,7 @@ impl App {
             let revision = self.runtime.with(|runtime, _| {
                 runtime.request_startup_outputs_for(
                     &self.state_dir,
+                    self.native_lighting.as_ref(),
                     &plan.local,
                     plan.document.clone(),
                     outputs,
