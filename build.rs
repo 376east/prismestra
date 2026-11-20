@@ -37,7 +37,9 @@ fn icon_resources(ico: &[u8]) -> Vec<u8> {
     let mut res = Vec::new();
     resource(&mut res, 0, 0, &[]); // Required empty .res file header.
     for (index, entry) in ico[6..6 + usize::from(count) * 16]
-        .chunks_exact(16)
+        .as_chunks::<16>()
+        .0
+        .iter()
         .enumerate()
     {
         let id = u16::try_from(index + 1).unwrap();
