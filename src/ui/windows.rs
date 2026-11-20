@@ -2486,7 +2486,7 @@ fn modal_command(hwnd: HWND, state: &State, id: i32) -> Result<(), String> {
         let a = slot.as_mut().ok_or("UI не создан")?;
         let count = a.export_profile(&path)?;
         a.status = format!(
-            "Экспортирована копия профиля и файлов медиа: {count}. Привязки к оборудованию не включены."
+            "Профиль экспортирован. Медиафайлы в ZIP: {count}. «Мои сцены» и локальные привязки хранятся отдельно."
         );
         return Ok(());
     }
