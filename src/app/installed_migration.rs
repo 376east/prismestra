@@ -54,6 +54,12 @@ const SOURCE_HINT: &str = "legacy-source.json";
 const LEGACY_LAUNCHER_SHA: &str =
     "82def8e5478fa616d691ebda66d0277c8950cc1d092b0797f8e99218ce670318";
 const LOCAL: &str = "lighting-local.json";
+const INSTALLED_LOCAL: &str = "state/lighting-local.json";
+const OPTIONAL_IMPORT_FILES: [(&str, usize); 3] = [
+    ("sensor-sources.json", sensor_bindings::MAX_BYTES),
+    ("scene-library.json", 256 * 1024),
+    ("editor-scene-draft.json", draft::MAX_BYTES),
+];
 const MAX_DISCOVERY: usize = 128 * 1024;
 const MAX_ASSETS: usize = 512 * 1024 * 1024;
 
@@ -231,7 +237,17 @@ fn apply(
     if source.profile.starts_with(root) || source.state.starts_with(root) {
         return Err("The installed Prismestra data cannot be its own migration source".into());
     }
-    let profile = read_required(&source.profile, document::MAX_BYTES)?;
+    let Some(profile) = read_optional(&source.profile, document::MAX_BYTES)? else {
+        if let Some(receipt) = pending
+            && let Some(outcome) = finish_written_import(root, receipt, source_running)?
+        {
+            return Ok(outcome);
+        }
+        return Err(format!(
+            "Missing Prismestra file: {}",
+            source.profile.display()
+        ));
+    };
     let (document, profile) = match Document::decode(&profile) {
         Ok(document) => (document, profile),
         Err(_) => {
@@ -273,13 +289,9 @@ fn apply(
     };
     let mut files = BTreeMap::from([
         ("profile.json".to_owned(), profile),
-        (format!("state/{LOCAL}"), local_bytes),
+        (INSTALLED_LOCAL.to_owned(), local_bytes),
     ]);
-    for (name, limit) in [
-        ("sensor-sources.json", sensor_bindings::MAX_BYTES),
-        ("scene-library.json", 256 * 1024),
-        ("editor-scene-draft.json", draft::MAX_BYTES),
-    ] {
+    for (name, limit) in OPTIONAL_IMPORT_FILES {
         let destination = format!("state/{name}");
         if pending
             .as_ref()
@@ -326,7 +338,7 @@ fn apply(
         .iter()
         .map(|(path, bytes)| (path.clone(), fingerprint(bytes)))
         .collect();
-    let mut receipt = match pending {
+    let receipt = match pending {
         Some(receipt) => {
             if receipt.source != source
                 || receipt.after != after
@@ -385,10 +397,66 @@ fn apply(
             storage::atomic_write(&destination, bytes, document::MAX_BYTES).map_err(err)?;
         }
     }
+    finish_import(root, receipt, source_running)
+}
+
+fn finish_import(
+    root: &Path,
+    mut receipt: Receipt,
+    source_running: bool,
+) -> Result<MigrationOutcome, String> {
     receipt.complete = true;
     receipt.source_running = source_running;
     write_receipt(root, &receipt)?;
     Ok(receipt.outcome(source_running))
+}
+
+fn finish_written_import(
+    root: &Path,
+    receipt: Receipt,
+    source_running: bool,
+) -> Result<Option<MigrationOutcome>, String> {
+    // The source may disappear after the last write and before the receipt is
+    // committed. Only a complete, verified target can finish without the source.
+    if receipt.before.len() != receipt.after.len()
+        || !receipt.after.contains_key("profile.json")
+        || !receipt.after.contains_key(INSTALLED_LOCAL)
+        || !receipt.after.keys().all(|path| {
+            receipt.before.contains_key(path)
+                && (matches!(path.as_str(), "profile.json" | INSTALLED_LOCAL)
+                    || path.strip_prefix("state/").is_some_and(|name| {
+                        OPTIONAL_IMPORT_FILES.iter().any(|(file, _)| *file == name)
+                    }))
+        })
+    {
+        return Err("Invalid Prismestra import receipt".into());
+    }
+    let mut profile = None;
+    for (path, expected) in &receipt.after {
+        let Some(bytes) = read_optional(&root.join(path), document::MAX_BYTES)? else {
+            return Ok(None);
+        };
+        if &fingerprint(&bytes) != expected {
+            return Ok(None);
+        }
+        if path == "profile.json" {
+            profile = Some(Document::decode(&bytes)?);
+        }
+    }
+    let document = profile.ok_or("Missing imported Prismestra profile")?;
+    let referenced = document.assets();
+    if !referenced.is_empty() {
+        let path = checked_local_path(&root.join("state/assets")).map_err(err)?;
+        let assets = Store::new(path)?;
+        let mut total = 0;
+        for id in referenced {
+            total += assets.read(id, assets::MAX_BYTES)?.len();
+            if total > MAX_ASSETS {
+                return Err("Imported Prismestra assets exceed 512 MiB".into());
+            }
+        }
+    }
+    finish_import(root, receipt, source_running).map(Some)
 }
 
 fn rebase_sensor_scope(
@@ -479,11 +547,6 @@ fn write_receipt(root: &Path, receipt: &Receipt) -> Result<(), String> {
         MAX_DISCOVERY,
     )
     .map_err(err)
-}
-
-fn read_required(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
-    read_optional(path, limit)?
-        .ok_or_else(|| format!("Missing Prismestra file: {}", path.display()))
 }
 
 fn read_optional(path: &Path, limit: usize) -> Result<Option<Vec<u8>>, String> {
@@ -1615,6 +1678,44 @@ mod tests {
             sensors
         );
         assert!(!installed.join("backend-task.json").exists());
+
+        let mut pending = read_receipt(&fixture.target).unwrap().unwrap();
+        pending.complete = false;
+        write_receipt(&fixture.target, &pending).unwrap();
+        fs::remove_file(&fixture.source.profile).unwrap();
+        let retry = || {
+            let pending = read_receipt(&fixture.target).unwrap().unwrap();
+            apply(
+                &fixture.target,
+                pending.source.clone(),
+                bundled(),
+                false,
+                Some(pending),
+            )
+        };
+
+        // A final receipt cannot be recovered if a target differs from its pin.
+        let installed_catalog = installed.join("sensor-sources.json");
+        fs::write(&installed_catalog, b"{}").unwrap();
+        assert!(retry().is_err());
+        assert_eq!(fs::read(&installed_catalog).unwrap(), b"{}");
+        assert!(!read_receipt(&fixture.target).unwrap().unwrap().complete);
+        fs::write(&installed_catalog, sensors).unwrap();
+
+        let installed_asset = installed.join("assets").join(media_id.as_str());
+        fs::remove_file(&installed_asset).unwrap();
+        assert!(retry().is_err());
+        assert!(!read_receipt(&fixture.target).unwrap().unwrap().complete);
+        fs::write(&installed_asset, media).unwrap();
+
+        assert!(matches!(
+            retry().unwrap(),
+            MigrationOutcome::Imported { .. }
+        ));
+        let completed = read_receipt(&fixture.target).unwrap().unwrap();
+        assert!(completed.complete);
+        assert!(!completed.handover_completed);
+        assert_eq!(completed.after, pending.after);
     }
 
     fn installed_temperature_scope_fixture() -> (
