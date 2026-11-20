@@ -41,6 +41,9 @@ use windows_sys::{
         },
         System::{
             Com::CoTaskMemFree,
+            EventLog::{
+                DeregisterEventSource, EVENTLOG_ERROR_TYPE, RegisterEventSourceW, ReportEventW,
+            },
             SystemInformation::{GetSystemDirectoryW, GetSystemWindowsDirectoryW},
             Threading::{
                 GetCurrentProcess, OpenProcessToken, PROCESS_NAME_NATIVE,
@@ -52,7 +55,7 @@ use windows_sys::{
             KF_FLAG_DONT_VERIFY, SHGetKnownFolderPath,
         },
     },
-    core::GUID,
+    core::{GUID, w},
 };
 
 const POLICY_LIMIT: usize = 128 * 1024;
@@ -137,7 +140,7 @@ impl InstalledPolicy {
             || token_sid(&full)? != sid
             || session(&token)? == 0
             || session(&token)? != session(&full)?
-            || !is_interactive_medium(&impersonation_token(&token)?)?
+            || !is_interactive_medium(&impersonation_token(&token).map_err(error)?)?
         {
             return Ok(None);
         }
@@ -249,8 +252,10 @@ impl HelperAuthority {
         let session = session(&current)?;
         let linked = linked_token(&current)
             .map_err(|err| authority_stage("get helper linked token", err))?;
-        let limited = impersonation_token(&linked)
-            .map_err(|err| authority_stage("duplicate helper linked token", err))?;
+        let limited = impersonation_token(&linked).map_err(|failure| {
+            report_linked_token_failure(&failure);
+            authority_stage("duplicate helper linked token", error(failure))
+        })?;
         if session == 0
             || session != self::session(&limited)?
             || token_sid(&limited)? != sid
@@ -288,7 +293,7 @@ impl HelperAuthority {
             || logon.LowPart != self.logon.LowPart
             || !is_interactive_medium(
                 &impersonation_token(&token)
-                    .map_err(|err| authority_stage("duplicate owner process token", err))?,
+                    .map_err(|err| authority_stage("duplicate owner process token", error(err)))?,
             )
             .map_err(|err| authority_stage("validate owner process token", err))?
         {
@@ -781,7 +786,62 @@ fn linked_token(token: &Handle) -> Result<Handle, String> {
     Ok(Handle(linked.LinkedToken))
 }
 
-fn impersonation_token(token: &Handle) -> Result<Handle, String> {
+struct DuplicationError {
+    failure: io::Error,
+    token_type: Option<i32>,
+    impersonation_level: Option<i32>,
+}
+
+impl std::fmt::Display for DuplicationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DuplicateTokenEx(SecurityImpersonation, ")?;
+        match (self.token_type, self.impersonation_level) {
+            (_, Some(level)) => write!(f, "source impersonation level {level}")?,
+            (Some(kind), None) => write!(f, "source token type {kind}")?,
+            (None, None) => f.write_str("source token type unavailable")?,
+        }
+        write!(f, "): {}", self.failure)
+    }
+}
+
+impl DuplicationError {
+    fn event_data(&self) -> String {
+        let number = |value: Option<i32>| value.map_or_else(|| "unknown".into(), |n| n.to_string());
+        format!(
+            "stage=duplicate_helper_linked_token api=DuplicateTokenEx win32={} token_type={} impersonation_level={}",
+            number(self.failure.raw_os_error()),
+            number(self.token_type),
+            number(self.impersonation_level),
+        )
+    }
+}
+
+fn report_linked_token_failure(failure: &DuplicationError) {
+    // The scheduled GUI executable may start without stderr. This fixed event
+    // carries numeric token metadata only and does not need a profile path.
+    let source = unsafe { RegisterEventSourceW(null(), w!("Prismestra Installed Backend")) };
+    if source.is_null() {
+        return;
+    }
+    let data: Vec<u16> = failure.event_data().encode_utf16().chain([0]).collect();
+    let strings = [data.as_ptr()];
+    unsafe {
+        ReportEventW(
+            source,
+            EVENTLOG_ERROR_TYPE,
+            0,
+            1,
+            null_mut(),
+            1,
+            0,
+            strings.as_ptr(),
+            null(),
+        );
+        DeregisterEventSource(source);
+    }
+}
+
+fn impersonation_token(token: &Handle) -> Result<Handle, DuplicationError> {
     let mut result = null_mut();
     if unsafe {
         DuplicateTokenEx(
@@ -795,16 +855,14 @@ fn impersonation_token(token: &Handle) -> Result<Handle, String> {
     } == 0
     {
         let failure = io::Error::last_os_error();
-        let source = match token_value::<TOKEN_STATISTICS>(token, TokenStatistics) {
-            Ok(stats) if stats.TokenType == TokenImpersonation => {
-                format!("source impersonation level {}", stats.ImpersonationLevel)
-            }
-            Ok(stats) => format!("source token type {}", stats.TokenType),
-            Err(_) => "source token type unavailable".into(),
-        };
-        return Err(error(format_args!(
-            "DuplicateTokenEx(SecurityImpersonation, {source}): {failure}"
-        )));
+        let stats = token_value::<TOKEN_STATISTICS>(token, TokenStatistics).ok();
+        return Err(DuplicationError {
+            failure,
+            token_type: stats.map(|stats| stats.TokenType),
+            impersonation_level: stats
+                .filter(|stats| stats.TokenType == TokenImpersonation)
+                .map(|stats| stats.ImpersonationLevel),
+        });
     }
     Ok(Handle(result))
 }
@@ -836,7 +894,10 @@ fn is_high_admin(token: &Handle) -> Result<bool, String> {
     Ok(elevation_type(token)? == TokenElevationTypeFull
         && integrity(token)? == 0x3000
         && session(token)? != 0
-        && member(&impersonation_token(token)?, WinBuiltinAdministratorsSid)?)
+        && member(
+            &impersonation_token(token).map_err(error)?,
+            WinBuiltinAdministratorsSid,
+        )?)
 }
 
 fn is_interactive_medium(token: &Handle) -> Result<bool, String> {
@@ -876,9 +937,14 @@ mod tests {
         let failure = impersonation_token(&Handle(identification)).err().unwrap();
         assert!(
             failure
+                .to_string()
                 .contains("DuplicateTokenEx(SecurityImpersonation, source impersonation level 1)")
         );
-        assert!(failure.contains("os error 1346"));
+        assert_eq!(failure.failure.raw_os_error(), Some(1346));
+        assert_eq!(
+            failure.event_data(),
+            "stage=duplicate_helper_linked_token api=DuplicateTokenEx win32=1346 token_type=2 impersonation_level=1"
+        );
     }
 
     #[test]
