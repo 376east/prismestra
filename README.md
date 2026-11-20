@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/malyarq/prismestra/actions/workflows/windows.yml"><img src="https://github.com/malyarq/prismestra/actions/workflows/windows.yml/badge.svg" alt="Windows checks"></a>
+  <a href="https://github.com/376east/prismestra/actions/workflows/windows.yml"><img src="https://github.com/376east/prismestra/actions/workflows/windows.yml/badge.svg?branch=master&amp;event=push" alt="Windows CI"></a>
   <img src="https://img.shields.io/badge/platform-Windows-89b4fa?style=flat-square" alt="Windows">
   <img src="https://img.shields.io/badge/core-Rust-f9bc7a?style=flat-square" alt="Rust core">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--2.0--or--later-a6e3a1?style=flat-square" alt="GPL-2.0-or-later"></a>
@@ -11,19 +11,23 @@
 
 <p align="center">
   <a href="#what-it-does">Features</a> ·
-  <a href="docs/compatibility.md">Compatibility</a> ·
+  <a href="docs/compatibility.md">Supported devices</a> ·
   <a href="CHANGELOG.md">Changelog</a> ·
-  <a href="#build-and-run">Build</a> ·
+  <a href="#build-and-run">Build from source</a> ·
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
-Prismestra is a local lighting orchestrator for Windows. Its goal is to bring PC RGB, unusual Bluetooth lights, LCD displays and home lighting into one spatial scene, with explicit device support and a small resident engine.
+Prismestra brings PC RGB, supported Bluetooth lights, LCD displays and home lighting into one scene. Arrange your devices on a canvas and keep the scene running after you close the Windows editor.
+
+A project from [37.6 East](https://github.com/376east).
 
 ## Download for Windows
 
-Download **[Prismestra Setup for Windows x64](https://github.com/malyarq/prismestra/releases/download/v0.1.0-preview.6/Prismestra-Setup-0.1.0.6-x64.exe)** from the [latest preview release](https://github.com/malyarq/prismestra/releases/tag/v0.1.0-preview.6). Run Setup and choose sign-in startup. The app restores an existing Prismestra scene or discovers supported local devices, builds a first map and starts a scene automatically. You can then arrange devices to match their physical positions.
+**[Download Windows x64 Preview 6](https://github.com/376east/prismestra/releases/download/v0.1.0-preview.6/Prismestra-Setup-0.1.0.6-x64.exe)** · [Check your devices](docs/compatibility.md) · [Release notes](https://github.com/376east/prismestra/releases/tag/v0.1.0-preview.6)
 
-The offline installer includes the application, its private headless OpenRGB backend, Visual C++ and WebView2 installers, and the optional signed PawnIO installer for supported PC lighting. You do not need a separate OpenRGB installation. Updates preserve scenes; uninstall is available in Windows Settings and preserves your data. See [installation and permissions](docs/windows-installer.md) for details and the recorded test scope. Developer source downloads are not installers.
+Run Setup and choose whether Prismestra should start when you sign in. The installer includes a background OpenRGB backend and the Windows runtimes it needs. [Installation and permissions](docs/windows-installer.md)
+
+> **Preview 6:** Stop hardware output before importing a portable ZIP profile. This release can send profile colors before you press Apply. [Known issues](https://github.com/376east/prismestra/releases/tag/v0.1.0-preview.6)
 
 **Early preview.** The scene engine, native editor and OpenRGB/WLED/Home Assistant setup paths are implemented and have software tests. Home Assistant tokens use Windows Credential Manager. A resident session keeps lighting and sensor subscriptions alive when the editor closes. The [local integration record](docs/validation/windows-local-kit.json) covers transport checks on one PC kit and identifies the tested source revision. Physical colors, firmware behavior and performance require separate checks. See the [compatibility table](docs/compatibility.md) before choosing a device.
 
@@ -48,7 +52,7 @@ Packaged Windows x64 builds require Microsoft Edge WebView2 Runtime 105 or newer
 Install a current stable [Rust toolchain](https://www.rust-lang.org/tools/install) with the Windows MSVC build tools, then:
 
 ```powershell
-git clone https://github.com/malyarq/prismestra.git
+git clone https://github.com/376east/prismestra.git
 cd prismestra
 cargo build --release --locked --bin pc-control-ui
 .\target\release\pc-control-ui.exe
