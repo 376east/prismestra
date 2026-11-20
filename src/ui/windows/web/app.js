@@ -30,6 +30,7 @@ let state = null, draft = null, draftOrigin = null, draftName = 'Текущая 
 let view = 'library', search = '', previewTimer = null, frame = null, commandPending = false, error = '', dialogMode = 'new', dialogReturn = null, savedSceneRequest = null, previewQueued = false, closing = false, nativeAwaitingAck = false, pendingView = null, advancedOpen = false, submittedStages = [], pointerGesture = false, keyGesture = false, composing = false, renderQueued = false, awaitingCommandAck = false, errorIsCommand = false;
 const formStages = new Map();
 let deviceInspection = null;
+let settingsOpener = null, settingsFocusReturn = null;
 const busy = () => closing || !state || !!state.pending || commandPending || savedSceneRequest !== null;
 const disabled = () => busy() ? 'disabled' : '';
 const changed = () => !!draft && !!state && !same(draft,state.scene);
@@ -326,6 +327,8 @@ function render() {
  }
  const key=focusKey(),node=document.activeElement,selection=typeof node?.selectionStart==='number'?[node.selectionStart,node.selectionEnd]:null;
  const headingFocused = node === $('#main h1');
+ const returnKey = view==='settings' && headingFocused ? settingsFocusReturn : null;
+ settingsFocusReturn = null;
  const hiddenNavFocused = node?.closest?.('nav') && !outputPageAvailable(node.dataset.view);
  renderedOutputEditor = outputPage(view)&&state?.editor?.page===view?state.editor:null;
  const selectedPage = settingsPages.includes(view)?'settings':view;
@@ -335,7 +338,8 @@ function render() {
  document.querySelectorAll('[data-native-kind="secret"]').forEach(input=>{const staged=formStages.get(stageKey('native',input.dataset.nativeField));if(staged)input.value=staged.value;});
  if(view==='devices')window.outputMap?.mount(state,send,currentGenericStages);
  syncControls();paintPreview();paintLibraryPreviews();
- if(headingFocused || (node?.dataset?.field && detachedOutputEdits()))focusHeading();
+ if(returnKey)restoreFocus(returnKey);
+ else if(headingFocused || (node?.dataset?.field && detachedOutputEdits()))focusHeading();
  else if(hiddenNavFocused)$('nav [data-view="devices"]')?.focus({preventScroll:true});
  else restoreFocus(key,selection);
  syncDeviceAnnouncement();
@@ -358,14 +362,18 @@ function paintPreview() {paintPixels($('#stage'),frame);}
 function paintLibraryPreviews() {
  document.querySelectorAll('[data-library-preview]').forEach(canvas=>paintPixels(canvas,state?.library.find(item=>String(item.id)===canvas.dataset.libraryPreview)?.preview));
 }
-function changeView(next) {
+function changeView(next, source) {
  if(!Object.hasOwn(pages,next)||!outputPageAvailable(next)||next===view||closing||pendingView)return;
  if(pageHasEdits()){showError('Примените или отмените изменения перед переходом в другой раздел.');return;}
- const previous=view;view=next;render();focusHeading();
+ const previous=view;
+ const opener = previous==='settings' && settingsPages.includes(next) && source?.closest('.settings-links')
+  ? '#main .settings-links '+focusKey(source)
+  : null;
+ view=next;render();focusHeading();
  if(!['library','editor'].includes(next)){
-  pendingView={previous,next};
+  pendingView={previous,next,opener};
   if(!send({op:'page',page:next})){view=previous;pendingView=null;render();focusHeading();}
- }
+ } else settingsOpener=null;
  if(next==='editor')requestPreview();
 }
 function setDraftOrigin(origin) {
@@ -441,7 +449,12 @@ window.prismestraReceive = message => {
   if(message.kind==='snapshot') {
    const acknowledged=awaitingCommandAck;awaitingCommandAck=false;completeStageAck();state=message.state;
    window.outputMap?.update(state);
-   if(acknowledged&&errorIsCommand&&!state.error){error='';errorIsCommand=false;$('#native-error').hidden=true;$('#native-error').innerHTML='';}commandPending=false;nativeAwaitingAck=false;pendingView=null;
+   if(acknowledged&&errorIsCommand&&!state.error){error='';errorIsCommand=false;$('#native-error').hidden=true;$('#native-error').innerHTML='';}commandPending=false;nativeAwaitingAck=false;
+   if(pendingView){
+    if(pendingView.next==='settings')settingsFocusReturn=settingsOpener;
+    settingsOpener=pendingView.opener??null;
+    pendingView=null;
+   }
    if(!draft){
     draft=clone(state.draftScene??state.scene);
     setDraftOrigin(state.draftScene?state.draftOrigin??null:{id:null,name:null,scene:state.scene});
@@ -474,7 +487,7 @@ window.prismestraReceive = message => {
 document.addEventListener('click',event=>{
  const b=event.target.closest('button');if(!b||b.disabled||(busy()&&b.hasAttribute('data-mutation')&&!recoveryAction(b.dataset.action)))return;
  if(b.dataset.nativeAction!==undefined)return void send({op:'native_action',id:b.dataset.nativeAction},true);
- if(b.dataset.view)return changeView(b.dataset.view);
+ if(b.dataset.view)return changeView(b.dataset.view,b);
  if(b.dataset.edit){const entry=state.library.find(e=>e.id===b.dataset.edit);if(entry)openEntry(entry);return;}
  if(b.dataset.apply){const entry=state.library.find(e=>e.id===b.dataset.apply);if(entry)send({op:'apply_scene',scene:clone(entry.scene)},true);return;}
  if(b.dataset.remove){const entry=state.library.find(e=>e.id===b.dataset.remove);if(entry&&!entry.builtIn){dialogReturn=focusKey();$('#remove-description').textContent=`Удалить сцену «${entry.name}» из профиля? Запущенный эффект продолжит работать.`;$('#remove-dialog').dataset.id=entry.id;$('#remove-dialog').showModal();$('#cancel-remove').focus();}return;}

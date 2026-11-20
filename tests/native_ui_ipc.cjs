@@ -582,3 +582,32 @@ for (const output of [navLcd, navAmbient]) {
  receiveDeviceState('snapshot',navFixture([]));
 }
 console.log('PASS: startup waiting, detached output input, no wrong-target mutation, reconnect and explicit discard');
+
+vm.runInContext('formStages.clear();view="settings";pendingView=null',context);
+const settingsState = navFixture();
+receiveDeviceState('snapshot',settingsState);
+const scheduleOpener = new Node();
+scheduleOpener.dataset.view = 'schedule';
+scheduleOpener.closest = selector => selector === '.settings-links' ? new Node() : null;
+const scheduleLink = find('#main .settings-links [data-view="schedule"]');
+const scheduleForm = {...settingsState,nativeForm:{page:'schedule',fields:[],actions:[],notes:[]}};
+const returnFromSchedule = () => {
+ events.click({target:{closest:()=>scheduleOpener}});
+ receiveDeviceState('snapshot',scheduleForm);
+ openView('settings');
+ assert.equal(viewNow(),'settings');
+ assert.notEqual(document.activeElement,scheduleLink,'Wait for the Settings snapshot before restoring focus');
+};
+returnFromSchedule();
+document.activeElement=find('#main h1');
+receiveDeviceState('status',{pending:false});
+assert.notEqual(document.activeElement,scheduleLink);
+receiveDeviceState('snapshot',settingsState);
+assert.equal(document.activeElement,scheduleLink,'Restore the initiating Settings link after acknowledgement');
+returnFromSchedule();
+const appearanceButton=find('#appearance-toggle');
+appearanceButton.id='appearance-toggle';
+document.activeElement=appearanceButton;
+receiveDeviceState('snapshot',settingsState);
+assert.equal(document.activeElement,appearanceButton,'An asynchronous return does not steal focus moved by the user');
+console.log('PASS: Settings return focus waits for acknowledgement and respects user focus');
