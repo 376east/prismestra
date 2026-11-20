@@ -261,36 +261,6 @@ fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
     }
     json!({"id":entry.id,"name":entry.name,"scene":entry.scene,"preview":{"width":24,"height":12,"colors":colors}})
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::lighting::scene::Effect;
-
-    #[test]
-    fn slow_breathing_card_shows_its_lit_phase_without_changing_scene_settings() {
-        let mut entry = crate::ui::catalog::plum_dawn();
-        entry.scene.effect = Effect::Breathing;
-        entry.scene.speed = 10;
-        entry.scene.fps = 144;
-        entry.scene.colors = vec![0x526681];
-        let saved = serde_json::to_value(&entry.scene).unwrap();
-        let card = scene_card(&entry);
-        let colors = card["preview"]["colors"].as_array().unwrap();
-        assert_eq!(colors.len(), 24 * 12);
-        assert!(colors.iter().all(|color| color.as_u64().unwrap() != 0));
-        assert_eq!(card["scene"], saved);
-
-        entry.scene.brightness = 0;
-        assert!(
-            scene_card(&entry)["preview"]["colors"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|color| color.as_u64().unwrap() == 0)
-        );
-    }
-}
-
 fn assets(path: &str) -> Option<(&'static str, &'static [u8])> {
     Some(match path {
         "/" | "/index.html" => ("text/html; charset=utf-8", include_bytes!("web/index.html")),
@@ -1110,4 +1080,34 @@ pub(super) fn return_to_editor(state: &State) -> Result<(), String> {
         app.show_page();
     }
     send(state, &snapshot(state)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lighting::scene::Effect;
+
+    #[test]
+    fn slow_breathing_card_shows_its_lit_phase_without_changing_scene_settings() {
+        let mut entry = crate::ui::catalog::plum_dawn();
+        entry.scene.effect = Effect::Breathing;
+        entry.scene.speed = 10;
+        entry.scene.fps = 144;
+        entry.scene.colors = vec![0x526681];
+        let saved = serde_json::to_value(&entry.scene).unwrap();
+        let card = scene_card(&entry);
+        let colors = card["preview"]["colors"].as_array().unwrap();
+        assert_eq!(colors.len(), 24 * 12);
+        assert!(colors.iter().all(|color| color.as_u64().unwrap() != 0));
+        assert_eq!(card["scene"], saved);
+
+        entry.scene.brightness = 0;
+        assert!(
+            scene_card(&entry)["preview"]["colors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|color| color.as_u64().unwrap() == 0)
+        );
+    }
 }
