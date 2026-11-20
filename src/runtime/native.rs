@@ -89,20 +89,16 @@ pub fn bound_factory(
             if cancel.cancelled() {
                 return Err("RGB output stopping".into());
             }
-            if let Some(controller) = &controller {
-                let info = crate::transport::wled_info::Endpoint::parse(&controller.http_endpoint)
-                    .map_err(|e| e.to_string())?
-                    .query(
-                        std::time::Instant::now() + std::time::Duration::from_secs(3),
-                        || cancel.cancelled(),
-                    )
-                    .map_err(|e| e.to_string())?;
-                controller.verify(&info, device.leds)?;
-            }
-            Ok(Box::new(super::network::Wled::connect(
-                endpoint,
-                device.leds,
-            )?))
+            let output = match &controller {
+                Some(controller) => super::network::Wled::connect_verified(
+                    endpoint,
+                    device.leds,
+                    controller,
+                    &cancel,
+                ),
+                None => super::network::Wled::connect(endpoint, device.leds),
+            }?;
+            Ok(Box::new(output))
         }),
         (
             Driver::SkydimoSerial { model },

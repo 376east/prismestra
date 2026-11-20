@@ -148,6 +148,31 @@ pub struct Wled {
     period: Duration,
     next: Option<Instant>,
     rgb: Vec<u8>,
+    #[cfg(windows)]
+    identity: Option<WledIdentity>,
+}
+
+#[cfg(windows)]
+struct WledIdentity {
+    controller: crate::devices::wled::Controller,
+    endpoint: crate::transport::wled_info::Endpoint,
+    valid_until: Instant,
+}
+
+#[cfg(windows)]
+impl WledIdentity {
+    fn revalidate(&mut self, leds: usize, cancel: &Cancellation) -> Result<(), String> {
+        let info = self
+            .endpoint
+            .query(Instant::now() + Duration::from_secs(3), || {
+                cancel.cancelled()
+            })
+            .map_err(|e| e.to_string())?;
+        self.controller.verify(&info, leds)?;
+        // UDP does not report a changed peer. Renew only against the bound HTTP origin.
+        self.valid_until = Instant::now() + Duration::from_secs(2);
+        Ok(())
+    }
 }
 
 pub struct OpenRgb {
@@ -248,7 +273,29 @@ impl Wled {
             period: Duration::from_micros(1_000_000u64.div_ceil(rate_hz)),
             next: None,
             rgb: vec![0; leds * 3],
+            #[cfg(windows)]
+            identity: None,
         })
+    }
+
+    #[cfg(windows)]
+    pub(super) fn connect_verified(
+        endpoint: SocketAddr,
+        leds: usize,
+        controller: &crate::devices::wled::Controller,
+        cancel: &Cancellation,
+    ) -> Result<Self, String> {
+        controller.validate_target(endpoint)?;
+        let mut output = Self::connect(endpoint, leds)?;
+        let mut identity = WledIdentity {
+            controller: controller.clone(),
+            endpoint: crate::transport::wled_info::Endpoint::parse(&controller.http_endpoint)
+                .map_err(|e| e.to_string())?,
+            valid_until: Instant::now(),
+        };
+        identity.revalidate(leds, cancel)?;
+        output.identity = Some(identity);
+        Ok(output)
     }
 }
 impl RgbDriver for Wled {
@@ -270,6 +317,14 @@ impl RgbDriver for Wled {
             && next > now
         {
             return Ok(WriteResult::Deferred(next - now));
+        }
+        #[cfg(windows)]
+        if let Some(identity) = &mut self.identity
+            && now >= identity.valid_until
+        {
+            identity.revalidate(self.leds, cancel)?;
+            // A frame submitted during HTTP validation supersedes this one.
+            return Ok(WriteResult::Deferred(Duration::from_millis(1)));
         }
         for (color, bytes) in colors
             .iter()

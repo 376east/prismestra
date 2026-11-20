@@ -15,7 +15,8 @@ use std::{
 use windows_sys::{
     Win32::{
         Foundation::{
-            CloseHandle, GENERIC_ALL, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LUID, LocalFree,
+            CloseHandle, ERROR_INSUFFICIENT_BUFFER, GENERIC_ALL, GENERIC_WRITE, HANDLE,
+            INVALID_HANDLE_VALUE, LUID, LocalFree,
         },
         Security::{
             ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
@@ -157,7 +158,9 @@ impl InstalledPolicy {
 
     pub(super) fn helper() -> Result<(Self, HelperAuthority), String> {
         let authority = HelperAuthority::current()?;
-        let state = authority.with_limited(current_state)??;
+        let state = authority
+            .with_limited(current_state)?
+            .map_err(|err| authority_stage("resolve state under linked limited token", err))?;
         let policy = Self::load(&authority.sid, state, &authority.executable)?
             .ok_or("Installed backend policy is missing")?;
         for directory in [&policy.config_dir, &policy.outbox] {
@@ -233,20 +236,26 @@ impl HelperAuthority {
         let current = process_token(
             unsafe { GetCurrentProcess() },
             TOKEN_QUERY | TOKEN_DUPLICATE,
-        )?;
-        if !is_high_admin(&current)? {
+        )
+        .map_err(|err| authority_stage("open helper process token", err))?;
+        if !is_high_admin(&current)
+            .map_err(|err| authority_stage("validate elevated helper token", err))?
+        {
             return Err(
                 "Installed backend helper requires a split-token elevated administrator".into(),
             );
         }
         let sid = token_sid(&current)?;
         let session = session(&current)?;
-        let linked = linked_token(&current)?;
-        let limited = impersonation_token(&linked)?;
+        let linked = linked_token(&current)
+            .map_err(|err| authority_stage("get helper linked token", err))?;
+        let limited = impersonation_token(&linked)
+            .map_err(|err| authority_stage("duplicate helper linked token", err))?;
         if session == 0
             || session != self::session(&limited)?
             || token_sid(&limited)? != sid
-            || !is_interactive_medium(&limited)?
+            || !is_interactive_medium(&limited)
+                .map_err(|err| authority_stage("validate helper linked token", err))?
         {
             return Err(
                 "Installed backend helper requires its own interactive limited token".into(),
@@ -268,13 +277,20 @@ impl HelperAuthority {
                 "Installed backend helper owner image differs from its installed executable".into(),
             );
         }
-        let token = process_token(process, TOKEN_QUERY | TOKEN_DUPLICATE)?;
-        let logon = token_value::<TOKEN_STATISTICS>(&token, TokenStatistics)?.AuthenticationId;
+        let token = process_token(process, TOKEN_QUERY | TOKEN_DUPLICATE)
+            .map_err(|err| authority_stage("open owner process token", err))?;
+        let logon = token_value::<TOKEN_STATISTICS>(&token, TokenStatistics)
+            .map_err(|err| authority_stage("query owner logon", err))?
+            .AuthenticationId;
         if token_sid(&token)? != self.sid
             || session(&token)? != self.session
             || logon.HighPart != self.logon.HighPart
             || logon.LowPart != self.logon.LowPart
-            || !is_interactive_medium(&impersonation_token(&token)?)?
+            || !is_interactive_medium(
+                &impersonation_token(&token)
+                    .map_err(|err| authority_stage("duplicate owner process token", err))?,
+            )
+            .map_err(|err| authority_stage("validate owner process token", err))?
         {
             return Err(
                 "Installed backend helper owner has a different user, logon or session".into(),
@@ -285,7 +301,10 @@ impl HelperAuthority {
 
     pub(super) fn with_limited<T>(&self, read: impl FnOnce() -> T) -> Result<T, String> {
         if unsafe { SetThreadToken(null(), self.limited.0) } == 0 {
-            return Err(error(io::Error::last_os_error()));
+            return Err(error(format_args!(
+                "SetThreadToken(linked limited token): {}",
+                io::Error::last_os_error()
+            )));
         }
         struct Revert;
         impl Drop for Revert {
@@ -314,7 +333,10 @@ impl HelperAuthority {
             )
         } == 0
         {
-            return Err(error(io::Error::last_os_error()));
+            return Err(error(format_args!(
+                "SetTokenInformation(TokenOwner): {}",
+                io::Error::last_os_error()
+            )));
         }
         Ok(())
     }
@@ -358,6 +380,15 @@ fn canonical_user_state_path(path: &Path) -> Result<PathBuf, String> {
 
 fn error(e: impl std::fmt::Display) -> String {
     format!("Installed backend authority: {e}")
+}
+
+fn authority_stage(stage: &str, error: String) -> String {
+    format!(
+        "Installed backend authority ({stage}): {}",
+        error
+            .strip_prefix("Installed backend authority: ")
+            .unwrap_or(&error)
+    )
 }
 
 fn known_folder(id: &GUID) -> Result<PathBuf, String> {
@@ -665,14 +696,24 @@ impl Drop for LocalAllocation {
 fn process_token(process: HANDLE, access: u32) -> Result<Handle, String> {
     let mut token = null_mut();
     if unsafe { OpenProcessToken(process, access, &mut token) } == 0 {
-        return Err(error(io::Error::last_os_error()));
+        return Err(error(format_args!(
+            "OpenProcessToken: {}",
+            io::Error::last_os_error()
+        )));
     }
     Ok(Handle(token))
 }
 
 fn token_data(token: &Handle, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<usize>, String> {
     let mut length = 0;
-    unsafe { GetTokenInformation(token.0, class, null_mut(), 0, &mut length) };
+    if unsafe { GetTokenInformation(token.0, class, null_mut(), 0, &mut length) } == 0 {
+        let failure = io::Error::last_os_error();
+        if failure.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) {
+            return Err(error(format_args!(
+                "GetTokenInformation(class {class}, size): {failure}"
+            )));
+        }
+    }
     if length == 0 || length > 65536 {
         return Err(error("invalid Windows token information size"));
     }
@@ -687,7 +728,10 @@ fn token_data(token: &Handle, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<usiz
         )
     } == 0
     {
-        return Err(error(io::Error::last_os_error()));
+        return Err(error(format_args!(
+            "GetTokenInformation(class {class}, data): {}",
+            io::Error::last_os_error()
+        )));
     }
     Ok(data)
 }
@@ -750,7 +794,17 @@ fn impersonation_token(token: &Handle) -> Result<Handle, String> {
         )
     } == 0
     {
-        return Err(error(io::Error::last_os_error()));
+        let failure = io::Error::last_os_error();
+        let source = match token_value::<TOKEN_STATISTICS>(token, TokenStatistics) {
+            Ok(stats) if stats.TokenType == TokenImpersonation => {
+                format!("source impersonation level {}", stats.ImpersonationLevel)
+            }
+            Ok(stats) => format!("source token type {}", stats.TokenType),
+            Err(_) => "source token type unavailable".into(),
+        };
+        return Err(error(format_args!(
+            "DuplicateTokenEx(SecurityImpersonation, {source}): {failure}"
+        )));
     }
     Ok(Handle(result))
 }
@@ -770,7 +824,10 @@ fn member(token: &Handle, kind: i32) -> Result<bool, String> {
     let mut sid = well_known_sid(kind)?;
     let mut result = 0;
     if unsafe { CheckTokenMembership(token.0, sid.as_mut_ptr().cast(), &mut result) } == 0 {
-        return Err(error(io::Error::last_os_error()));
+        return Err(error(format_args!(
+            "CheckTokenMembership(well-known SID type {kind}): {}",
+            io::Error::last_os_error()
+        )));
     }
     Ok(result != 0)
 }
@@ -791,6 +848,38 @@ fn is_interactive_medium(token: &Handle) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows_sys::Win32::Security::SecurityIdentification;
+
+    #[test]
+    fn identification_token_cannot_be_used_for_limited_file_access() {
+        let token = process_token(
+            unsafe { GetCurrentProcess() },
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+        )
+        .unwrap();
+        let mut identification = null_mut();
+        assert_ne!(
+            unsafe {
+                DuplicateTokenEx(
+                    token.0,
+                    TOKEN_QUERY | TOKEN_DUPLICATE,
+                    null(),
+                    SecurityIdentification,
+                    TokenImpersonation,
+                    &mut identification,
+                )
+            },
+            0,
+            "{}",
+            io::Error::last_os_error()
+        );
+        let failure = impersonation_token(&Handle(identification)).err().unwrap();
+        assert!(
+            failure
+                .contains("DuplicateTokenEx(SecurityImpersonation, source impersonation level 1)")
+        );
+        assert!(failure.contains("os error 1346"));
+    }
 
     #[test]
     fn policy_accepts_only_exact_sid_ipv4_loopback_and_unambiguous_runtime_pins() {
