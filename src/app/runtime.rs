@@ -623,15 +623,12 @@ impl Runtime {
     }
 
     fn live_rgb_plan(&self, document: &Document, outputs: &OutputPlan) -> Option<LiveRgbPlan> {
-        // This transaction changes RGB layout/routes only. The full path still
-        // handles changes that require rebuilding capture, LCD or sensor state.
+        // RGB layout and route changes can leave the other owners running
+        // when they require no rebuild.
         if self.power.error().is_some()
             || self.capture_factory.is_some()
             || self.capture.is_some()
             || outputs.capture.is_some()
-            || !self.lcd_specs.is_empty()
-            || !self.lcd.is_empty()
-            || !outputs.lcd.is_empty()
             || !self.sensor_specs.is_empty()
             || !self.sensors.is_empty()
             || !self.document.ambient.routes.is_empty()
@@ -642,6 +639,20 @@ impl Runtime {
         layout.lighting.setup = document.lighting.setup.clone();
         layout.lighting.groups = document.lighting.groups.clone();
         if layout != *document {
+            return None;
+        }
+        if outputs.lcd.len() != self.lcd_specs.len()
+            || outputs.lcd.len() != self.lcd.len()
+            || outputs.lcd.iter().any(|(id, keys, factory)| {
+                self.lcd_specs.get(id).is_none_or(|previous| {
+                    previous.keys != *keys || !Arc::ptr_eq(&previous.factory, factory)
+                }) || self
+                    .lcd
+                    .get(id)
+                    .is_none_or(|worker| worker.snapshot().phase != lcd_worker::Phase::Ready)
+                    || !self.device_unchanged(document, id)
+            })
+        {
             return None;
         }
         let retained: BTreeSet<_> = outputs
@@ -674,7 +685,7 @@ impl Runtime {
                 .then(|| id.clone())
             })
             .collect();
-        if retained.is_empty() {
+        if retained.is_empty() && self.lcd.is_empty() {
             return None;
         }
         let retiring = self
@@ -684,6 +695,21 @@ impl Runtime {
             .cloned()
             .collect();
         Some(LiveRgbPlan { retained, retiring })
+    }
+
+    fn device_unchanged(&self, document: &Document, id: &str) -> bool {
+        self.document
+            .lighting
+            .setup
+            .devices
+            .iter()
+            .find(|device| device.id == id)
+            == document
+                .lighting
+                .setup
+                .devices
+                .iter()
+                .find(|device| device.id == id)
     }
     /// Save As storage barrier. Never changes a model or starts/restarts a factory.
     /// Pending saves retain the applied journal until that proposal actually commits.
@@ -766,7 +792,9 @@ impl Runtime {
             self.pending = None;
             self.error = None;
             self.capture = None;
-            self.lcd.clear();
+            if live.is_none() {
+                self.lcd.clear();
+            }
 
             self.sensors.clear();
 
@@ -945,7 +973,10 @@ impl Runtime {
             self.revision = revision;
             self.point_targets = targets;
             self.colors = colors;
-            self.lcd.clear();
+            if live.is_none() {
+                self.lcd.clear();
+                self.lcd_view.clear();
+            }
 
             self.sensors.clear();
 
@@ -954,7 +985,6 @@ impl Runtime {
             self.last_wall = None;
             self.error = None;
             self.rgb_view.clear();
-            self.lcd_view.clear();
             self.capture_view = None;
             self.bump_view();
         }
@@ -971,7 +1001,7 @@ impl Runtime {
         }
         if restart {
             if let Some(live) = &live {
-                self.restart_registered_rgb(&live.retained, false)?;
+                self.restart_registered_rgb(Some(live), false)?;
                 self.bump()?;
             } else if let Err(error) = self.restart_registered(false) {
                 self.stop_channels();
@@ -1465,7 +1495,7 @@ impl Runtime {
 
     fn restart_registered_rgb(
         &mut self,
-        retained: &BTreeSet<String>,
+        live: Option<&LiveRgbPlan>,
         retry_action_required: bool,
     ) -> Result<(), String> {
         if retry_action_required {
@@ -1477,7 +1507,8 @@ impl Runtime {
             .rgb_specs
             .iter()
             .filter(|(id, _)| {
-                !retained.contains(*id) && (retry_action_required || !self.rgb_requires_action(id))
+                live.is_none_or(|plan| !plan.retained.contains(*id))
+                    && (retry_action_required || !self.rgb_requires_action(id))
             })
             .map(|(id, s)| (id.clone(), s.keys.clone(), s.factory.clone()))
             .collect::<Vec<_>>();
@@ -1485,7 +1516,7 @@ impl Runtime {
         for (id, keys, f) in rgb {
             let result = self.host.attach_claimed(&id, keys, move |c| f(c));
             if let Err(error) = self.handle_output_start(&id, result) {
-                if retained.is_empty() {
+                if live.is_none() {
                     return Err(error);
                 }
                 first_error.get_or_insert(error);
@@ -1497,7 +1528,7 @@ impl Runtime {
     fn restart_registered(&mut self, retry_action_required: bool) -> Result<(), String> {
         // Called only after all previous owners have been reaped. Never reuse a
         // native handle across suspend; every factory revalidates its binding.
-        self.restart_registered_rgb(&BTreeSet::new(), retry_action_required)?;
+        self.restart_registered_rgb(None, retry_action_required)?;
         let lcd = self
             .lcd_specs
             .iter()

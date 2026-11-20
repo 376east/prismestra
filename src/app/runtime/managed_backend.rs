@@ -71,7 +71,7 @@ impl Runtime {
         document: &Document,
         outputs: &mut OutputPlan,
     ) -> Result<bool, String> {
-        self.reuse_unchanged_native_rgb(previous, local, document, outputs, false);
+        self.reuse_unchanged_native_outputs(previous, local, document, outputs, false);
         let Some(config) = crate::app::managed_backend::Config::read_optional(state_dir)? else {
             return Ok(false);
         };
@@ -141,13 +141,13 @@ impl Runtime {
                 BTreeSet::new()
             }
         };
-        self.reuse_unchanged_native_rgb(previous, local, &document, &mut outputs, true);
+        self.reuse_unchanged_native_outputs(previous, local, &document, &mut outputs, true);
         let revision = self.request_outputs_for(document, outputs)?;
         self.pending.as_mut().unwrap().startup_managed_ids = Some(ids);
         Ok(revision)
     }
 
-    fn reuse_unchanged_native_rgb(
+    fn reuse_unchanged_native_outputs(
         &self,
         previous: Option<&Local>,
         local: &Local,
@@ -155,10 +155,25 @@ impl Runtime {
         outputs: &mut OutputPlan,
         keep_ha_session: bool,
     ) {
-        let Some(previous) = previous.filter(|old| old.door_brightness == local.door_brightness)
-        else {
+        let Some(previous) = previous else {
             return;
         };
+        for (id, keys, factory) in &mut outputs.lcd {
+            if let Some(binding) = local.devices.get(id)
+                && previous.devices.get(id) == Some(binding)
+                && self.device_unchanged(document, id)
+                && self
+                    .lcd
+                    .get(id)
+                    .is_some_and(|worker| worker.snapshot().phase == lcd_worker::Phase::Ready)
+                && let Some(spec) = self.lcd_specs.get(id).filter(|spec| spec.keys == *keys)
+            {
+                *factory = spec.factory.clone();
+            }
+        }
+        if previous.door_brightness != local.door_brightness {
+            return;
+        }
         for (id, keys, factory) in &mut outputs.rgb {
             let Some(binding) = local.devices.get(id) else {
                 continue;
@@ -170,20 +185,7 @@ impl Runtime {
             {
                 continue;
             }
-            let same_device = document
-                .lighting
-                .setup
-                .devices
-                .iter()
-                .find(|device| device.id == *id)
-                == self
-                    .document
-                    .lighting
-                    .setup
-                    .devices
-                    .iter()
-                    .find(|device| device.id == *id);
-            if same_device
+            if self.device_unchanged(document, id)
                 && previous.devices.get(id) == Some(binding)
                 && self
                     .host
