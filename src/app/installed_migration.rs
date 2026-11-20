@@ -1194,6 +1194,10 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::with_legacy_folder("old")
+        }
+
+        fn with_legacy_folder(folder: &str) -> Self {
             let stamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -1202,13 +1206,13 @@ mod tests {
                 "prismestra-migration-{}-{stamp}",
                 std::process::id()
             ));
-            let old = root.join("old");
+            let old = root.join(folder);
             let target = root.join("target");
             for path in [old.join("state"), target.join("state")] {
                 fs::create_dir_all(path).unwrap();
             }
             let root = root.canonicalize().unwrap();
-            let old = root.join("old");
+            let old = root.join(folder);
             Self {
                 source: Source {
                     profile: old.join("profile.json"),
@@ -1285,14 +1289,11 @@ mod tests {
         "127.0.0.1:17422".parse().unwrap()
     }
 
-    #[test]
-    fn verified_hint_finds_a_closed_source_outside_standard_locations() {
-        let fixture = Fixture::new();
+    fn write_closed_source_hint(fixture: &Fixture) -> (PathBuf, PathBuf, String) {
         let legacy = fixture.source.profile.parent().unwrap();
         let launcher = legacy.join("Start Prismestra.ps1");
         let wrapper = b"synthetic legacy launcher; never executed";
         fs::write(&launcher, wrapper).unwrap();
-        document(true).save(&fixture.source.profile).unwrap();
         let relative = "versions/aaaaaaa/Prismestra/Prismestra.exe";
         let executable = legacy.join(relative);
         let release = executable.parent().unwrap();
@@ -1326,14 +1327,21 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let pin = fingerprint(wrapper);
+        (launcher, executable, fingerprint(wrapper))
+    }
+
+    #[test]
+    fn verified_hint_finds_a_closed_source_outside_standard_locations() {
+        let fixture = Fixture::new();
+        document(true).save(&fixture.source.profile).unwrap();
+        let (launcher, executable, pin) = write_closed_source_hint(&fixture);
         assert_eq!(
             known_sources(&fixture.target, &pin).unwrap(),
             BTreeSet::from([fixture.source.clone()])
         );
         fs::write(&executable, b"different bytes").unwrap();
         assert!(hinted_source(&fixture.target, &pin).is_none());
-        fs::write(&executable, image).unwrap();
+        fs::write(&executable, b"synthetic release image; never executed").unwrap();
         fs::write(&launcher, b"unrecognized wrapper").unwrap();
         assert!(hinted_source(&fixture.target, &pin).is_none());
     }
@@ -1622,7 +1630,7 @@ mod tests {
             sensor_pci::Pci,
             sensors::{Source as TemperatureSource, Value},
         };
-        let fixture = Fixture::new();
+        let fixture = Fixture::with_legacy_folder("Старый профиль");
         let mut doc = document(true);
         let inputs = (0..5).map(|i| format!("sensor_{i}")).collect::<Vec<_>>();
         for input in &inputs {
@@ -1657,7 +1665,7 @@ mod tests {
     }
 
     #[test]
-    fn installed_migration_rebases_only_the_exact_temperature_scope() {
+    fn installed_migration_rebases_only_the_exact_temperature_scope_from_closed_source_hint() {
         use sensor_bindings::{Catalog as SensorCatalog, Scope};
         let (fixture, doc, inputs, old_scope, new_scope, mut catalog) =
             installed_temperature_scope_fixture();
@@ -1684,7 +1692,42 @@ mod tests {
         let source_path = fixture.source.state.join("sensor-sources.json");
         fs::write(&source_path, &original).unwrap();
 
-        fixture.migrate(false).unwrap();
+        let (_, _, pin) = write_closed_source_hint(&fixture);
+        let source = unique(known_sources(&fixture.target, &pin).unwrap())
+            .unwrap()
+            .expect("the original-user hint must find the closed portable profile");
+        assert_eq!(source, fixture.source);
+        let profile = fs::read(&source.profile).unwrap();
+        let local = fs::read(source.state.join(LOCAL)).unwrap();
+        let migrate = || {
+            migrate_from(
+                &fixture.target,
+                &document(false),
+                bundled(),
+                &source.profile,
+                &source.state,
+                false,
+            )
+            .unwrap()
+        };
+        assert!(matches!(
+            migrate(),
+            MigrationOutcome::Imported {
+                source_running: false,
+                used_bundled_backend: false,
+                external_uses_bundled_endpoint: false,
+            }
+        ));
+        assert_eq!(fs::read(&source.profile).unwrap(), profile);
+        assert_eq!(fs::read(source.state.join(LOCAL)).unwrap(), local);
+        assert_eq!(
+            fs::read(fixture.target.join("profile.json")).unwrap(),
+            profile
+        );
+        assert_eq!(
+            fs::read(fixture.target.join("state").join(LOCAL)).unwrap(),
+            local
+        );
         let installed_path = fixture.target.join("state/sensor-sources.json");
         let installed = SensorCatalog::load(&installed_path).unwrap();
         assert_eq!(fs::read(&source_path).unwrap(), original);
@@ -1699,7 +1742,22 @@ mod tests {
             .expect("five verified routes must resolve for the installed profile path");
         assert_eq!(actual, expected);
         let migrated_bytes = fs::read(&installed_path).unwrap();
-        fixture.migrate(false).unwrap();
+        let receipt = read_receipt(&fixture.target).unwrap().unwrap();
+        assert!(receipt.complete);
+        assert_eq!(receipt.source, source);
+        assert_eq!(receipt.after["profile.json"], fingerprint(&profile));
+        assert_eq!(
+            receipt.after[&format!("state/{LOCAL}")],
+            fingerprint(&local)
+        );
+        assert_eq!(
+            receipt.after["state/sensor-sources.json"],
+            fingerprint(&migrated_bytes)
+        );
+        let receipt_path = fixture.target.join(RECEIPT);
+        let receipt_bytes = fs::read(&receipt_path).unwrap();
+        assert!(matches!(migrate(), MigrationOutcome::None));
+        assert_eq!(fs::read(&receipt_path).unwrap(), receipt_bytes);
         assert_eq!(fs::read(&installed_path).unwrap(), migrated_bytes);
     }
 
