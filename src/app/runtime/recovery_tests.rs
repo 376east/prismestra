@@ -1025,6 +1025,22 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
             lcd.frames_sent > frames_before
         });
         assert_eq!(held.dropped.load(Ordering::SeqCst), 0);
+        #[cfg(windows)]
+        if matches!(change, PlanChange::MixedReplace) {
+            assert!(runtime.pending_configuration());
+            let lcd = runtime
+                .document()
+                .lighting
+                .setup
+                .devices
+                .iter()
+                .find(|device| device.id == "lcd")
+                .unwrap();
+            assert!(matches!(
+                runtime.output_activity(lcd),
+                OutputActivity::Sent(_)
+            ));
+        }
     }
     #[cfg(windows)]
     assert!(matches!(

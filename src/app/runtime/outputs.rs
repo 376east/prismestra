@@ -79,10 +79,11 @@ impl Runtime {
             return OutputActivity::Off;
         }
         let pending_output = self.pending.as_ref().is_some_and(|pending| {
+            // A live RGB plan leaves every applied LCD worker running.
             pending
                 .live_rgb
                 .as_ref()
-                .is_none_or(|live| !live.retained.contains(id))
+                .is_none_or(|live| !is_lcd && !live.retained.contains(id))
         });
         if self.suspended || pending_output || self.power.pending() {
             return OutputActivity::Connecting;
