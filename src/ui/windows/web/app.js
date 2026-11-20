@@ -447,7 +447,7 @@ window.prismestraReceive = message => {
   if(message.kind==='close_cancelled'){closing=false;syncControls();return;}
   if(message.kind==='draft_error'){showError(message.message,true);syncControls();return;}
   if(message.kind==='error'){awaitingCommandAck=false;closing=false;submittedStages=[];savedSceneRequest=null;commandPending=false;nativeAwaitingAck=false;if(pendingView){view=pendingView.previous;pendingView=null;render();focusHeading();}showError(message.message,true);syncControls();return;}
-  if(message.kind==='scene_file'||message.kind==='scene_file_frame'){window.sceneFile?.receive(message);return;}
+  if(['scene_file','scene_file_frame','scene_file_lcd_frame'].includes(message.kind)){window.sceneFile?.receive(message);return;}
   if(message.kind==='snapshot') {
    const acknowledged=awaitingCommandAck;awaitingCommandAck=false;completeStageAck();state=message.state;
    window.outputMap?.update(state);
