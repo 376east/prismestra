@@ -54,6 +54,13 @@ const SOURCE_HINT: &str = "legacy-source.json";
 const LEGACY_LAUNCHER_SHA: &str =
     "82def8e5478fa616d691ebda66d0277c8950cc1d092b0797f8e99218ce670318";
 const LOCAL: &str = "lighting-local.json";
+const INSTALLED_LOCAL: &str = "state/lighting-local.json";
+const INSTALLED_SENSOR_CATALOG: &str = "state/sensor-sources.json";
+const OPTIONAL_IMPORT_FILES: [(&str, usize); 3] = [
+    ("sensor-sources.json", sensor_bindings::MAX_BYTES),
+    ("scene-library.json", 256 * 1024),
+    ("editor-scene-draft.json", draft::MAX_BYTES),
+];
 const MAX_DISCOVERY: usize = 128 * 1024;
 const MAX_ASSETS: usize = 512 * 1024 * 1024;
 
@@ -231,7 +238,17 @@ fn apply(
     if source.profile.starts_with(root) || source.state.starts_with(root) {
         return Err("The installed Prismestra data cannot be its own migration source".into());
     }
-    let profile = read_required(&source.profile, document::MAX_BYTES)?;
+    let Some(profile) = read_optional(&source.profile, document::MAX_BYTES)? else {
+        if let Some(receipt) = pending
+            && let Some(outcome) = finish_written_import(root, receipt, source_running)?
+        {
+            return Ok(outcome);
+        }
+        return Err(format!(
+            "Missing Prismestra file: {}",
+            source.profile.display()
+        ));
+    };
     let (document, profile) = match Document::decode(&profile) {
         Ok(document) => (document, profile),
         Err(_) => {
@@ -273,13 +290,10 @@ fn apply(
     };
     let mut files = BTreeMap::from([
         ("profile.json".to_owned(), profile),
-        (format!("state/{LOCAL}"), local_bytes),
+        (INSTALLED_LOCAL.to_owned(), local_bytes),
     ]);
-    for (name, limit) in [
-        ("sensor-sources.json", sensor_bindings::MAX_BYTES),
-        ("scene-library.json", 256 * 1024),
-        ("editor-scene-draft.json", draft::MAX_BYTES),
-    ] {
+    let mut old_sensor_pin = None;
+    for (name, limit) in OPTIONAL_IMPORT_FILES {
         let destination = format!("state/{name}");
         if pending
             .as_ref()
@@ -292,30 +306,66 @@ fn apply(
         let Some(bytes) = read_optional(&path, limit)? else {
             continue;
         };
-        match name {
+        let bytes = match name {
             "sensor-sources.json" => {
-                sensor_bindings::Catalog::decode(&bytes)?;
+                let original = fingerprint(&bytes);
+                let rebased = rebase_sensor_scope(
+                    bytes,
+                    &source.profile,
+                    &root.join("profile.json"),
+                    &document,
+                )?;
+                if pending
+                    .as_ref()
+                    .and_then(|receipt| receipt.after.get(&destination))
+                    == Some(&original)
+                    && fingerprint(&rebased) != original
+                {
+                    old_sensor_pin = Some(original);
+                }
+                rebased
             }
             "scene-library.json" => {
                 Catalog::load(&path, &document.lighting.scene)?;
+                bytes
             }
             _ => {
                 draft::Draft::decode(&bytes)?;
+                bytes
             }
-        }
+        };
         files.insert(destination, bytes);
     }
-    let after = files
+    let after: BTreeMap<String, String> = files
         .iter()
         .map(|(path, bytes)| (path.clone(), fingerprint(bytes)))
         .collect();
-    let mut receipt = match pending {
-        Some(receipt) => {
+    let receipt = match pending {
+        Some(mut receipt) => {
             if receipt.source != source
-                || receipt.after != after
                 || receipt.before.len() != files.len()
                 || files.keys().any(|name| !receipt.before.contains_key(name))
             {
+                return Err("Prismestra settings changed during an interrupted import".into());
+            }
+            if let Some(old_pin) = old_sensor_pin {
+                receipt.after.insert(
+                    INSTALLED_SENSOR_CATALOG.into(),
+                    after[INSTALLED_SENSOR_CATALOG].clone(),
+                );
+                let current = read_optional(
+                    &root.join(INSTALLED_SENSOR_CATALOG),
+                    sensor_bindings::MAX_BYTES,
+                )?
+                .as_deref()
+                .map(fingerprint);
+                if current.as_ref() == Some(&old_pin) {
+                    receipt
+                        .before
+                        .insert(INSTALLED_SENSOR_CATALOG.into(), current);
+                }
+            }
+            if receipt.after != after {
                 return Err("Prismestra settings changed during an interrupted import".into());
             }
             receipt
@@ -368,10 +418,133 @@ fn apply(
             storage::atomic_write(&destination, bytes, document::MAX_BYTES).map_err(err)?;
         }
     }
+    finish_import(root, receipt, source_running)
+}
+
+fn finish_import(
+    root: &Path,
+    mut receipt: Receipt,
+    source_running: bool,
+) -> Result<MigrationOutcome, String> {
     receipt.complete = true;
     receipt.source_running = source_running;
     write_receipt(root, &receipt)?;
     Ok(receipt.outcome(source_running))
+}
+
+fn finish_written_import(
+    root: &Path,
+    receipt: Receipt,
+    source_running: bool,
+) -> Result<Option<MigrationOutcome>, String> {
+    // The source may disappear after the last write and before the receipt is
+    // committed. Only a complete, verified target can finish without the source.
+    if receipt.before.len() != receipt.after.len()
+        || !receipt.after.contains_key("profile.json")
+        || !receipt.after.contains_key(INSTALLED_LOCAL)
+        || !receipt.after.keys().all(|path| {
+            receipt.before.contains_key(path)
+                && (matches!(path.as_str(), "profile.json" | INSTALLED_LOCAL)
+                    || path.strip_prefix("state/").is_some_and(|name| {
+                        OPTIONAL_IMPORT_FILES.iter().any(|(file, _)| *file == name)
+                    }))
+        })
+    {
+        return Err("Invalid Prismestra import receipt".into());
+    }
+    let mut profile = None;
+    let mut sensor_catalog = None;
+    for (path, expected) in &receipt.after {
+        let Some(bytes) = read_optional(&root.join(path), document::MAX_BYTES)? else {
+            return Ok(None);
+        };
+        if &fingerprint(&bytes) != expected {
+            return Ok(None);
+        }
+        if path == "profile.json" {
+            profile = Some(Document::decode(&bytes)?);
+        } else if path == INSTALLED_SENSOR_CATALOG {
+            sensor_catalog = Some((bytes, expected));
+        }
+    }
+    let document = profile.ok_or("Missing imported Prismestra profile")?;
+    if let Some((bytes, expected)) = sensor_catalog {
+        let rebased = rebase_sensor_scope(
+            bytes,
+            &receipt.source.profile,
+            &root.join("profile.json"),
+            &document,
+        )?;
+        if &fingerprint(&rebased) != expected {
+            return Err(
+                "Restore the legacy Prismestra profile to finish migrating its temperature routes"
+                    .into(),
+            );
+        }
+    }
+    let referenced = document.assets();
+    if !referenced.is_empty() {
+        let path = checked_local_path(&root.join("state/assets")).map_err(err)?;
+        let assets = Store::new(path)?;
+        let mut total = 0;
+        for id in referenced {
+            total += assets.read(id, assets::MAX_BYTES)?.len();
+            if total > MAX_ASSETS {
+                return Err("Imported Prismestra assets exceed 512 MiB".into());
+            }
+        }
+    }
+    finish_import(root, receipt, source_running).map(Some)
+}
+
+fn rebase_sensor_scope(
+    bytes: Vec<u8>,
+    source: &Path,
+    target: &Path,
+    document: &Document,
+) -> Result<Vec<u8>, String> {
+    use sensor_bindings::Scope;
+    let mut catalog = sensor_bindings::Catalog::decode(&bytes)?;
+    let inputs = document
+        .temperatures
+        .sources
+        .iter()
+        .filter_map(|source| match &source.value {
+            super::sensors::Value::Sensor { input } => Some(input.clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if inputs.is_empty() {
+        return Ok(bytes);
+    }
+
+    let source = source.to_string_lossy();
+    let plain = source.strip_prefix(r"\\?\").unwrap_or(&source);
+    let target = Scope::lighting(&target.to_string_lossy(), document)?;
+    if catalog.routes.iter().any(|route| route.scope == target) {
+        return Ok(bytes);
+    }
+    let old_scopes = [source.as_ref(), plain]
+        .into_iter()
+        .map(|name| Scope::lighting(name, document))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let mut present = old_scopes
+        .iter()
+        .filter(|scope| catalog.routes.iter().any(|route| &route.scope == *scope));
+    let Some(old) = present.next() else {
+        return Ok(bytes);
+    };
+    if present.next().is_some() || catalog.prepare(old, &inputs).is_err() {
+        return Ok(bytes);
+    }
+    for route in &mut catalog.routes {
+        if &route.scope == old {
+            route.scope = target.clone();
+        }
+    }
+    catalog.encode()
 }
 
 fn copy_assets(source: &Path, target: &Path, document: &Document) -> Result<(), String> {
@@ -412,11 +585,6 @@ fn write_receipt(root: &Path, receipt: &Receipt) -> Result<(), String> {
         MAX_DISCOVERY,
     )
     .map_err(err)
-}
-
-fn read_required(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
-    read_optional(path, limit)?
-        .ok_or_else(|| format!("Missing Prismestra file: {}", path.display()))
 }
 
 fn read_optional(path: &Path, limit: usize) -> Result<Option<Vec<u8>>, String> {
@@ -1127,6 +1295,10 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::with_legacy_folder("old")
+        }
+
+        fn with_legacy_folder(folder: &str) -> Self {
             let stamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -1135,13 +1307,13 @@ mod tests {
                 "prismestra-migration-{}-{stamp}",
                 std::process::id()
             ));
-            let old = root.join("old");
+            let old = root.join(folder);
             let target = root.join("target");
             for path in [old.join("state"), target.join("state")] {
                 fs::create_dir_all(path).unwrap();
             }
             let root = root.canonicalize().unwrap();
-            let old = root.join("old");
+            let old = root.join(folder);
             Self {
                 source: Source {
                     profile: old.join("profile.json"),
@@ -1218,14 +1390,11 @@ mod tests {
         "127.0.0.1:17422".parse().unwrap()
     }
 
-    #[test]
-    fn verified_hint_finds_a_closed_source_outside_standard_locations() {
-        let fixture = Fixture::new();
+    fn write_closed_source_hint(fixture: &Fixture) -> (PathBuf, PathBuf, String) {
         let legacy = fixture.source.profile.parent().unwrap();
         let launcher = legacy.join("Start Prismestra.ps1");
         let wrapper = b"synthetic legacy launcher; never executed";
         fs::write(&launcher, wrapper).unwrap();
-        document(true).save(&fixture.source.profile).unwrap();
         let relative = "versions/aaaaaaa/Prismestra/Prismestra.exe";
         let executable = legacy.join(relative);
         let release = executable.parent().unwrap();
@@ -1259,14 +1428,21 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let pin = fingerprint(wrapper);
+        (launcher, executable, fingerprint(wrapper))
+    }
+
+    #[test]
+    fn verified_hint_finds_a_closed_source_outside_standard_locations() {
+        let fixture = Fixture::new();
+        document(true).save(&fixture.source.profile).unwrap();
+        let (launcher, executable, pin) = write_closed_source_hint(&fixture);
         assert_eq!(
             known_sources(&fixture.target, &pin).unwrap(),
             BTreeSet::from([fixture.source.clone()])
         );
         fs::write(&executable, b"different bytes").unwrap();
         assert!(hinted_source(&fixture.target, &pin).is_none());
-        fs::write(&executable, image).unwrap();
+        fs::write(&executable, b"synthetic release image; never executed").unwrap();
         fs::write(&launcher, b"unrecognized wrapper").unwrap();
         assert!(hinted_source(&fixture.target, &pin).is_none());
     }
@@ -1540,6 +1716,348 @@ mod tests {
             sensors
         );
         assert!(!installed.join("backend-task.json").exists());
+
+        let mut pending = read_receipt(&fixture.target).unwrap().unwrap();
+        pending.complete = false;
+        write_receipt(&fixture.target, &pending).unwrap();
+        fs::remove_file(&fixture.source.profile).unwrap();
+        let retry = || {
+            let pending = read_receipt(&fixture.target).unwrap().unwrap();
+            apply(
+                &fixture.target,
+                pending.source.clone(),
+                bundled(),
+                false,
+                Some(pending),
+            )
+        };
+
+        // A final receipt cannot be recovered if a target differs from its pin.
+        let installed_catalog = installed.join("sensor-sources.json");
+        fs::write(&installed_catalog, b"{}").unwrap();
+        assert!(retry().is_err());
+        assert_eq!(fs::read(&installed_catalog).unwrap(), b"{}");
+        assert!(!read_receipt(&fixture.target).unwrap().unwrap().complete);
+        fs::write(&installed_catalog, sensors).unwrap();
+
+        let installed_asset = installed.join("assets").join(media_id.as_str());
+        fs::remove_file(&installed_asset).unwrap();
+        assert!(retry().is_err());
+        assert!(!read_receipt(&fixture.target).unwrap().unwrap().complete);
+        fs::write(&installed_asset, media).unwrap();
+
+        assert!(matches!(
+            retry().unwrap(),
+            MigrationOutcome::Imported { .. }
+        ));
+        let completed = read_receipt(&fixture.target).unwrap().unwrap();
+        assert!(completed.complete);
+        assert!(!completed.handover_completed);
+        assert_eq!(completed.after, pending.after);
+    }
+
+    fn installed_temperature_scope_fixture() -> (
+        Fixture,
+        Document,
+        Vec<String>,
+        sensor_bindings::Scope,
+        sensor_bindings::Scope,
+        sensor_bindings::Catalog,
+    ) {
+        use crate::app::{
+            sensor_bindings::{Catalog as SensorCatalog, Scope, Target},
+            sensor_pci::Pci,
+            sensors::{Source as TemperatureSource, Value},
+        };
+        let fixture = Fixture::with_legacy_folder("Старый профиль");
+        let mut doc = document(true);
+        let inputs = (0..5).map(|i| format!("sensor_{i}")).collect::<Vec<_>>();
+        for input in &inputs {
+            doc.temperatures.sources.push(TemperatureSource {
+                key: format!("view_{input}"),
+                value: Value::Sensor {
+                    input: input.clone(),
+                },
+            });
+        }
+        fixture.populate(&doc, "127.0.0.1:6742".parse().unwrap());
+        let old_identity = fixture.source.profile.to_string_lossy();
+        let destination = fixture.target.join("profile.json");
+        let new_identity = destination.to_string_lossy();
+        let old_scope = Scope::lighting(&old_identity, &doc).unwrap();
+        let new_scope = Scope::lighting(&new_identity, &doc).unwrap();
+        let mut catalog = SensorCatalog::default();
+        catalog
+            .set_source(
+                "physical/test-nvidia",
+                Target::Nvidia {
+                    pci: Pci {
+                        device_id: 0x280310de,
+                        subsystem_id: 0x12345678,
+                        revision_id: 0xa1,
+                        extended_device_id: 0x77,
+                    },
+                },
+            )
+            .unwrap();
+        (fixture, doc, inputs, old_scope, new_scope, catalog)
+    }
+
+    #[test]
+    fn installed_migration_rebases_only_the_exact_temperature_scope_from_closed_source_hint() {
+        use sensor_bindings::{Catalog as SensorCatalog, Scope};
+        let (fixture, doc, inputs, old_scope, new_scope, mut catalog) =
+            installed_temperature_scope_fixture();
+        let old_identity = fixture.source.profile.to_string_lossy();
+        let foreign = Scope::lighting("another-profile", &doc).unwrap();
+        let mut stale_doc = doc.clone();
+        stale_doc.temperatures.sources.pop();
+        let stale = Scope::lighting(&old_identity, &stale_doc).unwrap();
+        assert_ne!(old_scope, new_scope);
+        assert_ne!(old_scope, stale);
+        let routes = inputs
+            .iter()
+            .map(|input| (input.clone(), "physical/test-nvidia".into()))
+            .collect::<Vec<_>>();
+        catalog.set_routes(&old_scope, &routes).unwrap();
+        catalog.set_routes(&foreign, &routes[..1]).unwrap();
+        catalog.set_routes(&stale, &routes[..4]).unwrap();
+        let expected = catalog.prepare(&old_scope, &inputs).unwrap();
+        assert_eq!(expected.len(), 5);
+        assert!(catalog.prepare(&stale, &inputs).is_err());
+        assert!(catalog.prepare(&new_scope, &inputs).is_err());
+        let foreign_routes = catalog.prepare(&foreign, &inputs[..1]).unwrap();
+        let original = catalog.encode().unwrap();
+        let source_path = fixture.source.state.join("sensor-sources.json");
+        fs::write(&source_path, &original).unwrap();
+
+        let (_, _, pin) = write_closed_source_hint(&fixture);
+        let source = unique(known_sources(&fixture.target, &pin).unwrap())
+            .unwrap()
+            .expect("the original-user hint must find the closed portable profile");
+        assert_eq!(source, fixture.source);
+        let profile = fs::read(&source.profile).unwrap();
+        let local = fs::read(source.state.join(LOCAL)).unwrap();
+        let migrate = || {
+            migrate_from(
+                &fixture.target,
+                &document(false),
+                bundled(),
+                &source.profile,
+                &source.state,
+                false,
+            )
+            .unwrap()
+        };
+        assert!(matches!(
+            migrate(),
+            MigrationOutcome::Imported {
+                source_running: false,
+                used_bundled_backend: false,
+                external_uses_bundled_endpoint: false,
+            }
+        ));
+        assert_eq!(fs::read(&source.profile).unwrap(), profile);
+        assert_eq!(fs::read(source.state.join(LOCAL)).unwrap(), local);
+        assert_eq!(
+            fs::read(fixture.target.join("profile.json")).unwrap(),
+            profile
+        );
+        assert_eq!(
+            fs::read(fixture.target.join("state").join(LOCAL)).unwrap(),
+            local
+        );
+        let installed_path = fixture.target.join("state/sensor-sources.json");
+        let installed = SensorCatalog::load(&installed_path).unwrap();
+        assert_eq!(fs::read(&source_path).unwrap(), original);
+        assert_eq!(installed.sources, catalog.sources);
+        assert_eq!(
+            installed.prepare(&foreign, &inputs[..1]).unwrap(),
+            foreign_routes
+        );
+        assert!(installed.prepare(&stale, &inputs).is_err());
+        let actual = installed
+            .prepare(&new_scope, &inputs)
+            .expect("five verified routes must resolve for the installed profile path");
+        assert_eq!(actual, expected);
+        let migrated_bytes = fs::read(&installed_path).unwrap();
+        let receipt = read_receipt(&fixture.target).unwrap().unwrap();
+        assert!(receipt.complete);
+        assert_eq!(receipt.source, source);
+        assert_eq!(receipt.after["profile.json"], fingerprint(&profile));
+        assert_eq!(
+            receipt.after[&format!("state/{LOCAL}")],
+            fingerprint(&local)
+        );
+        assert_eq!(
+            receipt.after["state/sensor-sources.json"],
+            fingerprint(&migrated_bytes)
+        );
+        let receipt_path = fixture.target.join(RECEIPT);
+        let receipt_bytes = fs::read(&receipt_path).unwrap();
+        assert!(matches!(migrate(), MigrationOutcome::None));
+        assert_eq!(fs::read(&receipt_path).unwrap(), receipt_bytes);
+        assert_eq!(fs::read(&installed_path).unwrap(), migrated_bytes);
+    }
+
+    #[test]
+    fn pending_preview6_receipt_rebases_temperature_routes_without_overwriting_edits() {
+        let (fixture, _, inputs, old, new, mut catalog) = installed_temperature_scope_fixture();
+        let routes = inputs
+            .iter()
+            .map(|input| (input.clone(), "physical/test-nvidia".into()))
+            .collect::<Vec<_>>();
+        catalog.set_routes(&old, &routes).unwrap();
+        let old_catalog = catalog.encode().unwrap();
+        let source_catalog = fixture.source.state.join("sensor-sources.json");
+        let target_catalog = fixture.target.join(INSTALLED_SENSOR_CATALOG);
+        fs::write(&source_catalog, &old_catalog).unwrap();
+        fixture.migrate(false).unwrap();
+
+        // Restore the receipt and files a previous version would have
+        // written just before the final receipt update.
+        let mut receipt = read_receipt(&fixture.target).unwrap().unwrap();
+        receipt.complete = false;
+        receipt
+            .after
+            .insert(INSTALLED_SENSOR_CATALOG.into(), fingerprint(&old_catalog));
+        write_receipt(&fixture.target, &receipt).unwrap();
+        let receipt_path = fixture.target.join(RECEIPT);
+        let original_receipt = fs::read(&receipt_path).unwrap();
+        fs::write(&target_catalog, &old_catalog).unwrap();
+
+        let moved = fixture.source.profile.with_extension("offline");
+        fs::rename(&fixture.source.profile, &moved).unwrap();
+        assert!(
+            apply(
+                &fixture.target,
+                fixture.source.clone(),
+                bundled(),
+                false,
+                read_receipt(&fixture.target).unwrap()
+            )
+            .unwrap_err()
+            .contains("temperature routes")
+        );
+        assert_eq!(fs::read(&receipt_path).unwrap(), original_receipt);
+        assert_eq!(fs::read(&target_catalog).unwrap(), old_catalog);
+        fs::rename(moved, &fixture.source.profile).unwrap();
+
+        let changed = sensor_bindings::Catalog::default().encode().unwrap();
+        fs::write(&target_catalog, &changed).unwrap();
+        assert!(fixture.migrate(false).is_err());
+        assert_eq!(fs::read(&target_catalog).unwrap(), changed);
+        assert_eq!(fs::read(&receipt_path).unwrap(), original_receipt);
+        fs::write(&target_catalog, &old_catalog).unwrap();
+
+        assert!(matches!(
+            fixture.migrate(false).unwrap(),
+            MigrationOutcome::Imported { .. }
+        ));
+        let rebased = sensor_bindings::Catalog::load(&target_catalog).unwrap();
+        assert_eq!(
+            rebased.prepare(&new, &inputs).unwrap(),
+            catalog.prepare(&old, &inputs).unwrap()
+        );
+        assert_eq!(fs::read(source_catalog).unwrap(), old_catalog);
+        let completed = read_receipt(&fixture.target).unwrap().unwrap();
+        assert!(completed.complete);
+        let rebased_bytes = fs::read(&target_catalog).unwrap();
+        assert_eq!(
+            completed.after[INSTALLED_SENSOR_CATALOG],
+            fingerprint(&rebased_bytes)
+        );
+        assert_eq!(
+            completed.before[INSTALLED_SENSOR_CATALOG],
+            Some(fingerprint(&old_catalog))
+        );
+
+        // A second interruption can leave the newer receipt on disk while
+        // the installed catalog still contains the old, verified bytes.
+        let mut interrupted = completed;
+        interrupted.complete = false;
+        write_receipt(&fixture.target, &interrupted).unwrap();
+        fs::write(&target_catalog, &old_catalog).unwrap();
+        assert!(matches!(
+            fixture.migrate(false).unwrap(),
+            MigrationOutcome::Imported { .. }
+        ));
+        let resumed = read_receipt(&fixture.target).unwrap().unwrap();
+        assert!(resumed.complete);
+        assert_eq!(resumed.before, interrupted.before);
+        assert_eq!(resumed.after, interrupted.after);
+        assert_eq!(fs::read(target_catalog).unwrap(), rebased_bytes);
+    }
+
+    #[test]
+    fn sensor_scope_accepts_dos_path_but_preserves_conflicting_scopes() {
+        use sensor_bindings::{Catalog as SensorCatalog, Scope};
+        let (fixture, doc, inputs, old, new, mut catalog) = installed_temperature_scope_fixture();
+        let source = fixture.source.profile.to_str().unwrap();
+        let dos = Scope::lighting(source.strip_prefix(r"\\?\").unwrap(), &doc).unwrap();
+        let installed = fixture.target.join("profile.json");
+        let routes = inputs
+            .iter()
+            .map(|input| (input.clone(), "physical/test-nvidia".into()))
+            .collect::<Vec<_>>();
+        catalog.set_routes(&dos, &routes).unwrap();
+        let original = catalog.encode().unwrap();
+        let migrated =
+            rebase_sensor_scope(original, &fixture.source.profile, &installed, &doc).unwrap();
+        assert_eq!(
+            SensorCatalog::decode(&migrated)
+                .unwrap()
+                .prepare(&new, &inputs),
+            catalog.prepare(&dos, &inputs)
+        );
+        catalog.set_routes(&old, &routes[..1]).unwrap();
+        let ambiguous = catalog.encode().unwrap();
+        assert_eq!(
+            rebase_sensor_scope(ambiguous.clone(), &fixture.source.profile, &installed, &doc)
+                .unwrap(),
+            ambiguous
+        );
+        catalog.set_routes(&new, &routes[..1]).unwrap();
+        let existing = catalog.encode().unwrap();
+        assert_eq!(
+            rebase_sensor_scope(existing.clone(), &fixture.source.profile, &installed, &doc)
+                .unwrap(),
+            existing
+        );
+    }
+
+    #[test]
+    fn installed_migration_does_not_rebase_invalid_temperature_routes() {
+        use sensor_bindings::Catalog as SensorCatalog;
+        for incomplete in [true, false] {
+            let (fixture, _, inputs, old_scope, new_scope, mut catalog) =
+                installed_temperature_scope_fixture();
+            let mut routes = inputs
+                .iter()
+                .map(|input| (input.clone(), "physical/test-nvidia".into()))
+                .collect::<Vec<_>>();
+            if incomplete {
+                routes.pop();
+            } else {
+                routes.push(("extra_input".into(), "physical/test-nvidia".into()));
+            }
+            catalog.set_routes(&old_scope, &routes).unwrap();
+            assert!(catalog.prepare(&old_scope, &inputs).is_err());
+            let source = fixture.source.state.join("sensor-sources.json");
+            let bytes = catalog.encode().unwrap();
+            fs::write(&source, &bytes).unwrap();
+            fixture.migrate(false).unwrap();
+            assert_eq!(fs::read(&source).unwrap(), bytes);
+            let installed =
+                SensorCatalog::load(&fixture.target.join("state/sensor-sources.json")).unwrap();
+            assert!(
+                installed
+                    .routes
+                    .iter()
+                    .all(|route| route.scope != new_scope)
+            );
+            assert!(installed.prepare(&new_scope, &inputs).is_err());
+        }
     }
 
     #[test]
