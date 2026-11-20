@@ -87,6 +87,11 @@ impl Startup {
         self.phase = "cancelled";
         self.worker.cancel();
     }
+    pub(super) fn cancel_for_import(&mut self) {
+        if self.enabled {
+            self.cancel();
+        }
+    }
     pub(super) fn drained(&self) -> bool {
         self.worker.is_idle() && self.handover.as_ref().is_none_or(|job| job.is_finished())
     }
