@@ -279,7 +279,7 @@ $password = $null
 $setupAttempted = $false
 try {
     $setupAttempted = $true
-    Run-Setup $setup '/TASKS=""' (Join-Path $report 'install.log')
+    Run-Setup $setup '/TASKS="" /ACCEPTWEBVIEW2TERMS' (Join-Path $report 'install.log')
     $manifestPath = Join-Path $install 'install-manifest.json'
     Assert-Expected ((Sha256 $manifestPath) -ceq $ManifestSha256) 'Installed production manifest SHA-256 mismatch.'
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
