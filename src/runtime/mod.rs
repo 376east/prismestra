@@ -305,6 +305,15 @@ impl Core {
             if output.is_reaped() {
                 continue;
             }
+            let source = if device.role == Role::Ambient {
+                self.external.get(&device.id).map(|v| v.as_ref())
+            } else {
+                self.frame.frames.get(&device.id).map(|v| v.as_slice())
+            };
+            let off = self.muted.get(&device.id) == Some(&true);
+            if device.role == Role::Canvas && !off && source.is_none() {
+                continue;
+            }
             let due = self
                 .cadences
                 .entry(device.id.clone())
@@ -326,12 +335,6 @@ impl Core {
             {
                 continue;
             }
-            let source = if device.role == Role::Ambient {
-                self.external.get(&device.id).map(|v| v.as_ref())
-            } else {
-                self.frame.frames.get(&device.id).map(|v| v.as_slice())
-            };
-            let off = self.muted.get(&device.id) == Some(&true);
             let black;
             let colors = if off {
                 black = vec![Rgb::default(); device.leds];
