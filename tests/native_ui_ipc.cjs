@@ -194,6 +194,30 @@ const cleanSchedule={...structuredClone(recoveryForm),dirty:false,actions:[{id:4
 vm.runInContext('formStages.set("other-page",{kind:"native",page:"sources",id:999,value:"Keep me"})',context);events.click({target:{closest:()=>localDiscard}});assert.equal(commands.length,beforeLocalCancel,'local cancellation performs no backend operation');assert.equal(vm.runInContext('currentPageStaged()',context),false);assert.equal(vm.runInContext('formStages.get("other-page").value',context),'Keep me','other page edits preserved');assert.equal(find('#native-field-0').value,'10:00');assert.equal(find('local-discard').hidden,true);assert.equal(vm.runInContext('state.nativeForm.dirty',context),false);
 console.log('PASS: Schedule text-only draft has immediate local discard without rerender/RPC; current page clears, other page and backend stay untouched');
 
+// Binding Save can consume text typed in WebView before the native form is dirty.
+const bindingForm={...structuredClone(form),actions:[{id:1811,label:'Save binding',enabled:false,accepts_staged_text:true}]};
+context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeForm:bindingForm}};
+vm.runInContext('formStages.clear();view="connections";window.prismestraReceive(payload)',context);
+context.control={dataset:{nativeAction:'1811'}};
+const bindingSaveDisabled=()=>vm.runInContext('nativeControlDisabled(control)',context);
+assert.equal(bindingSaveDisabled(),true);
+const endpointField=find('#native-field-0');
+const beforeBindingEdit=commands.length;
+endpointField.value='192.0.2.27:4048';
+events.input({target:endpointField});
+events.change({target:endpointField});
+assert.equal(commands.length,beforeBindingEdit);
+assert.equal(bindingSaveDisabled(),false);
+context.payload={kind:'status',state:{nativeForm:{...bindingForm,actions:[{id:1811,label:'Save binding',enabled:false}]}}};
+vm.runInContext('window.prismestraReceive(payload)',context);
+assert.equal(bindingSaveDisabled(),true,'an unavailable host may not save locally staged input');
+context.payload={kind:'status',state:{nativeForm:bindingForm}};
+vm.runInContext('window.prismestraReceive(payload); send({op:"native_action",id:1811},true)',context);
+assert.equal(commands.length,beforeBindingEdit+1);
+assert.deepEqual(commands.at(-1),{op:'native_action',id:1811,fields:[{id:101,value:'192.0.2.27:4048'}],editor_fields:[]});
+assert.equal(bindingSaveDisabled(),true,'the save remains locked until the native acknowledgement');
+console.log('PASS: first click saves staged connection text only when the host can accept it');
+
 // Command errors survive failed-followup snapshots/status, and clear only on a new command's successful ack.
 context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeAux:structuredClone(aux),editor:{page:'devices',index:0,targets:[],fields:[],dirty:false}}};vm.runInContext('formStages.clear();view="devices";window.prismestraReceive(payload)',context);const errorName=find('#native-field-0');errorName.value='UI test light';events.input({target:errorName});vm.runInContext('send({op:"native_action",id:410},true);window.prismestraReceive({kind:"error",message:"fixedLEDcount"});window.prismestraReceive(payload)',context);assert.equal(find('#native-error').hidden,false);assert.ok(find('#native-error').innerHTML.includes('fixedLEDcount'));assert.ok(find('#native-error').innerHTML.includes('discard-fields'),'failed command keeps local discard while text remains staged');
 vm.runInContext('window.prismestraReceive({kind:"status",state:{error:null,pending:false}})',context);assert.equal(find('#native-error').hidden,false,'periodic success cannot dismiss validation error');

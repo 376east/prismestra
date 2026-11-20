@@ -252,7 +252,11 @@ fn form_snapshot(app: &App, page: &str, ids: impl IntoIterator<Item = i32>) -> V
                 notes.push(note);
             }
         } else if kind == Kind::Action {
-            actions.push(json!({"id":id,"label":label(app,id,hwnd,kind),"enabled":enabled}));
+            let mut action = json!({"id":id,"label":label(app,id,hwnd,kind),"enabled":enabled});
+            if id == connections::SAVE_BINDING && app.can_stage_connection_save() {
+                action["accepts_staged_text"] = json!(true);
+            }
+            actions.push(action);
         } else {
             let value = match kind {
                 Kind::Text if id == E_LED_COUNT => selected_fixed_led_count(app)
@@ -466,6 +470,9 @@ pub(super) fn action(state: &State, id: i32) -> Result<(), String> {
         let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
         let app = slot.as_ref().ok_or("Нет сессии редактора")?;
         let (hwnd, kind) = control(app, id).ok_or("Действие недоступно на этой странице")?;
+        if id == connections::SAVE_BINDING {
+            app.refresh_connections();
+        }
         if kind != Kind::Action || unsafe { IsWindowEnabled(hwnd) } == 0 {
             return Err("Действие отключено".into());
         }
