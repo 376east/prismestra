@@ -362,21 +362,37 @@ fn scan_pixel_addresses(
     Ok(snapshot)
 }
 
+pub(crate) struct PixelProbe {
+    pub address: u64,
+    pub capacity: Result<usize, String>,
+}
+
 /// Passive discovery followed by a read-only EA81 capability query for
 /// advertisement-verified pixel controllers only.
-pub fn discover_pixel_controllers(
+pub(crate) fn discover_pixel_controllers(
     control: &mut dyn ble::Control,
     exclude: &BTreeSet<u64>,
-) -> Result<Vec<(u64, usize)>, String> {
+) -> Result<Vec<PixelProbe>, String> {
     let addresses = scan_pixel_addresses(control, exclude)?;
+    probe_pixel_addresses(control, exclude, addresses, |address, budget| {
+        WindowsBackend
+            .connect(address, budget, &mut |_| {})
+            .and_then(|mut link| link.pixel_capacity(budget))
+    })
+}
+
+fn probe_pixel_addresses(
+    control: &mut dyn ble::Control,
+    exclude: &BTreeSet<u64>,
+    addresses: BTreeMap<u64, bool>,
+    mut probe: impl FnMut(u64, &mut dyn ble::Control) -> Result<usize, String>,
+) -> Result<Vec<PixelProbe>, String> {
     let mut result = Vec::new();
-    let mut first_error = None;
-    let mut probes = 0;
     for (address, supported) in addresses {
         if !supported || exclude.contains(&address) {
             continue;
         }
-        if probes == MAX_PIXEL_PROBES {
+        if result.len() == MAX_PIXEL_PROBES {
             break;
         }
         let started = control.now();
@@ -384,28 +400,17 @@ pub fn discover_pixel_controllers(
         let Ok(_lease) = Lease::acquire(vec![format!("ble:{address}")]) else {
             continue;
         };
-        probes += 1;
         // Share one eight-second budget across connection and capability probing.
         let mut budget = ble::FrameControl {
             inner: control,
             started,
         };
-        match WindowsBackend
-            .connect(address, &mut budget, &mut |_| {})
-            .and_then(|mut link| link.pixel_capacity(&mut budget))
-        {
-            Ok(points) => result.push((address, points)),
-            Err(error) => {
-                first_error.get_or_insert(error);
-            }
-        }
+        result.push(PixelProbe {
+            address,
+            capacity: probe(address, &mut budget),
+        });
     }
     ble::check_wait(control, control.now())?;
-    if result.is_empty()
-        && let Some(error) = first_error
-    {
-        return Err(error);
-    }
     Ok(result)
 }
 
@@ -878,6 +883,43 @@ mod tests {
             self.time += d;
         }
     }
+
+    #[test]
+    fn pixel_discovery_keeps_failed_and_confirmed_addresses() {
+        let mut clock = Clock {
+            time: Duration::ZERO,
+            cancel: false,
+        };
+        let denied = 0x0010_0010_0010;
+        let confirmed = denied + 1;
+        let excluded = denied + 2;
+        let unsupported = denied + 3;
+        let records = probe_pixel_addresses(
+            &mut clock,
+            &BTreeSet::from([excluded]),
+            BTreeMap::from([
+                (denied, true),
+                (confirmed, true),
+                (excluded, true),
+                (unsupported, false),
+            ]),
+            |address, _| match address {
+                id if id == denied => Err("fixture access denied".into()),
+                id if id == confirmed => Ok(153),
+                _ => panic!("unexpected address probed"),
+            },
+        )
+        .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].address, denied);
+        assert_eq!(
+            records[0].capacity.as_ref().unwrap_err(),
+            "fixture access denied"
+        );
+        assert_eq!(records[1].address, confirmed);
+        assert_eq!(records[1].capacity, Ok(153));
+    }
+
     #[derive(Clone)]
     struct FakeOperation {
         cancelled: Arc<AtomicBool>,
