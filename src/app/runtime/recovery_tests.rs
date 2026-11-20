@@ -800,6 +800,70 @@ fn live_plan_adds_an_independent_rgb_output_while_an_existing_write_is_held() {
     assert_plan_preserves_neighbor(PlanChange::Add);
 }
 
+#[test]
+fn live_plan_preserves_the_scheduled_scene_step_and_last_frame() {
+    let mut document = runtime().document().clone();
+    document.lighting.scene.effect = crate::lighting::scene::Effect::Breathing;
+    document.lighting.scene.colors = vec![0xff0000];
+    document.lighting.scene.speed = 200;
+    document.lighting.scene.fps = 10;
+    document.lighting.setup.devices[0].rate_hz = 50;
+    let mut reference =
+        crate::runtime::scene::Renderer::new(document.lighting.scene.clone()).unwrap();
+    let mut runtime = Runtime::new(document.clone(), None).unwrap();
+    runtime
+        .attach_rgb("a", vec![], factory(&Arc::new(Link::default())))
+        .unwrap();
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Ready);
+
+    for time in [0, 100_000, 200_000, 300_000] {
+        let expected = reference.step(&document.lighting.setup.canvas).unwrap();
+        runtime.tick(time, 1_800_000_000).unwrap();
+        assert_eq!(runtime.colors(), &expected);
+    }
+    let last = runtime.colors()[0];
+    let last_ticket = runtime.host.requested("a").unwrap();
+
+    let mut added = document.lighting.setup.devices[0].clone();
+    added.id = "added".into();
+    added.rate_hz = 1;
+    document.lighting.setup.devices.push(added);
+    document.lighting.setup.canvas.width = 3;
+    document.lighting.setup.canvas.points.push(Point {
+        device: "added".into(),
+        led: 0,
+        x: 2,
+        y: 0,
+    });
+    document.lighting.groups.pc.push("added".into());
+    let mut proposal = runtime.output_plan();
+    proposal
+        .rgb
+        .push(("added".into(), vec![], factory(&Arc::new(Link::default()))));
+    let revision = runtime
+        .request_outputs_for(document.clone(), proposal)
+        .unwrap();
+    runtime.tick(320_000, 1_800_000_000).unwrap();
+
+    assert_eq!(runtime.output_revision(), revision);
+    assert_eq!(
+        runtime.colors()[0],
+        last,
+        "applying the plan advanced the animation"
+    );
+    assert_eq!(runtime.host.frame("a"), Some([last].as_slice()));
+    assert!(runtime.host.requested("a").unwrap().sequence > last_ticket.sequence);
+    assert!(runtime.host.requested("added").is_none());
+
+    let expected = reference.step(&document.lighting.setup.canvas).unwrap();
+    assert_ne!(expected[0], last);
+    runtime.tick(400_000, 1_800_000_000).unwrap();
+    assert_eq!(runtime.colors(), &expected);
+    assert_eq!(runtime.host.frame("added"), Some(&expected[2..]));
+    assert!(runtime.host.requested("added").is_some());
+    drain(&mut runtime);
+}
+
 #[cfg(windows)]
 #[test]
 fn live_plan_native_discovery_keeps_ready_bindings_when_preparing_fresh_factories() {

@@ -273,9 +273,29 @@ impl Host {
         } = &mut *core;
         let previous_muted = std::mem::replace(current_muted, muted);
         cadences.retain(|id, _| previous_muted.get(id) == current_muted.get(id));
+        // Keep the last complete frames of surviving owners until the next
+        // scheduled scene step. A new owner needs a frame from the new layout.
+        let frames: BTreeMap<_, _> = core
+            .frame
+            .frames
+            .iter()
+            .filter(|(id, _)| core.outputs.contains_key(*id))
+            .map(|(id, colors)| (id.clone(), colors.clone()))
+            .collect();
+        let preview = setup
+            .canvas
+            .points
+            .iter()
+            .map(|point| {
+                frames
+                    .get(&point.device)
+                    .and_then(|colors| colors.get(point.led))
+                    .copied()
+                    .unwrap_or_default()
+            })
+            .collect();
         core.setup = Arc::new(setup);
-        core.frame = Default::default();
-        core.scene_cadence = Default::default();
+        core.frame = Arc::new(FrameView { preview, frames });
         self.setup = core.setup.clone();
         self.frame = core.frame.clone();
         drop(core);
