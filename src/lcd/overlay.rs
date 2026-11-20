@@ -7,6 +7,27 @@ use image::{
 use std::collections::HashMap;
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
+pub const LAYOUT_SIZE: u32 = 480;
+pub const CARD_WIDTH: u32 = 188;
+pub const CARD_HEIGHT: u32 = 76;
+pub const MAX_BLOCKS: usize = 4;
+
+/// Top-left position in the upright 480×480 LCD view.
+pub struct Block<'a> {
+    pub x: u32,
+    pub y: u32,
+    pub label: &'a str,
+    pub celsius: f64,
+}
+
+pub struct TtLayoutFrame {
+    pub jpeg: Vec<u8>,
+    /// True when encoding needed a plain background to keep the cards readable.
+    pub used_solid_background: bool,
+}
+
+const TT_FALLBACK_BACKGROUND: Rgb<u8> = Rgb([16, 16, 20]);
+
 pub struct Renderer {
     font: fontdue::Font,
     glyphs: HashMap<char, (fontdue::Metrics, Vec<u8>)>,
@@ -107,8 +128,8 @@ impl Renderer {
         result.push('…');
         result
     }
-    fn text(&mut self, pixmap: &mut Pixmap, text: &str, y: i32) {
-        let mut x = 208. + (118. - self.width(text)) / 2.;
+    fn text(&mut self, pixmap: &mut Pixmap, text: &str, left: i32, y: i32) {
+        let mut x = left as f32 + (118. - self.width(text)) / 2.;
         let metrics = self.font.horizontal_line_metrics(22.).unwrap();
         let baseline = y as f32 + (34. - (metrics.ascent - metrics.descent)) / 2. + metrics.ascent;
         for c in text.chars() {
@@ -125,11 +146,11 @@ impl Renderer {
                 for dx in 0..metrics.width {
                     let px = gx + dx as i32;
                     let py = gy + dy as i32;
-                    if !(208..326).contains(&px) || !(y..y + 34).contains(&py) {
+                    if !(left..left + 118).contains(&px) || !(y..y + 34).contains(&py) {
                         continue;
                     }
                     let a = u16::from(coverage[dy * metrics.width + dx]);
-                    let offset = ((py * 480 + px) * 4) as usize;
+                    let offset = ((py * LAYOUT_SIZE as i32 + px) * 4) as usize;
                     let out = &mut pixmap.data_mut()[offset..offset + 4];
                     for channel in out.iter_mut().take(3) {
                         *channel = (a + (u16::from(*channel) * (255 - a) + 127) / 255) as u8;
@@ -140,6 +161,64 @@ impl Renderer {
             x += metrics.advance_width;
         }
     }
+    /// Render from back to front in upright view coordinates. Omit unavailable
+    /// readings before calling. The caller owns persistence and device rotation.
+    pub fn render_blocks(
+        &mut self,
+        background: &RgbImage,
+        blocks: &[Block<'_>],
+    ) -> Result<RgbImage, String> {
+        if background.dimensions() != (LAYOUT_SIZE, LAYOUT_SIZE) || blocks.len() > MAX_BLOCKS {
+            return Err("LCD layout requires a 480×480 canvas and at most four blocks".into());
+        }
+        let mut layer = Pixmap::new(LAYOUT_SIZE, LAYOUT_SIZE).ok_or("Cannot allocate overlay")?;
+        for block in blocks {
+            if block.x > LAYOUT_SIZE - CARD_WIDTH || block.y > LAYOUT_SIZE - CARD_HEIGHT {
+                return Err("Temperature block exceeds LCD canvas".into());
+            }
+            let name =
+                normalized_label(block.label, block.celsius).ok_or("Invalid temperature block")?;
+            self.paint_card(&mut layer, block.x, block.y, &name, block.celsius);
+        }
+        let mut view = background.clone();
+        blend(&mut view, layer)?;
+        Ok(view)
+    }
+
+    /// Encode an upright layout for TT. On size exhaustion alone, retry once
+    /// with a solid background while retaining all positioned cards.
+    pub fn encode_tt_blocks(
+        &mut self,
+        background: &RgbImage,
+        blocks: &[Block<'_>],
+        device_rotation: i32,
+    ) -> Result<TtLayoutFrame, String> {
+        let angle = super::media::rotation(device_rotation)?;
+        let encode = |view| {
+            let device_frame = match angle {
+                90 => imageops::rotate90(&view),
+                180 => imageops::rotate180(&view),
+                270 => imageops::rotate270(&view),
+                _ => view,
+            };
+            super::media::encode_jpeg_within_budget(&device_frame)
+        };
+        let view = self.render_blocks(background, blocks)?;
+        if let Some(jpeg) = encode(view)? {
+            return Ok(TtLayoutFrame {
+                jpeg,
+                used_solid_background: false,
+            });
+        }
+        let plain = RgbImage::from_pixel(LAYOUT_SIZE, LAYOUT_SIZE, TT_FALLBACK_BACKGROUND);
+        let view = self.render_blocks(&plain, blocks)?;
+        let jpeg = encode(view)?.ok_or("Solid LCD layout exceeds the 20000-byte TT JPEG budget")?;
+        Ok(TtLayoutFrame {
+            jpeg,
+            used_solid_background: true,
+        })
+    }
+
     pub fn render(
         &mut self,
         background: &RgbImage,
@@ -154,22 +233,34 @@ impl Renderer {
         let Ok(angle) = super::media::rotation(angle) else {
             return Ok(background.clone());
         };
-        let name = label.split_whitespace().collect::<Vec<_>>().join(" ");
-        if !celsius.is_finite()
-            || !(-20.0..=150.0).contains(&celsius)
-            || name.is_empty()
-            || name.encode_utf16().count() > 4096
-        {
+        let Some(name) = normalized_label(label, celsius) else {
             return Ok(background.clone());
-        }
+        };
         let mut view = match angle {
             90 => imageops::rotate270(background),
             180 => imageops::rotate180(background),
             270 => imageops::rotate90(background),
             _ => background.clone(),
         };
-        let mut layer = Pixmap::new(480, 480).ok_or("Cannot allocate overlay")?;
-        let panel = rounded(146., 350., 188., 76., 10.);
+        let mut layer = Pixmap::new(LAYOUT_SIZE, LAYOUT_SIZE).ok_or("Cannot allocate overlay")?;
+        self.paint_card(&mut layer, 146, 350, &name, celsius);
+        blend(&mut view, layer)?;
+        Ok(match angle {
+            90 => imageops::rotate90(&view),
+            180 => imageops::rotate180(&view),
+            270 => imageops::rotate270(&view),
+            _ => view,
+        })
+    }
+
+    fn paint_card(&mut self, layer: &mut Pixmap, x: u32, y: u32, name: &str, celsius: f64) {
+        let panel = rounded(
+            x as f32,
+            y as f32,
+            CARD_WIDTH as f32,
+            CARD_HEIGHT as f32,
+            10.,
+        );
         let mut paint = Paint::default();
         paint.set_color_rgba8(16, 16, 14, 202);
         layer.fill_path(
@@ -191,9 +282,10 @@ impl Renderer {
             None,
         );
         paint.set_color_rgba8(255, 255, 255, 255);
-        let transform = Transform::from_row(48. / 26., 0., 0., 48. / 26., 154., 364.);
+        let transform =
+            Transform::from_row(48. / 26., 0., 0., 48. / 26., x as f32 + 8., y as f32 + 14.);
         layer.stroke_path(
-            &icon(&name),
+            &icon(name),
             &paint,
             &Stroke {
                 width: 1.8,
@@ -204,32 +296,38 @@ impl Renderer {
             transform,
             None,
         );
-        self.text(&mut layer, &self.title(&name), 354);
+        self.text(layer, &self.title(name), x as i32 + 62, y as i32 + 4);
         // Actual Qt QString fixed0 uses ties away from zero and suppresses -0.
         let reading = format!("{}°C", celsius.round() as i32);
-        self.text(&mut layer, &reading, 388);
-        let rgba = RgbaImage::from_raw(480, 480, layer.take()).ok_or("Invalid overlay raster")?;
-        let rgba = if view.dimensions() == (480, 480) {
-            rgba
-        } else {
-            imageops::resize(&rgba, view.width(), view.height(), FilterType::Triangle)
-        };
-        // Layer channels are premultiplied. Never multiply source color by alpha twice.
-        for (x, y, pixel) in view.enumerate_pixels_mut() {
-            let source = rgba.get_pixel(x, y).0;
-            let a = u16::from(source[3]);
-            *pixel = Rgb([0, 1, 2].map(|i| {
-                (u16::from(source[i]) + (u16::from(pixel[i]) * (255 - a) + 127) / 255).min(255)
-                    as u8
-            }));
-        }
-        Ok(match angle {
-            90 => imageops::rotate90(&view),
-            180 => imageops::rotate180(&view),
-            270 => imageops::rotate270(&view),
-            _ => view,
-        })
+        self.text(layer, &reading, x as i32 + 62, y as i32 + 38);
     }
+}
+
+fn normalized_label(raw: &str, celsius: f64) -> Option<String> {
+    let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    ((!name.is_empty())
+        && name.encode_utf16().count() <= 4096
+        && (-20.0..=150.0).contains(&celsius))
+    .then_some(name)
+}
+
+fn blend(view: &mut RgbImage, layer: Pixmap) -> Result<(), String> {
+    let rgba = RgbaImage::from_raw(LAYOUT_SIZE, LAYOUT_SIZE, layer.take())
+        .ok_or("Invalid overlay raster")?;
+    let rgba = if view.dimensions() == (LAYOUT_SIZE, LAYOUT_SIZE) {
+        rgba
+    } else {
+        imageops::resize(&rgba, view.width(), view.height(), FilterType::Triangle)
+    };
+    // Layer channels are premultiplied. Never multiply source color by alpha twice.
+    for (x, y, pixel) in view.enumerate_pixels_mut() {
+        let source = rgba.get_pixel(x, y).0;
+        let a = u16::from(source[3]);
+        *pixel = Rgb([0, 1, 2].map(|i| {
+            (u16::from(source[i]) + (u16::from(pixel[i]) * (255 - a) + 127) / 255).min(255) as u8
+        }));
+    }
+    Ok(())
 }
 
 #[cfg(all(test, windows))]
@@ -239,6 +337,72 @@ mod tests {
         let path = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
             .join("Fonts/seguibl.ttf");
         Renderer::new(std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn positioned_layout_uses_the_existing_card_and_respects_bounds() {
+        let mut renderer = renderer();
+        let background = RgbImage::from_pixel(LAYOUT_SIZE, LAYOUT_SIZE, Rgb([45, 42, 49]));
+        let mut block = Block {
+            x: 146,
+            y: 350,
+            label: "CPU",
+            celsius: 56.0,
+        };
+        let original = renderer.render(&background, 0, "CPU", 56.0).unwrap();
+        assert_eq!(
+            original,
+            renderer
+                .render_blocks(&background, std::slice::from_ref(&block))
+                .unwrap()
+        );
+        block.x = 30;
+        block.y = 40;
+        let repositioned = renderer
+            .render_blocks(&background, std::slice::from_ref(&block))
+            .unwrap();
+        assert_ne!(repositioned.get_pixel(48, 58), background.get_pixel(48, 58));
+        assert_eq!(
+            repositioned.get_pixel(165, 365),
+            background.get_pixel(165, 365)
+        );
+        block.x = u32::MAX;
+        assert!(renderer.render_blocks(&background, &[block]).is_err());
+    }
+
+    #[test]
+    fn tt_layout_keeps_fitting_frames_and_preserves_cards_on_budget_fallback() {
+        let mut renderer = renderer();
+        let layout = [Block {
+            x: 20,
+            y: 100,
+            label: "GPU",
+            celsius: 47.0,
+        }];
+        let plain = RgbImage::from_pixel(LAYOUT_SIZE, LAYOUT_SIZE, TT_FALLBACK_BACKGROUND);
+        let expected = renderer.render_blocks(&plain, &layout).unwrap();
+        let expected = super::super::media::encode_jpeg(&imageops::rotate90(&expected)).unwrap();
+        let fitting = renderer.encode_tt_blocks(&plain, &layout, 90).unwrap();
+        assert!(!fitting.used_solid_background);
+        assert_eq!(fitting.jpeg, expected);
+
+        let grid = RgbImage::from_fn(LAYOUT_SIZE, LAYOUT_SIZE, |x, y| {
+            if (x / 11 + y / 11).is_multiple_of(2) {
+                Rgb([255, 237, 16])
+            } else {
+                Rgb([8, 14, 192])
+            }
+        });
+        let view = renderer.render_blocks(&grid, &layout).unwrap();
+        assert!(
+            super::super::media::encode_jpeg_within_budget(&imageops::rotate90(&view))
+                .unwrap()
+                .is_none()
+        );
+        let fallback = renderer.encode_tt_blocks(&grid, &layout, 90).unwrap();
+        assert!(fallback.used_solid_background);
+        assert_eq!(fallback.jpeg, expected);
+        assert!(renderer.encode_tt_blocks(&grid, &layout, 45).is_err());
     }
     #[test]
     fn compact_icons_and_invalid_values_preserve_background() {

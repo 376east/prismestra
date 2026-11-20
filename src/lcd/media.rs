@@ -24,6 +24,10 @@ pub struct Media {
     pub rotation: i32,
 }
 
+/// Author-distributed original GIF. See resources/lcd/README.md for provenance.
+pub const BUILTIN_KALEIDOSCOPE_GIF: &[u8] =
+    include_bytes!("../../resources/lcd/animated-kaleidoscope.gif");
+
 fn limits() -> Limits {
     let mut limits = Limits::default();
     limits.max_image_width = Some(4096);
@@ -110,6 +114,13 @@ pub fn canvas(
 /// Baseline 4:4:4 at the native spatial resolution. Quality values preserve the
 /// former compatibility ladder; bytes/quantization differ from the Windows WIC encoder.
 pub fn encode_jpeg(frame: &RgbImage) -> Result<Vec<u8>, String> {
+    encode_jpeg_within_budget(frame)?
+        .ok_or_else(|| "Frame exceeds the20000-byte LCD compatibility budget".into())
+}
+
+/// None means only the size budget was exhausted. Invalid input and encoding
+/// failures remain errors that the caller must report.
+pub(super) fn encode_jpeg_within_budget(frame: &RgbImage) -> Result<Option<Vec<u8>>, String> {
     if frame.dimensions() != (480, 480) {
         return Err("TT JPEG requires480x480".into());
     }
@@ -123,10 +134,10 @@ pub fn encode_jpeg(frame: &RgbImage) -> Result<Vec<u8>, String> {
         normalize_component_ids(&mut bytes)?;
         super::protocol::validate_jpeg(&bytes)?;
         if bytes.len() <= FRAME_BUDGET {
-            return Ok(bytes);
+            return Ok(Some(bytes));
         }
     }
-    Err("Frame exceeds the20000-byte LCD compatibility budget".into())
+    Ok(None)
 }
 
 // jpeg-encoder0.7.1 uses component IDs0,1,2; the TT protocol requires1,2,3.
