@@ -215,7 +215,7 @@ def main():
         "A second launch with the same settings directory shows a tray hint.\n\n"
         "Inspect and configure a supported connection before activating hardware. "
         "Keep your existing fan and pump control software.\n\n"
-        "Device support and limitations: https://github.com/malyarq/prismestra/blob/"
+        "Device support and limitations: https://github.com/376east/prismestra/blob/"
         f"{args.expected_commit}/docs/compatibility.md\n\n"
         f"Corresponding source and dependency sources: `{source_zip.name}`, "
         "distributed alongside this package. See LICENSE and licenses/ for terms.\n",

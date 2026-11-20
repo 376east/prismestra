@@ -33,9 +33,33 @@ pub enum Error {
     EntityUnavailable,
     UnsupportedCapabilities,
     Http(u16),
+    RetryAfter { status: u16, seconds: u32 },
     WinHttp(u32),
     ResponseTooLarge,
     InvalidResponse,
+}
+
+impl Error {
+    pub(crate) fn authorization_rejected(self) -> bool {
+        matches!(self, Self::Authentication | Self::Http(403))
+    }
+
+    /// A bound light may be reachable again without changing its configuration.
+    pub(crate) fn transient_delay(self) -> Option<u32> {
+        match self {
+            Self::RetryAfter { seconds, .. } => Some(seconds),
+            Self::Deadline
+            | Self::EntityUnavailable
+            | Self::Http(408 | 429 | 500 | 502 | 503 | 504)
+            | Self::WinHttp(
+                ERROR_WINHTTP_TIMEOUT
+                | ERROR_WINHTTP_NAME_NOT_RESOLVED
+                | ERROR_WINHTTP_CANNOT_CONNECT
+                | ERROR_WINHTTP_CONNECTION_ERROR,
+            ) => Some(0),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -377,6 +401,18 @@ impl Client {
             401 => return Err(Error::Authentication),
             404 if entity_lookup => return Err(Error::MissingEntity),
             200..=299 => (),
+            429 | 503 => {
+                let status = status as u16;
+                let error = text_header(&request, WINHTTP_QUERY_RETRY_AFTER)
+                    .ok()
+                    .flatten()
+                    .and_then(|text| retry_after_seconds(&text, std::time::SystemTime::now()))
+                    .map_or(Error::Http(status), |seconds| Error::RetryAfter {
+                        status,
+                        seconds,
+                    });
+                return Err(error);
+            }
             code => return Err(Error::Http(code as u16)),
         }
         if numeric_header(&request, WINHTTP_QUERY_CONTENT_LENGTH)?
@@ -496,6 +532,12 @@ fn timeouts(
 fn numeric_header(handle: &Handle, key: u32) -> Result<Option<u64>, Error> {
     // WinHTTP's portable numeric query is DWORD-only. Ask WinHTTP for this
     // individual header in a fixed buffer, then parse its decimal value as u64.
+    text_header(handle, key)?
+        .map(|text| text.trim().parse().map_err(|_| Error::InvalidResponse))
+        .transpose()
+}
+
+fn text_header(handle: &Handle, key: u32) -> Result<Option<String>, Error> {
     let mut text = [0u16; 64];
     let mut size = std::mem::size_of_val(&text) as u32;
     if unsafe {
@@ -512,11 +554,9 @@ fn numeric_header(handle: &Handle, key: u32) -> Result<Option<u64>, Error> {
         if size as usize >= std::mem::size_of_val(&text) || !size.is_multiple_of(2) {
             return Err(Error::InvalidResponse);
         }
-        let text =
-            String::from_utf16(&text[..size as usize / 2]).map_err(|_| Error::InvalidResponse)?;
-        Ok(Some(
-            text.trim().parse().map_err(|_| Error::InvalidResponse)?,
-        ))
+        String::from_utf16(&text[..size as usize / 2])
+            .map(Some)
+            .map_err(|_| Error::InvalidResponse)
     } else if std::io::Error::last_os_error().raw_os_error()
         == Some(ERROR_WINHTTP_HEADER_NOT_FOUND as i32)
     {
@@ -524,6 +564,18 @@ fn numeric_header(handle: &Handle, key: u32) -> Result<Option<u64>, Error> {
     } else {
         Err(native_error())
     }
+}
+
+fn retry_after_seconds(text: &str, now: std::time::SystemTime) -> Option<u32> {
+    let text = text.trim();
+    if let Ok(seconds) = text.parse::<u64>() {
+        return Some(seconds.min(u32::MAX.into()) as u32);
+    }
+    let date = chrono::DateTime::parse_from_rfc2822(text).ok()?;
+    let now = chrono::DateTime::<chrono::Utc>::from(now);
+    let delay = date.signed_duration_since(now).to_std().unwrap_or_default();
+    let seconds = delay.as_secs() + u64::from(delay.subsec_nanos() > 0);
+    Some(seconds.min(u32::MAX.into()) as u32)
 }
 
 // Synchronous WinHTTP operations are bounded individually by <=500ms timeouts.

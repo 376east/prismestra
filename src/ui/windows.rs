@@ -322,7 +322,10 @@ fn load_project(path: &Path) -> Result<(Project, Option<Document>), String> {
             }),
     }
 }
-fn load_profile(path: &Path, asset_root: &Path) -> Result<crate::app::bundle::Profile, String> {
+fn load_profile(
+    path: &Path,
+    asset_root: &Path,
+) -> Result<(crate::app::bundle::Profile, bool), String> {
     let mut prefix = Vec::new();
     File::open(path)
         .map_err(|e| e.to_string())?
@@ -336,15 +339,14 @@ fn load_profile(path: &Path, asset_root: &Path) -> Result<crate::app::bundle::Pr
     {
         let loaded = crate::app::bundle::load(path)?;
         let store = crate::app::assets::Store::new(asset_root.to_owned())?;
-        loaded.install(&store)
+        Ok((loaded.install(&store)?, true))
     } else {
         let (p, document) = load_project(path)?;
-        match document {
-            Some(d) => Ok(crate::app::bundle::Profile { document: d }),
-            None => Ok(crate::app::bundle::Profile {
-                document: Document::from_lighting(p)?,
-            }),
-        }
+        let document = match document {
+            Some(document) => document,
+            None => Document::from_lighting(p)?,
+        };
+        Ok((crate::app::bundle::Profile { document }, false))
     }
 }
 #[cfg(test)]
@@ -520,7 +522,7 @@ struct App {
     ambient_image: Vec<crate::lighting::color::Rgb>,
     ambient_frame: (u64, u64),
     last_status: Instant,
-    pending_open: Option<(Runtime, PathBuf)>,
+    pending_open: Option<PendingOpen>,
     shutdown: crate::app::shutdown::Shutdown,
     painter: Painter,
     widgets: BTreeMap<i32, HWND>,
@@ -535,6 +537,12 @@ struct App {
     state_dir: PathBuf,
     groups: [bool; 2],
 }
+struct PendingOpen {
+    runtime: Runtime,
+    path: PathBuf,
+    portable: bool,
+}
+
 impl App {
     fn attach_outputs(&mut self) -> Result<(), String> {
         if let Some(local) = &self.native_lighting {
@@ -1095,8 +1103,8 @@ impl App {
         self.sources.release_lighting();
         self.connections.scan.cancel();
         self.sources.scan.cancel();
-        if let Some((runtime, _)) = &mut self.pending_open {
-            runtime.stop();
+        if let Some(pending) = &mut self.pending_open {
+            pending.runtime.stop();
         }
         if let Err(error) = self.runtime.request_shutdown(&mut self.shutdown) {
             self.status = error;
@@ -1112,7 +1120,10 @@ impl App {
             && self.sources.scan.is_idle()
             && self.connections.scan.is_idle()
             && self.sources.drained()
-            && self.pending_open.as_mut().is_none_or(|(r, _)| r.drained())
+            && self
+                .pending_open
+                .as_mut()
+                .is_none_or(|pending| pending.runtime.drained())
     }
     fn build_editor(&mut self, parent: HWND) -> Result<(), String> {
         self.control(
@@ -1772,12 +1783,16 @@ impl App {
         crate::app::bundle::export(path, &document, &store)
     }
     fn open_profile(&mut self, path: &Path) -> Result<(), String> {
-        if self.pending_open.is_some() || self.runtime.pending_configuration() {
+        if self.pending_open.is_some()
+            || self.runtime.pending_configuration()
+            || self.connection_switching()
+            || self.first_run.configuring()
+        {
             return Err("Дождитесь применения или открытия профиля.".into());
         }
-        let imported = load_profile(path, &self.asset_root)?;
+        let (imported, portable) = load_profile(path, &self.asset_root)?;
         let document = imported.document;
-        if let Some(local) = &self.native_lighting {
+        if !portable && let Some(local) = &self.native_lighting {
             local.validate(&document)?;
         }
         let journal = journal_path(&self.state_dir, Some(path), &document);
@@ -1785,9 +1800,16 @@ impl App {
         if self.runtime.autonomous_rgb() {
             candidate.enable_autonomous_rgb()?;
         }
+        if portable {
+            self.first_run.cancel_for_import();
+        }
         self.sources.release_lighting();
         self.runtime.stop();
-        self.pending_open = Some((candidate, path.to_owned()));
+        self.pending_open = Some(PendingOpen {
+            runtime: candidate,
+            path: path.to_owned(),
+            portable,
+        });
         self.status = "Открытие профиля: ожидаю завершения текущих операций…".into();
         Ok(())
     }
@@ -1820,6 +1842,7 @@ impl App {
                     use crate::app::runtime::OutputActivity;
                     match activity {
                         OutputActivity::Sent(frames) => format!("Кадры отправлены: {frames}"),
+                        OutputActivity::Retrying(error) => format!("Ожидает повтора ({error})"),
                         OutputActivity::Unavailable(Some(error)) => format!("Недоступно: {error}"),
                         _ => output_activity_label(&activity).into(),
                     }
@@ -2007,17 +2030,35 @@ impl App {
             if !self.runtime.drained() {
                 return Ok(scan_changed);
             }
-            let (runtime, path) = self.pending_open.take().unwrap();
+            let PendingOpen {
+                runtime,
+                path,
+                portable,
+            } = self.pending_open.take().unwrap();
             self.sources.release_lighting();
             self.runtime = Client::new(runtime, self.runtime.background())?;
             self.context_revision = self.context_revision.wrapping_add(1);
+            if portable {
+                // Keep the local binding file for explicit Apply, but never
+                // attach its outputs to a document opened from an archive.
+                self.native_lighting = None;
+                self.connections.stopped();
+                self.set_text(PC_ON, "ПК в предпросмотре");
+                self.set_text(DOOR_ON, "Лента в предпросмотре");
+                self.set_text(SCHED_ON, "Включить расписание предпросмотра");
+                self.set_text(APPLY_SCHED, "Применить к предпросмотру");
+            }
             self.attach_outputs()?;
             self.path = Some(path);
             self.dirty = false;
             self.was_pending = false;
             self.reset_editor(0);
             self.sync();
-            self.status = "Профиль открыт. Управление оборудованием выключено.".into();
+            self.status = if self.native_lighting.is_some() {
+                "Профиль открыт с локальными подключениями.".into()
+            } else {
+                "Профиль открыт. Управление оборудованием выключено.".into()
+            };
             if self.page == Page::Sources {
                 self.refresh_sources();
             }
@@ -2202,6 +2243,7 @@ impl Default for FinalStopRender {
 struct State {
     icon: brand_icon::Icon,
     modern_enabled: bool,
+    webview_user_data: web_shell::UserDataFolder,
     webview: RefCell<Option<web_shell::WebShell>>,
     modern_session: RefCell<Option<modern::Session>>,
     app: RefCell<Option<App>>,
@@ -2847,20 +2889,24 @@ pub fn run(args: Vec<OsString>) -> Result<(), String> {
     run_with_instance(args, None)
 }
 
-pub(crate) fn run_installed(args: Vec<OsString>, instance: Instance) -> Result<(), String> {
-    run_with_instance(args, Some(instance))
+pub(crate) fn run_installed(
+    args: Vec<OsString>,
+    instance: Instance,
+    user_root: PathBuf,
+) -> Result<(), String> {
+    run_with_instance(args, Some((instance, user_root)))
 }
 
 fn run_with_instance(
     args: Vec<OsString>,
-    installed_instance: Option<Instance>,
+    installed: Option<(Instance, PathBuf)>,
 ) -> Result<(), String> {
     let diagnostic = args.iter().any(|a| a == "--snapshot" || a == "--selftest");
     let error_dir = args
         .windows(2)
         .find(|pair| pair[0] == "--state-dir")
         .map(|pair| PathBuf::from(&pair[1]));
-    let result = run_inner(args, installed_instance);
+    let result = run_inner(args, installed);
     if !diagnostic && let Err(error) = &result {
         startup_ack::failed(error);
         if let Some(dir) = error_dir {
@@ -2883,6 +2929,7 @@ fn output_activity_label(activity: &crate::app::runtime::OutputActivity) -> &'st
     match activity {
         OutputActivity::Off => "Выключено",
         OutputActivity::Connecting => "Подключается",
+        OutputActivity::Retrying(_) => "Ожидает повтора",
         OutputActivity::Sent(_) => "Кадры отправлены",
         OutputActivity::Unavailable(_) => "Недоступно",
     }
@@ -2891,7 +2938,7 @@ fn output_activity_label(activity: &crate::app::runtime::OutputActivity) -> &'st
 fn native_sources_allowed(snapshot: bool, selftest: bool) -> bool {
     !snapshot && !selftest
 }
-fn run_inner(args: Vec<OsString>, installed_instance: Option<Instance>) -> Result<(), String> {
+fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Result<(), String> {
     let mut o = options(args)?;
     let state_dir = if let Some(path) = &o.state_dir {
         path.clone()
@@ -2924,7 +2971,7 @@ fn run_inner(args: Vec<OsString>, installed_instance: Option<Instance>) -> Resul
         o.snapshot = Some(state_dir.join("diagnostics/selftest.png"));
     }
     let resident_mode = o.snapshot.is_none() && !o.selftest;
-    let _portable_instance = if resident_mode && installed_instance.is_none() {
+    let _portable_instance = if resident_mode && installed.is_none() {
         Some(resident::Instance::acquire(&state_dir)?)
     } else {
         None
@@ -2940,7 +2987,7 @@ fn run_inner(args: Vec<OsString>, installed_instance: Option<Instance>) -> Resul
         .map_err(|e| e.to_string())?
         .join("assets");
     let imported = if let Some(path) = &o.project {
-        load_profile(path, &asset_root)?
+        load_profile(path, &asset_root)?.0
     } else {
         let (project, document) = project(&o)?;
         crate::app::bundle::Profile {
@@ -2980,6 +3027,10 @@ fn run_inner(args: Vec<OsString>, installed_instance: Option<Instance>) -> Resul
     let state = Box::new(State {
         icon: brand_icon::Icon::new()?,
         modern_enabled,
+        webview_user_data: match &installed {
+            Some((_, user_root)) => web_shell::UserDataFolder::installed(user_root.clone()),
+            None => web_shell::UserDataFolder::Standalone,
+        },
         webview: RefCell::new(None),
         modern_session: RefCell::new(None),
         app: RefCell::new(None),
@@ -3325,7 +3376,7 @@ fn run_inner(args: Vec<OsString>, installed_instance: Option<Instance>) -> Resul
     if !o.selftest {
         startup_ack::ready();
     }
-    if let Some(instance) = &installed_instance
+    if let Some((instance, _)) = &installed
         && let Err(error) = instance.enable_activation(&state)
     {
         eprintln!("{error}");
@@ -3937,6 +3988,14 @@ fn native_portable_profile(hwnd: HWND, state: &State) -> Result<(), String> {
             return Err("Invalid package changed the active profile".into());
         }
         a.asset_root = fresh_assets.clone();
+        // A ZIP must open in preview even when the prior profile has bindings
+        // that cannot be used by this document.
+        a.native_lighting = Some(crate::app::lighting_outputs::Local {
+            version: 1,
+            devices: Default::default(),
+            monitors: Default::default(),
+            door_brightness: 60,
+        });
         a.open_profile(&alias)?; // Recognize content even after a filename change.
     }
     native_wait_configuration(state)?;
@@ -3956,6 +4015,9 @@ fn native_portable_profile(hwnd: HWND, state: &State) -> Result<(), String> {
         a.tick()?;
         if a.runtime.document() != &expected {
             return Err("Imported portable document differs".into());
+        }
+        if a.native_lighting.is_some() {
+            return Err("Portable import retained active hardware bindings".into());
         }
         if a.runtime
             .lcd_status(&expected.lcd[0].device)

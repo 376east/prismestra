@@ -56,7 +56,7 @@ pub fn bound_factory(
                 credential_id,
             },
         ) => Arc::new(move |cancel| {
-            Ok(Box::new(super::network::HomeAssistant::connect(
+            Ok(Box::new(super::network::HomeAssistant::from_binding(
                 &endpoint,
                 &entity,
                 &credential_id,

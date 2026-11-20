@@ -46,11 +46,12 @@ pub enum Dispatch {
 pub struct InstalledLaunch {
     args: Vec<OsString>,
     instance: windows::Instance,
+    user_root: PathBuf,
 }
 
 impl InstalledLaunch {
     pub fn run(self) -> Result<(), String> {
-        windows::run_installed(self.args, self.instance)
+        windows::run_installed(self.args, self.instance, self.user_root)
     }
 }
 
@@ -129,7 +130,11 @@ pub fn dispatch(args: Vec<OsString>) -> Result<Dispatch, String> {
             SESSION
                 .set(mode)
                 .map_err(|_| "Installed frontend already dispatched")?;
-            Ok(Dispatch::InstalledUi(InstalledLaunch { args, instance }))
+            Ok(Dispatch::InstalledUi(InstalledLaunch {
+                args,
+                instance,
+                user_root,
+            }))
         }
     }
 }
@@ -319,6 +324,19 @@ fn profile_root(manifest: &Manifest, user_root: &Path) -> Result<PathBuf, String
     }
 }
 
+pub(crate) fn webview_profile_path(user_root: &Path, state: &Path) -> Result<PathBuf, String> {
+    let legacy = state.join("webview-editor");
+    // The legacy user data folder can contain a customized editor appearance.
+    match fs::symlink_metadata(&legacy) {
+        Ok(_) => Ok(legacy),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(user_root.join("wv")),
+        Err(error) => Err(format!(
+            "Inspect WebView2 profile {}: {error}",
+            legacy.display()
+        )),
+    }
+}
+
 fn verify_backend(manifest: &Manifest, executable: &Path) -> Result<(), String> {
     let backend = install_root(executable)?.join(BACKEND_PATH);
     verify_hash(&backend, &manifest.backend.sha256)
@@ -416,7 +434,7 @@ fn bootstrap_with_migration(
     Ok(args)
 }
 
-fn directory(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn directory(path: &Path) -> Result<PathBuf, String> {
     match fs::create_dir(path) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -647,6 +665,61 @@ pub(crate) mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn fresh_install_keeps_webview_profile_at_the_user_root() {
+        let fixture = Fixture::new();
+        let (_, manifest) = fixture.payload(b"fixture backend");
+        let root = profile_root(&manifest, &fixture.0.join("Prismestra")).unwrap();
+        let state = directory(&root.join("state")).unwrap();
+        let profile = webview_profile_path(&root, &state).unwrap();
+        assert_eq!(profile, root.join("wv"));
+        assert!(!profile.exists());
+        assert_eq!(directory(&profile).unwrap(), profile);
+        assert_eq!(webview_profile_path(&root, &state).unwrap(), profile);
+        assert!(!state.join("webview-editor").exists());
+    }
+
+    #[test]
+    fn namespaced_install_keeps_webview_data_separate() {
+        let fixture = Fixture::new();
+        let (_, mut manifest) = fixture.payload(b"fixture backend");
+        let root = fixture.0.join("Prismestra");
+        let default_root = profile_root(&manifest, &root).unwrap();
+        let default_state = directory(&default_root.join("state")).unwrap();
+        let default_profile = webview_profile_path(&default_root, &default_state).unwrap();
+        let namespace = "81967ed3-4ba4-4b0b-80aa-d2139a423f13";
+        manifest.data_namespace = Some(namespace.into());
+        let scoped_root = profile_root(&manifest, &root).unwrap();
+        let scoped_state = directory(&scoped_root.join("state")).unwrap();
+        let scoped_profile = webview_profile_path(&scoped_root, &scoped_state).unwrap();
+        assert_eq!(
+            scoped_profile,
+            default_root.join("Instances").join(namespace).join("wv")
+        );
+        assert_ne!(
+            directory(&scoped_profile).unwrap(),
+            directory(&default_profile).unwrap()
+        );
+    }
+
+    #[test]
+    fn upgrade_retains_existing_webview_folder_and_its_data() {
+        let fixture = Fixture::new();
+        let (exe, manifest) = fixture.payload(b"old backend");
+        let root = fixture.0.join("Prismestra");
+        bootstrap(&manifest, &exe, &root).unwrap();
+        let state = directory(&root.join("state")).unwrap();
+        let legacy = directory(&state.join("webview-editor")).unwrap();
+        let preferences = legacy.join("preferences-fixture");
+        fs::write(&preferences, b"custom appearance").unwrap();
+        let (exe, manifest) = fixture.payload(b"updated backend");
+        bootstrap(&manifest, &exe, &root).unwrap();
+        let selected = webview_profile_path(&root, &state).unwrap();
+        assert_eq!(directory(&selected).unwrap(), legacy);
+        assert_eq!(fs::read(&preferences).unwrap(), b"custom appearance");
+        assert!(!root.join("wv").exists());
     }
 
     #[test]

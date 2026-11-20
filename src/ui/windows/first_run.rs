@@ -87,6 +87,11 @@ impl Startup {
         self.phase = "cancelled";
         self.worker.cancel();
     }
+    pub(super) fn cancel_for_import(&mut self) {
+        if self.enabled {
+            self.cancel();
+        }
+    }
     pub(super) fn drained(&self) -> bool {
         self.worker.is_idle() && self.handover.as_ref().is_none_or(|job| job.is_finished())
     }
@@ -168,6 +173,7 @@ impl App {
         if !self.first_run.enabled || self.shutdown.active() {
             self.first_run.worker.cancel();
             let _ = self.first_run.worker.poll();
+            let _ = self.first_run.worker.poll_inventory();
             return Ok(false);
         }
         if !self.first_run.initialized {
@@ -236,7 +242,13 @@ impl App {
                 let document = self.runtime.document().clone();
                 let outputs = local.prepare(&document, &self.asset_root)?;
                 self.first_run.restoring = Some(self.runtime.with(|runtime, _| {
-                    runtime.request_startup_outputs_for(&self.state_dir, &local, document, outputs)
+                    runtime.request_startup_outputs_for(
+                        &self.state_dir,
+                        None,
+                        &local,
+                        document,
+                        outputs,
+                    )
                 })?);
                 self.first_run.phase = "restoring";
                 self.native_lighting = Some(local);
@@ -310,6 +322,7 @@ impl App {
                 self.runtime.with(|runtime, _| {
                     runtime.request_startup_outputs_for(
                         &self.state_dir,
+                        Some(&applied.plan.local),
                         local,
                         applied.previous_document,
                         outputs,
@@ -318,7 +331,11 @@ impl App {
                 return Err(error);
             }
             self.native_lighting = Some(applied.plan.local);
-            self.first_run.phase = "applied";
+            self.first_run.phase = if self.first_run.worker.is_idle() {
+                "applied"
+            } else {
+                "discovering"
+            };
             self.startup_output_labels();
             self.first_run.expected = Some(self.runtime.document().clone());
             self.context_revision = self.context_revision.wrapping_add(1);
@@ -347,6 +364,11 @@ impl App {
             let plan = result?;
             self.first_run.discovery_issues = plan.issues.clone();
             if !plan.changed {
+                if !self.first_run.worker.is_idle() {
+                    self.first_run.phase = "discovering";
+                    self.status = "Ищу остальные поддерживаемые устройства…".into();
+                    return Ok(true);
+                }
                 self.first_run.phase = "discovered";
                 self.status = if self.runtime.document().lighting.setup.devices.is_empty() {
                     format!(
@@ -366,6 +388,7 @@ impl App {
             let revision = self.runtime.with(|runtime, _| {
                 runtime.request_startup_outputs_for(
                     &self.state_dir,
+                    self.native_lighting.as_ref(),
                     &plan.local,
                     plan.document.clone(),
                     outputs,
@@ -382,6 +405,25 @@ impl App {
             self.status = "Устройства найдены. Подключаю к общей сцене…".into();
             return Ok(true);
         }
+        let endpoint = "127.0.0.1:17422".parse().unwrap();
+        if let Some(inventory) = self.first_run.worker.poll_inventory() {
+            let local = self
+                .native_lighting
+                .clone()
+                .ok_or("Не загружены локальные подключения")?;
+            let document = self.runtime.document().clone();
+            let path = self.path.as_ref().ok_or("Нет пути профиля")?;
+            let baseline = first_run::baseline(&self.state_dir, path, &document, &local)?;
+            self.first_run.worker.prepare(
+                document,
+                local,
+                self.asset_root.clone(),
+                endpoint,
+                inventory,
+                baseline,
+            )?;
+            return Ok(false);
+        }
         if !self.first_run.worker.is_idle() || Instant::now() < self.first_run.next {
             return Ok(false);
         }
@@ -397,23 +439,18 @@ impl App {
         }
         let local = self
             .native_lighting
-            .clone()
+            .as_ref()
             .ok_or("Не загружены локальные подключения")?;
-        let document = self.runtime.document().clone();
-        let path = self.path.as_ref().ok_or("Нет пути профиля")?;
-        let baseline = first_run::baseline(&self.state_dir, path, &document, &local)?;
-        let endpoint = "127.0.0.1:17422".parse().unwrap();
+        let document = self.runtime.document();
+        let progressive = document.lighting.setup.devices.is_empty()
+            && document.ambient.routes.is_empty()
+            && document.temperatures.sources.is_empty();
         let guard = self
             .runtime
             .with(|runtime, _| runtime.managed_discovery_guard(&self.state_dir, endpoint));
-        self.first_run.worker.start(
-            document,
-            local,
-            self.asset_root.clone(),
-            endpoint,
-            guard,
-            baseline,
-        )?;
+        self.first_run
+            .worker
+            .start(endpoint, guard, local, progressive)?;
         self.first_run.attempts += 1;
         self.first_run.phase = "discovering";
         self.status = "Ищу поддерживаемые устройства. Сцена включится автоматически…".into();
