@@ -851,6 +851,7 @@ fn live_plan_preserves_the_scheduled_scene_step_and_last_frame() {
         last,
         "applying the plan advanced the animation"
     );
+    assert_eq!(runtime.colors()[1], last);
     assert_eq!(runtime.host.frame("a"), Some([last].as_slice()));
     assert!(runtime.host.requested("a").unwrap().sequence > last_ticket.sequence);
     assert!(runtime.host.requested("added").is_none());

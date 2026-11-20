@@ -287,7 +287,8 @@ impl Host {
             .points
             .iter()
             .map(|point| {
-                frames
+                core.frame
+                    .frames
                     .get(&point.device)
                     .and_then(|colors| colors.get(point.led))
                     .copied()
