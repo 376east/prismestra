@@ -10,18 +10,21 @@
 </p>
 
 <p align="center">
-  <a href="#what-it-does">Features</a> ·
-  <a href="docs/compatibility.md">Compatibility</a> ·
+  <strong><a href="#download-for-windows">Download for Windows</a></strong> ·
+  <a href="docs/compatibility.md">Supported devices</a> ·
   <a href="CHANGELOG.md">Changelog</a> ·
-  <a href="#build-and-run">Build</a> ·
-  <a href="CONTRIBUTING.md">Contribute</a>
+  <a href="#build-and-run">Build from source</a>
 </p>
 
-Prismestra is a local lighting orchestrator for Windows. Its goal is to bring PC RGB, unusual Bluetooth lights, LCD displays and home lighting into one spatial scene, with explicit device support and a small resident engine.
+Prismestra brings PC RGB, Bluetooth lights, LCD displays and home lighting into a single scene. It runs locally on Windows and keeps the scene running when you close the editor.
+
+An open-source project from [37.6 East](https://github.com/376east).
 
 ## Download for Windows
 
-Download **[Prismestra Setup for Windows x64](https://github.com/malyarq/prismestra/releases/download/v0.1.0-preview.6/Prismestra-Setup-0.1.0.6-x64.exe)** from the [latest preview release](https://github.com/malyarq/prismestra/releases/tag/v0.1.0-preview.6). Run Setup and choose sign-in startup. The app restores an existing Prismestra scene or discovers supported local devices, builds a first map and starts a scene automatically. You can then arrange devices to match their physical positions.
+**[Get Prismestra Setup for Windows x64](https://github.com/malyarq/prismestra/releases/download/v0.1.0-preview.6/Prismestra-Setup-0.1.0.6-x64.exe)** · [Preview 6 release notes and known issues](https://github.com/malyarq/prismestra/releases/tag/v0.1.0-preview.6)
+
+Run Setup and choose whether Prismestra should start when you sign in. See the [device compatibility table](docs/compatibility.md) and the release notes for first-run behavior on your setup.
 
 The offline installer includes the application, its private headless OpenRGB backend, Visual C++ and WebView2 installers, and the optional signed PawnIO installer for supported PC lighting. You do not need a separate OpenRGB installation. Updates preserve scenes; uninstall is available in Windows Settings and preserves your data. See [installation and permissions](docs/windows-installer.md) for details and the recorded test scope. Developer source downloads are not installers.
 
