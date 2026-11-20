@@ -1,0 +1,52 @@
+{
+  "discover": {
+    "deviceCandidates": []
+  },
+  "proposal": {
+    "deviceCandidates": [
+      {
+        "id": "auto-rgb-0000000000000000000000000000000000000001",
+        "role": "canvas",
+        "label": "Fixture"
+      },
+      {
+        "id": "auto-lcd-0000000000000000000000000000000000000002",
+        "role": "lcd",
+        "label": "Fixture"
+      }
+    ]
+  },
+  "savedRgb": {
+    "deviceCandidates": [
+      {
+        "id": "auto-lcd-0000000000000000000000000000000000000002",
+        "role": "lcd",
+        "label": "Fixture"
+      }
+    ]
+  },
+  "cancelled": {
+    "deviceCandidates": []
+  },
+  "replacement": {
+    "deviceCandidates": [
+      {
+        "id": "auto-rgb-0000000000000000000000000000000000000003",
+        "role": "canvas",
+        "label": "Fixture"
+      }
+    ]
+  },
+  "rediscovered": {
+    "deviceCandidates": [
+      {
+        "id": "auto-lcd-0000000000000000000000000000000000000002",
+        "role": "lcd",
+        "label": "Fixture"
+      }
+    ]
+  },
+  "installed": {
+    "deviceCandidates": []
+  }
+}

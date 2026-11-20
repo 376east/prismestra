@@ -1,0 +1,109 @@
+#scene-file-dialog {
+ width: 860px;
+}
+#scene-file-dialog [hidden] {
+ display: none;
+}
+#scene-file-dialog h3 {
+ margin: 10px 0 4px;
+ font-size: 14px;
+}
+#scene-file-controls,
+#scene-file-edges {
+ border: 0;
+ min-width: 0;
+ padding: 0;
+ margin: 0;
+}
+.scene-file-actions {
+ display: flex;
+ flex-wrap: wrap;
+ gap: 8px;
+ margin: 12px 0;
+}
+#scene-file-status {
+ min-height: 18px;
+ margin-bottom: 8px;
+}
+.scene-file-layout {
+ display: grid;
+ grid-template-columns: minmax(0, 1fr) minmax(240px, .75fr);
+ gap: 16px;
+}
+.scene-file-layout canvas {
+ display: block;
+ max-width: 100%;
+ background: var(--ui-field);
+ border: 1px solid var(--ui-border);
+ border-radius: var(--radius-field);
+}
+#scene-file-canvas {
+ width: 100%;
+}
+.scene-file-stage {
+ position: relative;
+ width: min(100%, calc(min(55vh, 480px) * var(--scene-frame-ratio, 1)));
+ margin-inline: auto;
+}
+#scene-file-outline {
+ position: absolute;
+ border: 2px solid #fff;
+ outline: 1px solid #101010;
+ pointer-events: none;
+}
+.scene-file-output-preview {
+ display: grid;
+ grid-template-columns: repeat(2, minmax(0,1fr));
+ gap: 12px;
+}
+#scene-file-lcd {
+ width: 96px;
+ max-height: 96px;
+ object-fit: contain;
+}
+#scene-file-strip {
+ width: 100%;
+ height: 22px;
+ image-rendering: pixelated;
+}
+.scene-file-output-preview p {
+ margin-top: 5px;
+ overflow-wrap: anywhere;
+}
+.scene-file-fields select {
+ width: 100%;
+ padding: 6px 8px;
+ background: var(--ui-field);
+ color: var(--ui-text);
+ border: 1px solid var(--ui-border);
+ border-radius: var(--radius-field);
+}
+.scene-file-region {
+ display: grid;
+ grid-template-columns: 1fr 1fr;
+ gap: 0 8px;
+ margin-top: 8px;
+}
+#scene-file-edges {
+ display: grid;
+ grid-template-columns: 1fr 1fr;
+ margin-top: 12px;
+}
+#scene-file-dialog .scene-file-layer {
+ display: flex;
+ align-items: center;
+ flex-wrap: wrap;
+ gap: 6px;
+ margin: 6px 0;
+}
+#scene-file-dialog .scene-file-layer input {
+ width: 72px;
+ height: 30px;
+ margin: 0;
+ padding: 0;
+}
+@media (max-width: 680px) {
+ .scene-file-layout {
+  grid-template-columns: minmax(0, 1fr);
+ }
+}

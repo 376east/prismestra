@@ -1,5 +1,6 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict'),path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'..','src','ui','windows','web','app.js'),'utf8');
+const outputMapSource=fs.readFileSync(path.join(__dirname,'..','src','ui','windows','web','output-map.js'),'utf8');
 const nodes=new Map(),commands=[],events={},rafQueue=[];
 class Node {constructor(){this.tagName='INPUT';this.validity={valid:true};this.dataset={};this.width=104;this.height=72;this.value='';this.disabled=false;this.innerHTML='';this.textContent='';}setAttribute(){}focus(){document.activeElement=this;}select(){}hasAttribute(name){return name==='data-target'&&this.dataset.target!==undefined;}before(){}append(){}addEventListener(){}setCustomValidity(){}reportValidity(){}showModal(){this.open=true;}close(){this.open=false;}getContext(){return {fillRect(){},clearRect(){},createImageData:(w,h)=>({data:new Uint8ClampedArray(w*h*4)}),putImageData:pixels=>{this.lastPixels=pixels;}};}}
 const find=s=>{if(!nodes.has(s))nodes.set(s,new Node());return nodes.get(s);};
@@ -11,6 +12,10 @@ assert.equal(commands[0].op,'snapshot');
 const scene={effect:'noise_map',colors:[0xff0000,0x00ff00],brightness:80,speed:30,fps:48,temperature:0,tint:0,noise:{frequency:.055,amplitude:1,lacunarity:.75,persistence:.5,octaves:2,motion:1,motion_speed:1},noise_palette:'custom',rainbow_width:10};
 const initial={scene, draftScene:{...scene,brightness:65},library:[{id:'saved',name:'Живая сцена',scene}],devices:[],groups:{pc:true,door:false},native:true,pending:false,dirty:false,status:'Готово',error:null,profilePath:'C:\\sample.json',editor:null};
 context.payload={kind:'snapshot',state:initial};vm.runInContext('window.prismestraReceive(payload)',context);
+const navigationIcons=vm.runInContext('Object.keys(pages).map(key => glyphs[key])',context);
+assert.ok(navigationIcons.every(Boolean),'each navigation item has its own glyph definition');
+assert.equal(new Set(navigationIcons).size,navigationIcons.length,'navigation glyphs are distinct');
+assert.match(find('nav').innerHTML,/aria-label="Сцены"[^>]*aria-current="page"/);
 assert.equal(vm.runInContext('draft.brightness',context),65,'restores backend draft once');
 vm.runInContext('draft.noise.frequency=.123;draft.brightness=55',context);
 context.payload={kind:'snapshot',state:structuredClone(initial)};vm.runInContext('window.prismestraReceive(payload)',context);
@@ -81,6 +86,80 @@ vm.runInContext('changeView("schedule");window.prismestraReceive(payload)',conte
 vm.runInContext('view="devices";state.editor={page:"devices",index:0,targets:["Device"],fields:[],dirty:true};render()',context);const beforeDirtyNavigation=commands.length;vm.runInContext('changeView("sources")',context);assert.equal(vm.runInContext('view',context),'devices');assert.equal(commands.length,beforeDirtyNavigation);assert.ok(find('#native-error').innerHTML.includes('Примените или отмените'));
 // Additional controls use details, keeping basic controls visible and open state across render.
 vm.runInContext('state.editor.dirty=false;view="editor";advancedOpen=false;render()',context);let markup=find('#main').innerHTML;assert.ok(markup.indexOf('data-param="brightness"')<markup.indexOf('<details'));assert.ok(markup.indexOf('data-param="speed"')<markup.indexOf('<details'));assert.ok(markup.indexOf('data-param="fps"')>markup.indexOf('<details'));assert.ok(markup.includes('Основной свет'));assert.ok(markup.includes('Дополнительный свет'));assert.ok(!markup.includes('Дверная лента'));events.toggle({target:{id:'advanced-scene',open:true}});vm.runInContext('render()',context);assert.ok(find('#main').innerHTML.includes('<details id="advanced-scene" open>'));
+// Palette structure edits reuse scene preview and leave the authoritative profile alone.
+const paletteScene={...structuredClone(scene),colors:[0x081426,0x154760,0x2db6ae,0xe3b769,0xf2d9a2]};
+context.paletteScene=paletteScene;
+vm.runInContext('draft=clone(paletteScene);palettePosition=0;render()',context);
+const paletteAction=action=>events.click({target:{closest:()=>({dataset:{action},disabled:false,hasAttribute:name=>name==='data-mutation'})}});
+const paletteControl=action=>{context.paletteControl={dataset:{action}};return vm.runInContext('controlDisabled(paletteControl)',context);};
+const beforePalette=commands.length;
+assert.ok(find('#main').innerHTML.includes('id="palette-position"'));
+assert.equal(paletteControl('move-palette-earlier'),true);
+events.change({target:Object.assign(new Node(),{id:'palette-position',value:'1',dataset:{}})});
+paletteAction('insert-palette-color');
+vm.runInContext('flushPreview()',context);
+assert.deepEqual(commands.at(-1).scene,{...paletteScene,colors:[0x081426,0x154760,0x154760,0x2db6ae,0xe3b769,0xf2d9a2]});
+assert.equal(vm.runInContext('palettePosition',context),2);
+events.change({target:Object.assign(new Node(),{id:'palette-position',value:'3',dataset:{}})});
+paletteAction('move-palette-earlier');
+vm.runInContext('flushPreview()',context);
+assert.deepEqual(commands.at(-1).scene,{...paletteScene,colors:[0x081426,0x154760,0x2db6ae,0x154760,0xe3b769,0xf2d9a2]});
+assert.equal(vm.runInContext('palettePosition',context),2);
+assert.ok(commands.slice(beforePalette).every(command=>command.op==='preview_scene'));
+assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(state.scene)',context)),scene);
+assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(state.library[0].scene)',context)),scene);
+vm.runInContext('send({op:"save_scene",name:"Palette copy",scene:clone(draft)},true)',context);
+assert.equal(commands.at(-1).op,'save_scene');
+assert.equal(commands.at(-1).id,undefined,'copy has no existing catalog ID');
+assert.deepEqual(commands.at(-1).scene,{...paletteScene,colors:[0x081426,0x154760,0x2db6ae,0x154760,0xe3b769,0xf2d9a2]});
+vm.runInContext('commandPending=false;awaitingCommandAck=false',context);
+vm.runInContext('draft.colors=Array.from({length:8},(_,index)=>index);palettePosition=7;render()',context);
+assert.equal(paletteControl('insert-palette-color'),true);
+assert.equal(paletteControl('move-palette-later'),true);
+paletteAction('insert-palette-color');paletteAction('move-palette-later');
+assert.equal(vm.runInContext('draft.colors.length',context),8);
+vm.runInContext('draft=clone(paletteScene);draft.colors=[0x081426];render()',context);
+assert.equal(vm.runInContext('palettePosition',context),0,'position clamps when opening a shorter palette');
+assert.equal(paletteControl('move-palette-earlier'),true);assert.equal(paletteControl('move-palette-later'),true);
+events.change({target:Object.assign(new Node(),{id:'noise-palette',dataset:{sceneSelect:'noise_palette'},value:'rainbow'})});
+assert.ok(!find('#main').innerHTML.includes('id="palette-position"'));
+paletteAction('insert-palette-color');assert.equal(vm.runInContext('draft.colors.length',context),1);
+events.change({target:Object.assign(new Node(),{id:'noise-palette',dataset:{sceneSelect:'noise_palette'},value:'custom'})});
+assert.ok(find('#main').innerHTML.includes('id="palette-position"'));
+vm.runInContext('draft.effect="rainbow_wave";render()',context);
+assert.ok(!find('#main').innerHTML.includes('id="palette-position"'));
+vm.runInContext('draft=clone(paletteScene);draft.effect="breathing";state.pending=true;render()',context);
+assert.equal(paletteControl('insert-palette-color'),true);
+paletteAction('insert-palette-color');assert.equal(vm.runInContext('draft.colors.length',context),5);
+vm.runInContext('state.pending=false;draft=null;previewQueued=false',context);
+console.log('PASS: palette insertion and reorder preview ordered RGB, scene untouched, palette mode and bounds respected');
+
+// Built-in templates are available beside existing entries and edit as unsaved copies.
+const plumDawn={id:'builtin:plum-dawn',name:'Сливовый рассвет',builtIn:true,scene:{...structuredClone(scene),speed:24,colors:[0x243467,0x7452a4,0xcc9dd5,0xfdb87d]}};
+context.payload={kind:'snapshot',state:{...structuredClone(initial),draftScene:null,draftOrigin:null,library:[plumDawn,...structuredClone(initial.library)]}};
+vm.runInContext('draft=null;view="library";window.prismestraReceive(payload)',context);
+let builtInMarkup=find('#main').innerHTML;
+assert.ok(builtInMarkup.includes('Сливовый рассвет'));
+assert.ok(builtInMarkup.includes('Шаблон'));
+assert.ok(!builtInMarkup.includes('data-remove="builtin:plum-dawn"'));
+assert.ok(builtInMarkup.includes('data-remove="saved"'));
+const beforeBuiltIn=commands.length;
+const presetClick=dataset=>events.click({target:{closest:()=>({dataset,disabled:false,hasAttribute:()=>true})}});
+presetClick({edit:plumDawn.id});
+assert.equal(commands.at(-1).op,'preview_scene');
+assert.equal(commands.at(-1).origin.id,null);
+assert.deepEqual(commands.at(-1).scene,plumDawn.scene);
+assert.ok(commands.slice(beforeBuiltIn).every(command=>command.op==='preview_scene'));
+assert.ok(!find('#main').innerHTML.includes('data-action="rename"'));
+vm.runInContext('draft.speed=35;requestPreview();flushPreview();saveDraft("My plum scene")',context);
+assert.equal(commands.at(-1).op,'save_scene');
+assert.equal(commands.at(-1).id,null,'saving a template creates a personal entry');
+assert.equal(commands.at(-1).scene.speed,35);
+assert.equal(vm.runInContext('state.library[0].scene.speed',context),24);
+assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(state.library[1].scene)',context)),scene);
+vm.runInContext('commandPending=false;awaitingCommandAck=false;savedSceneRequest=null;draft=null;draftOrigin=null;selectedId=null',context);
+console.log('PASS: built-in template preview and copy leave the preset and the legacy catalog entry untouched');
+
 // Native library frames go through the same pixel painter; missing frames keep a palette fallback.
 context.payload={kind:'snapshot',state:{...structuredClone(initial),library:[{id:'saved',name:'Native frame',scene,preview:{width:2,height:1,colors:[0xff0000,0x00ff00]}},{id:'fallback',name:'No cached frame',scene}]}};vm.runInContext('view="library";window.prismestraReceive(payload)',context);
 assert.ok(find('#main').innerHTML.includes('data-library-preview="saved"'));assert.ok(find('#main').innerHTML.includes('Палитра сцены'));const artwork=find('library-canvas-saved');assert.equal(artwork.width,2);assert.equal(artwork.height,1);assert.deepEqual([...artwork.lastPixels.data],[255,0,0,255,0,255,0,255]);assert.ok(find('#main').innerHTML.includes('параметры RGB'));
@@ -121,9 +200,414 @@ vm.runInContext('window.prismestraReceive({kind:"status",state:{error:null,pendi
 vm.runInContext('send({op:"native_action",id:410},true);window.prismestraReceive(payload)',context);assert.equal(find('#native-error').hidden,true,'new successful command snapshot clears old command error');assert.equal(find('#native-error').innerHTML,'','stale notice actions are removed');assert.equal(vm.runInContext('stagedDirty()',context),false);
 context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeAux:structuredClone(aux),error:'Provider still unavailable'}};vm.runInContext('send({op:"native_action",id:410},true);window.prismestraReceive(payload)',context);assert.equal(find('#native-error').hidden,false);assert.ok(find('#native-error').innerHTML.includes('Provider still unavailable'),'successful ack cannot hide an actual backend error');
 console.log('PASS: failed snapshot/status retain command error; causal successful ack removes stale error/actions; current backend error remains');
+
+// The cards show applied outputs, whereas the properties selector edits the draft.
+const appliedDevices = ['first','second','third'].map(id=>({
+ id,label:id,role:'canvas',driver:{type:'stub'},leds:10,rate_hz:48,enabled:true
+}));
+context.payload={kind:'snapshot',state:{
+ ...structuredClone(initial),devices:appliedDevices,draftDevices:appliedDevices.slice(1),
+ editor:{page:'devices',index:0,targets:['second','third'],fields:[],dirty:true}
+}};
+vm.runInContext('formStages.clear();view="devices";window.prismestraReceive(payload)',context);
+const secondButtonMarkup=find('#main').innerHTML.match(/<button[^>]*aria-label="Свойства: second"[^>]*>/)[0];
+const secondButton=new Node();
+for(const [,name,value] of secondButtonMarkup.matchAll(/data-(device-index|device-id)="([^"]+)"/g)){
+ secondButton.dataset[name==='device-index'?'deviceIndex':'deviceId']=value;
+}
+const beforeDeviceSelection=commands.length;
+events.click({target:{closest:()=>secondButton}});
+assert.equal(commands.length,beforeDeviceSelection+1);
+assert.deepEqual(commands.at(-1),{op:'select_device',id:'second'},
+ 'Open the same output after an earlier device was removed in the draft');
+vm.runInContext('window.prismestraReceive(payload)',context);
+const objectSelector=new Node();objectSelector.dataset.target='';objectSelector.value='1';
+events.change({target:objectSelector});
+assert.deepEqual(commands.at(-1),{op:'select_item',index:1},'Native draft dropdown still selects by its own index');
+vm.runInContext('window.prismestraReceive(payload);pendingView={previous:"library",next:"devices"}',context);
+const beforePendingPage=commands.length;
+events.click({target:{closest:()=>secondButton}});
+assert.equal(commands.length,beforePendingPage,'Do not send a card selection before native navigation is acknowledged');
+vm.runInContext('pendingView=null',context);
+console.log('PASS: device cards select by logical identity and the draft dropdown still uses indices');
+
+// An active device inspection announces transitions once and follows its logical ID.
+{
+ const wled = {id:'desk rgb',label:'WLED',role:'canvas',leds:32,rate_hz:30,enabled:true};
+ const other = appliedDevices[0];
+ const deviceSnapshot = {
+  ...initial, devices:[other,wled], draftDevices:[other,wled],
+  editor:{page:'devices',index:0,targets:[other.label,wled.label],fields:[],dirty:false},
+  deviceActivity:{labels:{[wled.id]:'Недоступно',[other.id]:'Выключено'}},
+};
+ const updateDeviceStatus = (selected, unrelated) => {
+  context.payload={kind:'status',state:{deviceActivity:{labels:{[wled.id]:selected,[other.id]:unrelated}}}};
+  vm.runInContext('window.prismestraReceive(payload)',context);
+};
+ context.payload={kind:'snapshot',state:deviceSnapshot};
+ vm.runInContext('window.prismestraReceive(payload)',context);
+ assert.match(mainMarkup,/id="device-status-desk%20rgb" data-output-status="desk rgb"/);
+ assert.match(mainMarkup,/aria-label="Свойства: WLED" aria-describedby="device-status-desk%20rgb"/);
+ assert.match(mainMarkup,/<p class="parameter-note" id="native-runtime-detail">/);
+ const live = find('#device-status-announcement');
+ const announcements = [];
+ let liveText = live.textContent;
+ Object.defineProperty(live,'textContent',{
+  get:()=>liveText,
+  set:value=>{liveText=value; if(value)announcements.push(value);},
+ });
+ const inspectedRow = find('[data-device-id="desk rgb"]');
+ inspectedRow.dataset.deviceId=wled.id;
+ inspectedRow.focus();
+ events.click({target:{closest:()=>inspectedRow}});
+ assert.deepEqual(commands.at(-1),{op:'select_device',id:wled.id});
+ context.payload={kind:'snapshot',state:{...deviceSnapshot,editor:{...deviceSnapshot.editor,index:1}}};
+ vm.runInContext('window.prismestraReceive(payload)',context);
+ assert.deepEqual(announcements,[],'Activation and the initial state are silent');
+ updateDeviceStatus('Подключается','Недоступно');
+ updateDeviceStatus('Подключается','Выключено');
+ const properties = new Node();
+ properties.closest = selector=>selector==='#device-properties'?properties:null;
+ properties.focus();
+ events.focusin();
+ updateDeviceStatus('Кадры отправлены','Выключено');
+ assert.deepEqual(announcements,['WLED. Подключается.','WLED. Кадры отправлены.']);
+ const escapeProperties = () => events.keydown({key:'Escape',target:properties,preventDefault(){}});
+ escapeProperties();
+ assert.equal(document.activeElement,inspectedRow);
+ properties.focus();
+ events.focusin();
+ inspectedRow.disabled=true; // The selector mock keeps detached nodes; the browser test removes the row.
+ escapeProperties();
+ assert.equal(document.activeElement,find('h1'));
+ events.focusin();
+ updateDeviceStatus('Недоступно','Выключено');
+ assert.equal(announcements.length,2,'Status changes outside the inspection stay silent');
+ vm.runInContext('deviceInspection=null',context);
+ console.log('PASS: selected device status changes only, spoken description, and logical focus return');
+}
+
+const candidateFixtures = require('./fixtures/device-candidates.json');
+const [foundRgb, foundLcd] = candidateFixtures.proposal.deviceCandidates;
+const foundState = {
+ ...initial,
+ editor: {page: 'devices', index: 0, targets: [], fields: [], dirty: false},
+ ...candidateFixtures.proposal,
+};
+const receiveDeviceState = (kind, state) => {
+ context.payload = {kind, state};
+ vm.runInContext('window.prismestraReceive(payload)', context);
+};
+const hasCandidate = id => mainMarkup.includes(`data-candidate-id="${id}"`);
+receiveDeviceState('snapshot', foundState);
+assert.ok(hasCandidate(foundRgb.id) && hasCandidate(foundLcd.id), 'same-label candidates keep separate IDs');
+receiveDeviceState('status', {detail: 'Keep current candidates'});
+assert.ok(hasCandidate(foundRgb.id) && hasCandidate(foundLcd.id));
+receiveDeviceState('snapshot', {...foundState, devices: [{...foundRgb, leds: 1}], editor: {
+ page: 'devices', index: 1, targets: ['Fixture'], fields: [], dirty: false,
+}});
+assert.ok(!hasCandidate(foundRgb.id) && hasCandidate(foundLcd.id), 'applied ID replaces a matching candidate');
+assert.ok(mainMarkup.includes('<option value="" disabled selected>Выберите устройство…</option>'));
+receiveDeviceState('status', candidateFixtures.cancelled);
+assert.ok(!hasCandidate(foundLcd.id), 'empty metadata removes stale candidate rows');
+receiveDeviceState('status', candidateFixtures.replacement);
+assert.ok(hasCandidate(candidateFixtures.replacement.deviceCandidates[0].id));
+console.log('PASS: candidate identity, applied precedence, metadata replacement, empty device selection');
+
 vm.runInContext('view="devices";state.editor={page:"devices",index:0,targets:["Strip"],fields:[],dirty:false};state.detail="Ошибка RGB: <test>";render()',context);
 assert.ok(find('#main').innerHTML.includes('Ошибка RGB: &lt;test&gt;'));
+
+// Map replies, connection changes and focus all belong to the current logical output.
+const mapEvents = {};
+const mapNodes = new Map();
+const mapNode = id => {
+ if (!mapNodes.has(id)) mapNodes.set(id, new Node());
+ return mapNodes.get(id);
+};
+const mapDocument = {
+ getElementById: mapNode,
+ createElement: () => Object.assign(new Node(), {style: {}, insertCell: () => new Node()}),
+};
+const mapDialog = mapNode('output-map');
+mapDialog.addEventListener = (event, handler) => { mapEvents[event] = handler; };
+const mapTable = mapNode('output-map-table');
+mapTable.tBodies = [{replaceChildren(...rows) { this.rows = rows; }}];
+mapNode('native-target').after = (...buttons) => {
+ for (const button of buttons) mapNodes.set(button.id, button);
+};
+const mapWindow = {};
+vm.runInNewContext(outputMapSource, {window: mapWindow, document: mapDocument});
+const map = mapWindow.outputMap;
+const strip = {id: 'strip', role: 'canvas', leds: 1};
+const other = {...strip, id: 'other'};
+const mapState = {
+ profilePath: 'fixture',
+ editor: {page: 'devices', index: 1},
+ devices: [other, strip],
+ draftDevices: [other, strip],
+ draftMapRevision: '12',
+ mapConnection: {device: 'strip', state: 'ready'},
+};
+const mapRequests = [];
+const mountMap = () => map.mount(mapState, command => !!mapRequests.push(command), () => []);
+const reply = (command, extra = {}) => ({
+ request: command.request, device: command.device, source: command.source,
+ revision: command.revision, availability: 'ready',
+ preview: {device: command.device, label: 'Strip', width: 1, height: 1, total: 1, offset: 0,
+  entries: [{led: 0, x: 0, y: 0, color: 0xff0000}]},
+ ...extra,
+});
+mountMap();
+mapNode('draft-output-map-open').onclick();
+const draftRequest = mapRequests.at(-1);
+assert.equal(draftRequest.device, 'strip');
+map.receive(reply(draftRequest, {revision: '11'}));
+map.receive(reply(draftRequest, {device: 'other'}));
+assert.equal(mapTable.hidden, true);
+map.receive(reply(draftRequest));
+assert.equal(mapTable.hidden, false);
+assert.equal(mapNode('output-map-mode').hidden, false);
+map.update({...mapState, mapConnection: {device: 'other', state: 'offline'}});
+assert.equal(mapNode('output-map-connection').hidden, true);
+mapState.mapConnection.state = 'offline';
+map.update(mapState);
+assert.equal(mapNode('output-map-connection').textContent, 'Выход отключён.');
+assert.equal(mapTable.hidden, false, 'offline transport leaves draft rows visible');
+mapNode('output-map-applied').onclick();
+assert.equal(mapNode('output-map-mode').hidden, true);
+assert.equal(document.activeElement, mapNode('output-map-refresh'));
+assert.equal(mapRequests.length, 1, 'offline return does not request a buffered frame');
+map.receive(reply(draftRequest));
+assert.equal(mapTable.hidden, true);
+mapState.mapConnection.state = 'ready';
+map.update(mapState);
+const appliedRequest = mapRequests.at(-1);
+assert.equal(appliedRequest.source, 'applied');
+assert.equal(appliedRequest.offset, 0);
+map.receive(reply(appliedRequest));
+assert.equal(mapTable.hidden, false);
+mapState.mapConnection.state = 'offline';
+map.update(mapState);
+map.receive(reply(appliedRequest));
+assert.equal(mapTable.hidden, true, 'late applied reply cannot restore an offline frame');
+const originalOpener = mapNode('draft-output-map-open');
+mountMap();
+mapEvents.cancel({preventDefault() {}});
+assert.equal(mapDialog.open, false);
+assert.notEqual(mapNode('draft-output-map-open'), originalOpener);
+assert.equal(document.activeElement, mapNode('draft-output-map-open'));
+assert.ok(mapRequests.every(command => command.op === 'preview_output' && command.device === 'strip'));
+console.log('PASS: one map output, draft revision, offline draft, return and reconnect, stale replies, focus after remount');
 context.payload={kind:'status',state:{detail:'RGB: передано кадров 153'}};
 vm.runInContext('window.prismestraReceive(payload)',context);
 assert.equal(find('#native-runtime-detail').textContent,'RGB: передано кадров 153');
 console.log('PASS: selected output diagnostics are escaped and update from runtime status messages');
+
+// Audit regression: selecting B must preserve the unsaved draft of A until the user decides.
+const entryA={id:'scene-a',name:'A',scene:{...scene,colors:[0x112233]}};
+const entryB={id:'scene-b',name:'B',scene:{...scene,colors:[0x445566]}};
+const draftState={...initial,editor:null,draftScene:null,library:[entryA,entryB]};
+const evaluate=expression=>vm.runInContext(expression,context);
+function restoreDraft(snapshot){
+ context.payload={kind:'snapshot',state:structuredClone(snapshot)};
+ evaluate('draft=null;view="library";window.prismestraReceive(payload)');
+}
+function selectScene(id){
+ events.click({target:{closest:()=>({dataset:{edit:id},disabled:false,hasAttribute:()=>true})}});
+}
+restoreDraft(draftState);
+selectScene(entryA.id);
+evaluate('draft.colors[0]=0xaabbcc;editDraft();flushPreview();changeView("library")');
+const draftA=commands.at(-1);
+assert.equal(draftA.origin.id,entryA.id);
+assert.equal(draftA.origin.scene.colors[0],0x112233);
+const beforeSwitch=commands.length;
+selectScene(entryB.id);
+assert.equal(find('#draft-switch').open,true);
+assert.equal(commands.length,beforeSwitch);
+assert.equal(evaluate('draft.colors[0]'),0xaabbcc);
+find('#draft-stay').onclick();
+assert.equal(evaluate('view'),'editor');
+assert.equal(evaluate('draft.colors[0]'),0xaabbcc);
+evaluate('changeView("library")');
+selectScene(entryA.id);
+assert.equal(find('#draft-switch').open,false,'reopening A resumes its draft');
+assert.equal(evaluate('draft.colors[0]'),0xaabbcc);
+
+// Even if the same edits were applied live, they are still unsaved in the library.
+context.payload={kind:'status',state:{scene:draftA.scene,pending:false}};
+evaluate('window.prismestraReceive(payload);changeView("library")');
+selectScene(entryB.id);
+find('#draft-save').onclick();
+assert.equal(commands.at(-1).op,'save_scene');
+assert.equal(commands.at(-1).id,entryA.id);
+assert.equal(commands.at(-1).scene.colors[0],0xaabbcc);
+evaluate('window.prismestraReceive({kind:"status",state:{pending:false}})');
+assert.equal(evaluate('busy()'),true,'periodic output status does not acknowledge saving');
+context.payload={kind:'snapshot',state:{...draftState,scene:draftA.scene}};
+evaluate('window.prismestraReceive(payload)');
+assert.equal(evaluate('busy()'),true,'an unrelated snapshot without the saved entry does not unlock the switch');
+evaluate('window.prismestraReceive({kind:"draft_error",message:"Could not autosave preview"})');
+assert.equal(evaluate('busy()'),true,'preview autosave errors do not cancel the pending catalog save');
+assert.equal(evaluate('selectedId'),entryA.id);
+evaluate('window.prismestraReceive({kind:"error",message:"Cannot write catalog"})');
+assert.equal(evaluate('selectedId'),entryA.id);
+assert.equal(evaluate('draft.colors[0]'),0xaabbcc);
+selectScene(entryB.id);
+find('#draft-save').onclick();
+context.payload={kind:'snapshot',state:{...draftState,library:[{...entryA,scene:draftA.scene},entryB]}};
+evaluate('window.prismestraReceive(payload)');
+assert.equal(evaluate('selectedId'),entryB.id);
+assert.equal(commands.at(-1).op,'preview_scene');
+assert.equal(commands.at(-1).origin.id,entryB.id);
+assert.ok(!commands.slice(beforeSwitch).some(command=>command.op==='apply_scene'));
+
+restoreDraft({...draftState,draftScene:draftA.scene,draftOrigin:draftA.origin});
+assert.equal(evaluate('draftName'),'A');
+assert.equal(evaluate('selectedId'),entryA.id);
+selectScene(entryB.id);
+find('#draft-discard').onclick();
+assert.equal(evaluate('selectedId'),entryB.id);
+assert.equal(commands.at(-1).scene.colors[0],0x445566);
+
+restoreDraft({...draftState,draftScene:draftA.scene});
+assert.equal(evaluate('draftName'),'Восстановленный черновик');
+selectScene(entryB.id);
+find('#draft-save').onclick();
+assert.equal(find('#name-dialog').open,true);
+find('#scene-name').value='Recovered';
+find('#name-form').onsubmit({preventDefault(){}});
+assert.equal(commands.at(-1).id,null,'legacy draft saves as a new entry');
+assert.equal(evaluate('draft.colors[0]'),0xaabbcc);
+context.payload={kind:'snapshot',state:{...draftState,library:[entryA,entryB,{id:'restored',name:'Recovered',scene:draftA.scene}]}};
+evaluate('window.prismestraReceive(payload)');
+assert.equal(evaluate('selectedId'),entryB.id);
+
+restoreDraft({...draftState,draftScene:draftA.scene,draftOrigin:draftA.origin,library:[{...entryA,name:'Reused ID'},entryB]});
+assert.equal(evaluate('selectedId'),null,'reused source ID does not silently reattach');
+assert.equal(evaluate('draftName'),'A');
+assert.equal(evaluate('draft.colors[0]'),0xaabbcc);
+evaluate('window.prismestraReceive({kind:"flush",id:93})');
+assert.equal(commands.at(-1).origin.id,null);
+assert.equal(commands.at(-1).origin.name,'A');
+console.log('PASS: scene draft guard, all three choices, acknowledged save and error recovery, named/legacy restore, stale source detachment');
+
+const navFixture = (devices = [], extra = {}) => ({
+ ...structuredClone(initial), devices, draftDevices: devices, deviceCandidates: [],
+ schedule: {enabled: false, paused: false}, ...extra,
+});
+const navHas = page => find('nav').innerHTML.includes(`data-view="${page}"`);
+const viewNow = () => vm.runInContext('view', context);
+const openView = page => vm.runInContext('changeView('+JSON.stringify(page)+')', context);
+const navLcd = {id: 'lcd', label: 'LCD', role: 'lcd', enabled: true, leds: 0};
+const navAmbient = {id: 'ambient', label: 'Screen strip', role: 'ambient', enabled: false, leds: 10};
+vm.runInContext('window.prismestraReceive({kind:"close_cancelled"})', context);
+vm.runInContext('formStages.clear();view="library";pendingView=null', context);
+receiveDeviceState('snapshot', navFixture([], {deviceCandidates: [navLcd, navAmbient]}));
+assert.ok(navHas('devices') && navHas('settings'));
+assert.ok(['lcd','ambient','connections','temperatures','sources','schedule'].every(page => !navHas(page)));
+const beforeHiddenOutput = commands.length;
+openView('lcd');
+assert.equal(commands.length, beforeHiddenOutput, 'Unapplied discovery does not open the LCD editor');
+openView('devices');
+receiveDeviceState('snapshot', navFixture([], {editor: {page:'devices',index:0,targets:[],fields:[],dirty:false}, nativeAux:{
+ page:'devices',fields:[{id:714,label:'Семейство',kind:'select',enabled:true,value:'lcd',choices:[]}],actions:[],notes:[],
+}}));
+assert.ok(mainMarkup.includes('data-action="focus-device-setup"'));
+assert.ok(mainMarkup.includes('data-view="connections"'));
+openView('connections');
+assert.deepEqual(commands.at(-1), {op:'page',page:'connections'});
+receiveDeviceState('snapshot', navFixture([navLcd, navAmbient], {deviceActivity:{labels:{lcd:'Нет связи'}}}));
+assert.ok(navHas('lcd') && navHas('ambient'), 'Configured disabled and unreachable outputs stay discoverable');
+openView('lcd');
+receiveDeviceState('snapshot', navFixture([navLcd, navAmbient], {editor:{page:'lcd',index:0,targets:['LCD'],fields:[],dirty:false}}));
+assert.equal(viewNow(), 'lcd');
+assert.ok(mainMarkup.includes('Проверить подключение') && mainMarkup.includes('Температуры'));
+receiveDeviceState('snapshot', navFixture([navAmbient], {pending:true}));
+assert.equal(viewNow(), 'lcd', 'Wait for configuration to settle before leaving the page');
+receiveDeviceState('status', {pending:false});
+assert.deepEqual(commands.at(-1), {op:'page',page:'devices'});
+assert.equal(viewNow(), 'devices');
+assert.ok(!navHas('lcd') && navHas('ambient'));
+receiveDeviceState('snapshot', navFixture([navAmbient], {schedule:{enabled:true,paused:true}}));
+openView('settings');
+assert.deepEqual(commands.at(-1), {op:'page',page:'settings'});
+receiveDeviceState('snapshot', navFixture([navAmbient], {schedule:{enabled:true,paused:true}}));
+assert.ok(mainMarkup.includes('Диагностика') && mainMarkup.includes('Расписание на паузе'));
+openView('schedule');
+assert.deepEqual(commands.at(-1), {op:'page',page:'schedule'});
+assert.ok(find('nav').innerHTML.includes('data-view="settings" class="active"'));
+console.log('PASS: hidden output links, discovery access, configured offline routes, removal fallback, settings and schedule');
+
+vm.runInContext('formStages.clear();view="devices";pendingView=null', context);
+receiveDeviceState('snapshot', navFixture([], {status:'Ищу поддерживаемые устройства…'}));
+assert.ok(find('#player-status').textContent.includes('Ищу поддерживаемые устройства'));
+assert.ok(navHas('devices') && !navHas('lcd') && !navHas('ambient'));
+receiveDeviceState('status', {status:'Автопоиск завершён'});
+assert.ok(!navHas('lcd') && !navHas('ambient'));
+for (const output of [navLcd, navAmbient]) {
+ const role=output.role;
+ const editorFor = (id, index=0) => ({
+  page:role,index,deviceId:id,targets:['Same label','Same label'],
+  fields:[{key:'label',label:'Label',value:'Original',choices:[]}],dirty:false,
+ });
+ receiveDeviceState('snapshot', navFixture([output]));
+ openView(role);
+ receiveDeviceState('snapshot', navFixture([output], {editor:editorFor(output.id)}));
+ const editing=find('#field-0');
+ editing.value='Keep this input';
+ events.input({target:editing});
+ receiveDeviceState('status', {deviceActivity:{labels:{[output.id]:'Недоступно'}}});
+ assert.equal(find('#field-0').value,'Keep this input','Transport loss keeps the active form');
+ assert.ok(navHas(role));
+ const replacement={...output,id:output.id+'-other'};
+ events.compositionstart({});
+ receiveDeviceState('snapshot', navFixture([replacement], {editor:editorFor(replacement.id)}));
+ editing.value='Keep this composed input';
+ events.input({target:editing});
+ events.compositionend({});
+ while(rafQueue.length)rafQueue.shift()();
+ assert.ok(mainMarkup.includes('Незавершённый ввод сохранён'));
+ assert.ok(!mainMarkup.includes('id="field-0"'),'Do not offer replacement fields while the original input is retained');
+ const beforeRepair=commands.length;
+ vm.runInContext('send({op:"apply_fields"},true)',context);
+ assert.equal(commands.length,beforeRepair,'Pending fields cannot be sent to a replacement at the same index');
+ receiveDeviceState('snapshot', navFixture([replacement,output], {editor:editorFor(output.id,1)}));
+ assert.equal(find('#field-0').value,'Keep this composed input','Original ID restores input after a reorder');
+ receiveDeviceState('snapshot', navFixture([], {editor:null}));
+ assert.equal(viewNow(),role,'Explicit removal cannot navigate away from unsaved input');
+ assert.ok(!navHas(role));
+ vm.runInContext('discardPageFields()',context);
+ assert.equal(viewNow(),'devices','Explicit discard lets the normal empty-page fallback run');
+ receiveDeviceState('snapshot',navFixture([]));
+}
+console.log('PASS: startup waiting, detached output input, no wrong-target mutation, reconnect and explicit discard');
+
+vm.runInContext('formStages.clear();view="settings";pendingView=null',context);
+const settingsState = navFixture();
+receiveDeviceState('snapshot',settingsState);
+const scheduleOpener = new Node();
+scheduleOpener.dataset.view = 'schedule';
+scheduleOpener.closest = selector => selector === '.settings-links' ? new Node() : null;
+const scheduleLink = find('#main .settings-links [data-view="schedule"]');
+const scheduleForm = {...settingsState,nativeForm:{page:'schedule',fields:[],actions:[],notes:[]}};
+const returnFromSchedule = () => {
+ events.click({target:{closest:()=>scheduleOpener}});
+ receiveDeviceState('snapshot',scheduleForm);
+ openView('settings');
+ assert.equal(viewNow(),'settings');
+ assert.notEqual(document.activeElement,scheduleLink,'Wait for the Settings snapshot before restoring focus');
+};
+returnFromSchedule();
+document.activeElement=find('#main h1');
+receiveDeviceState('status',{pending:false});
+assert.notEqual(document.activeElement,scheduleLink);
+receiveDeviceState('snapshot',settingsState);
+assert.equal(document.activeElement,scheduleLink,'Restore the initiating Settings link after acknowledgement');
+returnFromSchedule();
+const appearanceButton=find('#appearance-toggle');
+appearanceButton.id='appearance-toggle';
+document.activeElement=appearanceButton;
+receiveDeviceState('snapshot',settingsState);
+assert.equal(document.activeElement,appearanceButton,'An asynchronous return does not steal focus moved by the user');
+console.log('PASS: Settings return focus waits for acknowledgement and respects user focus');

@@ -4,7 +4,7 @@ use super::{
     device_setup,
     document::{Document, Lcd},
     lcd,
-    lighting_bindings::discovery::{Target, native_factory, openrgb_factory},
+    lighting_bindings::discovery::{Inventory, Target, native_factory, openrgb_factory},
     lighting_outputs::Local,
 };
 use crate::{
@@ -44,34 +44,115 @@ struct Task {
     thread: JoinHandle<Result<Plan, String>>,
 }
 
+type Probe = JoinHandle<Result<Discovery, String>>;
+
+struct Scan {
+    cancel: Cancellation,
+    probes: Vec<(&'static str, Probe)>,
+    inventory: Discovery,
+    updated: bool,
+    progressive: bool,
+}
+
+impl Scan {
+    fn spawn(
+        &mut self,
+        name: &'static str,
+        probe: impl FnOnce() -> Result<Discovery, String> + Send + 'static,
+    ) {
+        match thread::Builder::new()
+            .name(format!("first-run-{name}"))
+            .spawn(probe)
+        {
+            Ok(thread) => self.probes.push((name, thread)),
+            Err(error) => {
+                self.inventory.issues.push(format!("{name}: {error}"));
+                self.updated = true;
+            }
+        }
+    }
+
+    fn poll(&mut self) -> Option<Discovery> {
+        let mut index = 0;
+        while index < self.probes.len() {
+            if !self.probes[index].1.is_finished() {
+                index += 1;
+                continue;
+            }
+            let (name, probe) = self.probes.swap_remove(index);
+            match probe.join() {
+                Ok(Ok(inventory)) => {
+                    self.inventory.controllers.extend(inventory.controllers);
+                    self.inventory.lcd_paths.extend(inventory.lcd_paths);
+                    self.inventory.ble_pixels.extend(inventory.ble_pixels);
+                    self.inventory.issues.extend(inventory.issues);
+                }
+                Ok(Err(error)) => self.inventory.issues.push(format!("{name}: {error}")),
+                Err(_) => self
+                    .inventory
+                    .issues
+                    .push(format!("{name}: поиск завершился с ошибкой.")),
+            }
+            self.updated = true;
+        }
+        if self.cancel.cancelled() || (!self.progressive && !self.probes.is_empty()) {
+            return None;
+        }
+        std::mem::take(&mut self.updated).then(|| self.inventory.clone())
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Worker {
+    scan: Option<Scan>,
     task: Option<Task>,
 }
 
 impl Worker {
     pub(crate) fn start(
         &mut self,
-        document: Document,
-        local: Local,
-        asset_root: PathBuf,
         endpoint: SocketAddr,
-        guard: Option<Guard>,
-        baseline: Baseline,
+        guard: Result<Option<Guard>, String>,
+        local: &Local,
+        progressive: bool,
     ) -> Result<(), String> {
         if !self.is_idle() {
             return Err("Первичный поиск оборудования уже выполняется.".into());
         }
+        self.scan = Some(discover(endpoint, guard, local, progressive));
+        Ok(())
+    }
+
+    pub(crate) fn poll_inventory(&mut self) -> Option<Discovery> {
+        let scan = self.scan.as_mut()?;
+        let result = scan.poll();
+        if scan.probes.is_empty() {
+            self.scan = None;
+        }
+        result
+    }
+
+    pub(crate) fn prepare(
+        &mut self,
+        document: Document,
+        local: Local,
+        asset_root: PathBuf,
+        endpoint: SocketAddr,
+        inventory: Discovery,
+        baseline: Baseline,
+    ) -> Result<(), String> {
+        if self.task.is_some() {
+            return Err("Карта устройств уже строится.".into());
+        }
         let cancel = Cancellation::default();
         let token = cancel.clone();
         let thread = thread::Builder::new()
-            .name("first-run-discovery".into())
+            .name("first-run-map".into())
             .spawn(move || {
-                let result = discover(endpoint, guard, &token, &local)?;
                 if token.cancelled() {
                     return Err(cancelled());
                 }
-                let mut plan = assemble(document, local, endpoint, result, || {
+                let mut plan = assemble(document, local, endpoint, inventory, || {
                     if token.cancelled() {
                         return Err(cancelled());
                     }
@@ -105,13 +186,16 @@ impl Worker {
     }
 
     pub(crate) fn cancel(&self) {
+        if let Some(scan) = &self.scan {
+            scan.cancel.cancel();
+        }
         if let Some(task) = &self.task {
             task.cancel.cancel();
         }
     }
 
     pub(crate) fn is_idle(&self) -> bool {
-        self.task.is_none()
+        self.scan.is_none() && self.task.is_none()
     }
 }
 
@@ -125,8 +209,8 @@ fn cancelled() -> String {
     "Первичный поиск оборудования отменён.".into()
 }
 
-#[derive(Default)]
-struct Discovery {
+#[derive(Clone, Default)]
+pub(crate) struct Discovery {
     controllers: Vec<ControllerInfo>,
     lcd_paths: Vec<String>,
     ble_pixels: Vec<(u64, usize)>,
@@ -135,11 +219,12 @@ struct Discovery {
 
 fn discover(
     endpoint: SocketAddr,
-    guard: Option<Guard>,
-    cancel: &Cancellation,
+    guard: Result<Option<Guard>, String>,
     local: &Local,
-) -> Result<Discovery, String> {
+    progressive: bool,
+) -> Scan {
     let started = Instant::now();
+    let cancel = Cancellation::default();
     let deadline = cancel.with_guard(Arc::new(move || {
         if started.elapsed() >= DISCOVERY_LIMIT {
             Err("Первичный поиск превысил лимит времени.".into())
@@ -155,112 +240,125 @@ fn discover(
             _ => None,
         })
         .collect();
-    thread::scope(|scope| {
-        let ble_cancel = deadline.clone();
-        let ble_worker = thread::Builder::new()
-            .name("first-run-ble".into())
-            .spawn_scoped(scope, move || {
-                let mut control = crate::runtime::adapters::Control::new(ble_cancel);
-                crate::transport::ble_windows::discover_pixel_controllers(
-                    &mut control,
-                    &bound_addresses,
-                )
-            });
-        let local = discover_local(endpoint, guard, cancel, deadline, started);
-        let ble = ble_worker.map_err(|e| e.to_string()).and_then(|worker| {
-            worker
-                .join()
-                .unwrap_or_else(|_| Err("Поиск BLE завершился с ошибкой.".into()))
-        });
-        let mut result = local?;
-        if cancel.cancelled() {
-            return Err(cancelled());
+    let mut scan = Scan {
+        cancel,
+        probes: Vec::new(),
+        inventory: Discovery::default(),
+        updated: false,
+        progressive,
+    };
+    let ble_cancel = deadline.clone();
+    scan.spawn("Surplife E1", move || {
+        let mut control = crate::runtime::adapters::Control::new(ble_cancel);
+        let probes = crate::transport::ble_windows::discover_pixel_controllers(
+            &mut control,
+            &bound_addresses,
+        )?;
+        let mut inventory = Discovery::default();
+        for probe in probes {
+            match probe.capacity {
+                Ok(points) => inventory.ble_pixels.push((probe.address, points)),
+                Err(error) => inventory.issues.push(format!(
+                    "Surplife E1 (адрес …{:04X}): {error}",
+                    probe.address & 0xffff
+                )),
+            }
         }
-        match ble {
-            Ok(pixels) => result.ble_pixels = pixels,
-            Err(error) => result.issues.push(format!("Surplife E1: {error}")),
-        }
-        Ok(result)
-    })
-}
-
-fn discover_local(
-    endpoint: SocketAddr,
-    guard: Option<Guard>,
-    cancel: &Cancellation,
-    deadline: Cancellation,
-    started: Instant,
-) -> Result<Discovery, String> {
-    let mut result = Discovery::default();
-    let native = native_factory();
-    let lcd = device_setup::preset("tt-lcd")?.device("lcd-search")?;
-    match native(Target::Device(lcd), deadline.clone()) {
-        Ok(inventory) => {
-            result.lcd_paths = inventory
+        Ok(inventory)
+    });
+    let lcd_cancel = deadline.clone();
+    scan.spawn("TT LCD", move || {
+        let lcd = device_setup::preset("tt-lcd")?.device("lcd-search")?;
+        let inventory = native_factory()(Target::Device(lcd), lcd_cancel)?;
+        Ok(Discovery {
+            lcd_paths: inventory
                 .candidates
                 .into_iter()
                 .map(|c| c.draft.endpoint)
-                .collect();
-            result.issues.extend(inventory.issues);
+                .collect(),
+            issues: inventory.issues,
+            ..Default::default()
+        })
+    });
+    scan.spawn("OpenRGB", move || {
+        discover_rgb(endpoint, guard, deadline, started)
+    });
+    scan
+}
+
+fn discover_rgb(
+    endpoint: SocketAddr,
+    guard: Result<Option<Guard>, String>,
+    deadline: Cancellation,
+    started: Instant,
+) -> Result<Discovery, String> {
+    let guard = guard?.ok_or("Управляемый backend недоступен для первичного поиска.")?;
+    if !endpoint.ip().is_loopback() || endpoint.port() == 0 {
+        return Err("Для автопоиска нужен локальный управляемый OpenRGB.".into());
+    }
+    loop {
+        if deadline.cancelled() {
+            return Err(cancelled());
         }
-        Err(error) => result.issues.push(format!("TT LCD: {error}")),
-    }
-    if cancel.cancelled() {
-        return Err(cancelled());
-    }
-    if let Some(guard) = guard {
-        let rgb = (|| {
-            if !endpoint.ip().is_loopback() || endpoint.port() == 0 {
-                return Err("Для автопоиска нужен локальный управляемый OpenRGB.".into());
-            }
-            loop {
-                if cancel.cancelled() {
-                    return Err(cancelled());
-                }
-                match guard() {
-                    Ok(()) => break,
-                    Err(error) if started.elapsed() >= BACKEND_WAIT => return Err(error),
-                    Err(_) => thread::sleep(Duration::from_millis(100)),
-                }
-            }
-            let target = device_setup::preset("openrgb-controller")?.device("rgb-search")?;
-            let target = Target::Device(target);
-            let factory = openrgb_factory(endpoint);
-            let scan_cancel = deadline.with_guard(guard);
-            let until = (Instant::now() + INVENTORY_WAIT).min(started + DISCOVERY_LIMIT);
-            loop {
-                let inventory = factory(target.clone(), scan_cancel.clone())?;
-                // The SDK listener can become ready before detectors publish
-                // physical controllers. Retry an empty inventory within budget.
-                if !inventory.candidates.is_empty() || Instant::now() >= until {
-                    break Ok(inventory);
-                }
-                if scan_cancel.cancelled() {
-                    break Err("Поиск OpenRGB прерван.".into());
-                }
-                thread::sleep(Duration::from_millis(250));
-            }
-        })();
-        match rgb {
-            Ok(inventory) => {
-                result.controllers = inventory
-                    .candidates
-                    .into_iter()
-                    .filter_map(|c| c.controller)
-                    .collect();
-                result.issues.extend(inventory.issues);
-            }
-            Err(error) => result.issues.push(format!("OpenRGB: {error}")),
+        match guard() {
+            Ok(()) => break,
+            Err(error) if started.elapsed() >= BACKEND_WAIT => return Err(error),
+            Err(_) => thread::sleep(Duration::from_millis(100)),
         }
-    } else {
-        result
-            .issues
-            .push("Управляемый OpenRGB недоступен для первичного поиска.".into());
     }
-    if cancel.cancelled() {
-        return Err(cancelled());
+    let until = (Instant::now() + INVENTORY_WAIT).min(started + DISCOVERY_LIMIT);
+    let inventory = discover_openrgb_inventory(endpoint, guard, deadline, until)?;
+    Ok(Discovery {
+        controllers: inventory
+            .candidates
+            .into_iter()
+            .filter_map(|c| c.controller)
+            .collect(),
+        issues: inventory.issues,
+        ..Default::default()
+    })
+}
+
+fn discover_openrgb_inventory(
+    endpoint: SocketAddr,
+    guard: Guard,
+    deadline: Cancellation,
+    until: Instant,
+) -> Result<Inventory, String> {
+    let target = Target::Device(device_setup::preset("openrgb-controller")?.device("rgb-search")?);
+    let factory = openrgb_factory(endpoint);
+    let scan_cancel = deadline.with_guard(guard.clone());
+    let poll_delay = Duration::from_millis(250);
+    let mut retried = false;
+    loop {
+        let inventory = match factory(target.clone(), scan_cancel.clone()) {
+            Err(first)
+                if !retried && Instant::now() + poll_delay < until && !deadline.cancelled() =>
+            {
+                thread::sleep(poll_delay);
+                if deadline.cancelled() || Instant::now() >= until {
+                    return Err(first);
+                }
+                // The original session was discarded. Verify ownership again before reconnecting.
+                guard().map_err(|reason| {
+                    format!("Чтение списка устройств SDK прервано ({first}). Повтор пропущен ({reason}).")
+                })?;
+                retried = true;
+                factory(target.clone(), scan_cancel.clone()).map_err(|error| {
+                    format!("Не удалось прочитать список устройств SDK ({first}). Повтор также завершился ошибкой ({error}).")
+                })?
+            }
+            result => result?,
+        };
+        // The SDK listener can become ready before detectors publish physical controllers.
+        if !inventory.candidates.is_empty() || Instant::now() >= until {
+            return Ok(inventory);
+        }
+        if scan_cancel.cancelled() {
+            return Err("Поиск OpenRGB прерван.".into());
+        }
+        thread::sleep(poll_delay);
     }
-    Ok(result)
 }
 
 fn logical_id(prefix: &str, identity: &str) -> String {
@@ -412,6 +510,7 @@ fn assemble(
     let mut remaining_points = MAX_POINTS.saturating_sub(setup.canvas.points.len());
     for (identity, rows) in by_identity {
         if local_routes.contains(&format!("openrgb:{identity}")) {
+            local_routes.extend(rows.iter().filter_map(native_route));
             continue;
         }
         if rows.len() != 1 {
@@ -1067,6 +1166,11 @@ fn save_lcd_media(root: &Path) -> Result<AssetId, String> {
 }
 
 #[cfg(test)]
+#[path = "../../tests/support/openrgb_peer.rs"]
+#[allow(dead_code)]
+mod openrgb_peer;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -1074,6 +1178,67 @@ mod tests {
         devices::Setup,
         transport::openrgb::{MatrixInfo, ZoneInfo},
     };
+
+    #[test]
+    fn sdk_inventory_retries_one_interrupted_read() {
+        let peer = openrgb_peer::Peer::disconnect_inventory(1);
+        let inventory = discover_openrgb_inventory(
+            peer.endpoint,
+            Arc::new(|| Ok(())),
+            Cancellation::default(),
+            Instant::now() + INVENTORY_WAIT,
+        )
+        .unwrap();
+        assert_eq!(inventory.candidates.len(), 1);
+        let calls = peer.calls.lock().unwrap();
+        assert_eq!(calls.iter().filter(|call| call.1 == 0).count(), 2);
+        assert!(calls.iter().all(|call| !matches!(call.1, 1050 | 1101)));
+    }
+
+    #[test]
+    fn sdk_inventory_reports_persistent_failure_after_one_retry() {
+        let peer = openrgb_peer::Peer::disconnect_inventory(3);
+        let Err(error) = discover_openrgb_inventory(
+            peer.endpoint,
+            Arc::new(|| Ok(())),
+            Cancellation::default(),
+            Instant::now() + INVENTORY_WAIT,
+        ) else {
+            panic!("the SDK receiver breaks every read");
+        };
+        assert!(error.contains("Повтор также завершился ошибкой"), "{error}");
+        assert_eq!(error.matches("OpenRGB:").count(), 2, "{error}");
+        let calls = peer.calls.lock().unwrap();
+        assert_eq!(calls.iter().filter(|call| call.1 == 0).count(), 2);
+        assert!(calls.iter().all(|call| !matches!(call.1, 1050 | 1101)));
+    }
+
+    #[test]
+    fn sdk_inventory_does_not_reconnect_after_ownership_loss() {
+        let peer = openrgb_peer::Peer::disconnect_inventory(1);
+        let calls = peer.calls.clone();
+        let guard = Arc::new(move || {
+            if calls.lock().unwrap().iter().any(|call| call.1 == 0) {
+                return Err("Порт больше не принадлежит приложению".into());
+            }
+            Ok(())
+        });
+        let Err(error) = discover_openrgb_inventory(
+            peer.endpoint,
+            guard,
+            Cancellation::default(),
+            Instant::now() + INVENTORY_WAIT,
+        ) else {
+            panic!("the ownership guard closes the route");
+        };
+        assert!(
+            error.contains("Повтор пропущен (Порт больше не принадлежит приложению)"),
+            "{error}"
+        );
+        let calls = peer.calls.lock().unwrap();
+        assert_eq!(calls.iter().filter(|call| call.1 == 40).count(), 1);
+        assert!(calls.iter().all(|call| !matches!(call.1, 1050 | 1101)));
+    }
 
     fn empty() -> (Document, Local) {
         let document = Document::from_lighting(Project {
@@ -1138,6 +1303,143 @@ mod tests {
 
     fn endpoint() -> SocketAddr {
         "127.0.0.1:17422".parse().unwrap()
+    }
+
+    #[test]
+    fn clean_scan_builds_lcd_and_ble_map_before_openrgb_is_available() {
+        let (_fixture, path, state, _) = super::super::installed::tests::fresh_profile();
+        let mut document = Document::load(&path).unwrap();
+        let mut local = Local::read(&state.join(LOCAL_NAME), &document).unwrap();
+        let asset_root = state.join("assets");
+        let (release, waiting) = std::sync::mpsc::channel();
+        let address = 0x1234_5678_9abc;
+        let mut scan = Scan {
+            cancel: Cancellation::default(),
+            probes: Vec::new(),
+            inventory: Discovery::default(),
+            updated: false,
+            progressive: true,
+        };
+        scan.spawn("OpenRGB", move || {
+            waiting.recv().map_err(|error| error.to_string())?;
+            Ok(Discovery {
+                controllers: vec![controller("Keyboard")],
+                ..Default::default()
+            })
+        });
+        scan.spawn("TT LCD", || {
+            Ok(Discovery {
+                lcd_paths: vec![
+                    r"\\?\hid#vid_264a&pid_233c&mi_01#stand#{synthetic-interface}".into(),
+                ],
+                ..Default::default()
+            })
+        });
+        scan.spawn("Surplife E1", move || {
+            Ok(Discovery {
+                ble_pixels: vec![(address, 3)],
+                ..Default::default()
+            })
+        });
+        let mut worker = Worker {
+            scan: Some(scan),
+            task: None,
+        };
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut apply_inventory = |worker: &mut Worker| {
+            let inventory = loop {
+                if let Some(inventory) = worker.poll_inventory() {
+                    break inventory;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "fixture inventory did not arrive"
+                );
+                thread::sleep(Duration::from_millis(5));
+            };
+            let before = baseline(&state, &path, &document, &local).unwrap();
+            worker
+                .prepare(
+                    document.clone(),
+                    local.clone(),
+                    asset_root.clone(),
+                    endpoint(),
+                    inventory,
+                    before,
+                )
+                .unwrap();
+            let plan = loop {
+                if let Some(plan) = worker.poll() {
+                    break plan.unwrap();
+                }
+                assert!(Instant::now() < deadline, "fixture map did not finish");
+                thread::sleep(Duration::from_millis(5));
+            };
+            assert!(plan.changed);
+            persist(&state, &path, &plan).unwrap();
+            document = Document::load(&path).unwrap();
+            local = Local::read(&state.join(LOCAL_NAME), &document).unwrap();
+            assert_eq!(document, plan.document);
+            document.clone()
+        };
+        let before_rgb = loop {
+            let map = apply_inventory(&mut worker);
+            assert!(!worker.is_idle());
+            if map.lighting.setup.devices.len() == 2 {
+                break map;
+            }
+        };
+        assert_eq!(before_rgb.lcd.len(), 1);
+        assert_eq!(before_rgb.lighting.setup.canvas.points.len(), 3);
+        release.send(()).unwrap();
+        let complete = apply_inventory(&mut worker);
+        assert!(worker.is_idle());
+        assert_eq!(complete.lighting.setup.devices.len(), 3);
+        assert_eq!(complete.lighting.setup.canvas.points.len(), 6);
+        assert_eq!(complete.lcd, before_rgb.lcd);
+        assert_eq!(complete.lighting.scene, before_rgb.lighting.scene);
+        assert!(
+            complete
+                .lighting
+                .setup
+                .canvas
+                .points
+                .starts_with(&before_rgb.lighting.setup.canvas.points)
+        );
+    }
+
+    #[test]
+    fn progressively_discovered_hid_route_keeps_its_first_verified_owner() {
+        let path = r"\\?\hid#vid_264a&pid_233c&mi_01#stand#{synthetic-interface}".to_owned();
+        let mut rgb = controller("Keyboard");
+        rgb.location = format!("HID: {path}");
+        let (document, local) = empty();
+        let first = assemble(
+            document,
+            local,
+            endpoint(),
+            Discovery {
+                controllers: vec![rgb.clone()],
+                ..Default::default()
+            },
+            || unreachable!(),
+        )
+        .unwrap();
+        assert!(first.changed && first.local.devices.len() == 1);
+        let second = assemble(
+            first.document.clone(),
+            first.local,
+            endpoint(),
+            Discovery {
+                controllers: vec![rgb],
+                lcd_paths: vec![path],
+                ..Default::default()
+            },
+            || panic!("an owned HID endpoint must not create a second output"),
+        )
+        .unwrap();
+        assert!(!second.changed);
+        assert_eq!(second.document, first.document);
     }
 
     struct SavedFixture {
@@ -1281,6 +1583,119 @@ mod tests {
     }
 
     #[test]
+    fn empty_installed_profile_reaches_first_sdk6_frame_and_saves_map() {
+        use crate::app::{installed, managed_backend, runtime::Runtime};
+
+        let (_fixture, profile, state, _) = installed::tests::fresh_profile();
+        let document = Document::load(&profile).unwrap();
+        let local = Local::read(&state.join(LOCAL_NAME), &document).unwrap();
+        assert!(document.lighting.setup.devices.is_empty());
+        assert!(document.lighting.setup.canvas.points.is_empty());
+        assert!(local.devices.is_empty());
+        let before = baseline(&state, &profile, &document, &local).unwrap();
+
+        let peer = openrgb_peer::Peer::new(false);
+        let managed = managed_backend::Config::read_optional(&state)
+            .unwrap()
+            .unwrap();
+        // The test route must never match the bundled backend or start its helper.
+        assert_ne!(peer.endpoint, managed.endpoint());
+        let target = device_setup::preset("openrgb-controller")
+            .unwrap()
+            .device("rgb-search")
+            .unwrap();
+        let inventory =
+            openrgb_factory(peer.endpoint)(Target::Device(target), Cancellation::default())
+                .unwrap();
+        assert_eq!(inventory.candidates.len(), 1);
+        assert!(
+            peer.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|call| !matches!(call.1, 1050 | 1101)),
+            "discovery must leave output untouched"
+        );
+        let mut plan = assemble(
+            document.clone(),
+            local,
+            peer.endpoint,
+            Discovery {
+                controllers: inventory
+                    .candidates
+                    .into_iter()
+                    .map(|candidate| candidate.controller.unwrap())
+                    .collect(),
+                ..Default::default()
+            },
+            || unreachable!(),
+        )
+        .unwrap();
+        plan.baseline = Some(before);
+        assert!(plan.changed);
+        assert_eq!(plan.document.lighting.setup.devices.len(), 1);
+        assert_eq!(plan.document.lighting.setup.canvas.points.len(), 2);
+        assert_eq!(plan.local.devices.len(), 1);
+
+        let mut runtime = Runtime::new(document, None).unwrap();
+        let outputs = plan
+            .local
+            .prepare(&plan.document, &state.join("assets"))
+            .unwrap();
+        let revision = runtime
+            .request_startup_outputs_for(&state, None, &plan.local, plan.document.clone(), outputs)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            runtime
+                .tick(crate::clock::monotonic_us(), 1_700_000_000)
+                .unwrap();
+            if peer.calls.lock().unwrap().iter().any(|call| call.1 == 1050) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no SDK6 frame reached the receiver"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        {
+            let calls = peer.calls.lock().unwrap();
+            let mut writes = calls.iter().filter(|call| matches!(call.1, 1050 | 1101));
+            // Discovery reports ID 7, then the first output session reports ID 8.
+            let direct = writes.next().unwrap();
+            assert_eq!((direct.0, direct.1), (8, 1101));
+            let frame = writes.next().unwrap();
+            assert_eq!((frame.0, frame.1), (8, 1050));
+            assert_eq!(frame.2.len(), 14);
+            assert_eq!(&frame.2[..6], &[14, 0, 0, 0, 2, 0]);
+            assert!(
+                frame.2[6..]
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|color| color[..3] != [0, 0, 0])
+            );
+        }
+        assert_eq!(runtime.output_revision(), revision);
+        assert_eq!(runtime.document(), &plan.document);
+        persist(&state, &profile, &plan).unwrap();
+        let reloaded = Document::load(&profile).unwrap();
+        let local = Local::read(&state.join(LOCAL_NAME), &reloaded).unwrap();
+        assert_eq!(reloaded, plan.document);
+        assert_eq!(
+            serde_json::to_value(&local).unwrap(),
+            serde_json::to_value(&plan.local).unwrap()
+        );
+        runtime.stop();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !runtime.drained() {
+            assert!(Instant::now() < deadline, "SDK6 output did not drain");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
     fn first_map_drives_software_frames_and_round_trips_through_profile_and_local() {
         use crate::{
             app::runtime::Runtime,
@@ -1332,7 +1747,13 @@ mod tests {
             }))
         });
         let revision = runtime
-            .request_outputs_for(plan.document.clone(), outputs)
+            .request_startup_outputs_for(
+                &fixture.state,
+                None,
+                &plan.local,
+                plan.document.clone(),
+                outputs,
+            )
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while frames.load(Ordering::SeqCst) < 3 && Instant::now() < deadline {
@@ -1345,6 +1766,10 @@ mod tests {
         assert!(nonblack.load(Ordering::SeqCst) > 0);
         assert_eq!(runtime.output_revision(), revision);
         assert_eq!(runtime.document(), &plan.document);
+        assert!(matches!(
+            runtime.output_activity(&plan.document.lighting.setup.devices[0]),
+            crate::app::runtime::OutputActivity::Sent(frames) if frames > 0
+        ));
         persist(&fixture.state, &fixture.profile, &plan).unwrap();
         let reloaded = Document::load(&fixture.profile).unwrap();
         let local = Local::read(&fixture.state.join(LOCAL_NAME), &reloaded).unwrap();

@@ -268,6 +268,18 @@ struct Dxgi {
     duplication: IDXGIOutputDuplication,
     readback: Readback,
 }
+
+fn validate_output_color_space(color_space: DXGI_COLOR_SPACE_TYPE) -> Result<(), String> {
+    if color_space == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 {
+        Ok(())
+    } else {
+        Err(format!(
+            "DXGI output color space {} requires GDI fallback",
+            color_space.0
+        ))
+    }
+}
+
 impl Dxgi {
     fn new(name: &str) -> Result<Self, String> {
         let factory: IDXGIFactory1 =
@@ -299,9 +311,7 @@ impl Dxgi {
                 if let Ok(output6) = output.cast::<IDXGIOutput6>() {
                     let desc1 = unsafe { output6.GetDesc1() }
                         .map_err(|e| message("Read output color space", e))?;
-                    if desc1.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 {
-                        return Err("HDR display requires GDI fallback".into());
-                    }
+                    validate_output_color_space(desc1.ColorSpace)?;
                 }
                 let (device, context) = device(Some(&adapter), D3D_DRIVER_TYPE_UNKNOWN)?;
                 let output1: IDXGIOutput1 = output
@@ -603,7 +613,63 @@ impl Source {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lighting::color::Rgb;
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
+
+    #[test]
+    fn fallback_reports_the_color_space_without_mistaking_limited_range_sdr_for_hdr() {
+        assert!(validate_output_color_space(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709).is_ok());
+        for color_space in [
+            DXGI_COLOR_SPACE_RGB_STUDIO_G22_NONE_P709,
+            DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+        ] {
+            assert_eq!(
+                validate_output_color_space(color_space).unwrap_err(),
+                format!(
+                    "DXGI output color space {} requires GDI fallback",
+                    color_space.0
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn portrait_fallback_bitmap_preserves_the_four_quadrants() {
+        // GDI supplies a top-down bitmap in desktop orientation for rotated displays.
+        let (width, height) = (90, 180);
+        let colors = [
+            Rgb::new(255, 0, 0),
+            Rgb::new(0, 255, 0),
+            Rgb::new(0, 0, 255),
+            Rgb::new(255, 255, 0),
+        ];
+        let bytes: Vec<_> = (0..width * height)
+            .flat_map(|index| {
+                let right = usize::from(index % width >= width / 2);
+                let bottom = usize::from(index / width >= height / 2);
+                let rgb = colors[bottom * 2 + right];
+                [rgb.b, rgb.g, rgb.r, 0]
+            })
+            .collect();
+        let full = pixels::thumbnail(&bytes, width, height, width as usize * 4, None).unwrap();
+        assert_eq!((full.width(), full.height()), (90, 180));
+        for ((x, y), color) in [(0, 0), (89, 0), (0, 179), (89, 179)]
+            .into_iter()
+            .zip(colors)
+        {
+            assert_eq!(full.pixels()[y * full.width() + x], color);
+        }
+        let crop = Rect {
+            x: 45,
+            y: 90,
+            width: 45,
+            height: 90,
+        };
+        let cropped =
+            pixels::thumbnail(&bytes, width, height, width as usize * 4, Some(crop)).unwrap();
+        assert!(cropped.pixels().iter().all(|pixel| *pixel == colors[3]));
+    }
+
     #[test]
     fn software_texture_readback_and_cache_without_desktop_access() {
         let (device, context) = device(None, D3D_DRIVER_TYPE_WARP).unwrap();

@@ -55,6 +55,8 @@ try {
     # Wait on the exact tool process below. Start-Process -Wait also waits for
     # descendants, including a hidden console host that can outlive qmake.
     $configure = Start-Process -FilePath ($mappedQt + '/bin/qmake.exe') -ArgumentList @('-nodepend', ('"' + $mappedSource + '/OpenRGB.pro"'), 'CONFIG+=release', 'CONFIG-=debug', 'CONFIG-=debug_and_release', 'CONFIG+=prismestra_pc_backend') -WindowStyle Hidden -PassThru -RedirectStandardOutput 'configure.stdout.log' -RedirectStandardError 'configure.log'
+    # Windows PowerShell can lose ExitCode after waiting unless it holds the process handle.
+    $null = $configure.Handle
     if (-not $configure.WaitForExit(120000)) {
         $configure.Kill()
         throw 'qmake exceeded its two-minute build preparation limit'
@@ -62,12 +64,15 @@ try {
     $configureExit = $configure.ExitCode
     if ($configureExit -ne 0) { throw "qmake failed ($configureExit); inspect configure.log" }
     $compile = Start-Process -FilePath $jomPath -ArgumentList @('/A', ('-j' + $Jobs)) -WindowStyle Hidden -PassThru -RedirectStandardOutput 'build.log' -RedirectStandardError 'build.stderr.log'
+    $null = $compile.Handle
     if (-not $compile.WaitForExit(1800000)) {
         $compile.Kill()
         throw 'Component compilation exceeded its thirty-minute limit'
     }
     $buildExit = $compile.ExitCode
     if ($buildExit -ne 0) { throw "Compilation failed ($buildExit); inspect build.log" }
+    # Import the utility module from this PowerShell installation.
+    Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1')
     Get-FileHash -LiteralPath 'release/OpenRGB.exe'
     # Runtime dependency staging, licenses and source verification are separate
     # gates. This script does not install, run, or approve the built component.

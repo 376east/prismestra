@@ -92,6 +92,62 @@ pub struct Editor {
     pub index: usize,
 }
 impl Editor {
+    pub fn select_device(&mut self, id: &str) -> Result<(), String> {
+        if self.page != Page::Devices {
+            return Err("Откройте раздел «Устройства»".into());
+        }
+        self.index =
+            Self::device_index(&self.document, id).ok_or("Устройства нет в черновике профиля")?;
+        Ok(())
+    }
+
+    fn device_index(document: &Document, id: &str) -> Option<usize> {
+        document
+            .lighting
+            .setup
+            .devices
+            .iter()
+            .position(|device| device.id == id)
+    }
+
+    #[cfg(any(windows, test))]
+    pub(super) fn selected_device_id(&self) -> Option<&str> {
+        if self.page != Page::Devices {
+            return None;
+        }
+        self.document
+            .lighting
+            .setup
+            .devices
+            .get(self.index)
+            .map(|device| device.id.as_str())
+    }
+
+    #[cfg(any(windows, test))]
+    pub(super) fn selected_output_id(&self) -> Option<&str> {
+        match self.page {
+            Page::Lcd => self
+                .document
+                .lcd
+                .get(self.index)
+                .map(|lcd| lcd.device.as_str()),
+            Page::Ambient => self
+                .document
+                .ambient
+                .routes
+                .get(self.index)
+                .map(|route| route.device.as_str()),
+            _ => None,
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    pub(super) fn device_index_in(&self, document: &Document) -> usize {
+        self.selected_device_id()
+            .and_then(|id| Self::device_index(document, id))
+            .unwrap_or(document.lighting.setup.devices.len())
+    }
+
     pub fn targets(document: &Document, page: Page) -> Vec<String> {
         match page {
             Page::Devices => document
@@ -323,9 +379,7 @@ impl Editor {
             .id
             .clone();
         self.document = device_setup::remove(&self.document, &id)?;
-        self.index = self
-            .index
-            .min(self.document.lighting.setup.devices.len().saturating_sub(1));
+        self.index = self.document.lighting.setup.devices.len();
         Ok(())
     }
     /// Only logical, unrouted ambient devices. No discovery or native I/O.
@@ -1550,6 +1604,70 @@ mod tests {
         expected.lighting.setup.canvas.height = 100;
         assert_eq!(editor.document, expected);
     }
+    #[test]
+    fn device_selection_follows_identity_after_draft_removal() {
+        let mut editor = Editor {
+            document: document(),
+            page: Page::Devices,
+            index: 0,
+        };
+        editor.add_device("door20").unwrap();
+        editor.index = 0;
+        editor.remove_device().unwrap();
+        assert!(editor.selected_device_id().is_none());
+        assert!(editor.fields().is_empty());
+
+        editor.select_device("lcd").unwrap();
+        assert_eq!(editor.index, 0);
+        assert_eq!(
+            editor.document.lighting.setup.devices[editor.index].id,
+            "lcd"
+        );
+        assert!(editor.select_device("screen").is_err());
+        assert_eq!(editor.index, 0);
+
+        editor.page = Page::Lcd;
+        assert!(editor.select_device("lcd").is_err());
+    }
+
+    #[test]
+    fn device_selection_survives_reordered_profile_and_clears_on_removal() {
+        let mut editor = Editor {
+            document: document(),
+            page: Page::Devices,
+            index: 0,
+        };
+        for device in &mut editor.document.lighting.setup.devices {
+            device.label = "Fixture".into();
+        }
+        editor.select_device("lcd").unwrap();
+        let mut next = editor.document.clone();
+        next.lighting.setup.devices.swap(0, 1);
+        assert_eq!(editor.device_index_in(&next), 0);
+        next.lighting
+            .setup
+            .devices
+            .retain(|device| device.id != "lcd");
+        editor.index = editor.device_index_in(&next);
+        editor.document = next;
+        assert!(editor.selected_device_id().is_none());
+        assert!(editor.fields().is_empty());
+    }
+
+    #[test]
+    fn output_editor_reports_logical_ids_for_draft_fields() {
+        let mut editor = Editor {
+            document: document(),
+            page: Page::Lcd,
+            index: 0,
+        };
+        assert_eq!(editor.selected_output_id(), Some("lcd"));
+        editor.page = Page::Ambient;
+        assert_eq!(editor.selected_output_id(), Some("screen"));
+        editor.index = 1;
+        assert_eq!(editor.selected_output_id(), None);
+    }
+
     #[test]
     fn device_remove_cleans_references_and_lcd_add_invents_no_asset() {
         let original = document();

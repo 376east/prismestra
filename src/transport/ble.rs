@@ -28,6 +28,12 @@ pub(crate) fn parse_pixel_capacity(packet: &[u8]) -> Result<Option<usize>, Strin
         .get("payload")
         .and_then(|v| v.as_str())
         .ok_or("EA81 notification has no hex payload")?;
+    // A complete foreign opcode is enough to rule out an EA81 reply.
+    if hex.as_bytes().get(..4).is_some_and(|opcode| {
+        opcode.iter().all(u8::is_ascii_hexdigit) && !opcode.eq_ignore_ascii_case(b"ea81")
+    }) {
+        return Ok(None);
+    }
     if !hex.len().is_multiple_of(2) || !hex.is_ascii() {
         return Err("Malformed EA81 hex payload".into());
     }
@@ -240,9 +246,11 @@ pub(crate) fn write_e1_pixel_frame(
         inner: control,
         started,
     };
-    for packet in packets {
+    let packet_count = packets.len();
+    for (index, packet) in packets.iter().enumerate() {
         check_wait(&frame, started)?;
-        submit(&packet, &mut frame)?;
+        submit(packet, &mut frame)
+            .map_err(|error| format!("BLE write {}/{packet_count} failed: {error}", index + 1))?;
     }
     check_wait(&frame, started)
 }
@@ -549,6 +557,69 @@ mod tests {
             .is_err()
         );
     }
+    #[test]
+    fn e104_default_att_mtu_and_mid_frame_shrink_report_exact_write_boundary() {
+        let colors = [Rgb::new(0, 255, 0); door::PIXEL_LEDS];
+        let black = [Rgb::default(); door::PIXEL_LEDS];
+        let mut clock = Clock {
+            time: Duration::ZERO,
+            cancel_at: Duration::MAX,
+        };
+        let mut packets = Vec::new();
+        write_e1_pixel_frame(&colors, 83, 255, 23, &mut clock, &mut |packet, _| {
+            packets.push(packet.to_vec());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(packets.len(), 56);
+        let mut body = Vec::new();
+        for (index, packet) in packets.iter().enumerate() {
+            let final_fragment = index == 55;
+            assert_eq!(packet.len(), if final_fragment { 12 } else { 19 });
+            assert!(door::fits(packet.len(), 23));
+            assert_eq!(&packet[..2], &[0x40, 255]);
+            assert_eq!(
+                u16::from_be_bytes([packet[2], packet[3]]),
+                index as u16 | if final_fragment { 0x8000 } else { 0 }
+            );
+            body.extend_from_slice(&packet[if index == 0 { 8 } else { 5 }..]);
+        }
+        assert_eq!(body.len(), 774);
+        assert_eq!(&body[..9], &[0xe1, 4, 1, 0, 1, 80, 83, 0, 153]);
+        assert_eq!(body[9..].as_chunks::<5>().0, &[[0, 60, 100, 100, 100]; 153]);
+
+        assert!(
+            write_e1_pixel_frame(&black, 83, 0, 23, &mut clock, &mut |_, _| {
+                panic!("The 21-byte off packet cannot fit this ATT payload");
+            })
+            .is_err()
+        );
+        write_e1_pixel_frame(&black, 83, 0, 24, &mut clock, &mut |packet, _| {
+            assert_eq!(packet, door::off_packet(0));
+            Ok(())
+        })
+        .unwrap();
+
+        let mut att_mtu = 25;
+        let mut accepted = 0;
+        let mut attempted = 0;
+        let error = write_e1_pixel_frame(&colors, 83, 0, att_mtu, &mut clock, &mut |packet, _| {
+            attempted += 1;
+            if !door::fits(packet.len(), att_mtu) {
+                return Err("Packet exceeds negotiated ATT payload".into());
+            }
+            accepted += 1;
+            att_mtu = 23;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!((attempted, accepted), (2, 1));
+        assert_eq!(
+            error,
+            "BLE write 2/49 failed: Packet exceeds negotiated ATT payload"
+        );
+    }
+
     #[test]
     fn variable_pixel_transport_prepares_bounded_frames_and_propagates_deadline() {
         let colors = vec![Rgb::new(0, 255, 0); 256];

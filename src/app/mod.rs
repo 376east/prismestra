@@ -31,6 +31,7 @@ pub mod lighting_outputs;
 pub mod managed_backend;
 pub mod preview;
 pub mod runtime;
+pub mod scene_file;
 pub mod sensor_bindings;
 pub mod sensor_discovery;
 #[cfg(windows)]
