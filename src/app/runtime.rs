@@ -652,16 +652,19 @@ impl Runtime {
         if layout != *document {
             return None;
         }
-        if self.lcd_specs.len() != self.lcd.len()
+        // An unchanged LCD with its own recovery may keep waiting while other routes change.
+        if self.lcd.keys().any(|id| !self.lcd_specs.contains_key(id))
             || self.lcd_specs.iter().any(|(id, previous)| {
                 !outputs.lcd.iter().any(|(next, keys, factory)| {
                     next == id && previous.keys == *keys && Arc::ptr_eq(&previous.factory, factory)
-                }) || self.lcd.get(id).is_none_or(|worker| {
-                    !matches!(
-                        worker.snapshot().phase,
-                        lcd_worker::Phase::Connecting | lcd_worker::Phase::Ready
-                    )
                 }) || !self.device_unchanged(document, id)
+                    || (!self.output_recovery.contains_key(id)
+                        && self.lcd.get(id).is_none_or(|worker| {
+                            !matches!(
+                                worker.snapshot().phase,
+                                lcd_worker::Phase::Connecting | lcd_worker::Phase::Ready
+                            )
+                        }))
             })
         {
             return None;

@@ -1639,6 +1639,101 @@ fn appending_lcd_starts_its_first_frame_without_reopening_existing_rgb() {
     remove_lcd_assets(runtime, assets);
 }
 
+#[cfg(windows)]
+#[test]
+fn startup_addition_keeps_healthy_rgb_while_an_unchanged_lcd_is_busy() {
+    use crate::{app::lighting_outputs::Local, devices::Binding};
+
+    let lcd = Arc::new(Link {
+        fail_open: AtomicBool::new(true),
+        ..Link::default()
+    });
+    let (mut runtime, assets) = arrival_lcd_runtime("paced-add-busy-lcd", lcd.clone());
+    let healthy = Arc::new(Link::default());
+    let saved_rgb = Binding::WledDdp {
+        endpoint: ([127, 0, 0, 207], 60334).into(),
+        controller: None,
+    };
+    runtime
+        .attach_rgb("b", saved_rgb.endpoint_keys(), factory(&healthy))
+        .unwrap();
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.lcd_status("lcd").unwrap().phase == lcd_worker::Phase::Failed
+    });
+    let before = runtime.host.status("b").unwrap();
+    let previous = Local {
+        version: 1,
+        devices: [
+            ("b".into(), saved_rgb),
+            (
+                "lcd".into(),
+                Binding::Hid {
+                    path: "bound-interface".into(),
+                },
+            ),
+        ]
+        .into(),
+        monitors: Default::default(),
+        door_brightness: 60,
+    };
+    let mut local = previous.clone();
+    let added = Binding::Ble {
+        address: 0x1234_5678_9abc,
+    };
+    let keys = added.endpoint_keys();
+    local.devices.insert("late".into(), added);
+    let mut document = runtime.document().clone();
+    let mut device = document.lighting.setup.devices[1].clone();
+    device.id = "late".into();
+    device.driver = Driver::SurplifeE1Pixels;
+    document.lighting.setup.devices.push(device);
+    document.lighting.setup.canvas.width = 3;
+    document.lighting.setup.canvas.points.push(Point {
+        device: "late".into(),
+        led: 0,
+        x: 2,
+        y: 0,
+    });
+    document.lighting.groups.door.push("late".into());
+    let mut outputs = runtime.output_plan();
+    outputs.rgb[0].2 = factory(&healthy);
+    let existing_lcd = outputs.lcd[0].2.clone();
+    outputs.lcd[0].2 = Arc::new(move |config, cancel| existing_lcd(config, cancel));
+    let late = Arc::new(Link::default());
+    outputs.rgb.push((
+        "late".into(),
+        keys,
+        factory_for(&late, Driver::SurplifeE1Pixels),
+    ));
+    let revision = runtime
+        .request_startup_outputs_for(&assets, Some(&previous), &local, document, outputs)
+        .unwrap();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.output_revision() == revision && !late.frames.lock().unwrap().is_empty()
+    });
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        before.generation
+    );
+    assert_eq!(healthy.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.lcd_status("lcd").unwrap().frames_sent, 0);
+    lcd.fail_open.store(false, Ordering::SeqCst);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.lcd_status("lcd").unwrap().frames_sent > 0
+    });
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        before.generation
+    );
+    drain(&mut runtime);
+    remove_lcd_assets(runtime, assets);
+}
+
 #[test]
 fn bound_lcd_arrival_renews_exhausted_recovery_without_restarting_other_outputs() {
     let link = Arc::new(Link::default());

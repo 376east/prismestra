@@ -241,11 +241,11 @@ impl Runtime {
             if let Some(binding) = local.devices.get(id)
                 && previous.devices.get(id) == Some(binding)
                 && self.device_unchanged(document, id)
-                && self.lcd.get(id).is_some_and(|worker| {
+                && (self.lcd.get(id).is_some_and(|worker| {
                     let phase = worker.snapshot().phase;
                     phase == lcd_worker::Phase::Ready
                         || (startup && phase == lcd_worker::Phase::Connecting)
-                })
+                }) || (startup && self.output_recovery.contains_key(id)))
                 && let Some(spec) = self.lcd_specs.get(id).filter(|spec| spec.keys == *keys)
             {
                 *factory = spec.factory.clone();
