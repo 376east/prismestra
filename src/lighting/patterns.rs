@@ -101,14 +101,71 @@ impl RainbowWave {
                 value: 255,
             }))?);
         }
-        if self.progress < 360.0 {
-            self.progress += p.speed as f32 / p.fps as f32
-        } else {
-            self.progress = 0.0
-        }
+        self.advance(p.speed as f32 / p.fps as f32);
         Ok(out)
     }
+
+    pub(crate) fn advance_frames(&mut self, p: Playback, mut remaining: u64) {
+        let increment = p.speed as f32 / p.fps as f32;
+        let mut last_zero = (self.progress == 0.0).then_some(remaining);
+        while remaining > 0 {
+            self.advance(increment);
+            remaining -= 1;
+            if self.progress == 0.0 {
+                // Replay the original f32 increments and reset. At zero, whole cycles
+                // can be skipped exactly, so work is bounded even after a long stall.
+                if let Some(previous) = last_zero {
+                    remaining %= previous - remaining;
+                } else {
+                    last_zero = Some(remaining);
+                }
+            }
+        }
+    }
+
+    fn advance(&mut self, increment: f32) {
+        if self.progress < 360.0 {
+            self.progress += increment;
+        } else {
+            self.progress = 0.0;
+        }
+    }
 }
+#[test]
+fn rainbow_phase_skips_whole_cycles_without_changing_legacy_progress() {
+    let playback = Playback {
+        speed: 37,
+        fps: 48,
+        brightness: 0.75,
+        temperature: 8,
+        tint: 0,
+    };
+    let mut reference = RainbowWave::default();
+    let mut cycle = 0;
+    loop {
+        reference.step(playback, 10, 0, false, false).unwrap();
+        cycle += 1;
+        if reference.progress == 0.0 {
+            break;
+        }
+    }
+
+    let mut skipped = RainbowWave::default();
+    for _ in 0..23 {
+        skipped.step(playback, 10, 0, false, false).unwrap();
+    }
+    skipped.advance_frames(playback, 1_000_000_000 * cycle + 57);
+    for _ in 0..80 {
+        reference.step(playback, 10, 0, false, false).unwrap();
+    }
+
+    assert_eq!(skipped.progress.to_bits(), reference.progress.to_bits());
+    assert_eq!(
+        skipped.step(playback, 10, 20, false, false).unwrap(),
+        reference.step(playback, 10, 20, false, false).unwrap(),
+    );
+}
+
 // Keep the 300-byte LUT inline: palette edits and frame sampling need no heap allocation.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy)]

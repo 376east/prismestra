@@ -24,19 +24,23 @@ struct Cadence {
 }
 impl Cadence {
     fn due(&mut self, now: u64, hz: u32) -> bool {
+        self.skipped_before_due(now, hz).is_some()
+    }
+
+    // The latest slot is due once. Its skipped predecessors advance the animation only.
+    fn skipped_before_due(&mut self, now: u64, hz: u32) -> Option<u64> {
         let period = 1_000_000u64.div_ceil(u64::from(hz));
         match self.next {
             None => {
                 self.next = Some(now.saturating_add(period));
-                true
+                Some(0)
             }
             Some(next) if now >= next => {
-                // Never catch up by sending a burst after a late tick.
-                self.next =
-                    Some(next.saturating_add(((now - next) / period + 1).saturating_mul(period)));
-                true
+                let skipped = (now - next) / period;
+                self.next = Some(next.saturating_add((skipped + 1).saturating_mul(period)));
+                Some(skipped)
             }
-            _ => false,
+            _ => None,
         }
     }
 }
@@ -278,9 +282,14 @@ impl Core {
         self.last_us = Some(now_us);
         self.refresh_feed(now_us)?;
         self.reap();
-        let rendered = self.scene_cadence.due(now_us, self.renderer.scene().fps);
-        if rendered {
-            let preview = self.renderer.step(&self.setup.canvas)?;
+        let skipped = self
+            .scene_cadence
+            .skipped_before_due(now_us, self.renderer.scene().fps);
+        let rendered = skipped.is_some();
+        if let Some(skipped) = skipped {
+            let preview = self
+                .renderer
+                .step_after_skips(&self.setup.canvas, skipped)?;
             let mut frames = BTreeMap::new();
             for device in self.setup.devices.iter().filter(|d| d.role == Role::Canvas) {
                 frames.insert(device.id.clone(), vec![Rgb::default(); device.leds]);
@@ -529,6 +538,46 @@ mod tests {
         assert!(host.drained());
         host.replace_setup(setup()).unwrap();
     }
+    #[test]
+    fn rainbow_phase_follows_render_time_without_replaying_output_ticks() {
+        let scene = Scene {
+            effect: crate::lighting::scene::Effect::RainbowWave,
+            speed: 50,
+            fps: 25,
+            ..scene::example()
+        };
+        let mut regular = Host::new(setup(), scene.clone()).unwrap();
+        let mut late = Host::new(setup(), scene).unwrap();
+        let (tx, rx) = mpsc::channel();
+        late.attach("door", move |_| Ok(Box::new(Fake(tx))))
+            .unwrap();
+
+        late.tick(0).unwrap();
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        for now in [40_000, 80_000, 120_000] {
+            late.tick(now).unwrap();
+        }
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        for now in (0..=360_000).step_by(40_000) {
+            regular.tick(now).unwrap();
+        }
+        assert_eq!(late.tick(365_000).unwrap(), 1);
+        let frame = regular.frame("door").unwrap();
+        assert_eq!(late.frame("door").unwrap(), frame);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), frame);
+        assert_eq!(late.tick(365_000).unwrap(), 0);
+        assert_eq!(late.frame("door").unwrap(), frame);
+
+        for now in [400_000, 440_000, 480_000] {
+            regular.tick(now).unwrap();
+        }
+        // The transport becomes due at 400 ms but never determines the render phase.
+        assert_eq!(late.tick(480_000).unwrap(), 1);
+        let frame = regular.frame("door").unwrap();
+        assert_eq!(late.frame("door").unwrap(), frame);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), frame);
+    }
+
     #[test]
     fn cadence_drops_late_work_instead_of_burst() {
         let mut c = Cadence::default();
