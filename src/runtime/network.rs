@@ -1,20 +1,27 @@
 //! Network outputs use the same endpoint lease, latest-frame queue and stop/drain as USB.
+#[cfg(windows)]
+use super::output::PrepareError;
 use super::output::{Cancellation, RgbDriver, WriteResult};
 use crate::{devices::Driver, lighting::color::Rgb, transport::wled};
 use std::{
     net::SocketAddr,
     time::{Duration, Instant},
 };
+#[cfg(windows)]
+const HA_MISSING_KEY: &str = "Home Assistant key is missing; save it before Apply";
 
 #[cfg(windows)]
 pub struct HomeAssistant {
-    client: crate::transport::home_assistant::Client,
+    client: Option<crate::transport::home_assistant::Client>,
+    entity: String,
     last: Option<[u8; 3]>,
     next: Option<Instant>,
+    retry_step: usize,
+    rebound_deadline: Option<Instant>,
 }
 #[cfg(windows)]
 impl HomeAssistant {
-    pub fn connect(
+    pub fn from_binding(
         endpoint: &str,
         entity: &str,
         credential_id: &str,
@@ -27,29 +34,23 @@ impl HomeAssistant {
         if cancel.cancelled() {
             return Err("Home Assistant output stopping".into());
         }
-        let token = crate::credentials_windows::read(credential_id)
-            .map_err(|e| e.to_string())?
-            .ok_or("Home Assistant key is missing; save it before Apply")?;
-        Self::with_token(endpoint, entity, token, cancel)
+        let token = crate::credentials_windows::read(credential_id).map_err(|e| e.to_string())?;
+        Self::with_token(endpoint, entity, token)
     }
-    fn with_token(
-        endpoint: &str,
-        entity: &str,
-        token: String,
-        cancel: &Cancellation,
-    ) -> Result<Self, String> {
+    fn with_token(endpoint: &str, entity: &str, token: Option<String>) -> Result<Self, String> {
         use crate::transport::home_assistant::{Client, Endpoint};
-        let mut client = Client::new(Endpoint::parse(endpoint).map_err(|e| e.to_string())?, token)
-            .map_err(|e| e.to_string())?;
-        client
-            .bind_light(entity, Instant::now() + Duration::from_secs(3), || {
-                cancel.cancelled()
-            })
+        let endpoint = Endpoint::parse(endpoint).map_err(|e| e.to_string())?;
+        let client = token
+            .map(|token| Client::new(endpoint, token))
+            .transpose()
             .map_err(|e| e.to_string())?;
         Ok(Self {
             client,
+            entity: entity.into(),
             last: None,
             next: None,
+            retry_step: 0,
+            rebound_deadline: None,
         })
     }
 }
@@ -61,10 +62,32 @@ impl RgbDriver for HomeAssistant {
     fn leds(&self) -> usize {
         1
     }
+    fn prepare(&mut self, cancel: &Cancellation) -> Result<(), PrepareError> {
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| PrepareError::RequiresAction(HA_MISSING_KEY.into()))?;
+        client
+            .bind_light(
+                &self.entity,
+                Instant::now() + Duration::from_secs(3),
+                || cancel.cancelled(),
+            )
+            .map_err(|error| {
+                if error.authorization_rejected() {
+                    PrepareError::RequiresAction(error.to_string())
+                } else {
+                    PrepareError::Failed(error.to_string())
+                }
+            })
+    }
     fn write(&mut self, colors: &[Rgb], cancel: &Cancellation) -> Result<WriteResult, String> {
         if cancel.cancelled() {
             return Err("Home Assistant output stopping".into());
         }
+        let Some(client) = self.client.as_mut() else {
+            return Ok(WriteResult::RequiresAction(HA_MISSING_KEY.into()));
+        };
         let [color] = colors else {
             return Err("Home Assistant requires one whole-light color".into());
         };
@@ -76,13 +99,45 @@ impl RgbDriver for HomeAssistant {
         if let Some(next) = self.next
             && next > now
         {
-            return Ok(WriteResult::Deferred(next - now));
+            return Ok(WriteResult::Deferred(
+                (next - now).min(Duration::from_secs(30)),
+            ));
         }
-        self.client
-            .set_color(rgb, now + Duration::from_secs(3), || cancel.cancelled())
-            .map_err(|e| e.to_string())?;
+        let rebound = self.rebound_deadline.take();
+        let deadline = rebound.unwrap_or(now + Duration::from_secs(3));
+        let result = if self.retry_step == 0 || rebound.is_some() {
+            client.set_color(rgb, deadline, || cancel.cancelled())
+        } else {
+            match client.bind_light(&self.entity, deadline, || cancel.cancelled()) {
+                Ok(()) => {
+                    // Let the mailbox pick up frames submitted while GET was in flight.
+                    self.rebound_deadline = Some(deadline);
+                    return Ok(WriteResult::Deferred(Duration::from_millis(1)));
+                }
+                Err(error) => Err(error),
+            }
+        };
+        if let Err(error) = result {
+            if error.authorization_rejected() {
+                return Ok(WriteResult::RequiresAction(error.to_string()));
+            }
+            let Some(seconds) = error.transient_delay() else {
+                return Err(error.to_string());
+            };
+            const BACKOFF_SECONDS: [u32; 4] = [1, 5, 15, 30];
+            let delay = Duration::from_secs(seconds.max(BACKOFF_SECONDS[self.retry_step]).into());
+            self.retry_step = (self.retry_step + 1).min(BACKOFF_SECONDS.len() - 1);
+            // The prior submission may no longer reflect a reconnected light.
+            self.last = None;
+            self.next = Some(Instant::now() + delay);
+            return Ok(WriteResult::Retrying(
+                delay.min(Duration::from_secs(30)),
+                error.to_string(),
+            ));
+        }
         self.last = Some(rgb);
         self.next = Some(Instant::now() + Duration::from_secs(1));
+        self.retry_step = 0;
         Ok(WriteResult::Submitted)
     }
 }

@@ -17,17 +17,24 @@ struct Link {
     calls: AtomicUsize,
     fail: AtomicBool,
     fail_open: AtomicBool,
+    retry: AtomicBool,
     frames: Mutex<Vec<Vec<Rgb>>>,
 }
-struct RgbLink(Arc<Link>);
+struct RgbLink(Arc<Link>, Driver);
 impl RgbDriver for RgbLink {
     fn protocol(&self) -> Driver {
-        Driver::WledDdp
+        self.1.clone()
     }
     fn leds(&self) -> usize {
         1
     }
     fn write(&mut self, colors: &[Rgb], _: &Cancellation) -> Result<WriteResult, String> {
+        if self.0.retry.load(Ordering::SeqCst) {
+            return Ok(WriteResult::Retrying(
+                Duration::from_millis(20),
+                "Temporary stand transport error".into(),
+            ));
+        }
         if self.0.fail.load(Ordering::SeqCst) {
             return Err("Disconnected stand output".into());
         }
@@ -36,13 +43,16 @@ impl RgbDriver for RgbLink {
     }
 }
 fn factory(link: &Arc<Link>) -> RgbFactory {
+    factory_for(link, Driver::WledDdp)
+}
+fn factory_for(link: &Arc<Link>, driver: Driver) -> RgbFactory {
     let link = link.clone();
     Arc::new(move |_| {
         link.calls.fetch_add(1, Ordering::SeqCst);
         if link.fail_open.load(Ordering::SeqCst) {
             return Err("Stand open failure".into());
         }
-        Ok(Box::new(RgbLink(link.clone())))
+        Ok(Box::new(RgbLink(link.clone(), driver.clone())))
     })
 }
 fn runtime() -> Runtime {
@@ -120,6 +130,35 @@ fn disconnected(runtime: &mut Runtime, link: &Link, id: &str, now: &mut u64) {
 fn drain(runtime: &mut Runtime) {
     runtime.stop();
     wait(|| runtime.drained());
+}
+
+#[cfg(windows)]
+#[test]
+fn output_activity_keeps_retry_reason_until_the_next_submission() {
+    let mut runtime = runtime();
+    let link = Arc::new(Link::default());
+    runtime.attach_rgb("a", vec![], factory(&link)).unwrap();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+    let generation = runtime.host.status("a").unwrap().generation;
+    link.retry.store(true, Ordering::SeqCst);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.host.status("a").unwrap().phase == Phase::Connecting
+    });
+    let device = runtime.document().lighting.setup.devices[0].clone();
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Retrying(error) if error == "Temporary stand transport error"
+    ));
+    link.retry.store(false, Ordering::SeqCst);
+    working(&mut runtime, "a", &mut now);
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Sent(_)
+    ));
+    assert_eq!(runtime.host.status("a").unwrap().generation, generation);
+    drain(&mut runtime);
 }
 
 #[test]
@@ -369,7 +408,7 @@ fn managed_candidate_without_matching_bindings_keeps_live_owner_until_commit() {
     let document = runtime.document().clone();
     assert!(
         !runtime
-            .prepare_managed_outputs(&root, &local, &document, &mut OutputPlan::default())
+            .prepare_managed_outputs(&root, None, &local, &document, &mut OutputPlan::default())
             .unwrap()
     );
     assert!(runtime.managed_backend.is_some());
@@ -415,7 +454,7 @@ fn startup_isolates_endpoint_contention_and_retries_the_returned_output() {
     outputs.rgb[1].2 = factory(&b);
     let lease = crate::runtime::output::Lease::acquire(outputs.rgb[0].1.clone()).unwrap();
     let revision = runtime
-        .request_startup_outputs_for(&state, &local, document.clone(), outputs)
+        .request_startup_outputs_for(&state, None, &local, document.clone(), outputs)
         .unwrap();
     let device = &document.lighting.setup.devices[0];
     assert!(matches!(
@@ -502,9 +541,9 @@ fn startup_registers_managed_outputs_on_commit_and_retries_on_new_inventory() {
         .unwrap(),
     )
     .unwrap();
-    runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
-        endpoint, 1,
-    ));
+    let task = state.join("backend-task.json");
+    // A bad task descriptor makes backend creation fail before any process can start.
+    std::fs::write(&task, "{").unwrap();
     let mut outputs = local.prepare(&document, &state.join("assets")).unwrap();
     // Even a fixture that reports SDK readiness cannot grant native I/O.
     let a = Arc::new(Link::default());
@@ -512,12 +551,15 @@ fn startup_registers_managed_outputs_on_commit_and_retries_on_new_inventory() {
     outputs.rgb[0].2 = factory(&a);
     outputs.rgb[1].2 = factory(&b);
     runtime
-        .request_startup_outputs_for(&state, &local, document, outputs)
+        .request_startup_outputs_for(&state, None, &local, document, outputs)
         .unwrap();
     assert!(runtime.managed_backend_ids.is_empty());
     let mut now = 0;
     working(&mut runtime, "b", &mut now);
     assert_eq!(runtime.managed_backend_ids, BTreeSet::from(["a".into()]));
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+    let initial_error = runtime.host.status("a").unwrap().error.unwrap();
+    assert!(initial_error.contains("EOF"), "{initial_error}");
     let healthy = runtime.host.status("b").unwrap().generation;
     for delay in [1_000_000, 5_000_000, 15_000_000] {
         wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
@@ -536,18 +578,41 @@ fn startup_registers_managed_outputs_on_commit_and_retries_on_new_inventory() {
     tick(&mut runtime, &mut now);
     assert_eq!(runtime.host.status("a").unwrap().generation, exhausted);
     runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
-        endpoint, 2,
+        ([127, 0, 0, 1], 17423).into(),
+        2,
     ));
     tick(&mut runtime, &mut now);
     now += 1_000_000;
     wait(|| {
         tick(&mut runtime, &mut now);
-        runtime.host.status("a").unwrap().generation != exhausted
+        let status = runtime.host.status("a").unwrap();
+        status.generation != exhausted && status.phase == Phase::Failed
     });
+    let wrong_endpoint = runtime.host.status("a").unwrap();
+    assert_eq!(
+        wrong_endpoint.error.as_deref(),
+        Some(initial_error.as_str())
+    );
+
+    runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
+        endpoint, 3,
+    ));
+    tick(&mut runtime, &mut now);
+    now += 1_000_000;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.host.status("a").unwrap().generation != wrong_endpoint.generation
+    });
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+    assert_eq!(
+        runtime.host.status("a").unwrap().error.as_deref(),
+        Some("Software fixture cannot own a backend")
+    );
     assert_eq!(a.calls.load(Ordering::SeqCst), 0);
     assert_eq!(b.calls.load(Ordering::SeqCst), 1);
     assert_eq!(runtime.host.status("b").unwrap().generation, healthy);
     drain(&mut runtime);
+    std::fs::remove_file(task).unwrap();
     std::fs::remove_file(config).unwrap();
     std::fs::remove_dir(state).unwrap();
 }
@@ -764,6 +829,7 @@ struct Held {
     block: AtomicBool,
     entered: AtomicBool,
     release: AtomicBool,
+    ignore_cancel: bool,
     dropped: AtomicUsize,
     calls: AtomicUsize,
 }
@@ -783,12 +849,491 @@ impl RgbDriver for HeldDriver {
     fn write(&mut self, _: &[Rgb], cancel: &Cancellation) -> Result<WriteResult, String> {
         if self.0.block.load(Ordering::SeqCst) {
             self.0.entered.store(true, Ordering::SeqCst);
-            while !self.0.release.load(Ordering::SeqCst) && !cancel.cancelled() {
+            while !self.0.release.load(Ordering::SeqCst)
+                && (self.0.ignore_cancel || !cancel.cancelled())
+            {
                 std::thread::sleep(Duration::from_millis(1));
             }
             return Err("Held stand I/O released".into());
         }
         Ok(WriteResult::Submitted)
+    }
+}
+
+#[test]
+fn live_plan_adds_an_independent_rgb_output_while_an_existing_write_is_held() {
+    assert_plan_preserves_neighbor(PlanChange::Add);
+}
+
+#[test]
+fn live_plan_preserves_the_scheduled_scene_step_and_last_frame() {
+    let mut document = runtime().document().clone();
+    document.lighting.scene.effect = crate::lighting::scene::Effect::Breathing;
+    document.lighting.scene.colors = vec![0xff0000];
+    document.lighting.scene.speed = 200;
+    document.lighting.scene.fps = 10;
+    document.lighting.setup.devices[0].rate_hz = 50;
+    let mut reference =
+        crate::runtime::scene::Renderer::new(document.lighting.scene.clone()).unwrap();
+    let mut runtime = Runtime::new(document.clone(), None).unwrap();
+    runtime
+        .attach_rgb("a", vec![], factory(&Arc::new(Link::default())))
+        .unwrap();
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Ready);
+
+    for time in [0, 100_000, 200_000, 300_000] {
+        let expected = reference.step(&document.lighting.setup.canvas).unwrap();
+        runtime.tick(time, 1_800_000_000).unwrap();
+        assert_eq!(runtime.colors(), &expected);
+    }
+    let last = runtime.colors()[0];
+    let last_ticket = runtime.host.requested("a").unwrap();
+
+    let mut added = document.lighting.setup.devices[0].clone();
+    added.id = "added".into();
+    added.rate_hz = 1;
+    document.lighting.setup.devices.push(added);
+    document.lighting.setup.canvas.width = 3;
+    document.lighting.setup.canvas.points.push(Point {
+        device: "added".into(),
+        led: 0,
+        x: 2,
+        y: 0,
+    });
+    document.lighting.groups.pc.push("added".into());
+    let mut proposal = runtime.output_plan();
+    proposal
+        .rgb
+        .push(("added".into(), vec![], factory(&Arc::new(Link::default()))));
+    let revision = runtime
+        .request_outputs_for(document.clone(), proposal)
+        .unwrap();
+    runtime.tick(320_000, 1_800_000_000).unwrap();
+
+    assert_eq!(runtime.output_revision(), revision);
+    assert_eq!(
+        runtime.colors()[0],
+        last,
+        "applying the plan advanced the animation"
+    );
+    assert_eq!(runtime.colors()[1], last);
+    assert_eq!(runtime.host.frame("a"), Some([last].as_slice()));
+    assert!(runtime.host.requested("a").unwrap().sequence > last_ticket.sequence);
+    assert!(runtime.host.requested("added").is_none());
+
+    let expected = reference.step(&document.lighting.setup.canvas).unwrap();
+    assert_ne!(expected[0], last);
+    runtime.tick(400_000, 1_800_000_000).unwrap();
+    assert_eq!(runtime.colors(), &expected);
+    assert_eq!(runtime.host.frame("added"), Some(&expected[2..]));
+    assert!(runtime.host.requested("added").is_some());
+    drain(&mut runtime);
+}
+
+#[cfg(windows)]
+#[test]
+fn live_plan_native_discovery_keeps_ready_bindings_when_preparing_fresh_factories() {
+    assert_plan_preserves_neighbor(PlanChange::NativeAdd);
+}
+
+#[cfg(windows)]
+#[test]
+fn live_plan_native_discovery_keeps_ready_external_openrgb() {
+    use crate::{app::lighting_outputs::Local, devices::Binding};
+
+    let mut document = runtime().document().clone();
+    document.lighting.setup.devices[1].driver = Driver::OpenRgb;
+    let mut runtime = Runtime::new(document.clone(), None).unwrap();
+    let wled = |port| Binding::WledDdp {
+        endpoint: ([127, 0, 0, 207], port).into(),
+        controller: None,
+    };
+    let previous = Local {
+        version: 1,
+        devices: [
+            ("a".into(), wled(60335)),
+            (
+                "b".into(),
+                Binding::OpenRgb {
+                    endpoint: ([127, 0, 0, 207], 60336).into(),
+                    identity: "1".repeat(64),
+                    topology: "2".repeat(64),
+                },
+            ),
+        ]
+        .into(),
+        monitors: Default::default(),
+        door_brightness: 60,
+    };
+    let state = std::env::temp_dir().join(format!(
+        "prismestra-plan-external-openrgb-{}-{}",
+        std::process::id(),
+        crate::clock::monotonic_us()
+    ));
+    let rgb = Arc::new(Link::default());
+    let sdk = Arc::new(Link::default());
+    let added = Arc::new(Link::default());
+    let prepare = |local: &Local, document: &Document| {
+        let mut plan = local.prepare(document, &state).unwrap();
+        for (id, _, next) in &mut plan.rgb {
+            *next = match id.as_str() {
+                "a" => factory(&rgb),
+                "b" => factory_for(&sdk, Driver::OpenRgb),
+                _ => factory(&added),
+            };
+        }
+        plan
+    };
+    let plan = prepare(&previous, &document);
+    runtime
+        .request_startup_outputs_for(&state, None, &previous, document.clone(), plan)
+        .unwrap();
+    let mut now = 0;
+    tick(&mut runtime, &mut now);
+    working(&mut runtime, "a", &mut now);
+    working(&mut runtime, "b", &mut now);
+    let generation = runtime.host.status("b").unwrap().generation;
+
+    let mut local = previous.clone();
+    local.devices.insert("new".into(), wled(60337));
+    let mut device = document.lighting.setup.devices[0].clone();
+    device.id = "new".into();
+    document.lighting.setup.devices.push(device);
+    document.lighting.setup.canvas.width = 3;
+    document.lighting.setup.canvas.points.push(Point {
+        device: "new".into(),
+        led: 0,
+        x: 2,
+        y: 0,
+    });
+    document.lighting.groups.pc.push("new".into());
+    let plan = prepare(&local, &document);
+    let applied = runtime.output_plan();
+    let mut manual = plan.clone();
+    runtime
+        .prepare_managed_outputs(&state, Some(&previous), &local, &document, &mut manual)
+        .unwrap();
+    let (_, _, old_openrgb) = applied.rgb.iter().find(|(id, _, _)| id == "b").unwrap();
+    let (_, _, manual_openrgb) = manual.rgb.iter().find(|(id, _, _)| id == "b").unwrap();
+    assert!(Arc::ptr_eq(old_openrgb, manual_openrgb));
+    let revision = runtime
+        .request_startup_outputs_for(&state, Some(&previous), &local, document, plan)
+        .unwrap();
+    assert!(matches!(
+        runtime.output_activity(&runtime.document().lighting.setup.devices[1]),
+        OutputActivity::Sent(_)
+    ));
+    working(&mut runtime, "new", &mut now);
+    working(&mut runtime, "b", &mut now);
+    assert_eq!(runtime.output_revision(), revision);
+    assert_eq!(runtime.host.status("b").unwrap().generation, generation);
+    assert_eq!(sdk.calls.load(Ordering::SeqCst), 1);
+
+    // A live external owner must not survive a change to managed policy.
+    // The software backend reports readiness but cannot grant any I/O.
+    let Binding::OpenRgb { endpoint, .. } = local.devices["b"] else {
+        unreachable!();
+    };
+    std::fs::create_dir(&state).unwrap();
+    let config = state.join("managed-openrgb.json");
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1, "enabled": true, "executable": std::env::current_exe().unwrap(),
+            "config_dir": state, "endpoint": endpoint, "expected_executable_sha256": "0".repeat(64)
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
+        endpoint, 1,
+    ));
+    let document = runtime.document().clone();
+    let plan = prepare(&local, &document);
+    runtime
+        .request_startup_outputs_for(&state, Some(&local), &local, document, plan)
+        .unwrap();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime
+            .host
+            .status("b")
+            .is_some_and(|status| status.phase == Phase::Failed)
+    });
+    assert_ne!(runtime.host.status("b").unwrap().generation, generation);
+    assert_eq!(sdk.calls.load(Ordering::SeqCst), 1);
+    drain(&mut runtime);
+    std::fs::remove_file(config).unwrap();
+    std::fs::remove_dir(state).unwrap();
+}
+
+#[test]
+fn live_plan_waits_for_rgb_owner_release_without_stopping_its_neighbor() {
+    assert_plan_preserves_neighbor(PlanChange::Replace);
+}
+
+#[test]
+fn live_plan_cancel_restores_the_original_owner_without_stopping_its_neighbor() {
+    assert_plan_preserves_neighbor(PlanChange::Cancel);
+}
+
+#[test]
+fn live_plan_keeps_unchanged_lcd_while_rgb_ownership_changes() {
+    assert_plan_preserves_neighbor(PlanChange::MixedAdd);
+    assert_plan_preserves_neighbor(PlanChange::MixedReplace);
+}
+
+#[derive(Debug)]
+enum PlanChange {
+    Add,
+    #[cfg(windows)]
+    NativeAdd,
+    MixedAdd,
+    MixedReplace,
+    Replace,
+    Cancel,
+}
+
+impl PlanChange {
+    fn adds_output(&self) -> bool {
+        match self {
+            Self::Add | Self::MixedAdd => true,
+            #[cfg(windows)]
+            Self::NativeAdd => true,
+            Self::Replace | Self::MixedReplace | Self::Cancel => false,
+        }
+    }
+}
+
+fn assert_plan_preserves_neighbor(change: PlanChange) {
+    struct Release(Arc<Held>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.block.store(false, Ordering::SeqCst);
+            self.0.release.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let lcd_link = Arc::new(Link::default());
+    let (mut runtime, lcd_assets) =
+        if matches!(change, PlanChange::MixedAdd | PlanChange::MixedReplace) {
+            let (runtime, assets) =
+                arrival_lcd_runtime(&format!("live-plan-{change:?}"), lcd_link.clone());
+            (runtime, Some(assets))
+        } else {
+            (runtime(), None)
+        };
+    let held = Arc::new(Held {
+        block: AtomicBool::new(true),
+        ignore_cancel: true,
+        ..Held::default()
+    });
+    let release = Release(held.clone());
+    let healthy = Arc::new(Link::default());
+    let new = Arc::new(Link::default());
+    let key = format!("live-plan-held-{}-{change:?}", std::process::id());
+    #[cfg(windows)]
+    let local = matches!(change, PlanChange::NativeAdd).then(|| {
+        let devices = [("a", 60331), ("b", 60332), ("added", 60333)]
+            .map(|(id, port)| {
+                (
+                    id.to_owned(),
+                    crate::devices::Binding::WledDdp {
+                        endpoint: ([127, 0, 0, 207], port).into(),
+                        controller: None,
+                    },
+                )
+            })
+            .into();
+        crate::app::lighting_outputs::Local {
+            version: 1,
+            devices,
+            monitors: Default::default(),
+            door_brightness: 60,
+        }
+    });
+    let (held_keys, healthy_keys) = (vec![key], Vec::new());
+    #[cfg(windows)]
+    let (held_keys, healthy_keys) = local.as_ref().map_or((held_keys, healthy_keys), |local| {
+        (
+            local.devices["a"].endpoint_keys(),
+            local.devices["b"].endpoint_keys(),
+        )
+    });
+    let held_factory = held.clone();
+    runtime
+        .attach_rgb(
+            "a",
+            held_keys,
+            Arc::new(move |_| {
+                held_factory.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(HeldDriver(held_factory.clone())))
+            }),
+        )
+        .unwrap();
+    runtime
+        .attach_rgb("b", healthy_keys, factory(&healthy))
+        .unwrap();
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    let lcd_generation = lcd_assets.as_ref().map(|_| {
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            runtime.lcd_status("lcd").unwrap().frames_sent > 0
+        });
+        runtime.lcd_status("lcd").unwrap().generation
+    });
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        held.entered.load(Ordering::SeqCst)
+    });
+    let healthy_generation = runtime.host.status("b").unwrap().generation;
+    let mut document = runtime.document().clone();
+    let mut plan = runtime.output_plan();
+    let new_id = if !change.adds_output() {
+        let (_, _, replacement) = plan.rgb.iter_mut().find(|(id, _, _)| id == "a").unwrap();
+        let old = held.clone();
+        let next = factory(&new);
+        *replacement = Arc::new(move |cancel| {
+            assert_eq!(old.dropped.load(Ordering::SeqCst), 1);
+            next(cancel)
+        });
+        "a"
+    } else {
+        let mut device = document.lighting.setup.devices[1].clone();
+        device.id = "added".into();
+        document.lighting.setup.devices.push(device);
+        document.lighting.setup.canvas.width = 3;
+        document.lighting.setup.canvas.points.push(Point {
+            device: "added".into(),
+            led: 0,
+            x: 2,
+            y: 0,
+        });
+        document.lighting.groups.pc.push("added".into());
+        plan.rgb.push(("added".into(), vec![], factory(&new)));
+        "added"
+    };
+    #[cfg(windows)]
+    let revision = if let Some(local) = local {
+        let mut previous = local.clone();
+        previous.devices.remove("added");
+        let state =
+            std::env::temp_dir().join(format!("prismestra-plan-native-{}", std::process::id()));
+        let mut candidate = local.prepare(&document, &state).unwrap();
+        // Keep production keys and construction. Replace the deferred I/O
+        // so an unexpected reopen can never reach a physical device.
+        for (id, _, candidate_factory) in &mut candidate.rgb {
+            *candidate_factory = match id.as_str() {
+                "b" => factory(&healthy),
+                "added" => factory(&new),
+                _ => Arc::new(|_| Err("Existing held device was reopened".into())),
+            };
+        }
+        let mut manual = candidate.clone();
+        runtime
+            .prepare_managed_outputs(&state, Some(&previous), &local, &document, &mut manual)
+            .unwrap();
+        for (id, _, prepared) in &manual.rgb {
+            let source = if id == "added" { &candidate } else { &plan };
+            let original = source
+                .rgb
+                .iter()
+                .find(|(old_id, _, _)| old_id == id)
+                .unwrap();
+            assert!(Arc::ptr_eq(&original.2, prepared));
+        }
+
+        let mut changed = local.clone();
+        let crate::devices::Binding::WledDdp { endpoint, .. } =
+            changed.devices.get_mut("b").unwrap()
+        else {
+            unreachable!();
+        };
+        endpoint.set_port(60334);
+        let mut rebound = changed.prepare(&document, &state).unwrap();
+        let before = rebound.rgb[1].2.clone();
+        runtime
+            .prepare_managed_outputs(&state, Some(&previous), &changed, &document, &mut rebound)
+            .unwrap();
+        assert_eq!(rebound.rgb[1].0, "b");
+        assert!(Arc::ptr_eq(&before, &rebound.rgb[1].2));
+
+        runtime
+            .request_startup_outputs_for(&state, Some(&previous), &local, document, candidate)
+            .unwrap()
+    } else {
+        runtime.request_outputs_for(document, plan).unwrap()
+    };
+    #[cfg(not(windows))]
+    let revision = runtime.request_outputs_for(document, plan).unwrap();
+    let frames_before = healthy.frames.lock().unwrap().len();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        healthy.frames.lock().unwrap().len() >= frames_before + 3
+    });
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        healthy_generation
+    );
+    assert_eq!(held.dropped.load(Ordering::SeqCst), 0);
+    if let Some(generation) = lcd_generation {
+        let frames_before = runtime.lcd_status("lcd").unwrap().frames_sent;
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            let lcd = runtime.lcd_status("lcd").unwrap();
+            assert_eq!(lcd.generation, generation);
+            lcd.frames_sent > frames_before
+        });
+        assert_eq!(held.dropped.load(Ordering::SeqCst), 0);
+        #[cfg(windows)]
+        if matches!(change, PlanChange::MixedReplace) {
+            assert!(runtime.pending_configuration());
+            let lcd = runtime
+                .document()
+                .lighting
+                .setup
+                .devices
+                .iter()
+                .find(|device| device.id == "lcd")
+                .unwrap();
+            assert!(matches!(
+                runtime.output_activity(lcd),
+                OutputActivity::Sent(_)
+            ));
+        }
+    }
+    #[cfg(windows)]
+    assert!(matches!(
+        runtime.output_activity(&runtime.document().lighting.setup.devices[1]),
+        OutputActivity::Sent(_)
+    ));
+    if !change.adds_output() {
+        assert_eq!(new.calls.load(Ordering::SeqCst), 0);
+        if matches!(change, PlanChange::Cancel) {
+            runtime.cancel_configuration().unwrap();
+        }
+        drop(release);
+    }
+    working(&mut runtime, new_id, &mut now);
+    if matches!(change, PlanChange::Cancel) {
+        assert_eq!(runtime.output_revision(), 0);
+        assert_eq!(new.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(held.calls.load(Ordering::SeqCst), 2);
+    } else {
+        assert_eq!(runtime.output_revision(), revision);
+        assert_eq!(new.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(held.calls.load(Ordering::SeqCst), 1);
+    }
+    assert_eq!(healthy.calls.load(Ordering::SeqCst), 1);
+    if let Some(generation) = lcd_generation {
+        assert_eq!(runtime.lcd_status("lcd").unwrap().generation, generation);
+        assert_eq!(lcd_link.calls.load(Ordering::SeqCst), 1);
+    }
+    held.release.store(true, Ordering::SeqCst);
+    drain(&mut runtime);
+    if let Some(assets) = lcd_assets {
+        remove_lcd_assets(runtime, assets);
     }
 }
 
@@ -955,6 +1500,7 @@ fn arrival_lcd_runtime(name: &str, link: Arc<Link>) -> (Runtime, std::path::Path
         let revision = runtime
             .request_startup_outputs_for(
                 &dir,
+                None,
                 &local,
                 document,
                 OutputPlan {
@@ -1259,6 +1805,75 @@ fn resume_keeps_ready_outputs_live_while_a_known_output_recovers() {
         runtime.host.status("b").unwrap().generation,
         healthy_generation
     );
+    drain(&mut runtime);
+}
+
+#[test]
+fn resume_keeps_ready_output_live_past_slow_neighbors_refresh_deadline() {
+    let mut runtime = runtime();
+    let slow = Arc::new(Link::default());
+    let healthy = Arc::new(Link::default());
+    let block_open = Arc::new(AtomicBool::new(false));
+    let slow_factory = factory(&slow);
+    let gate = block_open.clone();
+    runtime
+        .attach_rgb(
+            "a",
+            vec![],
+            Arc::new(move |cancel| {
+                while gate.load(Ordering::SeqCst) {
+                    if cancel.cancelled() {
+                        return Err("Slow stand output opening cancelled".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                slow_factory(cancel)
+            }),
+        )
+        .unwrap();
+    runtime.attach_rgb("b", vec![], factory(&healthy)).unwrap();
+    runtime.enable_registered_output_recovery();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+    working(&mut runtime, "b", &mut now);
+
+    block_open.store(true, Ordering::SeqCst);
+    runtime.notify_power(true, now).unwrap();
+    runtime.notify_power(false, now).unwrap();
+    wait(|| runtime.lighting_drained());
+    now += 7_000_000;
+    tick(&mut runtime, &mut now);
+    wait(|| runtime.host.status("b").unwrap().phase == Phase::Ready);
+    assert_eq!(runtime.host.status("a").unwrap().phase, Phase::Connecting);
+    let generation = runtime.host.status("b").unwrap().generation;
+    tick(&mut runtime, &mut now);
+    assert_eq!(runtime.power.error(), None);
+
+    // Only the simulated clock crosses the legacy global refresh deadline.
+    let last_requested = runtime.host.requested("b");
+    now += 30_000_000;
+    tick(&mut runtime, &mut now);
+    assert_eq!(runtime.power.error(), None);
+    assert_eq!(runtime.host.status("a").unwrap().phase, Phase::Connecting);
+    assert_eq!(runtime.outputs_ready(), Ok(false));
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime
+            .host
+            .status("b")
+            .unwrap()
+            .last_submitted
+            .is_some_and(|ticket| {
+                last_requested.is_none_or(|previous| ticket.sequence > previous.sequence)
+            })
+    });
+    assert_eq!(runtime.host.status("b").unwrap().generation, generation);
+    assert_eq!(healthy.calls.load(Ordering::SeqCst), 2);
+
+    block_open.store(false, Ordering::SeqCst);
+    working(&mut runtime, "a", &mut now);
+    assert_eq!(slow.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(runtime.outputs_ready(), Ok(true));
     drain(&mut runtime);
 }
 

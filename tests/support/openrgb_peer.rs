@@ -82,22 +82,27 @@ fn packet(stream: &mut TcpStream, device: u32, kind: u32, body: &[u8]) -> std::i
 }
 impl Peer {
     pub fn new(duplicate: bool) -> Self {
-        Self::start(duplicate, false, false, None)
+        Self::start(duplicate, false, false, None, 0)
     }
     pub fn virtual_controller() -> Self {
-        Self::start(false, true, false, None)
+        Self::start(false, true, false, None, 0)
     }
     pub fn becomes_ambiguous_on_activation() -> Self {
-        Self::start(false, false, true, None)
+        Self::start(false, false, true, None, 0)
     }
     pub fn with_invalid_neighbor(serial: &'static str) -> Self {
-        Self::start(false, false, false, Some(serial))
+        Self::start(false, false, false, Some(serial), 0)
+    }
+    #[allow(dead_code)]
+    pub fn disconnect_inventory(sessions: usize) -> Self {
+        Self::start(false, false, false, None, sessions)
     }
     fn start(
         duplicate: bool,
         virtual_controller: bool,
         late_duplicate: bool,
         invalid_neighbor: Option<&'static str>,
+        disconnect_inventory: usize,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -141,6 +146,9 @@ impl Peer {
                         40 => packet(&mut stream, device, kind, &6u32.to_le_bytes()),
                         52 => packet(&mut stream, device, 53, &(1u32 | 1 << 30).to_le_bytes()),
                         0 => {
+                            if connections <= disconnect_inventory {
+                                break;
+                            }
                             inventory_requests += 1;
                             let duplicate = duplicate
                                 || invalid_neighbor.is_some()
