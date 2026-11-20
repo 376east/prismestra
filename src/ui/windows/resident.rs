@@ -824,18 +824,19 @@ pub(super) fn open_editor(state: &State) -> Result<(), String> {
         } else {
             WS_OVERLAPPEDWINDOW
         } | WS_CLIPCHILDREN;
+        let ex_style = super::editor_ex_style(state.snapshot);
         let mut rect = RECT {
             left: 0,
             top: 0,
             right: px(width, dpi),
             bottom: px(height, dpi),
         };
-        if unsafe { AdjustWindowRectExForDpi(&mut rect, style, 0, WS_EX_CONTROLPARENT, dpi) } == 0 {
+        if unsafe { AdjustWindowRectExForDpi(&mut rect, style, 0, ex_style, dpi) } == 0 {
             return Err(last("Size editor"));
         }
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_CONTROLPARENT,
+                ex_style,
                 wide(super::CLASS).as_ptr(),
                 wide(PRODUCT_NAME).as_ptr(),
                 style,

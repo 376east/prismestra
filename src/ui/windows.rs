@@ -50,6 +50,9 @@ mod sources;
 mod startup_ack;
 use runtime_client::Client;
 const CLASS: &str = "PrismestraWindow";
+fn editor_ex_style(snapshot: bool) -> u32 {
+    WS_EX_CONTROLPARENT | if snapshot { 0 } else { WS_EX_APPWINDOW }
+}
 const PRODUCT_NAME: &str = "Prismestra";
 const NAV_SCENE: i32 = 101;
 const NAV_DEVICES: i32 = 102;
@@ -3062,18 +3065,19 @@ fn run_inner(args: Vec<OsString>, installed_instance: Option<Instance>) -> Resul
     } else {
         WS_OVERLAPPEDWINDOW
     } | WS_CLIPCHILDREN;
+    let ex_style = editor_ex_style(o.snapshot.is_some());
     let mut rect = RECT {
         left: 0,
         top: 0,
         right: px(w, dpi),
         bottom: px(h, dpi),
     };
-    if unsafe { AdjustWindowRectExForDpi(&mut rect, style, 0, WS_EX_CONTROLPARENT, dpi) } == 0 {
+    if unsafe { AdjustWindowRectExForDpi(&mut rect, style, 0, ex_style, dpi) } == 0 {
         return Err(last("Size native UI"));
     }
     let raw = unsafe {
         CreateWindowExW(
-            WS_EX_CONTROLPARENT,
+            ex_style,
             class.as_ptr(),
             wide(PRODUCT_NAME).as_ptr(),
             style,
