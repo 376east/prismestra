@@ -250,14 +250,21 @@ fn discover(
     let ble_cancel = deadline.clone();
     scan.spawn("Surplife E1", move || {
         let mut control = crate::runtime::adapters::Control::new(ble_cancel);
-        let ble_pixels = crate::transport::ble_windows::discover_pixel_controllers(
+        let probes = crate::transport::ble_windows::discover_pixel_controllers(
             &mut control,
             &bound_addresses,
         )?;
-        Ok(Discovery {
-            ble_pixels,
-            ..Default::default()
-        })
+        let mut inventory = Discovery::default();
+        for probe in probes {
+            match probe.capacity {
+                Ok(points) => inventory.ble_pixels.push((probe.address, points)),
+                Err(error) => inventory.issues.push(format!(
+                    "Surplife E1 (адрес …{:04X}): {error}",
+                    probe.address & 0xffff
+                )),
+            }
+        }
+        Ok(inventory)
     });
     let lcd_cancel = deadline.clone();
     scan.spawn("TT LCD", move || {
