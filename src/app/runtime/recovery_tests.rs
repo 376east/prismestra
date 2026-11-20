@@ -1600,6 +1600,46 @@ fn remove_lcd_assets(runtime: Runtime, dir: std::path::PathBuf) {
 }
 
 #[test]
+fn appending_lcd_starts_its_first_frame_without_reopening_existing_rgb() {
+    let lcd = Arc::new(Link::default());
+    let (mut fixture, assets) = arrival_lcd_runtime("append-to-live", lcd);
+    let proposal = fixture.document().clone();
+    let lcd_outputs = fixture.output_plan().lcd;
+    drain(&mut fixture);
+    drop(fixture);
+
+    let mut runtime = runtime();
+    let rgb = Arc::new(Link::default());
+    runtime
+        .attach_rgb("a", vec!["existing-rgb".into()], factory(&rgb))
+        .unwrap();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+    let before = runtime.host.status("a").unwrap();
+    let mut outputs = runtime.output_plan();
+    outputs.lcd = lcd_outputs;
+    let revision = runtime.request_outputs_for(proposal, outputs).unwrap();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.output_revision() == revision
+            && runtime
+                .lcd_status("lcd")
+                .is_some_and(|snapshot| snapshot.frames_sent > 0)
+            && runtime
+                .host
+                .status("a")
+                .is_some_and(|snapshot| snapshot.submitted > before.submitted)
+    });
+    assert_eq!(
+        runtime.host.status("a").unwrap().generation,
+        before.generation
+    );
+    assert_eq!(rgb.calls.load(Ordering::SeqCst), 1);
+    drain(&mut runtime);
+    remove_lcd_assets(runtime, assets);
+}
+
+#[test]
 fn bound_lcd_arrival_renews_exhausted_recovery_without_restarting_other_outputs() {
     let link = Arc::new(Link::default());
     link.fail_open.store(true, Ordering::SeqCst);

@@ -186,6 +186,7 @@ struct Configuration {
 struct LiveRgbPlan {
     retained: BTreeSet<String>,
     retiring: BTreeSet<String>,
+    added_lcd: BTreeSet<String>,
 }
 #[derive(PartialEq, Eq)]
 struct RgbView {
@@ -643,23 +644,34 @@ impl Runtime {
         let mut layout = self.document.clone();
         layout.lighting.setup = document.lighting.setup.clone();
         layout.lighting.groups = document.lighting.groups.clone();
+        // First-run probes can discover a new LCD after RGB already started.
+        // Preserve the live layout only for appended LCD definitions.
+        if document.lcd.starts_with(&layout.lcd) {
+            layout.lcd.clone_from(&document.lcd);
+        }
         if layout != *document {
             return None;
         }
-        if outputs.lcd.len() != self.lcd_specs.len()
-            || outputs.lcd.len() != self.lcd.len()
-            || outputs.lcd.iter().any(|(id, keys, factory)| {
-                self.lcd_specs.get(id).is_none_or(|previous| {
-                    previous.keys != *keys || !Arc::ptr_eq(&previous.factory, factory)
-                }) || self
-                    .lcd
-                    .get(id)
-                    .is_none_or(|worker| worker.snapshot().phase != lcd_worker::Phase::Ready)
-                    || !self.device_unchanged(document, id)
+        if self.lcd_specs.len() != self.lcd.len()
+            || self.lcd_specs.iter().any(|(id, previous)| {
+                !outputs.lcd.iter().any(|(next, keys, factory)| {
+                    next == id && previous.keys == *keys && Arc::ptr_eq(&previous.factory, factory)
+                }) || self.lcd.get(id).is_none_or(|worker| {
+                    !matches!(
+                        worker.snapshot().phase,
+                        lcd_worker::Phase::Connecting | lcd_worker::Phase::Ready
+                    )
+                }) || !self.device_unchanged(document, id)
             })
         {
             return None;
         }
+        let added_lcd = outputs
+            .lcd
+            .iter()
+            .filter(|(id, _, _)| !self.lcd_specs.contains_key(id))
+            .map(|(id, _, _)| id.clone())
+            .collect();
         let retained: BTreeSet<_> = outputs
             .rgb
             .iter()
@@ -685,7 +697,8 @@ impl Runtime {
                     && previous.keys == *keys
                     && Arc::ptr_eq(&previous.factory, factory)
                     && self.host.status(id).is_some_and(|snapshot| {
-                        snapshot.phase == crate::runtime::output::Phase::Ready
+                        use crate::runtime::output::Phase;
+                        matches!(snapshot.phase, Phase::Connecting | Phase::Ready)
                     }))
                 .then(|| id.clone())
             })
@@ -699,7 +712,11 @@ impl Runtime {
             .filter(|id| !retained.contains(*id))
             .cloned()
             .collect();
-        Some(LiveRgbPlan { retained, retiring })
+        Some(LiveRgbPlan {
+            retained,
+            retiring,
+            added_lcd,
+        })
     }
 
     fn device_unchanged(&self, document: &Document, id: &str) -> bool {
@@ -1006,7 +1023,9 @@ impl Runtime {
         }
         if restart {
             if let Some(live) = &live {
-                self.restart_registered_rgb(Some(live), false)?;
+                let rgb = self.restart_registered_rgb(Some(live), false);
+                let lcd = self.restart_registered_lcd(Some(&live.added_lcd));
+                rgb.and(lcd)?;
                 self.bump()?;
             } else if let Err(error) = self.restart_registered(false) {
                 self.stop_channels();
@@ -1558,15 +1577,7 @@ impl Runtime {
         // Every reopened owner revalidates its binding. A recoverable RGB
         // owner that is still stopping is deferred to its own recovery.
         self.restart_registered_rgb(None, retry_action_required)?;
-        let lcd = self
-            .lcd_specs
-            .iter()
-            .map(|(id, s)| (id.clone(), s.keys.clone(), s.factory.clone()))
-            .collect::<Vec<_>>();
-        for (id, keys, f) in lcd {
-            let result = self.start_registered_lcd(&id, keys, f);
-            self.handle_output_start(&id, result)?;
-        }
+        self.restart_registered_lcd(None)?;
         if let Some(f) = self.capture_factory.clone() {
             let generation = self.next_generation()?;
             self.capture = Some(capture_worker::Worker::start(
@@ -1597,6 +1608,20 @@ impl Runtime {
         }
         self.sensor_stamps.clear();
         self.bump()
+    }
+
+    fn restart_registered_lcd(&mut self, added: Option<&BTreeSet<String>>) -> Result<(), String> {
+        let lcd = self
+            .lcd_specs
+            .iter()
+            .filter(|(id, _)| added.is_none_or(|ids| ids.contains(*id)))
+            .map(|(id, s)| (id.clone(), s.keys.clone(), s.factory.clone()))
+            .collect::<Vec<_>>();
+        for (id, keys, f) in lcd {
+            let result = self.start_registered_lcd(&id, keys, f);
+            self.handle_output_start(&id, result)?;
+        }
+        Ok(())
     }
     fn ready(&self, recovers_independently: impl Fn(&str) -> bool) -> Result<bool, String> {
         let mut ready = true;
