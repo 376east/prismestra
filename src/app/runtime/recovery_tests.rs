@@ -1956,3 +1956,165 @@ fn resume_recovers_a_known_lcd_whose_endpoint_is_still_claimed() {
     drain(&mut runtime);
     remove_lcd_assets(runtime, dir);
 }
+
+#[test]
+fn second_resume_restores_independent_rgb_before_the_old_write_releases() {
+    for autonomous in [false, true] {
+        assert_second_resume_preserves_independent_rgb(autonomous);
+    }
+}
+
+fn assert_second_resume_preserves_independent_rgb(autonomous: bool) {
+    use std::sync::mpsc::{self, Receiver, SyncSender};
+
+    struct BlockOnce {
+        sink: RgbLink,
+        armed: Arc<AtomicBool>,
+        gate: Option<(SyncSender<()>, Receiver<()>)>,
+    }
+
+    impl RgbDriver for BlockOnce {
+        fn protocol(&self) -> Driver {
+            self.sink.protocol()
+        }
+
+        fn leds(&self) -> usize {
+            self.sink.leds()
+        }
+
+        fn write(&mut self, colors: &[Rgb], cancel: &Cancellation) -> Result<WriteResult, String> {
+            if self.armed.swap(false, Ordering::SeqCst)
+                && let Some((entered, release)) = self.gate.take()
+            {
+                entered.send(()).map_err(|e| e.to_string())?;
+                release
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|e| e.to_string())?;
+                assert!(cancel.cancelled());
+                return Err("Injected old write returned after cancellation".into());
+            }
+            self.sink.write(colors, cancel)
+        }
+    }
+
+    let mut runtime = runtime();
+    if autonomous {
+        runtime.enable_autonomous_rgb().unwrap();
+    }
+    let a = Arc::new(Link::default());
+    let b = Arc::new(Link::default());
+    let armed = Arc::new(AtomicBool::new(false));
+    let (entered, blocked) = mpsc::sync_channel(1);
+    let (release, finished) = mpsc::channel();
+    let first_gate = Mutex::new(Some((entered, finished)));
+    let (source, trigger) = (a.clone(), armed.clone());
+    runtime
+        .attach_rgb(
+            "a",
+            vec!["qa:power:held".into()],
+            Arc::new(move |_| {
+                source.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(BlockOnce {
+                    sink: RgbLink(source.clone(), Driver::WledDdp),
+                    armed: trigger.clone(),
+                    gate: first_gate.lock().unwrap().take(),
+                }))
+            }),
+        )
+        .unwrap();
+    runtime
+        .attach_rgb("b", vec!["qa:power:healthy".into()], factory(&b))
+        .unwrap();
+    runtime.enable_registered_output_recovery();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+    working(&mut runtime, "b", &mut now);
+    let first_a = runtime.host.status("a").unwrap().generation;
+    let first_b = runtime.host.status("b").unwrap().generation;
+    armed.store(true, Ordering::SeqCst);
+    let mut has_blocked = false;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        has_blocked |= blocked.try_recv().is_ok();
+        has_blocked
+    });
+    let before = runtime.host.status("a").unwrap();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.host.status("a").unwrap().received >= before.received + 3
+    });
+    let queued = runtime.host.status("a").unwrap();
+    assert!(queued.received > before.received && queued.replaced > before.replaced);
+    assert_eq!(queued.submitted, before.submitted);
+    let old_a_frames = a.frames.lock().unwrap().len();
+
+    runtime.notify_power(true, now).unwrap();
+    runtime.notify_power(false, now).unwrap();
+    now += 6_000_000;
+    tick(&mut runtime, &mut now);
+    assert!(runtime.power.pending() && runtime.refresh.is_none());
+    runtime.notify_power(true, now).unwrap();
+    runtime.notify_power(false, now).unwrap();
+    let second_resume_at = now;
+    runtime.set_group(Target::Pc, false).unwrap();
+    let old_b_frames = b.frames.lock().unwrap().len();
+    now += 7_000_000;
+    working(&mut runtime, "b", &mut now);
+    let resumed_b = runtime.host.status("b").unwrap().generation;
+    assert_ne!(resumed_b, first_b);
+    let initial_b = b.frames.lock().unwrap()[old_b_frames].clone();
+    assert_eq!(initial_b, vec![Rgb::default()]);
+
+    now = now.max(second_resume_at + 60_000_000);
+    tick(&mut runtime, &mut now);
+
+    assert_eq!(runtime.power.suspends, 2);
+    assert_eq!(runtime.power.resumes, 2);
+    assert!(!runtime.power.pending() && runtime.refresh.is_none());
+    assert!(runtime.power.error().is_none());
+    assert!(!runtime.host.output_reaped("a"));
+    assert_eq!(a.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(b.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(runtime.host.status("a").unwrap().generation, first_a);
+    assert_eq!(runtime.host.status("b").unwrap().generation, resumed_b);
+    assert_eq!(a.frames.lock().unwrap().len(), old_a_frames);
+    println!(
+        "autonomous={autonomous} held_after_second_resume_us={} power_pending=false power_error=false opens_a=1 opens_b=2 queued_received_delta={} queued_replaced_delta={}",
+        now - second_resume_at,
+        queued.received - before.received,
+        queued.replaced - before.replaced
+    );
+
+    release.send(()).unwrap();
+    wait(|| {
+        runtime.host.reap();
+        runtime.host.output_reaped("a")
+    });
+    assert_eq!(
+        a.frames.lock().unwrap().len(),
+        old_a_frames,
+        "old queued frame escaped cancellation"
+    );
+    working(&mut runtime, "a", &mut now);
+    working(&mut runtime, "b", &mut now);
+    assert!(!runtime.power.pending() && runtime.power.error().is_none());
+    assert_eq!(a.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(b.calls.load(Ordering::SeqCst), 2);
+    let resumed_a = runtime.host.status("a").unwrap().generation;
+    assert_ne!(resumed_a, first_a);
+    assert_eq!(runtime.host.status("b").unwrap().generation, resumed_b);
+    assert!(!runtime.group_on(Target::Pc));
+    for (link, old_frames) in [(&a, old_a_frames), (&b, old_b_frames)] {
+        let frames = link.frames.lock().unwrap();
+        assert!(!frames[old_frames..].is_empty());
+        assert!(
+            frames[old_frames..]
+                .iter()
+                .all(|frame| frame.as_slice() == [Rgb::default()])
+        );
+    }
+    println!(
+        "after_release old_queue_dropped=true resume_completed=true a_generation={first_a}->{resumed_a} b_generation={first_b}->{resumed_b} first_frames_match_current_off=true"
+    );
+    drain(&mut runtime);
+}
