@@ -177,7 +177,17 @@ fn discover(
             return Err(cancelled());
         }
         match ble {
-            Ok(pixels) => result.ble_pixels = pixels,
+            Ok(probes) => {
+                for probe in probes {
+                    match probe.capacity {
+                        Ok(points) => result.ble_pixels.push((probe.address, points)),
+                        Err(error) => result.issues.push(format!(
+                            "Surplife E1 (адрес …{:04X}): {error}",
+                            probe.address & 0xffff
+                        )),
+                    }
+                }
+            }
             Err(error) => result.issues.push(format!("Surplife E1: {error}")),
         }
         Ok(result)
