@@ -35,4 +35,4 @@ Successful compilation does not complete the other stages. A report should say w
 - After a light has been bound, a temporary REST failure keeps the worker in Connecting while it retries. It checks the same entity's state and capabilities before submitting the latest scene color. Retry delays are 1, 5, 15, then 30 seconds, with longer waits when HA supplies `Retry-After`. Invalid credentials and other permanent errors use the normal failure path. A successful POST still confirms service submission only. [HA worker](../src/runtime/network.rs)
 - Read-only temperatures do not grant fan or pump control. The application does not replace Fan Control.
 
-Device reports are welcome through the [device report form](https://github.com/malyarq/prismestra/issues/new?template=device.yml).
+Device reports are welcome through the [device report form](https://github.com/376east/prismestra/issues/new?template=device.yml). For a Surplife E1 strip, see the [BLE acceptance steps and report fields](ble-device-acceptance.md).
