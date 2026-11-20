@@ -303,13 +303,14 @@ pub(super) fn open(state: &State) -> Result<(), String> {
     // WebView initialization pumps COM/Win32 messages. No App borrow is held here.
     #[cfg(debug_assertions)]
     let _ = std::fs::write(state_dir.join("webview-stage.txt"), "initializing");
-    let shell = web_shell::WebShell::new(hwnd, &state_dir, assets).inspect_err(|_error| {
-        #[cfg(debug_assertions)]
-        let _ = std::fs::write(
-            state_dir.join("webview-stage.txt"),
-            format!("failed: {_error}"),
-        );
-    })?;
+    let shell = web_shell::WebShell::new(hwnd, &state.webview_user_data, &state_dir, assets)
+        .inspect_err(|_error| {
+            #[cfg(debug_assertions)]
+            let _ = std::fs::write(
+                state_dir.join("webview-stage.txt"),
+                format!("failed: {_error}"),
+            );
+        })?;
     // WebView creation pumps Win32 messages, including a pending editor close.
     if state.editor_window.get() != hwnd {
         return Err("Окно было закрыто при открытии редактора".into());

@@ -2243,6 +2243,7 @@ impl Default for FinalStopRender {
 struct State {
     icon: brand_icon::Icon,
     modern_enabled: bool,
+    webview_user_data: web_shell::UserDataFolder,
     webview: RefCell<Option<web_shell::WebShell>>,
     modern_session: RefCell<Option<modern::Session>>,
     app: RefCell<Option<App>>,
@@ -2888,20 +2889,24 @@ pub fn run(args: Vec<OsString>) -> Result<(), String> {
     run_with_instance(args, None)
 }
 
-pub(crate) fn run_installed(args: Vec<OsString>, instance: Instance) -> Result<(), String> {
-    run_with_instance(args, Some(instance))
+pub(crate) fn run_installed(
+    args: Vec<OsString>,
+    instance: Instance,
+    user_root: PathBuf,
+) -> Result<(), String> {
+    run_with_instance(args, Some((instance, user_root)))
 }
 
 fn run_with_instance(
     args: Vec<OsString>,
-    installed_instance: Option<Instance>,
+    installed: Option<(Instance, PathBuf)>,
 ) -> Result<(), String> {
     let diagnostic = args.iter().any(|a| a == "--snapshot" || a == "--selftest");
     let error_dir = args
         .windows(2)
         .find(|pair| pair[0] == "--state-dir")
         .map(|pair| PathBuf::from(&pair[1]));
-    let result = run_inner(args, installed_instance);
+    let result = run_inner(args, installed);
     if !diagnostic && let Err(error) = &result {
         startup_ack::failed(error);
         if let Some(dir) = error_dir {
@@ -2933,7 +2938,7 @@ fn output_activity_label(activity: &crate::app::runtime::OutputActivity) -> &'st
 fn native_sources_allowed(snapshot: bool, selftest: bool) -> bool {
     !snapshot && !selftest
 }
-fn run_inner(args: Vec<OsString>, installed_instance: Option<Instance>) -> Result<(), String> {
+fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Result<(), String> {
     let mut o = options(args)?;
     let state_dir = if let Some(path) = &o.state_dir {
         path.clone()
@@ -2966,7 +2971,7 @@ fn run_inner(args: Vec<OsString>, installed_instance: Option<Instance>) -> Resul
         o.snapshot = Some(state_dir.join("diagnostics/selftest.png"));
     }
     let resident_mode = o.snapshot.is_none() && !o.selftest;
-    let _portable_instance = if resident_mode && installed_instance.is_none() {
+    let _portable_instance = if resident_mode && installed.is_none() {
         Some(resident::Instance::acquire(&state_dir)?)
     } else {
         None
@@ -3022,6 +3027,10 @@ fn run_inner(args: Vec<OsString>, installed_instance: Option<Instance>) -> Resul
     let state = Box::new(State {
         icon: brand_icon::Icon::new()?,
         modern_enabled,
+        webview_user_data: match &installed {
+            Some((_, user_root)) => web_shell::UserDataFolder::installed(user_root.clone()),
+            None => web_shell::UserDataFolder::Standalone,
+        },
         webview: RefCell::new(None),
         modern_session: RefCell::new(None),
         app: RefCell::new(None),
@@ -3367,7 +3376,7 @@ fn run_inner(args: Vec<OsString>, installed_instance: Option<Instance>) -> Resul
     if !o.selftest {
         startup_ack::ready();
     }
-    if let Some(instance) = &installed_instance
+    if let Some((instance, _)) = &installed
         && let Err(error) = instance.enable_activation(&state)
     {
         eprintln!("{error}");

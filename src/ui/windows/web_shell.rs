@@ -1,8 +1,8 @@
 //! Embedded WebView2 transport. COM callbacks only enqueue bounded messages.
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, OnceCell, RefCell},
     collections::VecDeque,
-    path::Path,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::mpsc,
 };
@@ -52,10 +52,51 @@ impl Drop for WebShell {
     }
 }
 
+pub(super) enum UserDataFolder {
+    Installed {
+        user_root: PathBuf,
+        selected: OnceCell<PathBuf>,
+    },
+    Standalone,
+}
+
+impl UserDataFolder {
+    pub(super) fn installed(user_root: PathBuf) -> Self {
+        Self::Installed {
+            user_root,
+            selected: OnceCell::new(),
+        }
+    }
+
+    fn prepare(&self, state_dir: &Path) -> Result<PathBuf, String> {
+        match self {
+            Self::Installed {
+                user_root,
+                selected,
+            } => {
+                use crate::app::installed::{directory, webview_profile_path};
+                if let Some(path) = selected.get() {
+                    return directory(path);
+                }
+                let path = directory(&webview_profile_path(user_root, state_dir)?)?;
+                // Keep a successful choice for editor reopens. Failed attempts can retry.
+                let _ = selected.set(path.clone());
+                Ok(path)
+            }
+            Self::Standalone => {
+                let profile = state_dir.join("webview-editor");
+                std::fs::create_dir_all(&profile).map_err(|e| format!("WebView profile: {e}"))?;
+                Ok(profile)
+            }
+        }
+    }
+}
+
 impl WebShell {
     /// Call on the parent window's UI thread, with its timer pumping, and drop before destroying HWND.
     pub fn new(
         hwnd: windows_sys::Win32::Foundation::HWND,
+        user_data: &UserDataFolder,
         state_dir: &Path,
         assets: Assets,
     ) -> Result<Self, String> {
@@ -72,8 +113,7 @@ impl WebShell {
         }
         unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() }.map_err(error)?;
         let apartment = Apartment;
-        let profile = state_dir.join("webview-editor");
-        std::fs::create_dir_all(&profile).map_err(|e| format!("WebView profile: {e}"))?;
+        let profile = user_data.prepare(state_dir)?;
         let environment = create_environment(&profile)?;
         let controller = create_controller(&environment, HWND(hwnd))?;
         let core = match unsafe { controller.CoreWebView2() } {
@@ -412,6 +452,38 @@ fn headers(mime: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_state_dir_keeps_standalone_webview_folder() {
+        let (_fixture, _, state, _) = crate::app::installed::tests::fresh_profile();
+        let custom = state.join("custom");
+        let options =
+            super::super::options(vec!["--state-dir".into(), custom.clone().into_os_string()])
+                .unwrap();
+        let path = UserDataFolder::Standalone
+            .prepare(&options.state_dir.unwrap())
+            .unwrap();
+        assert_eq!(path, custom.join("webview-editor"));
+        assert!(path.is_dir());
+        assert!(!state.parent().unwrap().join("wv").exists());
+    }
+
+    #[test]
+    fn installed_webview_retries_failed_preparation_and_keeps_the_successful_choice() {
+        let (_fixture, _, state, _) = crate::app::installed::tests::fresh_profile();
+        let root = state.parent().unwrap();
+        let folder = UserDataFolder::installed(root.to_owned());
+        let legacy = state.join("webview-editor");
+        std::fs::write(&legacy, b"blocked directory").unwrap();
+        assert!(folder.prepare(&state).is_err());
+        assert!(!root.join("wv").exists());
+        std::fs::remove_file(&legacy).unwrap();
+        let selected = folder.prepare(&state).unwrap();
+        assert_eq!(selected, root.join("wv").canonicalize().unwrap());
+        std::fs::create_dir(&legacy).unwrap();
+        assert_eq!(folder.prepare(&state).unwrap(), selected);
+    }
+
     #[test]
     fn origin_is_exact_and_queue_is_bounded() {
         assert!(same_origin("http://prismestra.localhost/index.html#scene"));
