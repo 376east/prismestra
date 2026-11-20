@@ -89,16 +89,22 @@ impl Runtime {
         if self.suspended || pending_output || self.power.pending() {
             return OutputActivity::Connecting;
         }
-        let action_required_error = self
+        if let Some(error) = self
             .rgb_specs
             .get(id)
-            .and_then(|spec| spec.action_required_error.as_ref());
-        if let Some(error) = action_required_error.or_else(|| {
-            self.output_recovery
-                .get(id)
-                .and_then(|state| state.start_error.as_ref())
-        }) {
+            .and_then(|spec| spec.action_required_error.as_ref())
+        {
             return OutputActivity::Unavailable(Some(error.clone()));
+        }
+        let recovery = self.output_recovery.get(id);
+        let retry_scheduled = self.power.error().is_none()
+            && recovery.is_some_and(recovery::Recovery::retry_scheduled);
+        let failed_activity = |error| match error {
+            Some(error) if retry_scheduled => OutputActivity::Retrying(error),
+            error => OutputActivity::Unavailable(error),
+        };
+        if let Some(error) = recovery.and_then(|state| state.start_error.clone()) {
+            return failed_activity(Some(error));
         }
         let (phase, frames, error) = if is_lcd {
             let Some(status) = self.lcd_status(id) else {
@@ -116,13 +122,17 @@ impl Runtime {
             let Some(status) = self.host.status(id) else {
                 return OutputActivity::Unavailable(None);
             };
+            if status.requires_action {
+                return OutputActivity::Unavailable(status.error);
+            }
             (status.phase, status.submitted, status.error)
         };
         match phase {
             Phase::Ready if frames > 0 => OutputActivity::Sent(frames),
             Phase::Connecting => error.map_or(OutputActivity::Connecting, OutputActivity::Retrying),
             Phase::Ready => OutputActivity::Connecting,
-            Phase::Failed | Phase::Stopping | Phase::Stopped => OutputActivity::Unavailable(error),
+            Phase::Failed => failed_activity(error),
+            Phase::Stopping | Phase::Stopped => OutputActivity::Unavailable(error),
         }
     }
 

@@ -186,6 +186,7 @@ struct Configuration {
 struct LiveRgbPlan {
     retained: BTreeSet<String>,
     retiring: BTreeSet<String>,
+    added_lcd: BTreeSet<String>,
 }
 #[derive(PartialEq, Eq)]
 struct RgbView {
@@ -643,23 +644,37 @@ impl Runtime {
         let mut layout = self.document.clone();
         layout.lighting.setup = document.lighting.setup.clone();
         layout.lighting.groups = document.lighting.groups.clone();
+        // First-run probes can discover a new LCD after RGB already started.
+        // Preserve the live layout only for appended LCD definitions.
+        if document.lcd.starts_with(&layout.lcd) {
+            layout.lcd.clone_from(&document.lcd);
+        }
         if layout != *document {
             return None;
         }
-        if outputs.lcd.len() != self.lcd_specs.len()
-            || outputs.lcd.len() != self.lcd.len()
-            || outputs.lcd.iter().any(|(id, keys, factory)| {
-                self.lcd_specs.get(id).is_none_or(|previous| {
-                    previous.keys != *keys || !Arc::ptr_eq(&previous.factory, factory)
-                }) || self
-                    .lcd
-                    .get(id)
-                    .is_none_or(|worker| worker.snapshot().phase != lcd_worker::Phase::Ready)
-                    || !self.device_unchanged(document, id)
+        // An unchanged LCD with its own recovery may keep waiting while other routes change.
+        if self.lcd.keys().any(|id| !self.lcd_specs.contains_key(id))
+            || self.lcd_specs.iter().any(|(id, previous)| {
+                !outputs.lcd.iter().any(|(next, keys, factory)| {
+                    next == id && previous.keys == *keys && Arc::ptr_eq(&previous.factory, factory)
+                }) || !self.device_unchanged(document, id)
+                    || (!self.output_recovery.contains_key(id)
+                        && self.lcd.get(id).is_none_or(|worker| {
+                            !matches!(
+                                worker.snapshot().phase,
+                                lcd_worker::Phase::Connecting | lcd_worker::Phase::Ready
+                            )
+                        }))
             })
         {
             return None;
         }
+        let added_lcd = outputs
+            .lcd
+            .iter()
+            .filter(|(id, _, _)| !self.lcd_specs.contains_key(id))
+            .map(|(id, _, _)| id.clone())
+            .collect();
         let retained: BTreeSet<_> = outputs
             .rgb
             .iter()
@@ -685,7 +700,8 @@ impl Runtime {
                     && previous.keys == *keys
                     && Arc::ptr_eq(&previous.factory, factory)
                     && self.host.status(id).is_some_and(|snapshot| {
-                        snapshot.phase == crate::runtime::output::Phase::Ready
+                        use crate::runtime::output::Phase;
+                        matches!(snapshot.phase, Phase::Connecting | Phase::Ready)
                     }))
                 .then(|| id.clone())
             })
@@ -699,7 +715,11 @@ impl Runtime {
             .filter(|id| !retained.contains(*id))
             .cloned()
             .collect();
-        Some(LiveRgbPlan { retained, retiring })
+        Some(LiveRgbPlan {
+            retained,
+            retiring,
+            added_lcd,
+        })
     }
 
     fn device_unchanged(&self, document: &Document, id: &str) -> bool {
@@ -1006,7 +1026,9 @@ impl Runtime {
         }
         if restart {
             if let Some(live) = &live {
-                self.restart_registered_rgb(Some(live), false)?;
+                let rgb = self.restart_registered_rgb(Some(live), false);
+                let lcd = self.restart_registered_lcd(Some(&live.added_lcd));
+                rgb.and(lcd)?;
                 self.bump()?;
             } else if let Err(error) = self.restart_registered(false) {
                 self.stop_channels();
@@ -1426,7 +1448,11 @@ impl Runtime {
         lighting && sensors && registry
     }
     fn lighting_drained(&mut self) -> bool {
-        let mut drained = self.host.drained();
+        let rgb_drained = self.host.drained();
+        self.other_channels_drained() && rgb_drained
+    }
+    fn other_channels_drained(&mut self) -> bool {
+        let mut drained = true;
         for w in self.lcd.values_mut() {
             drained = w.reap() && drained;
         }
@@ -1440,6 +1466,18 @@ impl Runtime {
         self.sensors
             .retain(|input, worker| self.sensor_specs.contains_key(input) || !worker.is_reaped());
         drained
+    }
+    fn resume_owners_drained(&mut self) -> bool {
+        if self.pending.is_some() || self.retry_action_required_on_refresh {
+            return self.lighting_drained();
+        }
+        self.host.clock_drained()
+            && self.other_channels_drained()
+            && self.host.rgb_outputs_drained(
+                self.rgb_specs
+                    .keys()
+                    .filter(|id| !self.output_recovery.contains_key(*id)),
+            )
     }
     /// Notifications only; this never calls Windows suspend/reboot/shutdown APIs.
     pub fn notify_power(&mut self, suspended: bool, now_us: u64) -> Result<(), String> {
@@ -1519,7 +1557,15 @@ impl Runtime {
             .collect::<Vec<_>>();
         let mut first_error = None;
         for (id, keys, f) in rgb {
-            let result = self.host.attach_claimed(&id, keys, move |c| f(c));
+            let result = if self.refresh_started
+                && self.output_recovery.contains_key(&id)
+                && !self.host.rgb_outputs_drained(std::iter::once(&id))
+            {
+                // Recovery waits for this worker to reap before it retries the same binding.
+                Err("Previous RGB owner is still stopping".into())
+            } else {
+                self.host.attach_claimed(&id, keys, move |c| f(c))
+            };
             if let Err(error) = self.handle_output_start(&id, result) {
                 if live.is_none() {
                     return Err(error);
@@ -1531,18 +1577,10 @@ impl Runtime {
     }
 
     fn restart_registered(&mut self, retry_action_required: bool) -> Result<(), String> {
-        // Called only after all previous owners have been reaped. Never reuse a
-        // native handle across suspend; every factory revalidates its binding.
+        // Every reopened owner revalidates its binding. A recoverable RGB
+        // owner that is still stopping is deferred to its own recovery.
         self.restart_registered_rgb(None, retry_action_required)?;
-        let lcd = self
-            .lcd_specs
-            .iter()
-            .map(|(id, s)| (id.clone(), s.keys.clone(), s.factory.clone()))
-            .collect::<Vec<_>>();
-        for (id, keys, f) in lcd {
-            let result = self.start_registered_lcd(&id, keys, f);
-            self.handle_output_start(&id, result)?;
-        }
+        self.restart_registered_lcd(None)?;
         if let Some(f) = self.capture_factory.clone() {
             let generation = self.next_generation()?;
             self.capture = Some(capture_worker::Worker::start(
@@ -1573,6 +1611,20 @@ impl Runtime {
         }
         self.sensor_stamps.clear();
         self.bump()
+    }
+
+    fn restart_registered_lcd(&mut self, added: Option<&BTreeSet<String>>) -> Result<(), String> {
+        let lcd = self
+            .lcd_specs
+            .iter()
+            .filter(|(id, _)| added.is_none_or(|ids| ids.contains(*id)))
+            .map(|(id, s)| (id.clone(), s.keys.clone(), s.factory.clone()))
+            .collect::<Vec<_>>();
+        for (id, keys, f) in lcd {
+            let result = self.start_registered_lcd(&id, keys, f);
+            self.handle_output_start(&id, result)?;
+        }
+        Ok(())
     }
     fn ready(&self, recovers_independently: impl Fn(&str) -> bool) -> Result<bool, String> {
         let mut ready = true;
@@ -1675,7 +1727,7 @@ impl Runtime {
                 }
             }
         }
-        let busy = !self.refresh_started && self.power.pending() && !self.lighting_drained();
+        let busy = !self.refresh_started && self.power.pending() && !self.resume_owners_drained();
         for _ in 0..2 {
             match self
                 .power

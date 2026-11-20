@@ -232,7 +232,7 @@ impl Runtime {
         local: &Local,
         document: &Document,
         outputs: &mut OutputPlan,
-        keep_ha_session: bool,
+        startup: bool,
     ) {
         let Some(previous) = previous else {
             return;
@@ -241,10 +241,11 @@ impl Runtime {
             if let Some(binding) = local.devices.get(id)
                 && previous.devices.get(id) == Some(binding)
                 && self.device_unchanged(document, id)
-                && self
-                    .lcd
-                    .get(id)
-                    .is_some_and(|worker| worker.snapshot().phase == lcd_worker::Phase::Ready)
+                && (self.lcd.get(id).is_some_and(|worker| {
+                    let phase = worker.snapshot().phase;
+                    phase == lcd_worker::Phase::Ready
+                        || (startup && phase == lcd_worker::Phase::Connecting)
+                }) || (startup && self.output_recovery.contains_key(id)))
                 && let Some(spec) = self.lcd_specs.get(id).filter(|spec| spec.keys == *keys)
             {
                 *factory = spec.factory.clone();
@@ -258,15 +259,16 @@ impl Runtime {
                 continue;
             };
             // Manual Apply can reload HA credentials under the same binding ID.
-            if !keep_ha_session && matches!(binding, Binding::HomeAssistant { .. }) {
+            if !startup && matches!(binding, Binding::HomeAssistant { .. }) {
                 continue;
             }
             if self.device_unchanged(document, id)
                 && previous.devices.get(id) == Some(binding)
-                && self
-                    .host
-                    .status(id)
-                    .is_some_and(|snapshot| snapshot.phase == crate::runtime::output::Phase::Ready)
+                && self.host.status(id).is_some_and(|snapshot| {
+                    use crate::runtime::output::Phase;
+                    snapshot.phase == Phase::Ready
+                        || (startup && snapshot.phase == Phase::Connecting)
+                })
                 && let Some(spec) = self.rgb_specs.get(id).filter(|spec| spec.keys == *keys)
                 && (!matches!(binding, Binding::OpenRgb { .. })
                     || self.openrgb_policies.matches(&spec.factory, factory))

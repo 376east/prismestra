@@ -725,24 +725,6 @@ fn helper_note(
 }
 
 #[cfg(test)]
-fn supervise_helper(
-    state_dir: &Path,
-    request: &Request,
-    helper: &Identity,
-    snapshot: impl Fn() -> super::managed_backend::Snapshot,
-    stop_restarting: impl Fn(),
-) -> Result<(), String> {
-    supervise_helper_with_clock(
-        state_dir,
-        request,
-        helper,
-        snapshot,
-        stop_restarting,
-        &ActiveClock,
-    )
-}
-
-#[cfg(test)]
 fn supervise_helper_with_clock(
     state_dir: &Path,
     request: &Request,
@@ -781,16 +763,6 @@ fn supervise_channels(
     let mut owner_read_failed = false;
     let mut last_backend_state = None;
     loop {
-        if clock.now_ms()? >= lease_deadline {
-            helper_note(
-                output,
-                request,
-                "helper_stop",
-                None,
-                "Managed helper stopping: parent heartbeat lease expired",
-            );
-            break;
-        }
         match channels.parent_identity(request.parent.pid) {
             Ok(parent) if parent == request.parent => {}
             Ok(_) => {
@@ -827,7 +799,33 @@ fn supervise_channels(
         if channels.control("owner-pause.json", request) {
             stop_restarting();
         }
-        match channels.read::<Request>("owner-request.json") {
+        let current = channels.read::<Request>("owner-request.json");
+        let cancellation = current
+            .is_ok()
+            .then(|| channels.read::<Cancel>("owner-cancel.json"));
+        let now = clock.now_ms()?;
+        // A late poll can observe a heartbeat issued before the cached lease
+        // expired. Without that evidence, never revive an expired lease.
+        if now >= lease_deadline
+            && (!current.as_ref().is_ok_and(|current| {
+                current.timestamp_ms < lease_deadline
+                    && clock::deadline(current.timestamp_ms, now).is_ok_and(|next| now < next)
+            }) || cancellation.as_ref().is_some_and(|result| match result {
+                Ok(_) => false,
+                Err(ControlRead::Io(error)) => error.kind() != std::io::ErrorKind::NotFound,
+                Err(ControlRead::Invalid(_)) => true,
+            }))
+        {
+            helper_note(
+                output,
+                request,
+                "helper_stop",
+                None,
+                "Managed helper stopping: parent heartbeat lease expired",
+            );
+            break;
+        }
+        match current {
             Err(ControlRead::Io(error)) => {
                 if !owner_read_failed {
                     helper_note(
@@ -854,7 +852,6 @@ fn supervise_channels(
                     );
                     owner_read_failed = false;
                 }
-                let now = clock.now_ms()?;
                 if current.version != clock::PROTOCOL
                     || current.clock_domain != clock::DOMAIN
                     || current.nonce != request.nonce
@@ -873,11 +870,9 @@ fn supervise_channels(
                     );
                     break;
                 }
-                lease_deadline = clock::deadline(current.timestamp_ms, now)?;
-                if !current.restarting {
-                    stop_restarting();
-                }
-                if channels.control("owner-cancel.json", request) {
+                if cancellation
+                    .is_some_and(|read| read.is_ok_and(|cancel| matches_control(&cancel, request)))
+                {
                     helper_note(
                         output,
                         request,
@@ -886,6 +881,10 @@ fn supervise_channels(
                         "Managed helper stopping: matching owner cancellation",
                     );
                     break;
+                }
+                lease_deadline = clock::deadline(current.timestamp_ms, now)?;
+                if !current.restarting {
+                    stop_restarting();
                 }
                 let snapshot = snapshot();
                 let backend_state = (
@@ -1358,6 +1357,109 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn supervisor_reads_a_renewal_after_a_delayed_poll_without_reviving_an_expired_lease() {
+        use std::{cell::RefCell, os::windows::fs::OpenOptionsExt};
+
+        for (case, issued_ms, wake_ms, expected_publications) in [
+            ("renewed", 14_800, 15_100, 2),
+            ("stale", 10_000, 15_100, 1),
+            ("stale successor", 14_800, 19_800, 1),
+            ("at deadline", 15_000, 15_100, 1),
+            ("after deadline", 15_001, 15_100, 1),
+            ("cancelled", 14_800, 15_100, 1),
+            ("old cancel", 14_800, 15_100, 2),
+            ("different nonce", 14_800, 15_100, 1),
+            ("different identity", 14_800, 15_100, 1),
+            ("owner locked", 14_800, 15_100, 1),
+            ("cancel locked", 14_800, 15_100, 1),
+        ] {
+            let (directory, mut request, helper) = sharing_fixture("delayed-lease-poll");
+            request.timestamp_ms = 10_000;
+            let path = directory.join("owner-request.json");
+            let cancel_path = directory.join("owner-cancel.json");
+            write_json(&path, &request).unwrap();
+            let clock = FakeClock::new(request.timestamp_ms);
+            let publications = Cell::new(0);
+            let blocked_file = RefCell::new(None);
+            let cancel = |nonce: String| {
+                write_json(
+                    &cancel_path,
+                    &Cancel {
+                        version: clock::PROTOCOL,
+                        clock_domain: clock::DOMAIN.into(),
+                        nonce,
+                    },
+                )
+                .unwrap();
+            };
+            supervise_helper_with_clock(
+                &directory,
+                &request,
+                &helper,
+                || {
+                    let count = publications.get() + 1;
+                    publications.set(count);
+                    if count == 1 {
+                        // The helper misses a poll while its live owner publishes a heartbeat.
+                        clock.active_ms.set(issued_ms);
+                        let mut renewed = request.clone();
+                        renewed.timestamp_ms = issued_ms;
+                        if case == "different nonce" {
+                            renewed.nonce.push_str("-replacement");
+                        }
+                        if case == "different identity" {
+                            renewed.parent.created ^= 1;
+                        }
+                        write_json(&path, &renewed).unwrap();
+                        if matches!(case, "cancelled" | "cancel locked") {
+                            cancel(request.nonce.clone());
+                        } else if case == "old cancel" {
+                            cancel("old-nonce".into());
+                        }
+                        if matches!(case, "owner locked" | "cancel locked") {
+                            let locked = if case == "owner locked" {
+                                &path
+                            } else {
+                                &cancel_path
+                            };
+                            *blocked_file.borrow_mut() = Some(
+                                fs::OpenOptions::new()
+                                    .read(true)
+                                    .share_mode(0)
+                                    .open(locked)
+                                    .unwrap(),
+                            );
+                        }
+                        clock.active_ms.set(wake_ms);
+                    } else {
+                        cancel(request.nonce.clone());
+                    }
+                    super::super::managed_backend::Snapshot::default()
+                },
+                || {},
+                &clock,
+            )
+            .unwrap();
+            drop(blocked_file.into_inner());
+            for name in [
+                "owner-request.json",
+                "owner-cancel.json",
+                "helper-status.json",
+                "backend-events.json",
+            ] {
+                let _ = fs::remove_file(directory.join(name));
+            }
+            fs::remove_dir(directory).unwrap();
+            assert_eq!(
+                publications.get(),
+                expected_publications,
+                "{case}, heartbeat issued at {issued_ms}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn supervisor_active_clock_api_failure_stops_status_publication() {
         let (directory, mut request, helper) = sharing_fixture("clock-failure");
         request.timestamp_ms = 10_000;
@@ -1450,7 +1552,31 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn status_and_owner_read_sharing_failures_preserve_supervisor_and_recover() {
-        use std::os::windows::fs::OpenOptionsExt;
+        use std::{os::windows::fs::OpenOptionsExt, sync::mpsc};
+
+        struct SharingClock {
+            now: Cell<Option<u64>>,
+            polled: mpsc::Sender<()>,
+            resume: mpsc::Receiver<u64>,
+        }
+
+        impl Clock for SharingClock {
+            fn now_ms(&self) -> Result<u64, String> {
+                self.now
+                    .get()
+                    .ok_or_else(|| "Sharing fixture closed".into())
+            }
+
+            fn sleep(&self, _: Duration) {
+                self.now.set(
+                    self.polled
+                        .send(())
+                        .ok()
+                        .and_then(|_| self.resume.recv().ok()),
+                );
+            }
+        }
+
         let (directory, request, helper) = sharing_fixture("sharing-recovery");
         let status_path = directory.join("helper-status.json");
         fs::write(&status_path, b"{}").unwrap();
@@ -1464,8 +1590,11 @@ mod tests {
         let paused = Arc::new(AtomicBool::new(false));
         let pause_observed = paused.clone();
         let state_dir = directory.clone();
+        let now = request.timestamp_ms;
+        let (polled, completed) = mpsc::channel();
+        let (resume, command) = mpsc::channel();
         let worker = thread::spawn(move || {
-            supervise_helper(
+            supervise_helper_with_clock(
                 &state_dir,
                 &request,
                 &helper,
@@ -1476,17 +1605,28 @@ mod tests {
                 || {
                     pause_observed.store(true, Ordering::SeqCst);
                 },
+                &SharingClock {
+                    now: Cell::new(Some(now)),
+                    polled,
+                    resume: command,
+                },
             )
         });
-        thread::sleep(Duration::from_millis(750));
-        assert!(!worker.is_finished());
-        assert!(calls.load(Ordering::SeqCst) >= 2);
+        let wait_for_poll = || {
+            completed
+                .recv_timeout(Duration::from_secs(10))
+                .expect("Supervisor did not complete a sharing-fixture poll");
+        };
+        let poll = |now| {
+            resume.send(now).unwrap();
+            wait_for_poll();
+        };
+        wait_for_poll();
+        poll(now);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(fs::read(&status_path).unwrap(), b"{}");
         drop(reader);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while read_json::<Status>(&status_path).is_err() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(20));
-        }
+        poll(now);
         let first = read_json::<Status>(&status_path).unwrap();
         let owner_reader = fs::OpenOptions::new()
             .read(true)
@@ -1502,7 +1642,7 @@ mod tests {
             },
         )
         .unwrap();
-        thread::sleep(Duration::from_millis(250));
+        poll(now);
         assert!(!paused.load(Ordering::SeqCst));
         write_json(
             &directory.join("owner-pause.json"),
@@ -1513,19 +1653,14 @@ mod tests {
             },
         )
         .unwrap();
-        thread::sleep(Duration::from_millis(750));
-        assert!(!worker.is_finished());
+        poll(now);
         assert!(
             paused.load(Ordering::SeqCst),
             "Stop must suppress respawn even while owner reads are blocked"
         );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         drop(owner_reader);
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while read_json::<Status>(&status_path).unwrap().timestamp_ms <= first.timestamp_ms
-            && Instant::now() < deadline
-        {
-            thread::sleep(Duration::from_millis(20));
-        }
+        poll(now + 1);
         assert!(read_json::<Status>(&status_path).unwrap().timestamp_ms > first.timestamp_ms);
         write_json(
             &directory.join("owner-cancel.json"),
@@ -1536,6 +1671,8 @@ mod tests {
             },
         )
         .unwrap();
+        resume.send(now + 1).unwrap();
+        drop(resume);
         worker.join().unwrap().unwrap();
         for name in [
             "owner-request.json",

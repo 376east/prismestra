@@ -468,7 +468,7 @@ fn startup_isolates_endpoint_contention_and_retries_the_returned_output() {
     assert_eq!(a.calls.load(Ordering::SeqCst), 0);
     assert!(matches!(
         runtime.output_activity(device),
-        OutputActivity::Unavailable(Some(_))
+        OutputActivity::Retrying(error) if !error.is_empty()
     ));
     drop(lease);
     now += 1_000_000;
@@ -478,7 +478,7 @@ fn startup_isolates_endpoint_contention_and_retries_the_returned_output() {
     disconnected(&mut runtime, &a, "a", &mut now);
     assert!(matches!(
         runtime.output_activity(device),
-        OutputActivity::Unavailable(Some(_))
+        OutputActivity::Retrying(error) if error == "Disconnected stand output"
     ));
     a.fail.store(false, Ordering::SeqCst);
     runtime.set_group(Target::Pc, false).unwrap();
@@ -671,6 +671,8 @@ fn recovery_initial_factory_failure_then_success_reopens_without_prior_submissio
 #[test]
 fn recovery_repeated_initial_factory_failures_exhaust_three_attempts() {
     let mut runtime = runtime();
+    #[cfg(windows)]
+    let device = runtime.document().lighting.setup.devices[0].clone();
     let link = Arc::new(Link::default());
     link.fail_open.store(true, Ordering::SeqCst);
     runtime.attach_rgb("a", vec![], factory(&link)).unwrap();
@@ -679,6 +681,11 @@ fn recovery_repeated_initial_factory_failures_exhaust_three_attempts() {
     let mut now = 0;
     for delay in [1_000_000, 5_000_000, 15_000_000] {
         tick(&mut runtime, &mut now);
+        #[cfg(windows)]
+        assert!(matches!(
+            runtime.output_activity(&device),
+            OutputActivity::Retrying(error) if error == "Stand open failure"
+        ));
         let previous = runtime.host.status("a").unwrap().generation;
         let due = now + delay;
         runtime.tick(due - 1, 1_800_000_000).unwrap();
@@ -698,6 +705,11 @@ fn recovery_repeated_initial_factory_failures_exhaust_three_attempts() {
     assert_eq!(link.calls.load(Ordering::SeqCst), 4);
     assert_eq!(runtime.host.status("a").unwrap().submitted, 0);
     assert_eq!(runtime.host.status("a").unwrap().phase, Phase::Failed);
+    #[cfg(windows)]
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Unavailable(Some(error)) if error == "Stand open failure"
+    ));
     #[cfg(windows)]
     {
         let other = Arc::new(Link::default());
@@ -1073,6 +1085,12 @@ fn live_plan_waits_for_rgb_owner_release_without_stopping_its_neighbor() {
 }
 
 #[test]
+fn live_plan_recovers_a_retained_neighbor_before_the_changed_owner_releases() {
+    assert_plan_preserves_neighbor(PlanChange::RecoverNeighbor);
+    assert_plan_preserves_neighbor(PlanChange::RecoverLcd);
+}
+
+#[test]
 fn live_plan_cancel_restores_the_original_owner_without_stopping_its_neighbor() {
     assert_plan_preserves_neighbor(PlanChange::Cancel);
 }
@@ -1091,6 +1109,8 @@ enum PlanChange {
     MixedAdd,
     MixedReplace,
     Replace,
+    RecoverNeighbor,
+    RecoverLcd,
     Cancel,
 }
 
@@ -1100,7 +1120,11 @@ impl PlanChange {
             Self::Add | Self::MixedAdd => true,
             #[cfg(windows)]
             Self::NativeAdd => true,
-            Self::Replace | Self::MixedReplace | Self::Cancel => false,
+            Self::Replace
+            | Self::MixedReplace
+            | Self::RecoverNeighbor
+            | Self::RecoverLcd
+            | Self::Cancel => false,
         }
     }
 }
@@ -1115,14 +1139,16 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
     }
 
     let lcd_link = Arc::new(Link::default());
-    let (mut runtime, lcd_assets) =
-        if matches!(change, PlanChange::MixedAdd | PlanChange::MixedReplace) {
-            let (runtime, assets) =
-                arrival_lcd_runtime(&format!("live-plan-{change:?}"), lcd_link.clone());
-            (runtime, Some(assets))
-        } else {
-            (runtime(), None)
-        };
+    let (mut runtime, lcd_assets) = if matches!(
+        change,
+        PlanChange::MixedAdd | PlanChange::MixedReplace | PlanChange::RecoverLcd
+    ) {
+        let (runtime, assets) =
+            arrival_lcd_runtime(&format!("live-plan-{change:?}"), lcd_link.clone());
+        (runtime, Some(assets))
+    } else {
+        (runtime(), None)
+    };
     let held = Arc::new(Held {
         block: AtomicBool::new(true),
         ignore_cancel: true,
@@ -1174,9 +1200,13 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
     runtime
         .attach_rgb("b", healthy_keys, factory(&healthy))
         .unwrap();
+    let recover_neighbor = matches!(change, PlanChange::RecoverNeighbor);
+    if recover_neighbor {
+        runtime.enable_output_recovery("b").unwrap();
+    }
     let mut now = 0;
     working(&mut runtime, "b", &mut now);
-    let lcd_generation = lcd_assets.as_ref().map(|_| {
+    let mut lcd_generation = lcd_assets.as_ref().map(|_| {
         wait(|| {
             tick(&mut runtime, &mut now);
             runtime.lcd_status("lcd").unwrap().frames_sent > 0
@@ -1308,6 +1338,38 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
         runtime.output_activity(&runtime.document().lighting.setup.devices[1]),
         OutputActivity::Sent(_)
     ));
+    if recover_neighbor {
+        disconnected(&mut runtime, &healthy, "b", &mut now);
+        healthy.fail.store(false, Ordering::SeqCst);
+        now += 1_000_000;
+        working(&mut runtime, "b", &mut now);
+        assert_ne!(
+            runtime.host.status("b").unwrap().generation,
+            healthy_generation
+        );
+        assert!(runtime.pending_configuration());
+        assert_eq!(held.dropped.load(Ordering::SeqCst), 0);
+    }
+    let recover_lcd = matches!(change, PlanChange::RecoverLcd);
+    if recover_lcd {
+        let old = lcd_generation.unwrap();
+        lcd_link.fail.store(true, Ordering::SeqCst);
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            runtime.lcd_status("lcd").unwrap().phase == lcd_worker::Phase::Failed
+        });
+        tick(&mut runtime, &mut now);
+        lcd_link.fail.store(false, Ordering::SeqCst);
+        now += 1_000_000;
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            let status = runtime.lcd_status("lcd").unwrap();
+            status.generation != old && status.frames_sent > 0
+        });
+        lcd_generation = Some(runtime.lcd_status("lcd").unwrap().generation);
+        assert!(runtime.pending_configuration());
+        assert_eq!(held.dropped.load(Ordering::SeqCst), 0);
+    }
     if !change.adds_output() {
         assert_eq!(new.calls.load(Ordering::SeqCst), 0);
         if matches!(change, PlanChange::Cancel) {
@@ -1325,10 +1387,16 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
         assert_eq!(new.calls.load(Ordering::SeqCst), 1);
         assert_eq!(held.calls.load(Ordering::SeqCst), 1);
     }
-    assert_eq!(healthy.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        healthy.calls.load(Ordering::SeqCst),
+        1 + usize::from(recover_neighbor)
+    );
     if let Some(generation) = lcd_generation {
         assert_eq!(runtime.lcd_status("lcd").unwrap().generation, generation);
-        assert_eq!(lcd_link.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            lcd_link.calls.load(Ordering::SeqCst),
+            1 + usize::from(recover_lcd)
+        );
     }
     held.release.store(true, Ordering::SeqCst);
     drain(&mut runtime);
@@ -1532,10 +1600,154 @@ fn remove_lcd_assets(runtime: Runtime, dir: std::path::PathBuf) {
 }
 
 #[test]
+fn appending_lcd_starts_its_first_frame_without_reopening_existing_rgb() {
+    let lcd = Arc::new(Link::default());
+    let (mut fixture, assets) = arrival_lcd_runtime("append-to-live", lcd);
+    let proposal = fixture.document().clone();
+    let lcd_outputs = fixture.output_plan().lcd;
+    drain(&mut fixture);
+    drop(fixture);
+
+    let mut runtime = runtime();
+    let rgb = Arc::new(Link::default());
+    runtime
+        .attach_rgb("a", vec!["existing-rgb".into()], factory(&rgb))
+        .unwrap();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+    let before = runtime.host.status("a").unwrap();
+    let mut outputs = runtime.output_plan();
+    outputs.lcd = lcd_outputs;
+    let revision = runtime.request_outputs_for(proposal, outputs).unwrap();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.output_revision() == revision
+            && runtime
+                .lcd_status("lcd")
+                .is_some_and(|snapshot| snapshot.frames_sent > 0)
+            && runtime
+                .host
+                .status("a")
+                .is_some_and(|snapshot| snapshot.submitted > before.submitted)
+    });
+    assert_eq!(
+        runtime.host.status("a").unwrap().generation,
+        before.generation
+    );
+    assert_eq!(rgb.calls.load(Ordering::SeqCst), 1);
+    drain(&mut runtime);
+    remove_lcd_assets(runtime, assets);
+}
+
+#[cfg(windows)]
+#[test]
+fn startup_addition_keeps_healthy_rgb_while_an_unchanged_lcd_is_busy() {
+    use crate::{app::lighting_outputs::Local, devices::Binding};
+
+    let lcd = Arc::new(Link {
+        fail_open: AtomicBool::new(true),
+        ..Link::default()
+    });
+    let (mut runtime, assets) = arrival_lcd_runtime("paced-add-busy-lcd", lcd.clone());
+    let healthy = Arc::new(Link::default());
+    let saved_rgb = Binding::WledDdp {
+        endpoint: ([127, 0, 0, 207], 60334).into(),
+        controller: None,
+    };
+    runtime
+        .attach_rgb("b", saved_rgb.endpoint_keys(), factory(&healthy))
+        .unwrap();
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.lcd_status("lcd").unwrap().phase == lcd_worker::Phase::Failed
+    });
+    let before = runtime.host.status("b").unwrap();
+    let previous = Local {
+        version: 1,
+        devices: [
+            ("b".into(), saved_rgb),
+            (
+                "lcd".into(),
+                Binding::Hid {
+                    path: "bound-interface".into(),
+                },
+            ),
+        ]
+        .into(),
+        monitors: Default::default(),
+        door_brightness: 60,
+    };
+    let mut local = previous.clone();
+    let added = Binding::Ble {
+        address: 0x1234_5678_9abc,
+    };
+    let keys = added.endpoint_keys();
+    local.devices.insert("late".into(), added);
+    let mut document = runtime.document().clone();
+    let mut device = document.lighting.setup.devices[1].clone();
+    device.id = "late".into();
+    device.driver = Driver::SurplifeE1Pixels;
+    document.lighting.setup.devices.push(device);
+    document.lighting.setup.canvas.width = 3;
+    document.lighting.setup.canvas.points.push(Point {
+        device: "late".into(),
+        led: 0,
+        x: 2,
+        y: 0,
+    });
+    document.lighting.groups.door.push("late".into());
+    let mut outputs = runtime.output_plan();
+    outputs.rgb[0].2 = factory(&healthy);
+    let existing_lcd = outputs.lcd[0].2.clone();
+    outputs.lcd[0].2 = Arc::new(move |config, cancel| existing_lcd(config, cancel));
+    let late = Arc::new(Link::default());
+    outputs.rgb.push((
+        "late".into(),
+        keys,
+        factory_for(&late, Driver::SurplifeE1Pixels),
+    ));
+    let revision = runtime
+        .request_startup_outputs_for(&assets, Some(&previous), &local, document, outputs)
+        .unwrap();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.output_revision() == revision && !late.frames.lock().unwrap().is_empty()
+    });
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        before.generation
+    );
+    assert_eq!(healthy.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.lcd_status("lcd").unwrap().frames_sent, 0);
+    lcd.fail_open.store(false, Ordering::SeqCst);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.lcd_status("lcd").unwrap().frames_sent > 0
+    });
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        before.generation
+    );
+    drain(&mut runtime);
+    remove_lcd_assets(runtime, assets);
+}
+
+#[test]
 fn bound_lcd_arrival_renews_exhausted_recovery_without_restarting_other_outputs() {
     let link = Arc::new(Link::default());
     link.fail_open.store(true, Ordering::SeqCst);
     let (mut runtime, dir) = arrival_lcd_runtime("late", link.clone());
+    #[cfg(windows)]
+    let device = runtime
+        .document()
+        .lighting
+        .setup
+        .devices
+        .last()
+        .unwrap()
+        .clone();
     let other = Arc::new(Link::default());
     runtime.attach_rgb("b", vec![], factory(&other)).unwrap();
     let mut now = 0;
@@ -1544,6 +1756,11 @@ fn bound_lcd_arrival_renews_exhausted_recovery_without_restarting_other_outputs(
     for delay in [1_000_000, 5_000_000, 15_000_000] {
         wait(|| runtime.lcd_status("lcd").unwrap().phase == lcd_worker::Phase::Failed);
         tick(&mut runtime, &mut now);
+        #[cfg(windows)]
+        assert!(matches!(
+            runtime.output_activity(&device),
+            OutputActivity::Retrying(error) if error == "LCD stand unavailable"
+        ));
         let old = runtime.lcd_status("lcd").unwrap().generation;
         now += delay;
         tick(&mut runtime, &mut now);
@@ -1558,6 +1775,11 @@ fn bound_lcd_arrival_renews_exhausted_recovery_without_restarting_other_outputs(
     now += 100_000_000;
     tick(&mut runtime, &mut now);
     assert_eq!(link.calls.load(Ordering::SeqCst), 4);
+    #[cfg(windows)]
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Unavailable(Some(error)) if error == "LCD stand unavailable"
+    ));
     link.fail_open.store(false, Ordering::SeqCst);
     runtime.lcd_interface_arrived("BOUND-INTERFACE", true);
     tick(&mut runtime, &mut now);
@@ -1955,4 +2177,166 @@ fn resume_recovers_a_known_lcd_whose_endpoint_is_still_claimed() {
     );
     drain(&mut runtime);
     remove_lcd_assets(runtime, dir);
+}
+
+#[test]
+fn second_resume_restores_independent_rgb_before_the_old_write_releases() {
+    for autonomous in [false, true] {
+        assert_second_resume_preserves_independent_rgb(autonomous);
+    }
+}
+
+fn assert_second_resume_preserves_independent_rgb(autonomous: bool) {
+    use std::sync::mpsc::{self, Receiver, SyncSender};
+
+    struct BlockOnce {
+        sink: RgbLink,
+        armed: Arc<AtomicBool>,
+        gate: Option<(SyncSender<()>, Receiver<()>)>,
+    }
+
+    impl RgbDriver for BlockOnce {
+        fn protocol(&self) -> Driver {
+            self.sink.protocol()
+        }
+
+        fn leds(&self) -> usize {
+            self.sink.leds()
+        }
+
+        fn write(&mut self, colors: &[Rgb], cancel: &Cancellation) -> Result<WriteResult, String> {
+            if self.armed.swap(false, Ordering::SeqCst)
+                && let Some((entered, release)) = self.gate.take()
+            {
+                entered.send(()).map_err(|e| e.to_string())?;
+                release
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|e| e.to_string())?;
+                assert!(cancel.cancelled());
+                return Err("Injected old write returned after cancellation".into());
+            }
+            self.sink.write(colors, cancel)
+        }
+    }
+
+    let mut runtime = runtime();
+    if autonomous {
+        runtime.enable_autonomous_rgb().unwrap();
+    }
+    let a = Arc::new(Link::default());
+    let b = Arc::new(Link::default());
+    let armed = Arc::new(AtomicBool::new(false));
+    let (entered, blocked) = mpsc::sync_channel(1);
+    let (release, finished) = mpsc::channel();
+    let first_gate = Mutex::new(Some((entered, finished)));
+    let (source, trigger) = (a.clone(), armed.clone());
+    runtime
+        .attach_rgb(
+            "a",
+            vec!["qa:power:held".into()],
+            Arc::new(move |_| {
+                source.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(BlockOnce {
+                    sink: RgbLink(source.clone(), Driver::WledDdp),
+                    armed: trigger.clone(),
+                    gate: first_gate.lock().unwrap().take(),
+                }))
+            }),
+        )
+        .unwrap();
+    runtime
+        .attach_rgb("b", vec!["qa:power:healthy".into()], factory(&b))
+        .unwrap();
+    runtime.enable_registered_output_recovery();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+    working(&mut runtime, "b", &mut now);
+    let first_a = runtime.host.status("a").unwrap().generation;
+    let first_b = runtime.host.status("b").unwrap().generation;
+    armed.store(true, Ordering::SeqCst);
+    let mut has_blocked = false;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        has_blocked |= blocked.try_recv().is_ok();
+        has_blocked
+    });
+    let before = runtime.host.status("a").unwrap();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.host.status("a").unwrap().received >= before.received + 3
+    });
+    let queued = runtime.host.status("a").unwrap();
+    assert!(queued.received > before.received && queued.replaced > before.replaced);
+    assert_eq!(queued.submitted, before.submitted);
+    let old_a_frames = a.frames.lock().unwrap().len();
+
+    runtime.notify_power(true, now).unwrap();
+    runtime.notify_power(false, now).unwrap();
+    now += 6_000_000;
+    tick(&mut runtime, &mut now);
+    assert!(runtime.power.pending() && runtime.refresh.is_none());
+    runtime.notify_power(true, now).unwrap();
+    runtime.notify_power(false, now).unwrap();
+    let second_resume_at = now;
+    runtime.set_group(Target::Pc, false).unwrap();
+    let old_b_frames = b.frames.lock().unwrap().len();
+    now += 7_000_000;
+    working(&mut runtime, "b", &mut now);
+    let resumed_b = runtime.host.status("b").unwrap().generation;
+    assert_ne!(resumed_b, first_b);
+    let initial_b = b.frames.lock().unwrap()[old_b_frames].clone();
+    assert_eq!(initial_b, vec![Rgb::default()]);
+
+    now = now.max(second_resume_at + 60_000_000);
+    tick(&mut runtime, &mut now);
+
+    assert_eq!(runtime.power.suspends, 2);
+    assert_eq!(runtime.power.resumes, 2);
+    assert!(!runtime.power.pending() && runtime.refresh.is_none());
+    assert!(runtime.power.error().is_none());
+    assert!(!runtime.host.output_reaped("a"));
+    assert_eq!(a.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(b.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(runtime.host.status("a").unwrap().generation, first_a);
+    assert_eq!(runtime.host.status("b").unwrap().generation, resumed_b);
+    assert_eq!(a.frames.lock().unwrap().len(), old_a_frames);
+    println!(
+        "autonomous={autonomous} held_after_second_resume_us={} power_pending=false power_error=false opens_a=1 opens_b=2 queued_received_delta={} queued_replaced_delta={}",
+        now - second_resume_at,
+        queued.received - before.received,
+        queued.replaced - before.replaced
+    );
+
+    release.send(()).unwrap();
+    wait(|| {
+        runtime.host.reap();
+        runtime.host.output_reaped("a")
+    });
+    assert_eq!(
+        a.frames.lock().unwrap().len(),
+        old_a_frames,
+        "old queued frame escaped cancellation"
+    );
+    working(&mut runtime, "a", &mut now);
+    working(&mut runtime, "b", &mut now);
+    assert!(!runtime.power.pending() && runtime.power.error().is_none());
+    assert_eq!(a.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(b.calls.load(Ordering::SeqCst), 2);
+    let resumed_a = runtime.host.status("a").unwrap().generation;
+    assert_ne!(resumed_a, first_a);
+    assert_eq!(runtime.host.status("b").unwrap().generation, resumed_b);
+    assert!(!runtime.group_on(Target::Pc));
+    for (link, old_frames) in [(&a, old_a_frames), (&b, old_b_frames)] {
+        let frames = link.frames.lock().unwrap();
+        assert!(!frames[old_frames..].is_empty());
+        assert!(
+            frames[old_frames..]
+                .iter()
+                .all(|frame| frame.as_slice() == [Rgb::default()])
+        );
+    }
+    println!(
+        "after_release old_queue_dropped=true resume_completed=true a_generation={first_a}->{resumed_a} b_generation={first_b}->{resumed_b} first_frames_match_current_off=true"
+    );
+    drain(&mut runtime);
 }
