@@ -1,0 +1,104 @@
+name: Preview 7 CRT diagnostic
+
+on:
+  push:
+    branches: [codex/verify-crt-08a5661]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    name: Exact 08a5661 installation and upgrade
+    if: github.repository == 'malyarq/prismestra'
+    runs-on: windows-2022
+    timeout-minutes: 75
+    env:
+      EXACT_COMMIT: 08a5661d9af94995bf06dc14e59101e96317ebad
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 08a5661d9af94995bf06dc14e59101e96317ebad
+          persist-credentials: false
+      - name: Build the exact diagnostic Setup and Sources
+        id: build
+        env:
+          PRISMESTRA_WEBVIEW2_X64_URL: ${{ vars.PRISMESTRA_WEBVIEW2_X64_URL }}
+        run: |
+          if ((git rev-parse HEAD) -cne $env:EXACT_COMMIT) { throw 'Unexpected checkout' }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vsdevcmd = & $vswhere -latest -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find Common7/Tools/VsDevCmd.bat
+          if (-not $vsdevcmd -or $LASTEXITCODE) { throw 'VS 2022 MSVC tools were not found' }
+          rustup toolchain install 1.99.1 --profile minimal
+          if ($LASTEXITCODE) { throw 'Rust installation failed' }
+          $env:RUSTUP_TOOLCHAIN = '1.99.1'
+          $output = Join-Path $env:RUNNER_TEMP prismestra-crt-diagnostic
+          New-Item -ItemType Directory -Path evidence | Out-Null
+          python scripts/build_windows_candidate.py --commit $env:EXACT_COMMIT --version 0.1.0.7 --vsdevcmd $vsdevcmd --output $output
+          if ($LASTEXITCODE) { throw 'Exact build failed' }
+          $dir = Join-Path $output candidate
+          $sums = (Get-FileHash (Join-Path $dir SHA256SUMS.txt)).Hash.ToLowerInvariant()
+          $candidate = ./scripts/installer/verify_candidate.ps1 -Directory $dir -Commit $env:EXACT_COMMIT -SumsSha256 $sums
+          $manifest = Get-Content (Join-Path $dir 'install-manifest.json') -Raw | ConvertFrom-Json
+          [ordered]@{
+            scope = 'diagnostic_preinstalled_runtime'
+            commit = $env:EXACT_COMMIT
+            workflow_commit = $env:GITHUB_SHA
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            runner_os = $env:RUNNER_OS
+            image_os = $env:ImageOS
+            image_version = $env:ImageVersion
+            setup_sha256 = $candidate.SetupSha256
+            manifest_sha256 = $candidate.ManifestSha256
+            sources_sha256 = (Get-FileHash (Join-Path $dir 'Prismestra-Sources-0.1.0.7.zip')).Hash.ToLowerInvariant()
+            component_sha256 = $manifest.backend.component_archive_sha256
+            app_sha256 = $manifest.app_sha256
+            backend_sha256 = $manifest.backend.sha256
+            sums_sha256 = $sums
+            cold_vc_download = 'not_exercised'
+          } | ConvertTo-Json | Set-Content evidence/build.json
+          Copy-Item (Join-Path $dir install-manifest.json),(Join-Path $dir SHA256SUMS.txt) evidence
+          Copy-Item (Join-Path $output openrgb-inventory.json) evidence
+          "sums=$sums" >> $env:GITHUB_OUTPUT
+      - name: Check Setup without a prior Prismestra installation
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          SUMS: ${{ steps.build.outputs.sums }}
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'prismestra-crt-diagnostic/candidate'
+          $c = ./scripts/installer/verify_candidate.ps1 -Directory $dir -Commit $env:EXACT_COMMIT -SumsSha256 $env:SUMS
+          ./scripts/installer/test_offline_setup.ps1 -Installer $c.Setup -Sha256 $c.SetupSha256 -Commit $env:EXACT_COMMIT -ManifestSha256 $c.ManifestSha256 -ReportDirectory evidence/clean -DisposableRunner
+      - name: Open the installed app as an ordinary Windows user
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          SUMS: ${{ steps.build.outputs.sums }}
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'prismestra-crt-diagnostic/candidate'
+          $c = ./scripts/installer/verify_candidate.ps1 -Directory $dir -Commit $env:EXACT_COMMIT -SumsSha256 $env:SUMS
+          ./scripts/installer/test_standard_user.ps1 -Installer $c.Setup -InstallerSha256 $c.SetupSha256 -Commit $env:EXACT_COMMIT -ManifestSha256 $c.ManifestSha256 -ReportDirectory evidence/standard-user -DisposableRunner
+      - name: Upgrade the published Preview 6
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          SUMS: ${{ steps.build.outputs.sums }}
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'prismestra-crt-diagnostic/candidate'
+          $c = ./scripts/installer/verify_candidate.ps1 -Directory $dir -Commit $env:EXACT_COMMIT -SumsSha256 $env:SUMS
+          $baseline = Get-Content scripts/installer/upgrade-baseline.lock.json -Raw | ConvertFrom-Json
+          $previous = Join-Path $env:RUNNER_TEMP $baseline.file
+          Invoke-WebRequest -Uri $baseline.source -OutFile $previous -TimeoutSec 180
+          ./scripts/installer/test_offline_setup.ps1 -PreviousInstaller $previous -Installer $c.Setup -Sha256 $c.SetupSha256 -Commit $env:EXACT_COMMIT -ManifestSha256 $c.ManifestSha256 -ReportDirectory evidence/upgrade -DisposableRunner
+      - name: Retain diagnostic receipts only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: crt-diagnostic-receipts
+          path: |
+            evidence/
+            ${{ runner.temp }}/prismestra-crt-diagnostic/openrgb-build/*.log
+            ${{ runner.temp }}/prismestra-crt-diagnostic/openrgb-inventory.json
+          if-no-files-found: error
+          retention-days: 7
