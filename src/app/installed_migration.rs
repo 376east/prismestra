@@ -292,17 +292,34 @@ fn apply(
         let Some(bytes) = read_optional(&path, limit)? else {
             continue;
         };
-        match name {
+        let bytes = match name {
             "sensor-sources.json" => {
-                sensor_bindings::Catalog::decode(&bytes)?;
+                // Preserve the exact catalog already pinned by an older interrupted import.
+                if pending
+                    .as_ref()
+                    .and_then(|receipt| receipt.after.get(&destination))
+                    == Some(&fingerprint(&bytes))
+                {
+                    sensor_bindings::Catalog::decode(&bytes)?;
+                    bytes
+                } else {
+                    rebase_sensor_scope(
+                        bytes,
+                        &source.profile,
+                        &root.join("profile.json"),
+                        &document,
+                    )?
+                }
             }
             "scene-library.json" => {
                 Catalog::load(&path, &document.lighting.scene)?;
+                bytes
             }
             _ => {
                 draft::Draft::decode(&bytes)?;
+                bytes
             }
-        }
+        };
         files.insert(destination, bytes);
     }
     let after = files
@@ -372,6 +389,56 @@ fn apply(
     receipt.source_running = source_running;
     write_receipt(root, &receipt)?;
     Ok(receipt.outcome(source_running))
+}
+
+fn rebase_sensor_scope(
+    bytes: Vec<u8>,
+    source: &Path,
+    target: &Path,
+    document: &Document,
+) -> Result<Vec<u8>, String> {
+    use sensor_bindings::Scope;
+    let mut catalog = sensor_bindings::Catalog::decode(&bytes)?;
+    let inputs = document
+        .temperatures
+        .sources
+        .iter()
+        .filter_map(|source| match &source.value {
+            super::sensors::Value::Sensor { input } => Some(input.clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if inputs.is_empty() {
+        return Ok(bytes);
+    }
+
+    let source = source.to_string_lossy();
+    let plain = source.strip_prefix(r"\\?\").unwrap_or(&source);
+    let target = Scope::lighting(&target.to_string_lossy(), document)?;
+    if catalog.routes.iter().any(|route| route.scope == target) {
+        return Ok(bytes);
+    }
+    let old_scopes = [source.as_ref(), plain]
+        .into_iter()
+        .map(|name| Scope::lighting(name, document))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let mut present = old_scopes
+        .iter()
+        .filter(|scope| catalog.routes.iter().any(|route| &route.scope == *scope));
+    let Some(old) = present.next() else {
+        return Ok(bytes);
+    };
+    if present.next().is_some() || catalog.prepare(old, &inputs).is_err() {
+        return Ok(bytes);
+    }
+    for route in &mut catalog.routes {
+        if &route.scope == old {
+            route.scope = target.clone();
+        }
+    }
+    catalog.encode()
 }
 
 fn copy_assets(source: &Path, target: &Path, document: &Document) -> Result<(), String> {
@@ -1540,6 +1607,171 @@ mod tests {
             sensors
         );
         assert!(!installed.join("backend-task.json").exists());
+    }
+
+    fn installed_temperature_scope_fixture() -> (
+        Fixture,
+        Document,
+        Vec<String>,
+        sensor_bindings::Scope,
+        sensor_bindings::Scope,
+        sensor_bindings::Catalog,
+    ) {
+        use crate::app::{
+            sensor_bindings::{Catalog as SensorCatalog, Scope, Target},
+            sensor_pci::Pci,
+            sensors::{Source as TemperatureSource, Value},
+        };
+        let fixture = Fixture::new();
+        let mut doc = document(true);
+        let inputs = (0..5).map(|i| format!("sensor_{i}")).collect::<Vec<_>>();
+        for input in &inputs {
+            doc.temperatures.sources.push(TemperatureSource {
+                key: format!("view_{input}"),
+                value: Value::Sensor {
+                    input: input.clone(),
+                },
+            });
+        }
+        fixture.populate(&doc, "127.0.0.1:6742".parse().unwrap());
+        let old_identity = fixture.source.profile.to_string_lossy();
+        let destination = fixture.target.join("profile.json");
+        let new_identity = destination.to_string_lossy();
+        let old_scope = Scope::lighting(&old_identity, &doc).unwrap();
+        let new_scope = Scope::lighting(&new_identity, &doc).unwrap();
+        let mut catalog = SensorCatalog::default();
+        catalog
+            .set_source(
+                "physical/test-nvidia",
+                Target::Nvidia {
+                    pci: Pci {
+                        device_id: 0x280310de,
+                        subsystem_id: 0x12345678,
+                        revision_id: 0xa1,
+                        extended_device_id: 0x77,
+                    },
+                },
+            )
+            .unwrap();
+        (fixture, doc, inputs, old_scope, new_scope, catalog)
+    }
+
+    #[test]
+    fn installed_migration_rebases_only_the_exact_temperature_scope() {
+        use sensor_bindings::{Catalog as SensorCatalog, Scope};
+        let (fixture, doc, inputs, old_scope, new_scope, mut catalog) =
+            installed_temperature_scope_fixture();
+        let old_identity = fixture.source.profile.to_string_lossy();
+        let foreign = Scope::lighting("another-profile", &doc).unwrap();
+        let mut stale_doc = doc.clone();
+        stale_doc.temperatures.sources.pop();
+        let stale = Scope::lighting(&old_identity, &stale_doc).unwrap();
+        assert_ne!(old_scope, new_scope);
+        assert_ne!(old_scope, stale);
+        let routes = inputs
+            .iter()
+            .map(|input| (input.clone(), "physical/test-nvidia".into()))
+            .collect::<Vec<_>>();
+        catalog.set_routes(&old_scope, &routes).unwrap();
+        catalog.set_routes(&foreign, &routes[..1]).unwrap();
+        catalog.set_routes(&stale, &routes[..4]).unwrap();
+        let expected = catalog.prepare(&old_scope, &inputs).unwrap();
+        assert_eq!(expected.len(), 5);
+        assert!(catalog.prepare(&stale, &inputs).is_err());
+        assert!(catalog.prepare(&new_scope, &inputs).is_err());
+        let foreign_routes = catalog.prepare(&foreign, &inputs[..1]).unwrap();
+        let original = catalog.encode().unwrap();
+        let source_path = fixture.source.state.join("sensor-sources.json");
+        fs::write(&source_path, &original).unwrap();
+
+        fixture.migrate(false).unwrap();
+        let installed_path = fixture.target.join("state/sensor-sources.json");
+        let installed = SensorCatalog::load(&installed_path).unwrap();
+        assert_eq!(fs::read(&source_path).unwrap(), original);
+        assert_eq!(installed.sources, catalog.sources);
+        assert_eq!(
+            installed.prepare(&foreign, &inputs[..1]).unwrap(),
+            foreign_routes
+        );
+        assert!(installed.prepare(&stale, &inputs).is_err());
+        let actual = installed
+            .prepare(&new_scope, &inputs)
+            .expect("five verified routes must resolve for the installed profile path");
+        assert_eq!(actual, expected);
+        let migrated_bytes = fs::read(&installed_path).unwrap();
+        fixture.migrate(false).unwrap();
+        assert_eq!(fs::read(&installed_path).unwrap(), migrated_bytes);
+    }
+
+    #[test]
+    fn sensor_scope_accepts_dos_path_but_preserves_conflicting_scopes() {
+        use sensor_bindings::{Catalog as SensorCatalog, Scope};
+        let (fixture, doc, inputs, old, new, mut catalog) = installed_temperature_scope_fixture();
+        let source = fixture.source.profile.to_str().unwrap();
+        let dos = Scope::lighting(source.strip_prefix(r"\\?\").unwrap(), &doc).unwrap();
+        let installed = fixture.target.join("profile.json");
+        let routes = inputs
+            .iter()
+            .map(|input| (input.clone(), "physical/test-nvidia".into()))
+            .collect::<Vec<_>>();
+        catalog.set_routes(&dos, &routes).unwrap();
+        let original = catalog.encode().unwrap();
+        let migrated =
+            rebase_sensor_scope(original, &fixture.source.profile, &installed, &doc).unwrap();
+        assert_eq!(
+            SensorCatalog::decode(&migrated)
+                .unwrap()
+                .prepare(&new, &inputs),
+            catalog.prepare(&dos, &inputs)
+        );
+        catalog.set_routes(&old, &routes[..1]).unwrap();
+        let ambiguous = catalog.encode().unwrap();
+        assert_eq!(
+            rebase_sensor_scope(ambiguous.clone(), &fixture.source.profile, &installed, &doc)
+                .unwrap(),
+            ambiguous
+        );
+        catalog.set_routes(&new, &routes[..1]).unwrap();
+        let existing = catalog.encode().unwrap();
+        assert_eq!(
+            rebase_sensor_scope(existing.clone(), &fixture.source.profile, &installed, &doc)
+                .unwrap(),
+            existing
+        );
+    }
+
+    #[test]
+    fn installed_migration_does_not_rebase_invalid_temperature_routes() {
+        use sensor_bindings::Catalog as SensorCatalog;
+        for incomplete in [true, false] {
+            let (fixture, _, inputs, old_scope, new_scope, mut catalog) =
+                installed_temperature_scope_fixture();
+            let mut routes = inputs
+                .iter()
+                .map(|input| (input.clone(), "physical/test-nvidia".into()))
+                .collect::<Vec<_>>();
+            if incomplete {
+                routes.pop();
+            } else {
+                routes.push(("extra_input".into(), "physical/test-nvidia".into()));
+            }
+            catalog.set_routes(&old_scope, &routes).unwrap();
+            assert!(catalog.prepare(&old_scope, &inputs).is_err());
+            let source = fixture.source.state.join("sensor-sources.json");
+            let bytes = catalog.encode().unwrap();
+            fs::write(&source, &bytes).unwrap();
+            fixture.migrate(false).unwrap();
+            assert_eq!(fs::read(&source).unwrap(), bytes);
+            let installed =
+                SensorCatalog::load(&fixture.target.join("state/sensor-sources.json")).unwrap();
+            assert!(
+                installed
+                    .routes
+                    .iter()
+                    .all(|route| route.scope != new_scope)
+            );
+            assert!(installed.prepare(&new_scope, &inputs).is_err());
+        }
     }
 
     #[test]
