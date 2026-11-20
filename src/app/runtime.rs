@@ -144,7 +144,8 @@ impl Store {
     }
 }
 
-pub type RgbFactory = Arc<dyn Fn(Cancellation) -> Result<Box<dyn RgbDriver>, String> + Send + Sync>;
+type RgbOpen = dyn Fn(Cancellation) -> Result<Box<dyn RgbDriver>, String> + Send + Sync;
+pub type RgbFactory = Arc<RgbOpen>;
 pub type LcdTransport = Box<dyn crate::lcd::protocol::ReportTransport>;
 pub type LcdFactory = Arc<
     dyn Fn(lcd::Config, Cancellation) -> Result<(lcd::Controller, LcdTransport), String>
@@ -267,6 +268,8 @@ pub struct Runtime {
     #[cfg(windows)]
     managed_backend: Option<super::backend_helper::Backend>,
     #[cfg(windows)]
+    openrgb_policies: managed_backend::OpenRgbPolicies,
+    #[cfg(windows)]
     managed_backend_ids: BTreeSet<String>,
     #[cfg(windows)]
     managed_backend_generation: u64,
@@ -342,6 +345,8 @@ impl Runtime {
             sample_freshness: vec![],
             #[cfg(windows)]
             managed_backend: None,
+            #[cfg(windows)]
+            openrgb_policies: managed_backend::OpenRgbPolicies::default(),
             #[cfg(windows)]
             managed_backend_ids: BTreeSet::new(),
             #[cfg(windows)]

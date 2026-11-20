@@ -97,6 +97,7 @@ pub struct Snapshot {
 pub struct Backend {
     endpoint: SocketAddr,
     inner: Inner,
+    ownership: Arc<()>,
 }
 enum Inner {
     Direct(Manager),
@@ -118,6 +119,7 @@ impl Backend {
     pub fn software_ready(endpoint: SocketAddr, generation: u64) -> Self {
         Self {
             endpoint,
+            ownership: Arc::new(()),
             inner: Inner::Software(Snapshot {
                 ready_generation: generation,
                 ready: true,
@@ -147,6 +149,7 @@ impl Backend {
                     if let Some(policy) = resolve_installed_task(state_dir, &config, &task) {
                         return Ok(Some(Self {
                             endpoint,
+                            ownership: Arc::new(()),
                             inner: Inner::Task(Proxy::start(
                                 state_dir,
                                 &policy.outbox,
@@ -158,7 +161,14 @@ impl Backend {
                 }
             }
         };
-        Ok(Some(Self { endpoint, inner }))
+        Ok(Some(Self {
+            endpoint,
+            inner,
+            ownership: Arc::new(()),
+        }))
+    }
+    pub(super) fn ownership(&self) -> Arc<()> {
+        self.ownership.clone()
     }
     pub fn endpoint(&self) -> SocketAddr {
         self.endpoint

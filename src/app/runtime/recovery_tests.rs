@@ -19,10 +19,10 @@ struct Link {
     fail_open: AtomicBool,
     frames: Mutex<Vec<Vec<Rgb>>>,
 }
-struct RgbLink(Arc<Link>);
+struct RgbLink(Arc<Link>, Driver);
 impl RgbDriver for RgbLink {
     fn protocol(&self) -> Driver {
-        Driver::WledDdp
+        self.1.clone()
     }
     fn leds(&self) -> usize {
         1
@@ -36,13 +36,16 @@ impl RgbDriver for RgbLink {
     }
 }
 fn factory(link: &Arc<Link>) -> RgbFactory {
+    factory_for(link, Driver::WledDdp)
+}
+fn factory_for(link: &Arc<Link>, driver: Driver) -> RgbFactory {
     let link = link.clone();
     Arc::new(move |_| {
         link.calls.fetch_add(1, Ordering::SeqCst);
         if link.fail_open.load(Ordering::SeqCst) {
             return Err("Stand open failure".into());
         }
-        Ok(Box::new(RgbLink(link.clone())))
+        Ok(Box::new(RgbLink(link.clone(), driver.clone())))
     })
 }
 fn runtime() -> Runtime {
@@ -804,6 +807,137 @@ fn live_plan_adds_an_independent_rgb_output_while_an_existing_write_is_held() {
 #[test]
 fn live_plan_native_discovery_keeps_ready_bindings_when_preparing_fresh_factories() {
     assert_plan_preserves_neighbor(PlanChange::NativeAdd);
+}
+
+#[cfg(windows)]
+#[test]
+fn live_plan_native_discovery_keeps_ready_external_openrgb() {
+    use crate::{app::lighting_outputs::Local, devices::Binding};
+
+    let mut document = runtime().document().clone();
+    document.lighting.setup.devices[1].driver = Driver::OpenRgb;
+    let mut runtime = Runtime::new(document.clone(), None).unwrap();
+    let wled = |port| Binding::WledDdp {
+        endpoint: ([127, 0, 0, 207], port).into(),
+        controller: None,
+    };
+    let previous = Local {
+        version: 1,
+        devices: [
+            ("a".into(), wled(60335)),
+            (
+                "b".into(),
+                Binding::OpenRgb {
+                    endpoint: ([127, 0, 0, 207], 60336).into(),
+                    identity: "1".repeat(64),
+                    topology: "2".repeat(64),
+                },
+            ),
+        ]
+        .into(),
+        monitors: Default::default(),
+        door_brightness: 60,
+    };
+    let state = std::env::temp_dir().join(format!(
+        "prismestra-plan-external-openrgb-{}-{}",
+        std::process::id(),
+        crate::clock::monotonic_us()
+    ));
+    let rgb = Arc::new(Link::default());
+    let sdk = Arc::new(Link::default());
+    let added = Arc::new(Link::default());
+    let prepare = |local: &Local, document: &Document| {
+        let mut plan = local.prepare(document, &state).unwrap();
+        for (id, _, next) in &mut plan.rgb {
+            *next = match id.as_str() {
+                "a" => factory(&rgb),
+                "b" => factory_for(&sdk, Driver::OpenRgb),
+                _ => factory(&added),
+            };
+        }
+        plan
+    };
+    let plan = prepare(&previous, &document);
+    runtime
+        .request_startup_outputs_for(&state, None, &previous, document.clone(), plan)
+        .unwrap();
+    let mut now = 0;
+    tick(&mut runtime, &mut now);
+    working(&mut runtime, "a", &mut now);
+    working(&mut runtime, "b", &mut now);
+    let generation = runtime.host.status("b").unwrap().generation;
+
+    let mut local = previous.clone();
+    local.devices.insert("new".into(), wled(60337));
+    let mut device = document.lighting.setup.devices[0].clone();
+    device.id = "new".into();
+    document.lighting.setup.devices.push(device);
+    document.lighting.setup.canvas.width = 3;
+    document.lighting.setup.canvas.points.push(Point {
+        device: "new".into(),
+        led: 0,
+        x: 2,
+        y: 0,
+    });
+    document.lighting.groups.pc.push("new".into());
+    let plan = prepare(&local, &document);
+    let applied = runtime.output_plan();
+    let mut manual = plan.clone();
+    runtime
+        .prepare_managed_outputs(&state, Some(&previous), &local, &document, &mut manual)
+        .unwrap();
+    let (_, _, old_openrgb) = applied.rgb.iter().find(|(id, _, _)| id == "b").unwrap();
+    let (_, _, manual_openrgb) = manual.rgb.iter().find(|(id, _, _)| id == "b").unwrap();
+    assert!(Arc::ptr_eq(old_openrgb, manual_openrgb));
+    let revision = runtime
+        .request_startup_outputs_for(&state, Some(&previous), &local, document, plan)
+        .unwrap();
+    assert!(matches!(
+        runtime.output_activity(&runtime.document().lighting.setup.devices[1]),
+        OutputActivity::Sent(_)
+    ));
+    working(&mut runtime, "new", &mut now);
+    working(&mut runtime, "b", &mut now);
+    assert_eq!(runtime.output_revision(), revision);
+    assert_eq!(runtime.host.status("b").unwrap().generation, generation);
+    assert_eq!(sdk.calls.load(Ordering::SeqCst), 1);
+
+    // A live external owner must not survive a change to managed policy.
+    // The software backend reports readiness but cannot grant any I/O.
+    let Binding::OpenRgb { endpoint, .. } = local.devices["b"] else {
+        unreachable!();
+    };
+    std::fs::create_dir(&state).unwrap();
+    let config = state.join("managed-openrgb.json");
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1, "enabled": true, "executable": std::env::current_exe().unwrap(),
+            "config_dir": state, "endpoint": endpoint, "expected_executable_sha256": "0".repeat(64)
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
+        endpoint, 1,
+    ));
+    let document = runtime.document().clone();
+    let plan = prepare(&local, &document);
+    runtime
+        .request_startup_outputs_for(&state, Some(&local), &local, document, plan)
+        .unwrap();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime
+            .host
+            .status("b")
+            .is_some_and(|status| status.phase == Phase::Failed)
+    });
+    assert_ne!(runtime.host.status("b").unwrap().generation, generation);
+    assert_eq!(sdk.calls.load(Ordering::SeqCst), 1);
+    drain(&mut runtime);
+    std::fs::remove_file(config).unwrap();
+    std::fs::remove_dir(state).unwrap();
 }
 
 #[test]
