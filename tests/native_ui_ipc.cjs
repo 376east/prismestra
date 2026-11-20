@@ -134,6 +134,32 @@ paletteAction('insert-palette-color');assert.equal(vm.runInContext('draft.colors
 vm.runInContext('state.pending=false;draft=null;previewQueued=false',context);
 console.log('PASS: palette insertion and reorder preview ordered RGB, scene untouched, palette mode and bounds respected');
 
+// Built-in templates are available beside existing entries and edit as unsaved copies.
+const plumDawn={id:'builtin:plum-dawn',name:'Сливовый рассвет',builtIn:true,scene:{...structuredClone(scene),speed:24,colors:[0x243467,0x7452a4,0xcc9dd5,0xfdb87d]}};
+context.payload={kind:'snapshot',state:{...structuredClone(initial),draftScene:null,draftOrigin:null,library:[plumDawn,...structuredClone(initial.library)]}};
+vm.runInContext('draft=null;view="library";window.prismestraReceive(payload)',context);
+let builtInMarkup=find('#main').innerHTML;
+assert.ok(builtInMarkup.includes('Сливовый рассвет'));
+assert.ok(builtInMarkup.includes('Шаблон'));
+assert.ok(!builtInMarkup.includes('data-remove="builtin:plum-dawn"'));
+assert.ok(builtInMarkup.includes('data-remove="saved"'));
+const beforeBuiltIn=commands.length;
+const presetClick=dataset=>events.click({target:{closest:()=>({dataset,disabled:false,hasAttribute:()=>true})}});
+presetClick({edit:plumDawn.id});
+assert.equal(commands.at(-1).op,'preview_scene');
+assert.equal(commands.at(-1).origin.id,null);
+assert.deepEqual(commands.at(-1).scene,plumDawn.scene);
+assert.ok(commands.slice(beforeBuiltIn).every(command=>command.op==='preview_scene'));
+assert.ok(!find('#main').innerHTML.includes('data-action="rename"'));
+vm.runInContext('draft.speed=35;requestPreview();flushPreview();saveDraft("My plum scene")',context);
+assert.equal(commands.at(-1).op,'save_scene');
+assert.equal(commands.at(-1).id,null,'saving a template creates a personal entry');
+assert.equal(commands.at(-1).scene.speed,35);
+assert.equal(vm.runInContext('state.library[0].scene.speed',context),24);
+assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(state.library[1].scene)',context)),scene);
+vm.runInContext('commandPending=false;awaitingCommandAck=false;savedSceneRequest=null;draft=null;draftOrigin=null;selectedId=null',context);
+console.log('PASS: built-in template preview and copy leave the preset and the legacy catalog entry untouched');
+
 // Native library frames go through the same pixel painter; missing frames keep a palette fallback.
 context.payload={kind:'snapshot',state:{...structuredClone(initial),library:[{id:'saved',name:'Native frame',scene,preview:{width:2,height:1,colors:[0xff0000,0x00ff00]}},{id:'fallback',name:'No cached frame',scene}]}};vm.runInContext('view="library";window.prismestraReceive(payload)',context);
 assert.ok(find('#main').innerHTML.includes('data-library-preview="saved"'));assert.ok(find('#main').innerHTML.includes('Палитра сцены'));const artwork=find('library-canvas-saved');assert.equal(artwork.width,2);assert.equal(artwork.height,1);assert.deepEqual([...artwork.lastPixels.data],[255,0,0,255,0,255,0,255]);assert.ok(find('#main').innerHTML.includes('параметры RGB'));

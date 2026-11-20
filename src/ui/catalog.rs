@@ -1,7 +1,11 @@
 //! Named native scenes. This catalog never contains bindings or credentials.
 pub(crate) mod draft;
 
-use crate::{lighting::scene::Effect, runtime::scene::Scene, storage};
+use crate::{
+    lighting::scene::Effect,
+    runtime::scene::{NoisePalette, NoiseSettings, Scene},
+    storage,
+};
 use serde::{Deserialize, Serialize};
 use std::{fs::File, io::Read, path::Path};
 
@@ -13,6 +17,34 @@ pub struct Entry {
     pub name: String,
     pub scene: Scene,
 }
+/// A library template, outside the ID namespace of saved user scenes.
+pub fn plum_dawn() -> Entry {
+    Entry {
+        id: "builtin:plum-dawn".into(),
+        name: "Сливовый рассвет".into(),
+        scene: Scene {
+            effect: Effect::NoiseMap,
+            colors: vec![0x243467, 0x7452a4, 0xcc9dd5, 0xfdb87d],
+            brightness: 72,
+            speed: 24,
+            fps: 25,
+            temperature: 0,
+            tint: 0,
+            noise: NoiseSettings {
+                frequency: 0.039,
+                amplitude: 1.0,
+                lacunarity: 0.78,
+                persistence: 0.5,
+                octaves: 2,
+                motion: 2,
+                motion_speed: 2,
+            },
+            noise_palette: NoisePalette::Custom,
+            rainbow_width: 10,
+        },
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Catalog {
@@ -148,6 +180,116 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plum_dawn_is_a_valid_template_with_stable_previews() {
+        use crate::devices::{Canvas, Point};
+        use crate::lighting::color::Rgb;
+        use crate::runtime::scene::Renderer;
+
+        let preset = plum_dawn();
+        assert!(valid_name(&preset.name));
+        assert!(
+            !valid_id(&preset.id),
+            "template IDs cannot enter the user catalog"
+        );
+        assert!(
+            !Catalog::seeded(&preset.scene)
+                .entries
+                .iter()
+                .any(|entry| entry.id == preset.id)
+        );
+        preset.scene.validate().unwrap();
+
+        let luma = |color: Rgb| {
+            (54 * u16::from(color.r) + 183 * u16::from(color.g) + 19 * u16::from(color.b)) / 256
+        };
+        for (width, height, strip_leds) in [(24, 12, 16), (72, 48, 30), (96, 48, 72)] {
+            let mut points: Vec<_> = (0..5)
+                .flat_map(|row| {
+                    (0..8).map(move |col| Point {
+                        device: "pc".into(),
+                        led: (8 * row + col) as usize,
+                        x: 1 + col * (width - 3) / 7,
+                        y: 1 + row * (height * 2 / 3 - 2) / 4,
+                    })
+                })
+                .collect();
+            points.extend((0..strip_leds).map(|led| Point {
+                device: "strip".into(),
+                led,
+                x: (width - 1) * led as u32 / (strip_leds as u32 - 1),
+                y: height - 2,
+            }));
+            let canvas = Canvas {
+                width,
+                height,
+                points,
+            };
+            let mut reference = Vec::new();
+
+            for fps in [preset.scene.fps, 20, 50] {
+                let scene = Scene {
+                    fps,
+                    ..preset.scene.clone()
+                };
+                let mut renderer = Renderer::new(scene).unwrap();
+                let mut samples = Vec::new();
+                let mut previous: Option<Vec<Rgb>> = None;
+                let mut pc_luma = (255, 0);
+                let mut strip_luma = pc_luma;
+
+                for frame_index in 0..=8 * fps / 5 {
+                    let frame = renderer.step(&canvas).unwrap();
+                    assert_eq!(frame.len(), 40 + strip_leds);
+                    for (index, &color) in frame.iter().enumerate() {
+                        let bounds = if index < 40 {
+                            &mut pc_luma
+                        } else {
+                            &mut strip_luma
+                        };
+                        bounds.0 = bounds.0.min(luma(color));
+                        bounds.1 = bounds.1.max(luma(color));
+                    }
+                    if let Some(previous) = &previous {
+                        assert!(frame.iter().zip(previous).all(|(a, b)| {
+                            [a.r.abs_diff(b.r), a.g.abs_diff(b.g), a.b.abs_diff(b.b)]
+                                .into_iter()
+                                .all(|delta| delta <= 10)
+                        }));
+                    }
+                    if [0, 4 * fps / 5, 8 * fps / 5].contains(&frame_index) {
+                        samples.push(frame.clone());
+                    }
+                    previous = Some(frame);
+                }
+
+                assert!(pc_luma.1 - pc_luma.0 >= 40 && strip_luma.1 - strip_luma.0 >= 40);
+                assert_ne!(samples[0][..40], samples[2][..40]);
+                assert_ne!(samples[0][40..], samples[2][40..]);
+                if reference.is_empty() {
+                    reference = samples;
+                } else {
+                    assert_eq!(samples, reference, "{width}x{height} at {fps} fps");
+                }
+            }
+
+            let mut normal = Renderer::new(preset.scene.clone()).unwrap();
+            let mut faster = Renderer::new(preset.scene.clone()).unwrap();
+            for _ in 0..8 {
+                assert_eq!(normal.step(&canvas).unwrap(), faster.step(&canvas).unwrap());
+            }
+            faster
+                .configure(Scene {
+                    speed: 42,
+                    ..preset.scene.clone()
+                })
+                .unwrap();
+            assert_eq!(normal.step(&canvas).unwrap(), faster.step(&canvas).unwrap());
+            assert!((0..8).any(|_| normal.step(&canvas).unwrap() != faster.step(&canvas).unwrap()));
+        }
+    }
+
     #[test]
     fn failed_save_keeps_memory_and_native_values() {
         let scene = crate::runtime::scene::example();
