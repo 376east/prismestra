@@ -6,6 +6,8 @@ from pathlib import Path
 import subprocess
 import zipfile
 
+from package_installer import reject_app_local_crt
+
 
 def digest(path):
     with path.open("rb") as stream:
@@ -51,6 +53,7 @@ def main():
         if path.is_symlink() or not path.is_file() or path.suffix != ".zip":
             raise ValueError("Expected verified input ZIP archives")
         with zipfile.ZipFile(path) as source:
+            reject_app_local_crt(source)
             if source.testzip() is not None:
                 raise ValueError("Source archive CRC failed")
     files = list(tracked(root))

@@ -67,6 +67,12 @@ class InstallerPackaging(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unexpected component directory"):
             installer.extract_component(archive, self.root / "bad", installer.sha256(archive))
 
+    def test_component_rejects_listed_app_local_crt_with_valid_pins(self):
+        archive = self.component(listed=("runtime/MSVCP140.dll",))
+        with self.assertRaisesRegex(ValueError, "App-local MSVC runtime is not allowed"):
+            installer.extract_component(archive, self.root / "stage", installer.sha256(archive))
+        self.assertFalse((self.root / "stage").exists())
+
     def test_component_rejects_traversal_and_windows_reserved_names(self):
         for name in ("../escape.exe", "runtime/../escape.exe", "runtime/COM1.exe", "runtime/x.dll:stream"):
             with self.subTest(name=name):

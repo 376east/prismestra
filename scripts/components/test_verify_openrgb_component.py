@@ -158,14 +158,15 @@ class CandidateChecks(unittest.TestCase):
                 self.assertFalse(report["ok"])
                 self.assertTrue(any("Qt import rejected" in error for error in report["errors"]))
 
-    def test_missing_runtime_is_explicit_and_bundled_runtime_is_inspected(self):
-        (self.release / "OpenRGB.exe").write_bytes(image(["VCRUNTIME140.dll"]))
-        report = self.verify()
-        self.assertFalse(report["ok"])
-        self.assertEqual(report["missing_msvc_runtime"], ["vcruntime140.dll"])
-        (self.release / "vcruntime140.dll").write_bytes(image(["kernel32.dll"]))
+    def test_system_runtime_imports_are_recorded_and_app_local_copies_rejected(self):
+        (self.release / "OpenRGB.exe").write_bytes(image(["VCRUNTIME140.dll"], ["MSVCP140_CODECvt_IDS.dll"]))
         report = self.verify()
         self.assertTrue(report["ok"], report["errors"])
+        self.assertEqual(report["system_msvc_imports"], ["msvcp140_codecvt_ids.dll", "vcruntime140.dll"])
+        (self.release / "VCRUNTIME140.dll").write_bytes(image(["kernel32.dll"]))
+        report = self.verify()
+        self.assertFalse(report["ok"])
+        self.assertIn("unexpected release entry: VCRUNTIME140.dll", report["errors"])
 
     def test_unknown_dependency_is_not_assumed_to_be_an_os_dll(self):
         (self.release / "OpenRGB.exe").write_bytes(image(["vendor.dll"]))

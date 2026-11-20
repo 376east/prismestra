@@ -148,7 +148,11 @@ begin
     not RegQueryDWordValue(HKLM64, VcKey, 'Major', Major) or
     not RegQueryDWordValue(HKLM64, VcKey, 'Minor', Minor) or
     not RegQueryDWordValue(HKLM64, VcKey, 'Bld', Build) or
-    not RegQueryDWordValue(HKLM64, VcKey, 'Rbld', Revision) then Exit;
+    not RegQueryDWordValue(HKLM64, VcKey, 'Rbld', Revision) or
+    not FileExists(ExpandConstant('{sys}\msvcp140.dll')) or
+    not FileExists(ExpandConstant('{sys}\msvcp140_codecvt_ids.dll')) or
+    not FileExists(ExpandConstant('{sys}\vcruntime140.dll')) or
+    not FileExists(ExpandConstant('{sys}\vcruntime140_1.dll')) then Exit;
   if Major <> {#VcMajor} then Result := Major > {#VcMajor}
   else if Minor <> {#VcMinor} then Result := Minor > {#VcMinor}
   else if Build <> {#VcBuild} then Result := Build > {#VcBuild}
@@ -383,10 +387,13 @@ var
   StartupReady: Boolean;
 begin
   if Step = ssPostInstall then begin
+#ifndef LifecycleTest
+    if not GuardInstall('RemoveLegacyCrt') then
+      RaiseException('Setup could not verify the installation or retire the previous private OpenRGB Visual C++ files. See the Setup log.');
+    InstallPolicy;
+#else
     if not GuardInstall('Check') then
       RaiseException('The installed Prismestra files did not pass access checks.');
-#ifndef LifecycleTest
-    InstallPolicy;
 #endif
     StartupReady := False;
     if WizardIsTaskSelected('autostart') then begin

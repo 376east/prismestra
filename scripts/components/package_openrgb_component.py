@@ -128,8 +128,8 @@ def package(args):
             raise ValueError("runtime inventory requires basenames")
         names.add(name.lower())
         add(runtime / name, "runtime/" + name, item)
-    allowed = {n.lower() for n in verifier.REQUIRED} | verifier.MSVC_RUNTIME
-    if (not {n.lower() for n in verifier.REQUIRED} <= names or not names <= allowed
+    required = {n.lower() for n in verifier.REQUIRED}
+    if (names != required
             or {p.name for p in runtime.iterdir()} != {PurePosixPath(n).name for n in files if n.startswith("runtime/")}):
         raise ValueError("runtime directory/inventory differs from verifier allowlist")
 

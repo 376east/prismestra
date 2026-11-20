@@ -30,6 +30,8 @@ $image = Join-Path $install 'Prismestra.exe'
 $userRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Prismestra'
 $manifestPath = Join-Path $install 'install-manifest.json'
 $backend = 'components/openrgb/runtime/OpenRGB.exe'
+$vcFilesRequired = @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'msvcp140_codecvt_ids.dll')
+$knownAppLocalCrt = $vcFilesRequired + @('msvcp140_1.dll', 'msvcp140_2.dll', 'msvcp140_atomic_wait.dll', 'concrt140.dll')
 $shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Prismestra.lnk'
 $arpKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{${appId}}_is1"
 $policyKey = "HKLM:\SOFTWARE\Prismestra\Installer\$appId"
@@ -96,7 +98,7 @@ function Get-Runtimes {
         ([version]::new($vc.Major, $vc.Minor, $vc.Bld, $vc.Rbld)).ToString()
     }
     $vcFiles = [ordered]@{}
-    foreach ($name in @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll')) {
+    foreach ($name in $vcFilesRequired) {
         $file = Get-Item -LiteralPath (Join-Path ([Environment]::SystemDirectory) $name) -ErrorAction SilentlyContinue
         if ($null -ne $file -and $file.Length -gt 0) { $vcFiles[$name] = $file.VersionInfo.FileVersion }
     }
@@ -123,7 +125,7 @@ function Get-Runtimes {
 
 function Test-RuntimesReady($Snapshot, [version]$MinimumVc) {
     ($null -ne $Snapshot.vc_version -and [version]$Snapshot.vc_version -ge $MinimumVc -and
-        $Snapshot.vc_files.Count -eq 3 -and
+        $Snapshot.vc_files.Count -eq $vcFilesRequired.Count -and
         @($Snapshot.webview.Values | Where-Object { $_.files_present }).Count -ge 1)
 }
 
@@ -305,6 +307,13 @@ try {
             installer_sha256 = $baseline.sha256
             app_sha256 = $previousManifest.app_sha256
             backend_sha256 = $previousManifest.backend.sha256
+            app_local_crt = @(
+                foreach ($name in $vcFilesRequired) {
+                    $legacy = Join-Path $install "components/openrgb/runtime/$name"
+                    Assert-Expected (Test-Path -LiteralPath $legacy -PathType Leaf) "Missing previous app-local runtime: $name"
+                    [ordered]@{ name = $name; sha256 = Get-Sha256 $legacy }
+                }
+            )
         }
         Assert-Expected (-not (Test-Path -LiteralPath $userRoot)) 'Previous Setup touched the synthetic profile location.'
         [void][IO.Directory]::CreateDirectory((Join-Path $userRoot 'state/assets'))
@@ -349,7 +358,7 @@ try {
             $remaining.vc_files.Count -eq 0) 'A supported registration or shared x64 VC DLL survived; clean download was not exercised.'
         $receipt.runtimes_before = $remaining
     }
-    $vcBeforeCandidate = (Get-Runtimes).vc_version
+    $vcBeforeCandidate = Get-Runtimes
     $setupAttempted = $true
     $receipt.setup_exit_code = Invoke-Installer $installerPath ($options + ' /ACCEPTWEBVIEW2TERMS') $setupLog
     $log = if (Test-Path -LiteralPath $setupLog -PathType Leaf) { Get-Content -LiteralPath $setupLog -Raw } else { '' }
@@ -383,9 +392,14 @@ try {
     Assert-Expected ($receipt.app_sha256 -ceq $manifest.app_sha256 -and
         $receipt.backend_sha256 -ceq $manifest.backend.sha256 -and $manifest.backend.relative_executable -ceq $backend) (
         'Installed app or OpenRGB differs from the package SHA-256 pins.')
+    $receipt.app_local_crt = @(Get-ChildItem -LiteralPath $install -Recurse -File -Force |
+        Where-Object { $_.Name -in $knownAppLocalCrt } | ForEach-Object Name)
+    Assert-Expected ($receipt.app_local_crt.Count -eq 0) 'Setup left an app-local Visual C++ runtime in the protected installation.'
     $minimumVc = [version]$manifest.minimum_vc_runtime
     $receipt.vc_download_verified = $log -match '(?m)Verified Microsoft Visual C\+\+ Runtime download\.'
-    $vcNeeded = [string]::IsNullOrEmpty($vcBeforeCandidate) -or [version]$vcBeforeCandidate -lt $minimumVc
+    $vcNeeded = [string]::IsNullOrEmpty($vcBeforeCandidate.vc_version) -or
+        [version]$vcBeforeCandidate.vc_version -lt $minimumVc -or
+        $vcBeforeCandidate.vc_files.Count -ne $vcFilesRequired.Count
     Assert-Expected ($receipt.vc_download_verified -eq $vcNeeded) 'Setup did not follow the expected VC Runtime download/reuse path.'
     if ($ExerciseVcDownload) {
         Assert-Expected ($receipt.vc_download_verified -and -not $receipt.reboot_required -and
@@ -446,7 +460,7 @@ try {
         try {
             $restored = Get-Runtimes
             if (-not $restored.vc_version -or [version]$restored.vc_version -lt $original -or
-                $restored.vc_files.Count -ne 3) {
+                $restored.vc_files.Count -ne $vcFilesRequired.Count) {
                 $recover = Start-Process -FilePath $vcRecovery -WindowStyle Hidden -Wait -PassThru -ArgumentList @(
                     '/install', '/quiet', '/norestart', '/log', ('"' + (Join-Path $report 'vc-recovery.log') + '"'))
                 try { $recoveryExit = $recover.ExitCode } finally { $recover.Dispose() }
@@ -455,7 +469,7 @@ try {
             }
             $receipt.vc_test.after_test = $restored
             $receipt.vc_test.restored = $restored.vc_version -and [version]$restored.vc_version -ge $original -and
-                $restored.vc_files.Count -eq 3
+                $restored.vc_files.Count -eq $vcFilesRequired.Count
             Assert-Expected $receipt.vc_test.restored 'A compatible runner VC Runtime could not be restored.'
         } catch { $failures.Add($_.Exception.Message) }
     }
