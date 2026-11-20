@@ -4,13 +4,40 @@ use crate::app::{
     first_run::{self, Plan, Worker},
     lighting_outputs::Local,
 };
+use crate::devices::{Device, Role};
 use std::{thread::JoinHandle, time::Duration};
+
+#[derive(serde::Serialize)]
+pub(super) struct DeviceCandidate<'a> {
+    id: &'a str,
+    role: Role,
+    label: &'a str,
+}
+
+impl<'a> From<&'a Device> for DeviceCandidate<'a> {
+    fn from(device: &'a Device) -> Self {
+        Self {
+            id: &device.id,
+            role: device.role,
+            label: &device.label,
+        }
+    }
+}
+
+fn new_devices<'a>(
+    current: &'a [Device],
+    proposal: Option<&'a [Device]>,
+) -> impl Iterator<Item = &'a Device> {
+    proposal
+        .into_iter()
+        .flatten()
+        .filter(|candidate| !current.iter().any(|device| device.id == candidate.id))
+}
 
 struct Applying {
     revision: u64,
     plan: Plan,
     previous_document: Document,
-    previous_outputs: crate::app::runtime::OutputPlan,
     path: PathBuf,
     context: u64,
 }
@@ -60,6 +87,11 @@ impl Startup {
         self.phase = "cancelled";
         self.worker.cancel();
     }
+    pub(super) fn cancel_for_import(&mut self) {
+        if self.enabled {
+            self.cancel();
+        }
+    }
     pub(super) fn drained(&self) -> bool {
         self.worker.is_idle() && self.handover.as_ref().is_none_or(|job| job.is_finished())
     }
@@ -69,19 +101,34 @@ impl Startup {
 }
 
 impl App {
+    fn pending_plan_matches(&self, pending: &Applying) -> bool {
+        self.path.as_ref() == Some(&pending.path)
+            && self.context_revision == pending.context
+            && !self.dirty
+            && !self.editor_dirty
+            && self.pending_open.is_none()
+            && !self.connection_switching()
+            && self.guard_connections_close().is_ok()
+            && self.connections.scan.is_idle()
+            && (self.runtime.document() == &pending.previous_document
+                || self.runtime.document() == &pending.plan.document)
+    }
+
+    pub(super) fn newly_found_devices(&self) -> impl Iterator<Item = &Device> {
+        let proposal = self.first_run.applying.as_ref().filter(|pending| {
+            self.first_run.enabled && !self.shutdown.active() && self.pending_plan_matches(pending)
+        });
+        new_devices(
+            &self.runtime.project().setup.devices,
+            proposal.map(|pending| pending.plan.document.lighting.setup.devices.as_slice()),
+        )
+    }
+
     fn startup_output_labels(&mut self) {
         self.set_text(PC_ON, "Подсветка ПК");
         self.set_text(DOOR_ON, "Дополнительный свет");
         self.set_text(SCHED_ON, "Включить расписание подсветки");
         self.set_text(APPLY_SCHED, "Применить к устройствам");
-        if !self.widgets.is_empty() {
-            unsafe {
-                SetWindowTextW(
-                    GetParent(self.h(PC_ON)),
-                    wide("Prismestra · Подсветка устройств").as_ptr(),
-                );
-            }
-        }
     }
     pub(super) fn poll_first_run(&mut self) -> bool {
         let changed = match self.advance_first_run() {
@@ -126,6 +173,7 @@ impl App {
         if !self.first_run.enabled || self.shutdown.active() {
             self.first_run.worker.cancel();
             let _ = self.first_run.worker.poll();
+            let _ = self.first_run.worker.poll_inventory();
             return Ok(false);
         }
         if !self.first_run.initialized {
@@ -192,15 +240,15 @@ impl App {
                     self.runtime.document(),
                 )?;
                 let document = self.runtime.document().clone();
-                let mut outputs = local.prepare(&document, &self.asset_root)?;
+                let outputs = local.prepare(&document, &self.asset_root)?;
                 self.first_run.restoring = Some(self.runtime.with(|runtime, _| {
-                    runtime.prepare_managed_outputs(
+                    runtime.request_startup_outputs_for(
                         &self.state_dir,
+                        None,
                         &local,
-                        &document,
-                        &mut outputs,
-                    )?;
-                    runtime.request_outputs_for(document, outputs)
+                        document,
+                        outputs,
+                    )
                 })?);
                 self.first_run.phase = "restoring";
                 self.native_lighting = Some(local);
@@ -223,7 +271,8 @@ impl App {
                 self.start_bound_sources()?;
             }
             self.status =
-                "Сохранённая сцена включена. Статусы передачи доступны в устройствах.".into();
+                "Сохранённые подключения восстановлены. Статусы передачи доступны в устройствах."
+                    .into();
             return Ok(true);
         }
         if self.first_run.applying.is_none()
@@ -241,17 +290,7 @@ impl App {
             return Ok(true);
         }
         if let Some(pending) = &self.first_run.applying {
-            if self.path.as_ref() != Some(&pending.path)
-                || self.context_revision != pending.context
-                || self.dirty
-                || self.editor_dirty
-                || self.pending_open.is_some()
-                || self.connection_switching()
-                || self.guard_connections_close().is_err()
-                || !self.connections.scan.is_idle()
-                || (self.runtime.document() != &pending.previous_document
-                    && self.runtime.document() != &pending.plan.document)
-            {
+            if !self.pending_plan_matches(pending) {
                 let pending = self.first_run.applying.take().unwrap();
                 if self.path.as_ref() == Some(&pending.path)
                     && self.runtime.output_revision() == pending.revision
@@ -275,19 +314,35 @@ impl App {
             }
             let applied = self.first_run.applying.take().unwrap();
             if let Err(error) = first_run::persist(&self.state_dir, &applied.path, &applied.plan) {
-                self.runtime
-                    .request_outputs_for(applied.previous_document, applied.previous_outputs)?;
+                let local = self
+                    .native_lighting
+                    .as_ref()
+                    .ok_or("Не загружены прежние подключения")?;
+                let outputs = local.prepare(&applied.previous_document, &self.asset_root)?;
+                self.runtime.with(|runtime, _| {
+                    runtime.request_startup_outputs_for(
+                        &self.state_dir,
+                        Some(&applied.plan.local),
+                        local,
+                        applied.previous_document,
+                        outputs,
+                    )
+                })?;
                 return Err(error);
             }
             self.native_lighting = Some(applied.plan.local);
-            self.first_run.phase = "applied";
+            self.first_run.phase = if self.first_run.worker.is_idle() {
+                "applied"
+            } else {
+                "discovering"
+            };
             self.startup_output_labels();
             self.first_run.expected = Some(self.runtime.document().clone());
             self.context_revision = self.context_revision.wrapping_add(1);
             self.first_run.context = self.context_revision;
             self.was_pending = false;
             self.dirty = false;
-            self.reset_editor(0);
+            self.reset_editor_preserving_device(0);
             self.sync();
             if self.page == Page::Connections {
                 self.open_connections()?;
@@ -309,6 +364,11 @@ impl App {
             let plan = result?;
             self.first_run.discovery_issues = plan.issues.clone();
             if !plan.changed {
+                if !self.first_run.worker.is_idle() {
+                    self.first_run.phase = "discovering";
+                    self.status = "Ищу остальные поддерживаемые устройства…".into();
+                    return Ok(true);
+                }
                 self.first_run.phase = "discovered";
                 self.status = if self.runtime.document().lighting.setup.devices.is_empty() {
                     format!(
@@ -323,29 +383,46 @@ impl App {
                 self.first_run.next = Instant::now() + Duration::from_secs(30);
                 return Ok(true);
             }
-            let mut outputs = plan.local.prepare(&plan.document, &self.asset_root)?;
+            let outputs = plan.local.prepare(&plan.document, &self.asset_root)?;
             let previous_document = self.runtime.document().clone();
-            let previous_outputs = self.runtime.output_plan();
             let revision = self.runtime.with(|runtime, _| {
-                runtime.prepare_managed_outputs(
+                runtime.request_startup_outputs_for(
                     &self.state_dir,
+                    self.native_lighting.as_ref(),
                     &plan.local,
-                    &plan.document,
-                    &mut outputs,
-                )?;
-                runtime.request_outputs_for(plan.document.clone(), outputs)
+                    plan.document.clone(),
+                    outputs,
+                )
             })?;
             self.first_run.applying = Some(Applying {
                 revision,
                 plan,
                 previous_document,
-                previous_outputs,
                 path: self.path.clone().ok_or("Нет пути профиля")?,
                 context: self.context_revision,
             });
             self.first_run.phase = "applying";
-            self.status = "Устройства найдены. Включаю общую сцену и сохраняю карту…".into();
+            self.status = "Устройства найдены. Подключаю к общей сцене…".into();
             return Ok(true);
+        }
+        let endpoint = "127.0.0.1:17422".parse().unwrap();
+        if let Some(inventory) = self.first_run.worker.poll_inventory() {
+            let local = self
+                .native_lighting
+                .clone()
+                .ok_or("Не загружены локальные подключения")?;
+            let document = self.runtime.document().clone();
+            let path = self.path.as_ref().ok_or("Нет пути профиля")?;
+            let baseline = first_run::baseline(&self.state_dir, path, &document, &local)?;
+            self.first_run.worker.prepare(
+                document,
+                local,
+                self.asset_root.clone(),
+                endpoint,
+                inventory,
+                baseline,
+            )?;
+            return Ok(false);
         }
         if !self.first_run.worker.is_idle() || Instant::now() < self.first_run.next {
             return Ok(false);
@@ -362,26 +439,88 @@ impl App {
         }
         let local = self
             .native_lighting
-            .clone()
+            .as_ref()
             .ok_or("Не загружены локальные подключения")?;
-        let document = self.runtime.document().clone();
-        let path = self.path.as_ref().ok_or("Нет пути профиля")?;
-        let baseline = first_run::baseline(&self.state_dir, path, &document, &local)?;
-        let endpoint = "127.0.0.1:17422".parse().unwrap();
+        let document = self.runtime.document();
+        let progressive = document.lighting.setup.devices.is_empty()
+            && document.ambient.routes.is_empty()
+            && document.temperatures.sources.is_empty();
         let guard = self
             .runtime
-            .with(|runtime, _| runtime.managed_discovery_guard(&self.state_dir, endpoint))?;
-        self.first_run.worker.start(
-            document,
-            local,
-            self.asset_root.clone(),
-            endpoint,
-            guard,
-            baseline,
-        )?;
+            .with(|runtime, _| runtime.managed_discovery_guard(&self.state_dir, endpoint));
+        self.first_run
+            .worker
+            .start(endpoint, guard, local, progressive)?;
         self.first_run.attempts += 1;
         self.first_run.phase = "discovering";
         self.status = "Ищу поддерживаемые устройства. Сцена включится автоматически…".into();
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::devices::Driver;
+
+    #[test]
+    fn discovery_dto_follows_only_the_current_proposal() {
+        fn device(id: &str, role: Role, driver: Driver, leds: usize) -> Device {
+            Device {
+                id: id.into(),
+                label: "Fixture".into(),
+                role,
+                driver,
+                leds,
+                enabled: true,
+                rate_hz: 25,
+            }
+        }
+
+        let rgb = device(
+            "auto-rgb-0000000000000000000000000000000000000001",
+            Role::Canvas,
+            Driver::OpenRgb,
+            3,
+        );
+        let lcd = device(
+            "auto-lcd-0000000000000000000000000000000000000002",
+            Role::Lcd,
+            Driver::TtLcd,
+            0,
+        );
+        let replacement = device(
+            "auto-rgb-0000000000000000000000000000000000000003",
+            Role::Canvas,
+            Driver::OpenRgb,
+            3,
+        );
+        let initial = [rgb.clone(), lcd.clone()];
+        let saved = [rgb];
+        let replaced = [replacement];
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/device-candidates.json"
+        ))
+        .unwrap();
+        let empty: &[Device] = &[];
+        let cases = [
+            ("discover", empty, None),
+            ("proposal", empty, Some(initial.as_slice())),
+            ("savedRgb", saved.as_slice(), Some(initial.as_slice())),
+            ("cancelled", empty, None),
+            ("replacement", empty, Some(replaced.as_slice())),
+            ("rediscovered", saved.as_slice(), Some(initial.as_slice())),
+            ("installed", initial.as_slice(), Some(initial.as_slice())),
+        ];
+        for (name, applied, proposal) in cases {
+            let rows: Vec<_> = new_devices(applied, proposal)
+                .map(DeviceCandidate::from)
+                .collect();
+            assert_eq!(
+                serde_json::json!({"deviceCandidates": rows}),
+                fixture[name],
+                "{name}"
+            );
+        }
     }
 }

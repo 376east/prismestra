@@ -120,30 +120,24 @@ pub fn pixel_payload_for_points(
     let mut out = Vec::with_capacity(9 + 5 * points);
     out.extend_from_slice(&[0xe1, 4, 1, 0, 1, 80, brightness as u8, count[0], count[1]]);
     for color in colors {
-        let (r, g, b) = (
-            color.r as f64 / 255.0,
-            color.g as f64 / 255.0,
-            color.b as f64 / 255.0,
-        );
+        let [r, g, b] = [color.r, color.g, color.b].map(i32::from);
         let high = r.max(g).max(b);
         let delta = high - r.min(g).min(b);
-        let hue = if delta == 0.0 {
-            0.0
-        } else if high == r {
-            ((g - b) / delta).rem_euclid(6.0) * 60.0
-        } else if high == g {
-            ((b - r) / delta + 2.0) * 60.0
-        } else {
-            ((r - g) / delta + 4.0) * 60.0
-        };
-        let h = (hue as u16).min(359);
-        let saturation = if high == 0.0 {
+        // Keep the ratios exact until truncating to the protocol's integer units.
+        let hue = if delta == 0 {
             0
+        } else if high == r {
+            (60 * (g - b)).rem_euclid(360 * delta) / delta
+        } else if high == g {
+            (120 * delta + 60 * (b - r)) / delta
         } else {
-            (delta / high * 100.0) as u16
+            (240 * delta + 60 * (r - g)) / delta
         };
-        let hs = (h << 7) | saturation;
-        out.extend_from_slice(&[0, (hs >> 8) as u8, hs as u8, (high * 100.0) as u8, 100]);
+        let saturation = 100 * delta / high.max(1);
+        let hs = ((hue as u16) << 7) | saturation as u16;
+        let [hs_hi, hs_lo] = hs.to_be_bytes();
+        let value = (100 * high / 255) as u8;
+        out.extend_from_slice(&[0, hs_hi, hs_lo, value, 100]);
     }
     Ok(out)
 }
@@ -299,6 +293,41 @@ fn pixel_color_records_preserve_intensity_and_header_brightness() {
     assert!(pixel_payload(&colors[..152], 15).is_err());
     assert!(pixel_payload(&colors, 0).is_err());
     assert!(pixel_payload(&colors, 101).is_err());
+}
+
+#[test]
+fn e104_preserves_exact_color_units_at_all_153_positions() {
+    let mut colors: Vec<_> = (0..PIXEL_LEDS)
+        .map(|index| {
+            let low = (index % 100) as u8;
+            if index < 100 {
+                Rgb::new(100, low, low)
+            } else {
+                Rgb::new(low, 100, low)
+            }
+        })
+        .collect();
+    colors[151] = Rgb::new(20, 0, 1);
+    colors[152] = Rgb::new(0, 20, 1);
+    let packets = pixel_fragments(&colors, 83, 7, 200).unwrap();
+    let mut body = packets[0][8..].to_vec();
+    for packet in &packets[1..] {
+        body.extend_from_slice(&packet[5..]);
+    }
+    assert_eq!(&body[..9], &[0xe1, 4, 1, 0, 1, 80, 83, 0, 153]);
+    let (records, remainder) = body[9..].as_chunks::<5>();
+    assert!(remainder.is_empty());
+    assert_eq!(records.len(), PIXEL_LEDS);
+    for (index, record) in records.iter().enumerate() {
+        let (hue, saturation, value) = match index {
+            151 => (357, 100, 7),
+            152 => (123, 100, 7),
+            0..100 => (0, 100 - index as u16, 39),
+            _ => (120, 200 - index as u16, 39),
+        };
+        let [high, low] = ((hue << 7) | saturation).to_be_bytes();
+        assert_eq!(*record, [0, high, low, value, 100], "point {index}");
+    }
 }
 
 #[test]

@@ -13,7 +13,7 @@ The marker check verifies the indices you observed. A controller's reported coun
 
 ## What to send
 
-Copy the fields below into a [device report](https://github.com/malyarq/prismestra/issues/new?template=device.yml). Use `unknown` for unreported firmware or MTU and `not run` for untested steps.
+Copy the fields below into a [device report](https://github.com/376east/prismestra/issues/new?template=device.yml). Use `unknown` for unreported firmware or MTU and `not run` for untested steps.
 
 ```text
 Controller model / hardware revision / firmware =
@@ -36,4 +36,10 @@ output=E104 fragment=1 result=link_lost remaining_writes=0 completed_frames=0
 retry=1 result=unexpected_controller capability_queries=0 color_writes=0
 retry=2 result=point_count_mismatch expected_points=153 reported_points=152 color_writes=0
 retry=3 result=restored points=153 first_frame_fragments=5 scene=current
+```
+
+In a Windows source checkout, the test below checks that a failed fragment stops the old frame and a fresh connection submits all 153 positions in order. It uses a fixture link.
+
+```powershell
+cargo test --locked --lib surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame -- --test-threads=1
 ```
