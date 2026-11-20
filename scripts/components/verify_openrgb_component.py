@@ -163,7 +163,7 @@ def verify(source, release, source_lock=None, dependency_lock=None):
     report = {"schema_version": 1, "ok": False, "scope": "static_component_candidate",
               "source_root": str(source), "release_directory": str(release),
               "expected_source_head": SOURCE_HEAD, "files": [], "errors": [],
-              "missing_msvc_runtime": [],
+              "system_msvc_imports": [],
               "unverified": ["binary built from this source", "license approval",
                              "complete corresponding source", "runtime and hardware behavior",
                              "clean Windows compatibility", "dynamically loaded DLLs"]}
@@ -222,7 +222,7 @@ def verify(source, release, source_lock=None, dependency_lock=None):
         if not stat.S_ISDIR(directory_info.st_mode) or getattr(directory_info, "st_file_attributes", 0) & 0x400:
             raise ValueError("release directory must be a non-reparse directory")
         available = {}
-        allowed = {name.lower() for name in REQUIRED} | MSVC_RUNTIME
+        allowed = {name.lower() for name in REQUIRED}
         for path in sorted(release.iterdir()):
             if path.name.lower() not in allowed:
                 errors.append(f"unexpected release entry: {path.name}")
@@ -264,12 +264,11 @@ def verify(source, release, source_lock=None, dependency_lock=None):
                     errors.append(f"Qt import rejected: {entry['name']} -> {name}")
                 elif name in OS_DLLS or re.fullmatch(r"(?:api|ext)-ms-win-[a-z0-9-]+\.dll", name):
                     continue
-                elif name in MSVC_RUNTIME and name not in available:
-                    report["missing_msvc_runtime"].append(name)
-                    errors.append(f"missing MSVC runtime: {entry['name']} -> {name}")
+                elif name in MSVC_RUNTIME:
+                    report["system_msvc_imports"].append(name)
                 elif name not in available:
                     errors.append(f"unresolved non-OS import: {entry['name']} -> {name}")
-        report["missing_msvc_runtime"] = sorted(set(report["missing_msvc_runtime"]))
+        report["system_msvc_imports"] = sorted(set(report["system_msvc_imports"]))
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         errors.append(str(error))
     report["ok"] = not errors

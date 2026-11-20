@@ -86,7 +86,7 @@ def checkout(lock, path):
 
 
 def build_component(root, tools, vsdevcmd):
-    from components.verify_openrgb_component import REQUIRED, MSVC_RUNTIME
+    from components.verify_openrgb_component import REQUIRED
 
     source_lock = COMPONENT / "source-lock.json"
     dependency_lock = COMPONENT / "dependency-lock.json"
@@ -111,10 +111,8 @@ def build_component(root, tools, vsdevcmd):
     archives.mkdir()
     assets = COMPONENT / "distribution-assets.json"
     with ZipFile(base) as previous:
-        for name in sorted((REQUIRED - {"OpenRGB.exe"}) | MSVC_RUNTIME):
-            member = f"runtime/{name}"
-            if member in previous.namelist():
-                (runtime / name).write_bytes(previous.read(member))
+        for name in sorted(REQUIRED - {"OpenRGB.exe"}):
+            (runtime / name).write_bytes(previous.read(f"runtime/{name}"))
         for entry in read(assets)["files"]:
             role, name = entry["path"].split("/")
             if role == "source":

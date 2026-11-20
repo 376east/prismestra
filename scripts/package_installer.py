@@ -15,6 +15,7 @@ import sys
 from urllib.parse import urlsplit
 import zipfile
 
+from components.verify_openrgb_component import MSVC_RUNTIME
 from package_release import sha256
 
 
@@ -94,9 +95,16 @@ def safe_archive_name(name):
     return path
 
 
+def reject_app_local_crt(archive):
+    for item in archive.infolist():
+        if PurePosixPath(item.filename).name.casefold() in MSVC_RUNTIME:
+            raise ValueError(f"App-local MSVC runtime is not allowed: {item.filename}")
+
+
 def extract_component(source, destination, expected, runtime_floor=None):
     file_pin(source, expected)
     with zipfile.ZipFile(source) as archive:
+        reject_app_local_crt(archive)
         infos = {}
         folded = set()
         for item in archive.infolist():
