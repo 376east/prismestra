@@ -162,7 +162,7 @@ jobs:
         run: |
           $candidate = ./scripts/installer/verify_candidate.ps1 -Directory (Join-Path $env:RUNNER_TEMP candidate) -Commit $env:GITHUB_SHA -SumsSha256 $env:SUMS_SHA256
           ./scripts/installer/test_offline_setup.ps1 -Installer $candidate.Setup -Sha256 $candidate.SetupSha256 -Commit $env:GITHUB_SHA -ManifestSha256 $candidate.ManifestSha256 -ReportDirectory evidence -DisposableRunner
-      - name: Install after removing the shared x64 VC Runtime
+      - name: Install on a guest without the shared x64 VC Runtime
         if: matrix.test == 'vc-download'
         shell: powershell
         env:
