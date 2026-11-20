@@ -137,9 +137,13 @@ impl Runtime {
     }
 
     pub(super) fn recover_failed_outputs(&mut self, now: u64) -> Result<(), String> {
+        let live = self
+            .pending
+            .as_ref()
+            .and_then(|pending| pending.live_rgb.as_ref());
         if self.stopped
             || self.suspended
-            || self.pending.is_some()
+            || (self.pending.is_some() && live.is_none())
             || self.power.pending()
             || self.power.error().is_some()
             || self.refresh.is_some()
@@ -150,6 +154,11 @@ impl Runtime {
         let mut lcd = Vec::new();
         for (id, state) in &mut self.output_recovery {
             if let Some(spec) = self.rgb_specs.get(id) {
+                // A live plan leaves retained RGB and all existing LCD routes in place.
+                // Retiring RGB routes belong to the pending plan's drain.
+                if live.is_some_and(|plan| !plan.retained.contains(id)) {
+                    continue;
+                }
                 let snapshot = self.host.status(id);
                 if spec.action_required_error.is_some()
                     || snapshot.as_ref().is_some_and(|s| s.requires_action)
