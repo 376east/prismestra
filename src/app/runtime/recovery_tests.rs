@@ -1085,6 +1085,12 @@ fn live_plan_waits_for_rgb_owner_release_without_stopping_its_neighbor() {
 }
 
 #[test]
+fn live_plan_recovers_a_retained_neighbor_before_the_changed_owner_releases() {
+    assert_plan_preserves_neighbor(PlanChange::RecoverNeighbor);
+    assert_plan_preserves_neighbor(PlanChange::RecoverLcd);
+}
+
+#[test]
 fn live_plan_cancel_restores_the_original_owner_without_stopping_its_neighbor() {
     assert_plan_preserves_neighbor(PlanChange::Cancel);
 }
@@ -1103,6 +1109,8 @@ enum PlanChange {
     MixedAdd,
     MixedReplace,
     Replace,
+    RecoverNeighbor,
+    RecoverLcd,
     Cancel,
 }
 
@@ -1112,7 +1120,11 @@ impl PlanChange {
             Self::Add | Self::MixedAdd => true,
             #[cfg(windows)]
             Self::NativeAdd => true,
-            Self::Replace | Self::MixedReplace | Self::Cancel => false,
+            Self::Replace
+            | Self::MixedReplace
+            | Self::RecoverNeighbor
+            | Self::RecoverLcd
+            | Self::Cancel => false,
         }
     }
 }
@@ -1127,14 +1139,16 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
     }
 
     let lcd_link = Arc::new(Link::default());
-    let (mut runtime, lcd_assets) =
-        if matches!(change, PlanChange::MixedAdd | PlanChange::MixedReplace) {
-            let (runtime, assets) =
-                arrival_lcd_runtime(&format!("live-plan-{change:?}"), lcd_link.clone());
-            (runtime, Some(assets))
-        } else {
-            (runtime(), None)
-        };
+    let (mut runtime, lcd_assets) = if matches!(
+        change,
+        PlanChange::MixedAdd | PlanChange::MixedReplace | PlanChange::RecoverLcd
+    ) {
+        let (runtime, assets) =
+            arrival_lcd_runtime(&format!("live-plan-{change:?}"), lcd_link.clone());
+        (runtime, Some(assets))
+    } else {
+        (runtime(), None)
+    };
     let held = Arc::new(Held {
         block: AtomicBool::new(true),
         ignore_cancel: true,
@@ -1186,9 +1200,13 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
     runtime
         .attach_rgb("b", healthy_keys, factory(&healthy))
         .unwrap();
+    let recover_neighbor = matches!(change, PlanChange::RecoverNeighbor);
+    if recover_neighbor {
+        runtime.enable_output_recovery("b").unwrap();
+    }
     let mut now = 0;
     working(&mut runtime, "b", &mut now);
-    let lcd_generation = lcd_assets.as_ref().map(|_| {
+    let mut lcd_generation = lcd_assets.as_ref().map(|_| {
         wait(|| {
             tick(&mut runtime, &mut now);
             runtime.lcd_status("lcd").unwrap().frames_sent > 0
@@ -1320,6 +1338,38 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
         runtime.output_activity(&runtime.document().lighting.setup.devices[1]),
         OutputActivity::Sent(_)
     ));
+    if recover_neighbor {
+        disconnected(&mut runtime, &healthy, "b", &mut now);
+        healthy.fail.store(false, Ordering::SeqCst);
+        now += 1_000_000;
+        working(&mut runtime, "b", &mut now);
+        assert_ne!(
+            runtime.host.status("b").unwrap().generation,
+            healthy_generation
+        );
+        assert!(runtime.pending_configuration());
+        assert_eq!(held.dropped.load(Ordering::SeqCst), 0);
+    }
+    let recover_lcd = matches!(change, PlanChange::RecoverLcd);
+    if recover_lcd {
+        let old = lcd_generation.unwrap();
+        lcd_link.fail.store(true, Ordering::SeqCst);
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            runtime.lcd_status("lcd").unwrap().phase == lcd_worker::Phase::Failed
+        });
+        tick(&mut runtime, &mut now);
+        lcd_link.fail.store(false, Ordering::SeqCst);
+        now += 1_000_000;
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            let status = runtime.lcd_status("lcd").unwrap();
+            status.generation != old && status.frames_sent > 0
+        });
+        lcd_generation = Some(runtime.lcd_status("lcd").unwrap().generation);
+        assert!(runtime.pending_configuration());
+        assert_eq!(held.dropped.load(Ordering::SeqCst), 0);
+    }
     if !change.adds_output() {
         assert_eq!(new.calls.load(Ordering::SeqCst), 0);
         if matches!(change, PlanChange::Cancel) {
@@ -1337,10 +1387,16 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
         assert_eq!(new.calls.load(Ordering::SeqCst), 1);
         assert_eq!(held.calls.load(Ordering::SeqCst), 1);
     }
-    assert_eq!(healthy.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        healthy.calls.load(Ordering::SeqCst),
+        1 + usize::from(recover_neighbor)
+    );
     if let Some(generation) = lcd_generation {
         assert_eq!(runtime.lcd_status("lcd").unwrap().generation, generation);
-        assert_eq!(lcd_link.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            lcd_link.calls.load(Ordering::SeqCst),
+            1 + usize::from(recover_lcd)
+        );
     }
     held.release.store(true, Ordering::SeqCst);
     drain(&mut runtime);
