@@ -763,16 +763,6 @@ fn supervise_channels(
     let mut owner_read_failed = false;
     let mut last_backend_state = None;
     loop {
-        if clock.now_ms()? >= lease_deadline {
-            helper_note(
-                output,
-                request,
-                "helper_stop",
-                None,
-                "Managed helper stopping: parent heartbeat lease expired",
-            );
-            break;
-        }
         match channels.parent_identity(request.parent.pid) {
             Ok(parent) if parent == request.parent => {}
             Ok(_) => {
@@ -809,7 +799,33 @@ fn supervise_channels(
         if channels.control("owner-pause.json", request) {
             stop_restarting();
         }
-        match channels.read::<Request>("owner-request.json") {
+        let current = channels.read::<Request>("owner-request.json");
+        let cancellation = current
+            .is_ok()
+            .then(|| channels.read::<Cancel>("owner-cancel.json"));
+        let now = clock.now_ms()?;
+        // A late poll can observe a heartbeat issued before the cached lease
+        // expired. Without that evidence, never revive an expired lease.
+        if now >= lease_deadline
+            && (!current.as_ref().is_ok_and(|current| {
+                current.timestamp_ms < lease_deadline
+                    && clock::deadline(current.timestamp_ms, now).is_ok_and(|next| now < next)
+            }) || cancellation.as_ref().is_some_and(|result| match result {
+                Ok(_) => false,
+                Err(ControlRead::Io(error)) => error.kind() != std::io::ErrorKind::NotFound,
+                Err(ControlRead::Invalid(_)) => true,
+            }))
+        {
+            helper_note(
+                output,
+                request,
+                "helper_stop",
+                None,
+                "Managed helper stopping: parent heartbeat lease expired",
+            );
+            break;
+        }
+        match current {
             Err(ControlRead::Io(error)) => {
                 if !owner_read_failed {
                     helper_note(
@@ -836,7 +852,6 @@ fn supervise_channels(
                     );
                     owner_read_failed = false;
                 }
-                let now = clock.now_ms()?;
                 if current.version != clock::PROTOCOL
                     || current.clock_domain != clock::DOMAIN
                     || current.nonce != request.nonce
@@ -855,11 +870,9 @@ fn supervise_channels(
                     );
                     break;
                 }
-                lease_deadline = clock::deadline(current.timestamp_ms, now)?;
-                if !current.restarting {
-                    stop_restarting();
-                }
-                if channels.control("owner-cancel.json", request) {
+                if cancellation
+                    .is_some_and(|read| read.is_ok_and(|cancel| matches_control(&cancel, request)))
+                {
                     helper_note(
                         output,
                         request,
@@ -868,6 +881,10 @@ fn supervise_channels(
                         "Managed helper stopping: matching owner cancellation",
                     );
                     break;
+                }
+                lease_deadline = clock::deadline(current.timestamp_ms, now)?;
+                if !current.restarting {
+                    stop_restarting();
                 }
                 let snapshot = snapshot();
                 let backend_state = (
@@ -1335,6 +1352,109 @@ mod tests {
             fs::remove_file(directory.join("helper-status.json")).unwrap();
             let _ = fs::remove_file(directory.join("backend-events.json"));
             fs::remove_dir(directory).unwrap();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn supervisor_reads_a_renewal_after_a_delayed_poll_without_reviving_an_expired_lease() {
+        use std::{cell::RefCell, os::windows::fs::OpenOptionsExt};
+
+        for (case, issued_ms, wake_ms, expected_publications) in [
+            ("renewed", 14_800, 15_100, 2),
+            ("stale", 10_000, 15_100, 1),
+            ("stale successor", 14_800, 19_800, 1),
+            ("at deadline", 15_000, 15_100, 1),
+            ("after deadline", 15_001, 15_100, 1),
+            ("cancelled", 14_800, 15_100, 1),
+            ("old cancel", 14_800, 15_100, 2),
+            ("different nonce", 14_800, 15_100, 1),
+            ("different identity", 14_800, 15_100, 1),
+            ("owner locked", 14_800, 15_100, 1),
+            ("cancel locked", 14_800, 15_100, 1),
+        ] {
+            let (directory, mut request, helper) = sharing_fixture("delayed-lease-poll");
+            request.timestamp_ms = 10_000;
+            let path = directory.join("owner-request.json");
+            let cancel_path = directory.join("owner-cancel.json");
+            write_json(&path, &request).unwrap();
+            let clock = FakeClock::new(request.timestamp_ms);
+            let publications = Cell::new(0);
+            let blocked_file = RefCell::new(None);
+            let cancel = |nonce: String| {
+                write_json(
+                    &cancel_path,
+                    &Cancel {
+                        version: clock::PROTOCOL,
+                        clock_domain: clock::DOMAIN.into(),
+                        nonce,
+                    },
+                )
+                .unwrap();
+            };
+            supervise_helper_with_clock(
+                &directory,
+                &request,
+                &helper,
+                || {
+                    let count = publications.get() + 1;
+                    publications.set(count);
+                    if count == 1 {
+                        // The helper misses a poll while its live owner publishes a heartbeat.
+                        clock.active_ms.set(issued_ms);
+                        let mut renewed = request.clone();
+                        renewed.timestamp_ms = issued_ms;
+                        if case == "different nonce" {
+                            renewed.nonce.push_str("-replacement");
+                        }
+                        if case == "different identity" {
+                            renewed.parent.created ^= 1;
+                        }
+                        write_json(&path, &renewed).unwrap();
+                        if matches!(case, "cancelled" | "cancel locked") {
+                            cancel(request.nonce.clone());
+                        } else if case == "old cancel" {
+                            cancel("old-nonce".into());
+                        }
+                        if matches!(case, "owner locked" | "cancel locked") {
+                            let locked = if case == "owner locked" {
+                                &path
+                            } else {
+                                &cancel_path
+                            };
+                            *blocked_file.borrow_mut() = Some(
+                                fs::OpenOptions::new()
+                                    .read(true)
+                                    .share_mode(0)
+                                    .open(locked)
+                                    .unwrap(),
+                            );
+                        }
+                        clock.active_ms.set(wake_ms);
+                    } else {
+                        cancel(request.nonce.clone());
+                    }
+                    super::super::managed_backend::Snapshot::default()
+                },
+                || {},
+                &clock,
+            )
+            .unwrap();
+            drop(blocked_file.into_inner());
+            for name in [
+                "owner-request.json",
+                "owner-cancel.json",
+                "helper-status.json",
+                "backend-events.json",
+            ] {
+                let _ = fs::remove_file(directory.join(name));
+            }
+            fs::remove_dir(directory).unwrap();
+            assert_eq!(
+                publications.get(),
+                expected_publications,
+                "{case}, heartbeat issued at {issued_ms}"
+            );
         }
     }
 
