@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   diagnostic:
-    name: Exact 08a5661 installation and upgrade
+    name: Exact 08a5661 upgrade with a modified DLL
     if: github.repository == 'malyarq/prismestra'
     runs-on: windows-2022
     timeout-minutes: 75
@@ -18,11 +18,19 @@ jobs:
     defaults:
       run:
         shell: pwsh
+        working-directory: product
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: 08a5661d9af94995bf06dc14e59101e96317ebad
           persist-credentials: false
+          path: product
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: diagnostic
+          sparse-checkout: scripts/installer
       - name: Build the exact diagnostic Setup and Sources
         id: build
         env:
@@ -64,23 +72,7 @@ jobs:
           Copy-Item (Join-Path $dir install-manifest.json),(Join-Path $dir SHA256SUMS.txt) evidence
           Copy-Item (Join-Path $output openrgb-inventory.json) evidence
           "sums=$sums" >> $env:GITHUB_OUTPUT
-      - name: Check Setup without a prior Prismestra installation
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        env:
-          SUMS: ${{ steps.build.outputs.sums }}
-        run: |
-          $dir = Join-Path $env:RUNNER_TEMP 'prismestra-crt-diagnostic/candidate'
-          $c = ./scripts/installer/verify_candidate.ps1 -Directory $dir -Commit $env:EXACT_COMMIT -SumsSha256 $env:SUMS
-          ./scripts/installer/test_offline_setup.ps1 -Installer $c.Setup -Sha256 $c.SetupSha256 -Commit $env:EXACT_COMMIT -ManifestSha256 $c.ManifestSha256 -ReportDirectory evidence/clean -DisposableRunner
-      - name: Open the installed app as an ordinary Windows user
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        env:
-          SUMS: ${{ steps.build.outputs.sums }}
-        run: |
-          $dir = Join-Path $env:RUNNER_TEMP 'prismestra-crt-diagnostic/candidate'
-          $c = ./scripts/installer/verify_candidate.ps1 -Directory $dir -Commit $env:EXACT_COMMIT -SumsSha256 $env:SUMS
-          ./scripts/installer/test_standard_user.ps1 -Installer $c.Setup -InstallerSha256 $c.SetupSha256 -Commit $env:EXACT_COMMIT -ManifestSha256 $c.ManifestSha256 -ReportDirectory evidence/standard-user -DisposableRunner
-      - name: Upgrade the published Preview 6
+      - name: Reject an upgrade with a modified app-local DLL, then retry
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           SUMS: ${{ steps.build.outputs.sums }}
@@ -90,14 +82,14 @@ jobs:
           $baseline = Get-Content scripts/installer/upgrade-baseline.lock.json -Raw | ConvertFrom-Json
           $previous = Join-Path $env:RUNNER_TEMP $baseline.file
           Invoke-WebRequest -Uri $baseline.source -OutFile $previous -TimeoutSec 180
-          ./scripts/installer/test_offline_setup.ps1 -PreviousInstaller $previous -Installer $c.Setup -Sha256 $c.SetupSha256 -Commit $env:EXACT_COMMIT -ManifestSha256 $c.ManifestSha256 -ReportDirectory evidence/upgrade -DisposableRunner
+          & ../diagnostic/scripts/installer/test_offline_setup.ps1 -PreviousInstaller $previous -Installer $c.Setup -Sha256 $c.SetupSha256 -Commit $env:EXACT_COMMIT -ManifestSha256 $c.ManifestSha256 -ReportDirectory evidence/upgrade -VerifyChangedLegacyCrtFailure -DisposableRunner
       - name: Retain diagnostic receipts only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: crt-diagnostic-receipts
+          name: crt-modified-dll-receipts
           path: |
-            evidence/
+            product/evidence/
             ${{ runner.temp }}/prismestra-crt-diagnostic/openrgb-build/*.log
             ${{ runner.temp }}/prismestra-crt-diagnostic/openrgb-inventory.json
           if-no-files-found: error

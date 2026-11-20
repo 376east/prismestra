@@ -7,12 +7,17 @@ param(
     [Parameter(Mandatory)][string]$ReportDirectory,
     [string]$PreviousInstaller,
     [switch]$ExerciseVcDownload,
+    [switch]$VerifyChangedLegacyCrtFailure,
     [switch]$DisposableRunner
 )
 
 $ErrorActionPreference = 'Stop'
 if (-not $DisposableRunner -or $env:GITHUB_ACTIONS -cne 'true') {
     throw 'Use this installer test only on a disposable GitHub Actions runner.'
+}
+if ($VerifyChangedLegacyCrtFailure -and (-not $PreviousInstaller -or
+    $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $ExerciseVcDownload)) {
+    throw 'The modified-DLL scenario requires the pinned Preview 6 on a GitHub-hosted runner.'
 }
 if ($ExerciseVcDownload -and ($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $PreviousInstaller)) {
     throw 'VC Runtime removal requires a dedicated GitHub-hosted fresh-install job.'
@@ -195,6 +200,99 @@ function Get-RegisteredUninstaller {
     $uninstaller
 }
 
+function Get-UpgradeSnapshot {
+    $snapshot = [ordered]@{}
+    foreach ($root in @($install, $userRoot, $policyDirectory, $shortcut)) {
+        $items = @()
+        if (Test-Path -LiteralPath $root) {
+            $item = Get-Item -LiteralPath $root -Force
+            $items += $item
+            if ($item.PSIsContainer) {
+                $items += Get-ChildItem -LiteralPath $root -Recurse -Force | Sort-Object FullName
+            }
+        }
+        $snapshot[$root] = @(
+            foreach ($item in $items) {
+                [ordered]@{
+                    path = $item.FullName
+                    directory = $item.PSIsContainer
+                    sha256 = if (-not $item.PSIsContainer) { Get-Sha256 $item.FullName }
+                    acl = (Get-Acl -LiteralPath $item.FullName).Sddl
+                }
+            }
+        )
+    }
+    foreach ($path in @($arpKey, $policyKey)) {
+        $snapshot[$path] = $null
+        if (Test-Path -LiteralPath $path) {
+            $key = Get-Item -LiteralPath $path
+            try {
+                $values = [ordered]@{}
+                foreach ($name in ($key.GetValueNames() | Sort-Object)) {
+                    $values[$name] = $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                }
+                $snapshot[$path] = $values
+            } finally { $key.Dispose() }
+        }
+    }
+    $snapshot.startup = Read-Startup
+    $scheduler = New-Object -ComObject 'Schedule.Service'
+    $scheduler.Connect()
+    try { $snapshot.backend_task = $scheduler.GetFolder('\').GetTask($taskName).Xml }
+    catch {
+        if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw }
+        $snapshot.backend_task = $null
+    }
+    $snapshot.shared_runtimes = Get-Runtimes
+    $snapshot.pawnio = Get-PawnIOState
+    $snapshot
+}
+
+function Test-ChangedLegacyCrtRejection {
+    $legacy = Join-Path $install 'components/openrgb/runtime/vcruntime140.dll'
+    $knownSha256 = 'd1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7'
+    Assert-Expected ((Get-Sha256 $legacy) -ceq $knownSha256) 'The original DLL differs from the known published Preview 6 bytes.'
+    Assert-Expected (Test-RuntimesReady (Get-Runtimes) ([version]'14.51.36247.0')) 'This diagnostic expects all shared runtimes in place.'
+    $original = [IO.File]::ReadAllBytes($legacy)
+    $probe = [ordered]@{
+        result = 'failed'
+        installer_sha256 = $receipt.installer_sha256
+        source_installer_sha256 = $receipt.previous.installer_sha256
+        original_dll_sha256 = $knownSha256
+    }
+    try {
+        [IO.File]::WriteAllBytes($legacy, [byte[]]($original + [byte]42))
+        $probe.modified_dll_sha256 = Get-Sha256 $legacy
+        Assert-Expected ($probe.modified_dll_sha256 -cne $knownSha256) 'Failed to prepare the modified DLL.'
+        $before = Get-UpgradeSnapshot
+        $before | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $report 'tampered-before.json') -Encoding UTF8
+        $logPath = Join-Path $report 'tampered-setup.log'
+        $probe.setup_exit_code = Invoke-Installer $installerPath ($options + ' /ACCEPTWEBVIEW2TERMS') $logPath
+        $after = Get-UpgradeSnapshot
+        $after | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $report 'tampered-after.json') -Encoding UTF8
+        $probe.manifest_commit_after = (Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).commit
+        $probe.modified_dll_after_sha256 = Get-Sha256 $legacy
+        $probe.changed_sections = @(
+            foreach ($section in $before.Keys) {
+                if (($before[$section] | ConvertTo-Json -Depth 10 -Compress) -cne
+                    ($after[$section] | ConvertTo-Json -Depth 10 -Compress)) { $section }
+            }
+        )
+        $log = Get-Content -LiteralPath $logPath -Raw
+        $probe.prepare_rejected = $log -match 'unrecognized runtime file' -and
+            $log -match 'vcruntime140\.dll' -and $log -match 'could not prepare the protected Program Files directory'
+        Assert-Expected ($probe.setup_exit_code -eq 7 -and $probe.prepare_rejected) 'Expected PrepareToInstall to refuse the modified DLL.'
+        Assert-Expected ($probe.changed_sections.Count -eq 0 -and
+            $probe.manifest_commit_after -ceq $receipt.previous.commit -and
+            $probe.modified_dll_after_sha256 -ceq $probe.modified_dll_sha256) 'The failed upgrade changed the installed product or associated state.'
+        $probe.result = 'passed'
+    } finally {
+        [IO.File]::WriteAllBytes($legacy, $original)
+        $probe.original_preserved_for_retry = (Get-Sha256 $legacy) -ceq $knownSha256
+        $probe | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $report 'tampered-upgrade.json') -Encoding UTF8
+    }
+}
+
 function Copy-PrerequisiteLogs([DateTime]$Since, [string]$Destination) {
     $files = @(Get-ChildItem -LiteralPath $env:TEMP -File -ErrorAction SilentlyContinue | Where-Object {
         $_.LastWriteTimeUtc -ge $Since -and $_.Name -match '^(dd_vcredist.*|dd_vcRuntime.*|msedge_installer.*|MicrosoftEdgeUpdate.*)\.log$'
@@ -328,6 +426,7 @@ try {
             $savedData[$name] = Get-Sha256 $path
         }
         $receipt.saved_data_sha256 = $savedData
+        if ($VerifyChangedLegacyCrtFailure) { Test-ChangedLegacyCrtRejection }
     }
     if ($ExerciseVcDownload) {
         $lock = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'prerequisites.lock.json') -Raw | ConvertFrom-Json
