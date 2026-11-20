@@ -12,6 +12,7 @@
 <p align="center">
   <a href="#what-it-does">Features</a> ·
   <a href="docs/compatibility.md">Compatibility</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
   <a href="#build-and-run">Build</a> ·
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
