@@ -55,6 +55,7 @@ const LEGACY_LAUNCHER_SHA: &str =
     "82def8e5478fa616d691ebda66d0277c8950cc1d092b0797f8e99218ce670318";
 const LOCAL: &str = "lighting-local.json";
 const INSTALLED_LOCAL: &str = "state/lighting-local.json";
+const INSTALLED_SENSOR_CATALOG: &str = "state/sensor-sources.json";
 const OPTIONAL_IMPORT_FILES: [(&str, usize); 3] = [
     ("sensor-sources.json", sensor_bindings::MAX_BYTES),
     ("scene-library.json", 256 * 1024),
@@ -291,6 +292,7 @@ fn apply(
         ("profile.json".to_owned(), profile),
         (INSTALLED_LOCAL.to_owned(), local_bytes),
     ]);
+    let mut old_sensor_pin = None;
     for (name, limit) in OPTIONAL_IMPORT_FILES {
         let destination = format!("state/{name}");
         if pending
@@ -306,22 +308,22 @@ fn apply(
         };
         let bytes = match name {
             "sensor-sources.json" => {
-                // Preserve the exact catalog already pinned by an older interrupted import.
+                let original = fingerprint(&bytes);
+                let rebased = rebase_sensor_scope(
+                    bytes,
+                    &source.profile,
+                    &root.join("profile.json"),
+                    &document,
+                )?;
                 if pending
                     .as_ref()
                     .and_then(|receipt| receipt.after.get(&destination))
-                    == Some(&fingerprint(&bytes))
+                    == Some(&original)
+                    && fingerprint(&rebased) != original
                 {
-                    sensor_bindings::Catalog::decode(&bytes)?;
-                    bytes
-                } else {
-                    rebase_sensor_scope(
-                        bytes,
-                        &source.profile,
-                        &root.join("profile.json"),
-                        &document,
-                    )?
+                    old_sensor_pin = Some(original);
                 }
+                rebased
             }
             "scene-library.json" => {
                 Catalog::load(&path, &document.lighting.scene)?;
@@ -334,17 +336,36 @@ fn apply(
         };
         files.insert(destination, bytes);
     }
-    let after = files
+    let after: BTreeMap<String, String> = files
         .iter()
         .map(|(path, bytes)| (path.clone(), fingerprint(bytes)))
         .collect();
     let receipt = match pending {
-        Some(receipt) => {
+        Some(mut receipt) => {
             if receipt.source != source
-                || receipt.after != after
                 || receipt.before.len() != files.len()
                 || files.keys().any(|name| !receipt.before.contains_key(name))
             {
+                return Err("Prismestra settings changed during an interrupted import".into());
+            }
+            if let Some(old_pin) = old_sensor_pin {
+                receipt.after.insert(
+                    INSTALLED_SENSOR_CATALOG.into(),
+                    after[INSTALLED_SENSOR_CATALOG].clone(),
+                );
+                let current = read_optional(
+                    &root.join(INSTALLED_SENSOR_CATALOG),
+                    sensor_bindings::MAX_BYTES,
+                )?
+                .as_deref()
+                .map(fingerprint);
+                if current.as_ref() == Some(&old_pin) {
+                    receipt
+                        .before
+                        .insert(INSTALLED_SENSOR_CATALOG.into(), current);
+                }
+            }
+            if receipt.after != after {
                 return Err("Prismestra settings changed during an interrupted import".into());
             }
             receipt
@@ -432,6 +453,7 @@ fn finish_written_import(
         return Err("Invalid Prismestra import receipt".into());
     }
     let mut profile = None;
+    let mut sensor_catalog = None;
     for (path, expected) in &receipt.after {
         let Some(bytes) = read_optional(&root.join(path), document::MAX_BYTES)? else {
             return Ok(None);
@@ -441,9 +463,25 @@ fn finish_written_import(
         }
         if path == "profile.json" {
             profile = Some(Document::decode(&bytes)?);
+        } else if path == INSTALLED_SENSOR_CATALOG {
+            sensor_catalog = Some((bytes, expected));
         }
     }
     let document = profile.ok_or("Missing imported Prismestra profile")?;
+    if let Some((bytes, expected)) = sensor_catalog {
+        let rebased = rebase_sensor_scope(
+            bytes,
+            &receipt.source.profile,
+            &root.join("profile.json"),
+            &document,
+        )?;
+        if &fingerprint(&rebased) != expected {
+            return Err(
+                "Restore the legacy Prismestra profile to finish migrating its temperature routes"
+                    .into(),
+            );
+        }
+    }
     let referenced = document.assets();
     if !referenced.is_empty() {
         let path = checked_local_path(&root.join("state/assets")).map_err(err)?;
@@ -1860,6 +1898,74 @@ mod tests {
         assert!(matches!(migrate(), MigrationOutcome::None));
         assert_eq!(fs::read(&receipt_path).unwrap(), receipt_bytes);
         assert_eq!(fs::read(&installed_path).unwrap(), migrated_bytes);
+    }
+
+    #[test]
+    fn pending_preview6_receipt_rebases_temperature_routes_without_overwriting_edits() {
+        let (fixture, _, inputs, old, new, mut catalog) = installed_temperature_scope_fixture();
+        let routes = inputs
+            .iter()
+            .map(|input| (input.clone(), "physical/test-nvidia".into()))
+            .collect::<Vec<_>>();
+        catalog.set_routes(&old, &routes).unwrap();
+        let old_catalog = catalog.encode().unwrap();
+        let source_catalog = fixture.source.state.join("sensor-sources.json");
+        let target_catalog = fixture.target.join(INSTALLED_SENSOR_CATALOG);
+        fs::write(&source_catalog, &old_catalog).unwrap();
+        fixture.migrate(false).unwrap();
+
+        // Restore the receipt and files a previous version would have
+        // written just before the final receipt update.
+        let mut receipt = read_receipt(&fixture.target).unwrap().unwrap();
+        receipt.complete = false;
+        receipt
+            .after
+            .insert(INSTALLED_SENSOR_CATALOG.into(), fingerprint(&old_catalog));
+        write_receipt(&fixture.target, &receipt).unwrap();
+        let receipt_path = fixture.target.join(RECEIPT);
+        let original_receipt = fs::read(&receipt_path).unwrap();
+        fs::write(&target_catalog, &old_catalog).unwrap();
+
+        let moved = fixture.source.profile.with_extension("offline");
+        fs::rename(&fixture.source.profile, &moved).unwrap();
+        assert!(
+            apply(
+                &fixture.target,
+                fixture.source.clone(),
+                bundled(),
+                false,
+                read_receipt(&fixture.target).unwrap()
+            )
+            .unwrap_err()
+            .contains("temperature routes")
+        );
+        assert_eq!(fs::read(&receipt_path).unwrap(), original_receipt);
+        assert_eq!(fs::read(&target_catalog).unwrap(), old_catalog);
+        fs::rename(moved, &fixture.source.profile).unwrap();
+
+        let changed = sensor_bindings::Catalog::default().encode().unwrap();
+        fs::write(&target_catalog, &changed).unwrap();
+        assert!(fixture.migrate(false).is_err());
+        assert_eq!(fs::read(&target_catalog).unwrap(), changed);
+        assert_eq!(fs::read(&receipt_path).unwrap(), original_receipt);
+        fs::write(&target_catalog, &old_catalog).unwrap();
+
+        assert!(matches!(
+            fixture.migrate(false).unwrap(),
+            MigrationOutcome::Imported { .. }
+        ));
+        let rebased = sensor_bindings::Catalog::load(&target_catalog).unwrap();
+        assert_eq!(
+            rebased.prepare(&new, &inputs).unwrap(),
+            catalog.prepare(&old, &inputs).unwrap()
+        );
+        assert_eq!(fs::read(source_catalog).unwrap(), old_catalog);
+        let completed = read_receipt(&fixture.target).unwrap().unwrap();
+        assert!(completed.complete);
+        assert_eq!(
+            completed.after[INSTALLED_SENSOR_CATALOG],
+            fingerprint(&fs::read(target_catalog).unwrap())
+        );
     }
 
     #[test]
