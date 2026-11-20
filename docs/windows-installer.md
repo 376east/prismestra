@@ -53,6 +53,8 @@ python scripts/package_installer.py --app-exe APP_EXE --app-sha256 APP_SHA256 --
 
 ### Windows Actions candidate
 
+The Windows CI workflow builds and tests a candidate on manual dispatch. An annotated release tag on `master` builds the same artifacts, runs the installer lifecycle checks, and publishes the verified Setup and corresponding source ZIP. Use `vX.Y.Z-preview.N` for prereleases and `vX.Y.Z` for stable releases. Prerelease installer versions use `X.Y.Z.N`. Stable installer versions use `X.Y.Z.0`, so increment the patch number before promoting a preview line to stable.
+
 Use **Windows checks** → **Run workflow** on the intended revision and provide a four-part Windows version. Pushes to delivery CI branches and preview tags also run packaging. A preview tag such as `v0.1.0-preview.6` supplies version `0.1.0.6`. The job builds on a native x64 Windows runner with Visual Studio 2022 to stay within the bundled Visual C++ runtime floor. It uses pinned Rust and Inno versions, the application and component recipes, and the current OpenRGB lock and patch. Its pinned published Preview 5 source companion supplies verified dependency files and corresponding source archives. The previous backend executable is excluded. The build checks the new backend inventory and tests its parent lease with hardware detection disabled.
 
 The prerequisite URLs are checked against `prerequisites.lock.json`. If the Microsoft URLs change bytes, approved HTTPS mirrors of the exact files can be configured with `PRISMESTRA_VC_REDIST_X64_URL` and `PRISMESTRA_WEBVIEW2_X64_URL`. Size, SHA-256 and the packager's Authenticode checks still apply.
