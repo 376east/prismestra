@@ -134,6 +134,32 @@ paletteAction('insert-palette-color');assert.equal(vm.runInContext('draft.colors
 vm.runInContext('state.pending=false;draft=null;previewQueued=false',context);
 console.log('PASS: palette insertion and reorder preview ordered RGB, scene untouched, palette mode and bounds respected');
 
+// Built-in templates are available beside existing entries and edit as unsaved copies.
+const plumDawn={id:'builtin:plum-dawn',name:'Сливовый рассвет',builtIn:true,scene:{...structuredClone(scene),speed:24,colors:[0x243467,0x7452a4,0xcc9dd5,0xfdb87d]}};
+context.payload={kind:'snapshot',state:{...structuredClone(initial),draftScene:null,draftOrigin:null,library:[plumDawn,...structuredClone(initial.library)]}};
+vm.runInContext('draft=null;view="library";window.prismestraReceive(payload)',context);
+let builtInMarkup=find('#main').innerHTML;
+assert.ok(builtInMarkup.includes('Сливовый рассвет'));
+assert.ok(builtInMarkup.includes('Шаблон'));
+assert.ok(!builtInMarkup.includes('data-remove="builtin:plum-dawn"'));
+assert.ok(builtInMarkup.includes('data-remove="saved"'));
+const beforeBuiltIn=commands.length;
+const presetClick=dataset=>events.click({target:{closest:()=>({dataset,disabled:false,hasAttribute:()=>true})}});
+presetClick({edit:plumDawn.id});
+assert.equal(commands.at(-1).op,'preview_scene');
+assert.equal(commands.at(-1).origin.id,null);
+assert.deepEqual(commands.at(-1).scene,plumDawn.scene);
+assert.ok(commands.slice(beforeBuiltIn).every(command=>command.op==='preview_scene'));
+assert.ok(!find('#main').innerHTML.includes('data-action="rename"'));
+vm.runInContext('draft.speed=35;requestPreview();flushPreview();saveDraft("My plum scene")',context);
+assert.equal(commands.at(-1).op,'save_scene');
+assert.equal(commands.at(-1).id,null,'saving a template creates a personal entry');
+assert.equal(commands.at(-1).scene.speed,35);
+assert.equal(vm.runInContext('state.library[0].scene.speed',context),24);
+assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(state.library[1].scene)',context)),scene);
+vm.runInContext('commandPending=false;awaitingCommandAck=false;savedSceneRequest=null;draft=null;draftOrigin=null;selectedId=null',context);
+console.log('PASS: built-in template preview and copy leave the preset and the legacy catalog entry untouched');
+
 // Native library frames go through the same pixel painter; missing frames keep a palette fallback.
 context.payload={kind:'snapshot',state:{...structuredClone(initial),library:[{id:'saved',name:'Native frame',scene,preview:{width:2,height:1,colors:[0xff0000,0x00ff00]}},{id:'fallback',name:'No cached frame',scene}]}};vm.runInContext('view="library";window.prismestraReceive(payload)',context);
 assert.ok(find('#main').innerHTML.includes('data-library-preview="saved"'));assert.ok(find('#main').innerHTML.includes('Палитра сцены'));const artwork=find('library-canvas-saved');assert.equal(artwork.width,2);assert.equal(artwork.height,1);assert.deepEqual([...artwork.lastPixels.data],[255,0,0,255,0,255,0,255]);assert.ok(find('#main').innerHTML.includes('параметры RGB'));
@@ -204,6 +230,62 @@ events.click({target:{closest:()=>secondButton}});
 assert.equal(commands.length,beforePendingPage,'Do not send a card selection before native navigation is acknowledged');
 vm.runInContext('pendingView=null',context);
 console.log('PASS: device cards select by logical identity and the draft dropdown still uses indices');
+
+// An active device inspection announces transitions once and follows its logical ID.
+{
+ const wled = {id:'desk rgb',label:'WLED',role:'canvas',leds:32,rate_hz:30,enabled:true};
+ const other = appliedDevices[0];
+ const deviceSnapshot = {
+  ...initial, devices:[other,wled], draftDevices:[other,wled],
+  editor:{page:'devices',index:0,targets:[other.label,wled.label],fields:[],dirty:false},
+  deviceActivity:{labels:{[wled.id]:'Недоступно',[other.id]:'Выключено'}},
+};
+ const updateDeviceStatus = (selected, unrelated) => {
+  context.payload={kind:'status',state:{deviceActivity:{labels:{[wled.id]:selected,[other.id]:unrelated}}}};
+  vm.runInContext('window.prismestraReceive(payload)',context);
+};
+ context.payload={kind:'snapshot',state:deviceSnapshot};
+ vm.runInContext('window.prismestraReceive(payload)',context);
+ assert.match(mainMarkup,/id="device-status-desk%20rgb" data-output-status="desk rgb"/);
+ assert.match(mainMarkup,/aria-label="Свойства: WLED" aria-describedby="device-status-desk%20rgb"/);
+ assert.match(mainMarkup,/<p class="parameter-note" id="native-runtime-detail">/);
+ const live = find('#device-status-announcement');
+ const announcements = [];
+ let liveText = live.textContent;
+ Object.defineProperty(live,'textContent',{
+  get:()=>liveText,
+  set:value=>{liveText=value; if(value)announcements.push(value);},
+ });
+ const inspectedRow = find('[data-device-id="desk rgb"]');
+ inspectedRow.dataset.deviceId=wled.id;
+ inspectedRow.focus();
+ events.click({target:{closest:()=>inspectedRow}});
+ assert.deepEqual(commands.at(-1),{op:'select_device',id:wled.id});
+ context.payload={kind:'snapshot',state:{...deviceSnapshot,editor:{...deviceSnapshot.editor,index:1}}};
+ vm.runInContext('window.prismestraReceive(payload)',context);
+ assert.deepEqual(announcements,[],'Activation and the initial state are silent');
+ updateDeviceStatus('Подключается','Недоступно');
+ updateDeviceStatus('Подключается','Выключено');
+ const properties = new Node();
+ properties.closest = selector=>selector==='#device-properties'?properties:null;
+ properties.focus();
+ events.focusin();
+ updateDeviceStatus('Кадры отправлены','Выключено');
+ assert.deepEqual(announcements,['WLED. Подключается.','WLED. Кадры отправлены.']);
+ const escapeProperties = () => events.keydown({key:'Escape',target:properties,preventDefault(){}});
+ escapeProperties();
+ assert.equal(document.activeElement,inspectedRow);
+ properties.focus();
+ events.focusin();
+ inspectedRow.disabled=true; // The selector mock keeps detached nodes; the browser test removes the row.
+ escapeProperties();
+ assert.equal(document.activeElement,find('h1'));
+ events.focusin();
+ updateDeviceStatus('Недоступно','Выключено');
+ assert.equal(announcements.length,2,'Status changes outside the inspection stay silent');
+ vm.runInContext('deviceInspection=null',context);
+ console.log('PASS: selected device status changes only, spoken description, and logical focus return');
+}
 
 const candidateFixtures = require('./fixtures/device-candidates.json');
 const [foundRgb, foundLcd] = candidateFixtures.proposal.deviceCandidates;
@@ -409,3 +491,123 @@ evaluate('window.prismestraReceive({kind:"flush",id:93})');
 assert.equal(commands.at(-1).origin.id,null);
 assert.equal(commands.at(-1).origin.name,'A');
 console.log('PASS: scene draft guard, all three choices, acknowledged save and error recovery, named/legacy restore, stale source detachment');
+
+const navFixture = (devices = [], extra = {}) => ({
+ ...structuredClone(initial), devices, draftDevices: devices, deviceCandidates: [],
+ schedule: {enabled: false, paused: false}, ...extra,
+});
+const navHas = page => find('nav').innerHTML.includes(`data-view="${page}"`);
+const viewNow = () => vm.runInContext('view', context);
+const openView = page => vm.runInContext('changeView('+JSON.stringify(page)+')', context);
+const navLcd = {id: 'lcd', label: 'LCD', role: 'lcd', enabled: true, leds: 0};
+const navAmbient = {id: 'ambient', label: 'Screen strip', role: 'ambient', enabled: false, leds: 10};
+vm.runInContext('window.prismestraReceive({kind:"close_cancelled"})', context);
+vm.runInContext('formStages.clear();view="library";pendingView=null', context);
+receiveDeviceState('snapshot', navFixture([], {deviceCandidates: [navLcd, navAmbient]}));
+assert.ok(navHas('devices') && navHas('settings'));
+assert.ok(['lcd','ambient','connections','temperatures','sources','schedule'].every(page => !navHas(page)));
+const beforeHiddenOutput = commands.length;
+openView('lcd');
+assert.equal(commands.length, beforeHiddenOutput, 'Unapplied discovery does not open the LCD editor');
+openView('devices');
+receiveDeviceState('snapshot', navFixture([], {editor: {page:'devices',index:0,targets:[],fields:[],dirty:false}, nativeAux:{
+ page:'devices',fields:[{id:714,label:'Семейство',kind:'select',enabled:true,value:'lcd',choices:[]}],actions:[],notes:[],
+}}));
+assert.ok(mainMarkup.includes('data-action="focus-device-setup"'));
+assert.ok(mainMarkup.includes('data-view="connections"'));
+openView('connections');
+assert.deepEqual(commands.at(-1), {op:'page',page:'connections'});
+receiveDeviceState('snapshot', navFixture([navLcd, navAmbient], {deviceActivity:{labels:{lcd:'Нет связи'}}}));
+assert.ok(navHas('lcd') && navHas('ambient'), 'Configured disabled and unreachable outputs stay discoverable');
+openView('lcd');
+receiveDeviceState('snapshot', navFixture([navLcd, navAmbient], {editor:{page:'lcd',index:0,targets:['LCD'],fields:[],dirty:false}}));
+assert.equal(viewNow(), 'lcd');
+assert.ok(mainMarkup.includes('Проверить подключение') && mainMarkup.includes('Температуры'));
+receiveDeviceState('snapshot', navFixture([navAmbient], {pending:true}));
+assert.equal(viewNow(), 'lcd', 'Wait for configuration to settle before leaving the page');
+receiveDeviceState('status', {pending:false});
+assert.deepEqual(commands.at(-1), {op:'page',page:'devices'});
+assert.equal(viewNow(), 'devices');
+assert.ok(!navHas('lcd') && navHas('ambient'));
+receiveDeviceState('snapshot', navFixture([navAmbient], {schedule:{enabled:true,paused:true}}));
+openView('settings');
+assert.deepEqual(commands.at(-1), {op:'page',page:'settings'});
+receiveDeviceState('snapshot', navFixture([navAmbient], {schedule:{enabled:true,paused:true}}));
+assert.ok(mainMarkup.includes('Диагностика') && mainMarkup.includes('Расписание на паузе'));
+openView('schedule');
+assert.deepEqual(commands.at(-1), {op:'page',page:'schedule'});
+assert.ok(find('nav').innerHTML.includes('data-view="settings" class="active"'));
+console.log('PASS: hidden output links, discovery access, configured offline routes, removal fallback, settings and schedule');
+
+vm.runInContext('formStages.clear();view="devices";pendingView=null', context);
+receiveDeviceState('snapshot', navFixture([], {status:'Ищу поддерживаемые устройства…'}));
+assert.ok(find('#player-status').textContent.includes('Ищу поддерживаемые устройства'));
+assert.ok(navHas('devices') && !navHas('lcd') && !navHas('ambient'));
+receiveDeviceState('status', {status:'Автопоиск завершён'});
+assert.ok(!navHas('lcd') && !navHas('ambient'));
+for (const output of [navLcd, navAmbient]) {
+ const role=output.role;
+ const editorFor = (id, index=0) => ({
+  page:role,index,deviceId:id,targets:['Same label','Same label'],
+  fields:[{key:'label',label:'Label',value:'Original',choices:[]}],dirty:false,
+ });
+ receiveDeviceState('snapshot', navFixture([output]));
+ openView(role);
+ receiveDeviceState('snapshot', navFixture([output], {editor:editorFor(output.id)}));
+ const editing=find('#field-0');
+ editing.value='Keep this input';
+ events.input({target:editing});
+ receiveDeviceState('status', {deviceActivity:{labels:{[output.id]:'Недоступно'}}});
+ assert.equal(find('#field-0').value,'Keep this input','Transport loss keeps the active form');
+ assert.ok(navHas(role));
+ const replacement={...output,id:output.id+'-other'};
+ events.compositionstart({});
+ receiveDeviceState('snapshot', navFixture([replacement], {editor:editorFor(replacement.id)}));
+ editing.value='Keep this composed input';
+ events.input({target:editing});
+ events.compositionend({});
+ while(rafQueue.length)rafQueue.shift()();
+ assert.ok(mainMarkup.includes('Незавершённый ввод сохранён'));
+ assert.ok(!mainMarkup.includes('id="field-0"'),'Do not offer replacement fields while the original input is retained');
+ const beforeRepair=commands.length;
+ vm.runInContext('send({op:"apply_fields"},true)',context);
+ assert.equal(commands.length,beforeRepair,'Pending fields cannot be sent to a replacement at the same index');
+ receiveDeviceState('snapshot', navFixture([replacement,output], {editor:editorFor(output.id,1)}));
+ assert.equal(find('#field-0').value,'Keep this composed input','Original ID restores input after a reorder');
+ receiveDeviceState('snapshot', navFixture([], {editor:null}));
+ assert.equal(viewNow(),role,'Explicit removal cannot navigate away from unsaved input');
+ assert.ok(!navHas(role));
+ vm.runInContext('discardPageFields()',context);
+ assert.equal(viewNow(),'devices','Explicit discard lets the normal empty-page fallback run');
+ receiveDeviceState('snapshot',navFixture([]));
+}
+console.log('PASS: startup waiting, detached output input, no wrong-target mutation, reconnect and explicit discard');
+
+vm.runInContext('formStages.clear();view="settings";pendingView=null',context);
+const settingsState = navFixture();
+receiveDeviceState('snapshot',settingsState);
+const scheduleOpener = new Node();
+scheduleOpener.dataset.view = 'schedule';
+scheduleOpener.closest = selector => selector === '.settings-links' ? new Node() : null;
+const scheduleLink = find('#main .settings-links [data-view="schedule"]');
+const scheduleForm = {...settingsState,nativeForm:{page:'schedule',fields:[],actions:[],notes:[]}};
+const returnFromSchedule = () => {
+ events.click({target:{closest:()=>scheduleOpener}});
+ receiveDeviceState('snapshot',scheduleForm);
+ openView('settings');
+ assert.equal(viewNow(),'settings');
+ assert.notEqual(document.activeElement,scheduleLink,'Wait for the Settings snapshot before restoring focus');
+};
+returnFromSchedule();
+document.activeElement=find('#main h1');
+receiveDeviceState('status',{pending:false});
+assert.notEqual(document.activeElement,scheduleLink);
+receiveDeviceState('snapshot',settingsState);
+assert.equal(document.activeElement,scheduleLink,'Restore the initiating Settings link after acknowledgement');
+returnFromSchedule();
+const appearanceButton=find('#appearance-toggle');
+appearanceButton.id='appearance-toggle';
+document.activeElement=appearanceButton;
+receiveDeviceState('snapshot',settingsState);
+assert.equal(document.activeElement,appearanceButton,'An asynchronous return does not steal focus moved by the user');
+console.log('PASS: Settings return focus waits for acknowledgement and respects user focus');

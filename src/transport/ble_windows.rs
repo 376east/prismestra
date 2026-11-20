@@ -29,12 +29,29 @@ use windows::{
     },
     Foundation::TypedEventHandler,
     Storage::Streams::{DataReader, DataWriter},
-    Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
+    Win32::{
+        Foundation::E_ACCESSDENIED,
+        System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
+    },
     core::GUID,
 };
 
+const ACCESS_DENIED: &str =
+    "Нет доступа к Bluetooth-контроллеру. Проверьте разрешение или сопряжение в Windows.";
+
 fn error(e: windows::core::Error) -> String {
-    format!("WinRT error: {e}; disconnected")
+    if e.code() == E_ACCESSDENIED {
+        ACCESS_DENIED.into()
+    } else {
+        format!("WinRT error: {e}; disconnected")
+    }
+}
+
+fn gatt_succeeded(status: GattCommunicationStatus) -> Result<bool, String> {
+    if status == GattCommunicationStatus::AccessDenied {
+        return Err(ACCESS_DENIED.into());
+    }
+    Ok(status == GattCommunicationStatus::Success)
 }
 fn uuid(short: u16) -> GUID {
     GUID::from_u128((short as u128) << 96 | 0x00001000800000805f9b34fb)
@@ -362,21 +379,37 @@ fn scan_pixel_addresses(
     Ok(snapshot)
 }
 
+pub(crate) struct PixelProbe {
+    pub address: u64,
+    pub capacity: Result<usize, String>,
+}
+
 /// Passive discovery followed by a read-only EA81 capability query for
 /// advertisement-verified pixel controllers only.
-pub fn discover_pixel_controllers(
+pub(crate) fn discover_pixel_controllers(
     control: &mut dyn ble::Control,
     exclude: &BTreeSet<u64>,
-) -> Result<Vec<(u64, usize)>, String> {
+) -> Result<Vec<PixelProbe>, String> {
     let addresses = scan_pixel_addresses(control, exclude)?;
+    probe_pixel_addresses(control, exclude, addresses, |address, budget| {
+        WindowsBackend
+            .connect(address, budget, &mut |_| {})
+            .and_then(|mut link| link.pixel_capacity(budget))
+    })
+}
+
+fn probe_pixel_addresses(
+    control: &mut dyn ble::Control,
+    exclude: &BTreeSet<u64>,
+    addresses: BTreeMap<u64, bool>,
+    mut probe: impl FnMut(u64, &mut dyn ble::Control) -> Result<usize, String>,
+) -> Result<Vec<PixelProbe>, String> {
     let mut result = Vec::new();
-    let mut first_error = None;
-    let mut probes = 0;
     for (address, supported) in addresses {
         if !supported || exclude.contains(&address) {
             continue;
         }
-        if probes == MAX_PIXEL_PROBES {
+        if result.len() == MAX_PIXEL_PROBES {
             break;
         }
         let started = control.now();
@@ -384,28 +417,17 @@ pub fn discover_pixel_controllers(
         let Ok(_lease) = Lease::acquire(vec![format!("ble:{address}")]) else {
             continue;
         };
-        probes += 1;
         // Share one eight-second budget across connection and capability probing.
         let mut budget = ble::FrameControl {
             inner: control,
             started,
         };
-        match WindowsBackend
-            .connect(address, &mut budget, &mut |_| {})
-            .and_then(|mut link| link.pixel_capacity(&mut budget))
-        {
-            Ok(points) => result.push((address, points)),
-            Err(error) => {
-                first_error.get_or_insert(error);
-            }
-        }
+        result.push(PixelProbe {
+            address,
+            capacity: probe(address, &mut budget),
+        });
     }
     ble::check_wait(control, control.now())?;
-    if result.is_empty()
-        && let Some(error) = first_error
-    {
-        return Err(error);
-    }
     Ok(result)
 }
 
@@ -468,11 +490,9 @@ impl Backend for WindowsBackend {
             control
         )
         .map_err(error)?;
+        let success = gatt_succeeded(services.Status().map_err(error)?)?;
         let service_list = services.Services().map_err(error)?;
-        ble::validate_service(
-            services.Status().map_err(error)? == GattCommunicationStatus::Success,
-            service_list.Size().map_err(error)?,
-        )?;
+        ble::validate_service(success, service_list.Size().map_err(error)?)?;
         link.service = Some(service_list.GetAt(0).map_err(error)?);
         let chars = bounded!(
             link.service
@@ -485,14 +505,11 @@ impl Backend for WindowsBackend {
             control
         )
         .map_err(error)?;
+        let success = gatt_succeeded(chars.Status().map_err(error)?)?;
         let list = chars.Characteristics().map_err(error)?;
         let count = list.Size().map_err(error)?;
         // Validate uniqueness before indexing. No fallback to an arbitrary service/characteristic.
-        ble::validate_characteristic(
-            chars.Status().map_err(error)? == GattCommunicationStatus::Success,
-            count,
-            true,
-        )?;
+        ble::validate_characteristic(success, count, true)?;
         let characteristic = list.GetAt(0).map_err(error)?;
         ble::validate_characteristic(
             true,
@@ -615,10 +632,9 @@ impl WindowsLink {
                 control
             )
             .map_err(error)?;
+            let success = gatt_succeeded(chars.Status().map_err(error)?)?;
             let list = chars.Characteristics().map_err(error)?;
-            if chars.Status().map_err(error)? != GattCommunicationStatus::Success
-                || list.Size().map_err(error)? != 1
-            {
+            if !success || list.Size().map_err(error)? != 1 {
                 return Err("FF02 notification characteristic unavailable or ambiguous".into());
             }
             let characteristic = list.GetAt(0).map_err(error)?;
@@ -674,7 +690,7 @@ impl WindowsLink {
                 control
             )
             .map_err(error)?;
-            if status != GattCommunicationStatus::Success {
+            if !gatt_succeeded(status)? {
                 return Err("FF02 notification subscription failed".into());
             }
             // No cached notification is accepted. Arm immediately before the fixed query so
@@ -702,7 +718,7 @@ impl WindowsLink {
                     control
                 )
                 .map_err(error)?;
-                if status != GattCommunicationStatus::Success {
+                if !gatt_succeeded(status)? {
                     return Err("FF02 notification unsubscribe failed".into());
                 }
             }
@@ -719,7 +735,7 @@ impl WindowsLink {
             return Err("BLE link lost; disconnected".into());
         }
         if !crate::lighting::door::fits(packet.len(), self.max_pdu()?) {
-            return Err("Packet exceeds negotiated ATT payload; no fragments sent".into());
+            return Err("Packet exceeds negotiated ATT payload".into());
         }
         let writer = DataWriter::new().map_err(error)?;
         let buffer = (|| {
@@ -736,7 +752,7 @@ impl WindowsLink {
             control
         )
         .map_err(error)?;
-        if result.Status().map_err(error)? != GattCommunicationStatus::Success {
+        if !gatt_succeeded(result.Status().map_err(error)?)? {
             return Err("GATT write failed; disconnected".into());
         }
         Ok(())
@@ -746,6 +762,27 @@ impl WindowsLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_message_requires_an_explicit_windows_denial() {
+        assert_eq!(
+            gatt_succeeded(GattCommunicationStatus::AccessDenied).unwrap_err(),
+            ACCESS_DENIED
+        );
+        assert_eq!(
+            error(windows::core::Error::from_hresult(E_ACCESSDENIED)),
+            ACCESS_DENIED
+        );
+        assert_eq!(gatt_succeeded(GattCommunicationStatus::Success), Ok(true));
+        assert_eq!(
+            gatt_succeeded(GattCommunicationStatus::Unreachable),
+            Ok(false)
+        );
+        assert_eq!(
+            gatt_succeeded(GattCommunicationStatus::ProtocolError),
+            Ok(false)
+        );
+    }
 
     fn product_advertisement() -> [u8; 27] {
         let mut bytes = [0; 27];
@@ -878,6 +915,43 @@ mod tests {
             self.time += d;
         }
     }
+
+    #[test]
+    fn pixel_discovery_keeps_failed_and_confirmed_addresses() {
+        let mut clock = Clock {
+            time: Duration::ZERO,
+            cancel: false,
+        };
+        let denied = 0x0010_0010_0010;
+        let confirmed = denied + 1;
+        let excluded = denied + 2;
+        let unsupported = denied + 3;
+        let records = probe_pixel_addresses(
+            &mut clock,
+            &BTreeSet::from([excluded]),
+            BTreeMap::from([
+                (denied, true),
+                (confirmed, true),
+                (excluded, true),
+                (unsupported, false),
+            ]),
+            |address, _| match address {
+                id if id == denied => Err("fixture access denied".into()),
+                id if id == confirmed => Ok(153),
+                _ => panic!("unexpected address probed"),
+            },
+        )
+        .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].address, denied);
+        assert_eq!(
+            records[0].capacity.as_ref().unwrap_err(),
+            "fixture access denied"
+        );
+        assert_eq!(records[1].address, confirmed);
+        assert_eq!(records[1].capacity, Ok(153));
+    }
+
     #[derive(Clone)]
     struct FakeOperation {
         cancelled: Arc<AtomicBool>,

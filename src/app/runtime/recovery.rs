@@ -9,13 +9,18 @@ pub(super) struct Recovery {
     pub(super) start_error: Option<String>,
 }
 impl Recovery {
-    fn observe(&mut self, generation: u64, failed: bool, now: u64) {
+    fn observe(&mut self, generation: u64, failed: bool, now: u64) -> bool {
         if failed && self.failed_generation != Some(generation) {
             self.failed_generation = Some(generation);
             self.due_us = [1_000_000, 5_000_000, 15_000_000]
                 .get(self.attempts)
                 .map(|delay| now.saturating_add(*delay));
+            return self.due_us.is_some();
         }
+        false
+    }
+    pub(super) fn retry_scheduled(&self) -> bool {
+        self.due_us.is_some()
     }
     fn take_attempt(&mut self, now: u64, reaped: bool) -> bool {
         if !reaped || !self.due_us.is_some_and(|due| now >= due) {
@@ -71,7 +76,7 @@ impl Runtime {
     /// Success does not replenish the budget. Budget is renewed only by
     /// an explicit configuration/refresh/power epoch or the return of a bound
     /// LCD interface, never by a successful factory or duplicate arrival.
-    /// Errors are untyped, so even auth/topology failures use this finite budget.
+    /// Generic errors use this finite budget. A worker can explicitly require user action.
     pub fn enable_output_recovery(&mut self, id: &str) -> Result<(), String> {
         if !self.rgb_specs.contains_key(id) && !self.lcd_specs.contains_key(id) {
             return Err("Output recovery requires a registered output".into());
@@ -90,10 +95,14 @@ impl Runtime {
     pub(super) fn reset_output_recovery(&mut self, id: &str) {
         self.lcd_arrivals.remove(id);
         if let Some(state) = self.output_recovery.get_mut(id) {
+            let was_scheduled = state.retry_scheduled();
             *state = Recovery {
                 start_error: state.start_error.take(),
                 ..Recovery::default()
             };
+            if was_scheduled {
+                self.bump_view();
+            }
         }
     }
 
@@ -137,9 +146,13 @@ impl Runtime {
     }
 
     pub(super) fn recover_failed_outputs(&mut self, now: u64) -> Result<(), String> {
+        let live = self
+            .pending
+            .as_ref()
+            .and_then(|pending| pending.live_rgb.as_ref());
         if self.stopped
             || self.suspended
-            || self.pending.is_some()
+            || (self.pending.is_some() && live.is_none())
             || self.power.pending()
             || self.power.error().is_some()
             || self.refresh.is_some()
@@ -148,14 +161,26 @@ impl Runtime {
         }
         let mut rgb = Vec::new();
         let mut lcd = Vec::new();
+        let mut scheduled_retry = false;
         for (id, state) in &mut self.output_recovery {
             if let Some(spec) = self.rgb_specs.get(id) {
+                // A live plan leaves retained RGB and all existing LCD routes in place.
+                // Retiring RGB routes belong to the pending plan's drain.
+                if live.is_some_and(|plan| !plan.retained.contains(id)) {
+                    continue;
+                }
                 let snapshot = self.host.status(id);
+                if spec.action_required_error.is_some()
+                    || snapshot.as_ref().is_some_and(|s| s.requires_action)
+                {
+                    continue;
+                }
                 let failed = state.start_error.is_some()
                     || snapshot
                         .as_ref()
                         .is_some_and(|s| s.phase == crate::runtime::output::Phase::Failed);
-                state.observe(snapshot.as_ref().map_or(0, |s| s.generation), failed, now);
+                scheduled_retry |=
+                    state.observe(snapshot.as_ref().map_or(0, |s| s.generation), failed, now);
                 if failed
                     && state.take_attempt(now, snapshot.is_none() || self.host.output_reaped(id))
                 {
@@ -176,13 +201,17 @@ impl Runtime {
                         ..Recovery::default()
                     };
                 }
-                state.observe(snapshot.as_ref().map_or(0, |s| s.generation), failed, now);
+                scheduled_retry |=
+                    state.observe(snapshot.as_ref().map_or(0, |s| s.generation), failed, now);
                 if failed
                     && state.take_attempt(now, worker.is_none_or(lcd_worker::Worker::is_reaped))
                 {
                     lcd.push((id.clone(), spec.keys.clone(), spec.factory.clone()));
                 }
             }
+        }
+        if scheduled_retry {
+            self.bump_view();
         }
         for (id, keys, factory) in rgb {
             let result = self.host.attach_claimed(&id, keys, move |c| factory(c));

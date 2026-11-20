@@ -1,4 +1,4 @@
-name: Windows checks
+name: CI
 
 on:
   push:
@@ -8,14 +8,14 @@ on:
       installer_version:
         description: Four-part Windows installer version for a candidate build
         required: true
-        default: '0.1.0.6'
+        default: '0.1.0.7'
         type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: windows-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -25,6 +25,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install stable Rust
         shell: pwsh
         run: |
@@ -52,8 +54,6 @@ jobs:
         run: |
           node --check src/ui/windows/web/app.js
           node tests/native_ui_ipc.cjs
-      - name: Check all targets
-        run: cargo check --locked --all-targets
       - name: Test without physical devices
         run: cargo test --locked -- --test-threads=1
       - name: Check Clippy
@@ -62,10 +62,10 @@ jobs:
   package:
     name: Build Windows Setup candidate
     if: >-
-      github.repository == 'malyarq/prismestra' &&
+      github.repository_id == '1450402221' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'push' &&
-        ((startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-preview.')) ||
+        (startsWith(github.ref, 'refs/tags/v') ||
          startsWith(github.ref, 'refs/heads/codex/delivery-ci-'))))
     # VS 2022 keeps linker output within the pinned VC runtime floor.
     runs-on: windows-2022
@@ -88,12 +88,15 @@ jobs:
         run: |
           $version = $env:DISPATCH_VERSION
           if ($env:GITHUB_REF_TYPE -ceq 'tag') {
-            if ($env:GITHUB_REF_NAME -cnotmatch '^v(\d+\.\d+\.\d+)-preview\.(\d+)$') {
-              throw 'Expected a preview tag like v0.1.0-preview.6'
+            if ($env:GITHUB_REF_NAME -cmatch '^v(\d+\.\d+\.\d+)-preview\.([1-9]\d*)$') {
+              $version = "$($Matches[1]).$($Matches[2])"
+            } elseif ($env:GITHUB_REF_NAME -cmatch '^v(\d+\.\d+\.\d+)$') {
+              $version = "$($Matches[1]).0"
+            } else {
+              throw 'Expected vX.Y.Z or vX.Y.Z-preview.N'
             }
-            $version = "$($Matches[1]).$($Matches[2])"
           } elseif (-not $version) {
-            $version = '0.1.0.6'
+            $version = '0.1.0.7'
           }
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
           $vsdevcmd = & $vswhere -latest -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find Common7/Tools/VsDevCmd.bat
@@ -206,6 +209,7 @@ jobs:
   candidate:
     name: Retain verified Windows candidate
     needs: [software, package, installer]
+    if: github.ref_type != 'tag'
     runs-on: windows-2025
     timeout-minutes: 10
     steps:
@@ -230,3 +234,44 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
+
+  publish:
+    name: Publish the tested Windows Setup
+    needs: [software, package, installer]
+    if: github.repository_id == '1450402221' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ needs.package.outputs.candidate }}
+          path: ${{ runner.temp }}/candidate
+      - name: Verify the tag and publish the exact tested files
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUMS_SHA256: ${{ needs.package.outputs.sums_sha256 }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ((git cat-file -t "refs/tags/$tag") -cne 'tag' -or
+              (git rev-parse "refs/tags/${tag}^{commit}") -cne $env:GITHUB_SHA) {
+            throw 'The release must use an annotated tag on this commit.'
+          }
+          git merge-base --is-ancestor $env:GITHUB_SHA refs/remotes/origin/master
+          if ($LASTEXITCODE) { throw 'Release commit must be in master.' }
+          $directory = Join-Path $env:RUNNER_TEMP candidate
+          $candidate = ./scripts/installer/verify_candidate.ps1 -Directory $directory -Commit $env:GITHUB_SHA -SumsSha256 $env:SUMS_SHA256
+          $sources = Get-ChildItem -LiteralPath $directory -Filter 'Prismestra-Sources-*.zip' -File
+          if (@($sources).Count -ne 1) { throw 'Expected one corresponding source archive.' }
+          $title = "Prismestra $($tag.TrimStart('v'))"
+          $notes = "Download **$(Split-Path -Leaf $candidate.Setup)** for Windows x64. Setup includes the background OpenRGB backend and required runtimes. See the [device compatibility guide](https://github.com/$env:GITHUB_REPOSITORY/blob/$env:GITHUB_SHA/docs/compatibility.md). The source ZIP is for developers.`n`nSetup SHA-256: $($candidate.SetupSha256)"
+          $releaseArgs = @('release', 'create', $tag, $candidate.Setup, $sources.FullName, '--repo', $env:GITHUB_REPOSITORY, '--verify-tag', '--title', $title, '--notes', $notes, '--generate-notes')
+          if ($tag.Contains('-preview.')) { $releaseArgs += @('--prerelease', '--latest=false') }
+          gh @releaseArgs
+          if ($LASTEXITCODE) { throw 'Publishing the tested Setup failed.' }

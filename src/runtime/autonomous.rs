@@ -233,6 +233,79 @@ impl Host {
         self.frame = core.frame.clone();
         Ok(())
     }
+    pub(crate) fn stop_rgb_outputs(&self, ids: &std::collections::BTreeSet<String>) {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        for id in ids {
+            if let Some(output) = core.outputs.get(id) {
+                output.stop();
+            }
+        }
+    }
+
+    pub(crate) fn rgb_outputs_drained<'a>(
+        &self,
+        ids: impl IntoIterator<Item = &'a String>,
+    ) -> bool {
+        let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.reap();
+        ids.into_iter()
+            .all(|id| core.outputs.get(id).is_none_or(|output| output.is_reaped()))
+    }
+
+    /// The runtime validates the setup and drains the changed owners before committing.
+    pub(crate) fn install_rgb_setup(
+        &mut self,
+        setup: Setup,
+        retired: &std::collections::BTreeSet<String>,
+        muted: BTreeMap<String, bool>,
+    ) {
+        let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        for id in retired {
+            debug_assert!(core.outputs.get(id).is_none_or(|output| output.is_reaped()));
+            core.outputs.remove(id);
+            core.endpoint_leases.remove(id);
+            core.cadences.remove(id);
+            core.requested.remove(id);
+            core.muted.remove(id);
+            core.external.remove(id);
+        }
+        let Core {
+            muted: current_muted,
+            cadences,
+            ..
+        } = &mut *core;
+        let previous_muted = std::mem::replace(current_muted, muted);
+        cadences.retain(|id, _| previous_muted.get(id) == current_muted.get(id));
+        // Keep the last complete frames of surviving owners until the next
+        // scheduled scene step. A new owner needs a frame from the new layout.
+        let frames: BTreeMap<_, _> = core
+            .frame
+            .frames
+            .iter()
+            .filter(|(id, _)| core.outputs.contains_key(*id))
+            .map(|(id, colors)| (id.clone(), colors.clone()))
+            .collect();
+        let preview = setup
+            .canvas
+            .points
+            .iter()
+            .map(|point| {
+                core.frame
+                    .frames
+                    .get(&point.device)
+                    .and_then(|colors| colors.get(point.led))
+                    .copied()
+                    .unwrap_or_default()
+            })
+            .collect();
+        core.setup = Arc::new(setup);
+        core.frame = Arc::new(FrameView { preview, frames });
+        self.setup = core.setup.clone();
+        self.frame = core.frame.clone();
+        drop(core);
+        self.notify();
+    }
+
     pub fn attach<F>(&mut self, id: &str, factory: F) -> Result<(), String>
     where
         F: FnOnce(Cancellation) -> Result<Box<dyn RgbDriver>, String> + Send + 'static,
@@ -367,10 +440,13 @@ impl Host {
     }
     pub fn drained(&mut self) -> bool {
         self.reap();
-        if self.clock.as_mut().is_some_and(|c| !c.reap()) {
+        if !self.clock_drained() {
             return false;
         }
         self.try_core().is_some_and(|mut c| c.drained())
+    }
+    pub(crate) fn clock_drained(&mut self) -> bool {
+        self.clock.as_mut().is_none_or(Clock::reap)
     }
 }
 impl Drop for Host {

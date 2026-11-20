@@ -28,6 +28,8 @@ const ACTIVATE_ACCEPTED: usize = 1;
 const EXIT_ACCEPTED: usize = 1;
 const EXIT_BUSY: usize = 2;
 const CALLBACK: u32 = WM_APP + 31;
+const TRAY_ICON_ID: u32 = 1;
+const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 const OPEN: u32 = 1;
 const STOP: u32 = 2;
 const EXIT: u32 = 3;
@@ -369,6 +371,11 @@ fn poll_tray(
     // The same(hwnd,uID) is used for every operation. MODIFY accepts an existing
     // icon after a duplicate TaskbarCreated without deleting/replacing it first.
     let succeeded = notify(NIM_ADD) || notify(NIM_MODIFY);
+    if succeeded && registration.get().epoch == epoch {
+        // An unsupported version leaves the registered icon usable. Decode
+        // both callback formats, including after Explorer re-registers it.
+        notify(NIM_SETVERSION);
+    }
     let mut pending = registration.get();
     let current = pending.finish(epoch, now_ms, succeeded);
     registration.set(pending);
@@ -690,10 +697,13 @@ fn tray_data(hwnd: HWND, icon: HICON) -> NOTIFYICONDATAW {
     let mut data = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
-        uID: 1,
-        uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+        uID: TRAY_ICON_ID,
+        uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
         uCallbackMessage: CALLBACK,
         hIcon: icon,
+        Anonymous: NOTIFYICONDATAW_0 {
+            uVersion: NOTIFYICON_VERSION_4,
+        },
         ..Default::default()
     };
     for (out, input) in data.szTip.iter_mut().zip(PRODUCT_NAME.encode_utf16()) {
@@ -781,6 +791,10 @@ pub(super) fn open_requested_editor(state: &State) -> Result<(), String> {
 }
 
 pub(super) fn open_editor(state: &State) -> Result<(), String> {
+    // Tray callbacks and a menu already on screen can arrive while Exit drains.
+    if state.session_action.get() == Action::Exit {
+        return Ok(());
+    }
     let existing = state.editor_window.get();
     if !existing.is_null() {
         if !state.snapshot {
@@ -1050,39 +1064,116 @@ fn maintain(state: &State) -> Result<(), String> {
     }
     Ok(())
 }
-fn menu(state: &State, hwnd: HWND) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrayCommand {
+    Open,
+    Menu { anchor_to_icon: bool },
+}
+
+fn tray_command(w: WPARAM, l: LPARAM) -> Option<TrayCommand> {
+    let payload = l as u32;
+    match (payload >> 16, payload & 0xffff) {
+        (TRAY_ICON_ID, NIN_SELECT | NIN_KEYSELECT) => Some(TrayCommand::Open),
+        (TRAY_ICON_ID, WM_CONTEXTMENU) => Some(TrayCommand::Menu {
+            anchor_to_icon: true,
+        }),
+        (0, WM_LBUTTONUP | WM_LBUTTONDBLCLK) if w == TRAY_ICON_ID as WPARAM => {
+            Some(TrayCommand::Open)
+        }
+        (0, WM_RBUTTONUP) if w == TRAY_ICON_ID as WPARAM => Some(TrayCommand::Menu {
+            anchor_to_icon: false,
+        }),
+        _ => None,
+    }
+}
+
+fn create_tray_menu() -> Option<HMENU> {
     let menu = unsafe { CreatePopupMenu() };
     if menu.is_null() {
-        return;
+        return None;
     }
     for (id, text) in [
-        (OPEN, "Открыть редактор"),
+        (OPEN, "Открыть Prismestra"),
         (STOP, "Остановить работу"),
         (EXIT, "Выйти"),
     ] {
-        unsafe {
-            AppendMenuW(menu, MF_STRING, id as usize, wide(text).as_ptr());
+        if unsafe { AppendMenuW(menu, MF_STRING, id as usize, wide(text).as_ptr()) } == 0 {
+            unsafe { DestroyMenu(menu) };
+            return None;
         }
     }
-    let mut point = POINT::default();
+    unsafe { SetMenuDefaultItem(menu, OPEN, 0) };
+    Some(menu)
+}
+
+fn tray_menu_placement(
+    cursor: POINT,
+    icon: Option<RECT>,
+    align_right: bool,
+) -> (POINT, u32, Option<TPMPARAMS>) {
+    let alignment = if align_right {
+        TPM_RIGHTALIGN
+    } else {
+        TPM_LEFTALIGN
+    };
+    let Some(rect) = icon else {
+        return (cursor, alignment, None);
+    };
+    (
+        POINT {
+            x: if align_right { rect.right } else { rect.left },
+            y: rect.bottom,
+        },
+        alignment,
+        Some(TPMPARAMS {
+            cbSize: size_of::<TPMPARAMS>() as u32,
+            rcExclude: rect,
+        }),
+    )
+}
+
+fn menu(state: &State, hwnd: HWND, anchor_to_icon: bool) {
+    let Some(menu) = create_tray_menu() else {
+        return;
+    };
+    // In version 4, wParam is undefined for WM_CONTEXTMENU. Query the icon
+    // so the keyboard menu appears at its target even on another monitor.
+    let icon = NOTIFYICONIDENTIFIER {
+        cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
+        hWnd: hwnd,
+        uID: TRAY_ICON_ID,
+        ..Default::default()
+    };
+    let mut rect = RECT::default();
+    let icon_rect = (anchor_to_icon && unsafe { Shell_NotifyIconGetRect(&icon, &mut rect) } == 0)
+        .then_some(rect);
+    let mut cursor = POINT::default();
+    if icon_rect.is_none() && unsafe { GetCursorPos(&mut cursor) } == 0 {
+        unsafe { DestroyMenu(menu) };
+        return;
+    }
+    let align_right = unsafe { GetSystemMetrics(SM_MENUDROPALIGNMENT) } != 0;
+    let (point, alignment, params) = tray_menu_placement(cursor, icon_rect, align_right);
     unsafe {
-        GetCursorPos(&mut point);
         SetForegroundWindow(hwnd);
     }
     let id = unsafe {
-        TrackPopupMenu(
+        TrackPopupMenuEx(
             menu,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON | alignment,
             point.x,
             point.y,
-            0,
             hwnd,
-            null(),
+            params.as_ref().map_or(null(), std::ptr::from_ref),
         )
     };
     unsafe {
         DestroyMenu(menu);
         PostMessageW(hwnd, WM_NULL, 0, 0);
+        if id == 0 {
+            let data = tray_data(hwnd, state.icon.handle());
+            Shell_NotifyIconW(NIM_SETFOCUS, &data);
+        }
     }
     let result = match id as u32 {
         OPEN => open_editor(state),
@@ -1172,18 +1263,14 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     let result = match msg {
         WM_TIMER => maintain(state),
         WM_CLOSE => request(state, Action::Exit, true),
-        CALLBACK => {
-            match l as u32 {
-                WM_LBUTTONUP | WM_LBUTTONDBLCLK => {
-                    if let Err(e) = open_editor(state) {
-                        report(state, e);
-                    }
-                }
-                WM_RBUTTONUP => menu(state, hwnd),
-                _ => {}
+        CALLBACK => match tray_command(w, l) {
+            Some(TrayCommand::Open) => open_editor(state),
+            Some(TrayCommand::Menu { anchor_to_icon }) => {
+                menu(state, hwnd, anchor_to_icon);
+                Ok(())
             }
-            Ok(())
-        }
+            None => Ok(()),
+        },
         WM_POWERBROADCAST => {
             if matches!(w as u32, PBT_APMSUSPEND | PBT_APMRESUMEAUTOMATIC) {
                 power_message(state, w as u32 == PBT_APMSUSPEND)
@@ -1532,7 +1619,10 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
         "Installed activation stand PASS: scoped Win32 request, silent duplicate autostart, one reopened editor, native captions and Prismestra tray tooltip"
     );
 
-    for (msg, w) in [(WM_SYSCOMMAND, SC_CLOSE as usize), (WM_CLOSE, 0)] {
+    for (msg, w, selection) in [
+        (WM_SYSCOMMAND, SC_CLOSE as usize, NIN_KEYSELECT),
+        (WM_CLOSE, 0, NIN_SELECT),
+    ] {
         let retained_status = "Resident diagnostic: preserve the last session status";
         state.app.borrow_mut().as_mut().unwrap().status = retained_status.into();
         unsafe { SendMessageW(state.editor_window.get(), msg, w, 0) };
@@ -1568,7 +1658,29 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
         {
             return Err("Editor close restarted/revoked shared sensor ownership".into());
         }
-        open_editor(state)?;
+        unsafe {
+            SendMessageW(
+                shell.hwnd,
+                CALLBACK,
+                0,
+                ((TRAY_ICON_ID << 16) | selection) as LPARAM,
+            );
+        }
+        let reopened = state.editor_window.get();
+        if reopened.is_null() {
+            return Err("Tray activation did not reopen the resident editor".into());
+        }
+        unsafe {
+            SendMessageW(
+                shell.hwnd,
+                CALLBACK,
+                0,
+                ((TRAY_ICON_ID << 16) | selection) as LPARAM,
+            );
+        }
+        if state.editor_window.get() != reopened {
+            return Err("Repeated tray activation replaced the editor".into());
+        }
         let slot = state.app.borrow();
         let a = slot.as_ref().unwrap();
         if a.status != retained_status {
@@ -1586,6 +1698,9 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
             return Err("Reopen replaced Runtime or lost read-only source state".into());
         }
     }
+    println!(
+        "Tray selection stand PASS: keyboard and mouse callbacks reopened one existing resident editor without restarting its Runtime"
+    );
     {
         let slot = state.app.borrow();
         let a = slot.as_ref().unwrap();
@@ -1841,6 +1956,17 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     if state.session_action.get() != Action::Exit {
         return Err("Exit was ignored after failed Stop".into());
     }
+    // Explorer may still deliver activation until the resident shell is destroyed.
+    for (wparam, lparam) in [
+        (0, ((TRAY_ICON_ID << 16) | NIN_KEYSELECT) as LPARAM),
+        (0, ((TRAY_ICON_ID << 16) | NIN_SELECT) as LPARAM),
+        (TRAY_ICON_ID as WPARAM, WM_LBUTTONUP as LPARAM),
+    ] {
+        unsafe { SendMessageW(shell.hwnd, CALLBACK, wparam, lparam) };
+        if !state.editor_window.get().is_null() {
+            return Err("Tray reopened the editor during Exit".into());
+        }
+    }
     settle(state, "exit", |a| {
         a.shutdown.phase() == crate::app::shutdown::Phase::Ready
             && state.editor_window.get().is_null()
@@ -1926,6 +2052,126 @@ mod tests {
     #[test]
     fn tray_failure_retry_success_and_explorer_restart_use_no_shell_api() {
         exercise_tray_retry().unwrap();
+    }
+    #[test]
+    fn tray_negotiates_keyboard_callbacks_and_keeps_its_standard_tooltip() {
+        let registration = Cell::new(TrayRegistration::default());
+        let mut operations = Vec::new();
+        // Even a failed version negotiation must preserve the one registered
+        // icon and the legacy mouse path.
+        assert_eq!(
+            poll_tray(&registration, 0, |operation| {
+                operations.push(operation);
+                operation == NIM_ADD
+            }),
+            Some(true)
+        );
+        assert_eq!(operations, [NIM_ADD, NIM_SETVERSION]);
+        assert!(registration.get().registered);
+        let mut value = registration.get();
+        value.taskbar_created(1);
+        registration.set(value);
+        operations.clear();
+        assert_eq!(
+            poll_tray(&registration, 1, |operation| {
+                operations.push(operation);
+                operation != NIM_ADD
+            }),
+            Some(true)
+        );
+        assert_eq!(operations, [NIM_ADD, NIM_MODIFY, NIM_SETVERSION]);
+        let data = tray_data(null_mut(), null_mut());
+        assert_eq!(data.uFlags & (NIF_TIP | NIF_SHOWTIP), NIF_TIP | NIF_SHOWTIP);
+        assert_eq!(unsafe { data.Anonymous.uVersion }, NOTIFYICON_VERSION_4);
+    }
+
+    #[test]
+    fn tray_dispatch_uses_the_right_icon_and_one_notification_per_action() {
+        let v4 = |id, event| ((id << 16) | event) as LPARAM;
+        for event in [NIN_KEYSELECT, NIN_SELECT] {
+            assert_eq!(
+                tray_command(0, v4(TRAY_ICON_ID, event)),
+                Some(TrayCommand::Open)
+            );
+        }
+        assert_eq!(
+            tray_command(0, v4(TRAY_ICON_ID, WM_CONTEXTMENU)),
+            Some(TrayCommand::Menu {
+                anchor_to_icon: true
+            })
+        );
+        for event in [WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_RBUTTONUP, NIN_POPUPOPEN] {
+            assert_eq!(tray_command(0, v4(TRAY_ICON_ID, event)), None);
+        }
+        assert_eq!(tray_command(0, v4(2, NIN_KEYSELECT)), None);
+        assert_eq!(tray_command(2, WM_RBUTTONUP as LPARAM), None);
+        assert_eq!(
+            tray_command(TRAY_ICON_ID as WPARAM, WM_LBUTTONUP as LPARAM),
+            Some(TrayCommand::Open)
+        );
+        assert_eq!(
+            tray_command(TRAY_ICON_ID as WPARAM, WM_RBUTTONUP as LPARAM),
+            Some(TrayCommand::Menu {
+                anchor_to_icon: false
+            })
+        );
+    }
+
+    #[test]
+    fn tray_menu_placement_matches_system_alignment_for_icon_and_cursor() {
+        let icon = RECT {
+            left: -120,
+            top: 730,
+            right: -96,
+            bottom: 754,
+        };
+        let cursor = POINT { x: 200, y: 100 };
+        for (align_right, expected_x, expected_flag) in [
+            (false, icon.left, TPM_LEFTALIGN),
+            (true, icon.right, TPM_RIGHTALIGN),
+        ] {
+            let (point, flag, params) = tray_menu_placement(cursor, Some(icon), align_right);
+            assert_eq!(
+                (point.x, point.y, flag),
+                (expected_x, icon.bottom, expected_flag)
+            );
+            let params = params.expect("icon rectangle excluded from menu");
+            let rect = params.rcExclude;
+            assert_eq!(
+                (rect.left, rect.top, rect.right, rect.bottom),
+                (icon.left, icon.top, icon.right, icon.bottom)
+            );
+            let (point, flag, params) = tray_menu_placement(cursor, None, align_right);
+            assert_eq!(
+                (point.x, point.y, flag),
+                (cursor.x, cursor.y, expected_flag)
+            );
+            assert!(params.is_none());
+        }
+    }
+
+    #[test]
+    fn native_tray_menu_marks_open_as_its_first_and_default_command() {
+        let menu = create_tray_menu().expect("native popup menu");
+        let mut label = [0u16; 64];
+        let (first, default, length) = unsafe {
+            let first = GetMenuItemID(menu, 0);
+            let default = GetMenuDefaultItem(menu, 0, 0);
+            let length = GetMenuStringW(
+                menu,
+                OPEN,
+                label.as_mut_ptr(),
+                label.len() as i32,
+                MF_BYCOMMAND,
+            );
+            DestroyMenu(menu);
+            (first, default, length)
+        };
+        assert_eq!((first, default), (OPEN, OPEN));
+        assert_eq!(
+            String::from_utf16_lossy(&label[..length as usize]),
+            "Открыть Prismestra"
+        );
     }
     #[test]
     fn tray_backoff_is_capped_and_repeated_timer_ticks_do_not_add_icons() {
