@@ -9,13 +9,18 @@ pub(super) struct Recovery {
     pub(super) start_error: Option<String>,
 }
 impl Recovery {
-    fn observe(&mut self, generation: u64, failed: bool, now: u64) {
+    fn observe(&mut self, generation: u64, failed: bool, now: u64) -> bool {
         if failed && self.failed_generation != Some(generation) {
             self.failed_generation = Some(generation);
             self.due_us = [1_000_000, 5_000_000, 15_000_000]
                 .get(self.attempts)
                 .map(|delay| now.saturating_add(*delay));
+            return self.due_us.is_some();
         }
+        false
+    }
+    pub(super) fn retry_scheduled(&self) -> bool {
+        self.due_us.is_some()
     }
     fn take_attempt(&mut self, now: u64, reaped: bool) -> bool {
         if !reaped || !self.due_us.is_some_and(|due| now >= due) {
@@ -90,10 +95,14 @@ impl Runtime {
     pub(super) fn reset_output_recovery(&mut self, id: &str) {
         self.lcd_arrivals.remove(id);
         if let Some(state) = self.output_recovery.get_mut(id) {
+            let was_scheduled = state.retry_scheduled();
             *state = Recovery {
                 start_error: state.start_error.take(),
                 ..Recovery::default()
             };
+            if was_scheduled {
+                self.bump_view();
+            }
         }
     }
 
@@ -148,6 +157,7 @@ impl Runtime {
         }
         let mut rgb = Vec::new();
         let mut lcd = Vec::new();
+        let mut scheduled_retry = false;
         for (id, state) in &mut self.output_recovery {
             if let Some(spec) = self.rgb_specs.get(id) {
                 let snapshot = self.host.status(id);
@@ -160,7 +170,8 @@ impl Runtime {
                     || snapshot
                         .as_ref()
                         .is_some_and(|s| s.phase == crate::runtime::output::Phase::Failed);
-                state.observe(snapshot.as_ref().map_or(0, |s| s.generation), failed, now);
+                scheduled_retry |=
+                    state.observe(snapshot.as_ref().map_or(0, |s| s.generation), failed, now);
                 if failed
                     && state.take_attempt(now, snapshot.is_none() || self.host.output_reaped(id))
                 {
@@ -181,13 +192,17 @@ impl Runtime {
                         ..Recovery::default()
                     };
                 }
-                state.observe(snapshot.as_ref().map_or(0, |s| s.generation), failed, now);
+                scheduled_retry |=
+                    state.observe(snapshot.as_ref().map_or(0, |s| s.generation), failed, now);
                 if failed
                     && state.take_attempt(now, worker.is_none_or(lcd_worker::Worker::is_reaped))
                 {
                     lcd.push((id.clone(), spec.keys.clone(), spec.factory.clone()));
                 }
             }
+        }
+        if scheduled_retry {
+            self.bump_view();
         }
         for (id, keys, factory) in rgb {
             let result = self.host.attach_claimed(&id, keys, move |c| factory(c));

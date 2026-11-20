@@ -468,7 +468,7 @@ fn startup_isolates_endpoint_contention_and_retries_the_returned_output() {
     assert_eq!(a.calls.load(Ordering::SeqCst), 0);
     assert!(matches!(
         runtime.output_activity(device),
-        OutputActivity::Unavailable(Some(_))
+        OutputActivity::Retrying(error) if !error.is_empty()
     ));
     drop(lease);
     now += 1_000_000;
@@ -478,7 +478,7 @@ fn startup_isolates_endpoint_contention_and_retries_the_returned_output() {
     disconnected(&mut runtime, &a, "a", &mut now);
     assert!(matches!(
         runtime.output_activity(device),
-        OutputActivity::Unavailable(Some(_))
+        OutputActivity::Retrying(error) if error == "Disconnected stand output"
     ));
     a.fail.store(false, Ordering::SeqCst);
     runtime.set_group(Target::Pc, false).unwrap();
@@ -671,6 +671,8 @@ fn recovery_initial_factory_failure_then_success_reopens_without_prior_submissio
 #[test]
 fn recovery_repeated_initial_factory_failures_exhaust_three_attempts() {
     let mut runtime = runtime();
+    #[cfg(windows)]
+    let device = runtime.document().lighting.setup.devices[0].clone();
     let link = Arc::new(Link::default());
     link.fail_open.store(true, Ordering::SeqCst);
     runtime.attach_rgb("a", vec![], factory(&link)).unwrap();
@@ -679,6 +681,11 @@ fn recovery_repeated_initial_factory_failures_exhaust_three_attempts() {
     let mut now = 0;
     for delay in [1_000_000, 5_000_000, 15_000_000] {
         tick(&mut runtime, &mut now);
+        #[cfg(windows)]
+        assert!(matches!(
+            runtime.output_activity(&device),
+            OutputActivity::Retrying(error) if error == "Stand open failure"
+        ));
         let previous = runtime.host.status("a").unwrap().generation;
         let due = now + delay;
         runtime.tick(due - 1, 1_800_000_000).unwrap();
@@ -698,6 +705,11 @@ fn recovery_repeated_initial_factory_failures_exhaust_three_attempts() {
     assert_eq!(link.calls.load(Ordering::SeqCst), 4);
     assert_eq!(runtime.host.status("a").unwrap().submitted, 0);
     assert_eq!(runtime.host.status("a").unwrap().phase, Phase::Failed);
+    #[cfg(windows)]
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Unavailable(Some(error)) if error == "Stand open failure"
+    ));
     #[cfg(windows)]
     {
         let other = Arc::new(Link::default());
@@ -1536,6 +1548,15 @@ fn bound_lcd_arrival_renews_exhausted_recovery_without_restarting_other_outputs(
     let link = Arc::new(Link::default());
     link.fail_open.store(true, Ordering::SeqCst);
     let (mut runtime, dir) = arrival_lcd_runtime("late", link.clone());
+    #[cfg(windows)]
+    let device = runtime
+        .document()
+        .lighting
+        .setup
+        .devices
+        .last()
+        .unwrap()
+        .clone();
     let other = Arc::new(Link::default());
     runtime.attach_rgb("b", vec![], factory(&other)).unwrap();
     let mut now = 0;
@@ -1544,6 +1565,11 @@ fn bound_lcd_arrival_renews_exhausted_recovery_without_restarting_other_outputs(
     for delay in [1_000_000, 5_000_000, 15_000_000] {
         wait(|| runtime.lcd_status("lcd").unwrap().phase == lcd_worker::Phase::Failed);
         tick(&mut runtime, &mut now);
+        #[cfg(windows)]
+        assert!(matches!(
+            runtime.output_activity(&device),
+            OutputActivity::Retrying(error) if error == "LCD stand unavailable"
+        ));
         let old = runtime.lcd_status("lcd").unwrap().generation;
         now += delay;
         tick(&mut runtime, &mut now);
@@ -1558,6 +1584,11 @@ fn bound_lcd_arrival_renews_exhausted_recovery_without_restarting_other_outputs(
     now += 100_000_000;
     tick(&mut runtime, &mut now);
     assert_eq!(link.calls.load(Ordering::SeqCst), 4);
+    #[cfg(windows)]
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Unavailable(Some(error)) if error == "LCD stand unavailable"
+    ));
     link.fail_open.store(false, Ordering::SeqCst);
     runtime.lcd_interface_arrived("BOUND-INTERFACE", true);
     tick(&mut runtime, &mut now);
