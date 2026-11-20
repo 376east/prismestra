@@ -1,7 +1,29 @@
 //! Backend lifecycle is a local capability; portable documents never grant it.
 use super::*;
 use crate::{app::lighting_outputs::Local, devices::Binding};
+use std::{net::SocketAddr, sync::Mutex};
 type BackendGuard = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
+
+pub(super) struct StartupGuard {
+    endpoint: SocketAddr,
+    current: Arc<Mutex<BackendGuard>>,
+}
+
+impl StartupGuard {
+    fn update(&self, guard: BackendGuard) {
+        *self.current.lock().unwrap_or_else(|e| e.into_inner()) = guard;
+    }
+
+    fn protect(&self, factory: RgbFactory) -> RgbFactory {
+        let current = self.current.clone();
+        Arc::new(move |cancel| {
+            // Pin this owner's guard for the whole worker lifetime.
+            let guard = current.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            guard()?;
+            factory(cancel.with_guard(guard))
+        })
+    }
+}
 
 impl Runtime {
     /// Explicit read-only discovery can start the configured backend before binding IDs exist.
@@ -76,12 +98,30 @@ impl Runtime {
     ) -> Result<u64, String> {
         let ids = match crate::app::managed_backend::Config::read_optional(state_dir) {
             Ok(Some(config)) => {
-                let ids = matching_ids(local, &document, config.endpoint());
+                let endpoint = config.endpoint();
+                let ids = matching_ids(local, &document, endpoint);
                 if !ids.is_empty() {
                     let guard = self
-                        .managed_guard_for(state_dir, config.endpoint())
+                        .managed_guard_for(state_dir, endpoint)
                         .unwrap_or_else(unavailable_guard);
-                    guard_outputs(&mut outputs, &ids, &guard);
+                    if let Some(startup) = self
+                        .managed_startup_guard
+                        .as_ref()
+                        .filter(|g| g.endpoint == endpoint)
+                    {
+                        startup.update(guard);
+                    } else {
+                        self.managed_startup_guard = Some(StartupGuard {
+                            endpoint,
+                            current: Arc::new(Mutex::new(guard)),
+                        });
+                    }
+                    let startup = self.managed_startup_guard.as_ref().unwrap();
+                    for (id, _, factory) in &mut outputs.rgb {
+                        if ids.contains(id) {
+                            *factory = startup.protect(factory.clone());
+                        }
+                    }
                 }
                 ids
             }
@@ -195,6 +235,11 @@ impl Runtime {
 
     pub fn release_managed_backend(&mut self) {
         self.managed_backend.take();
+        if let Some(startup) = self.managed_startup_guard.take() {
+            startup.update(unavailable_guard(
+                "Managed OpenRGB backend was released".into(),
+            ));
+        }
         self.managed_backend_ids.clear();
         self.managed_backend_detail = None;
         self.managed_backend_generation = 0;
@@ -230,6 +275,11 @@ impl Runtime {
             return;
         }
         self.managed_backend_generation = generation;
+        if let (Some(startup), Some(backend)) = (&self.managed_startup_guard, &self.managed_backend)
+            && startup.endpoint == backend.endpoint()
+        {
+            startup.update(backend.guard());
+        }
         // A recovered server renews only its own output retries. Other RGB,
         // BLE, LCD, capture and sensor workers keep their current generations.
         for id in self.managed_backend_ids.clone() {

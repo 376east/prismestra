@@ -156,6 +156,7 @@ pub type CaptureFactory =
 struct RgbSpec {
     keys: Vec<String>,
     factory: RgbFactory,
+    action_required_error: Option<String>,
 }
 struct LcdSpec {
     keys: Vec<String>,
@@ -254,6 +255,7 @@ pub struct Runtime {
     suspended: bool,
     stopped: bool,
     refresh_started: bool,
+    retry_action_required_on_refresh: bool,
     error: Option<String>,
     pending: Option<Configuration>,
     colors: Vec<Rgb>,
@@ -266,6 +268,8 @@ pub struct Runtime {
     sample_freshness: Vec<bool>,
     #[cfg(windows)]
     managed_backend: Option<super::backend_helper::Backend>,
+    #[cfg(windows)]
+    managed_startup_guard: Option<managed_backend::StartupGuard>,
     #[cfg(windows)]
     managed_backend_ids: BTreeSet<String>,
     #[cfg(windows)]
@@ -330,6 +334,7 @@ impl Runtime {
             suspended: false,
             stopped: false,
             refresh_started: false,
+            retry_action_required_on_refresh: false,
             error: None,
             pending: None,
             colors,
@@ -342,6 +347,8 @@ impl Runtime {
             sample_freshness: vec![],
             #[cfg(windows)]
             managed_backend: None,
+            #[cfg(windows)]
+            managed_startup_guard: None,
             #[cfg(windows)]
             managed_backend_ids: BTreeSet::new(),
             #[cfg(windows)]
@@ -822,6 +829,10 @@ impl Runtime {
             };
             let pending = self.pending.take().unwrap();
             let outputs = pending.outputs;
+            let preserve_action_failures = outputs.is_none();
+            #[cfg(windows)]
+            let preserve_action_failures =
+                preserve_action_failures || pending.startup_managed_ids.is_some();
             let proposal = pending.document;
             let old = &self.document.lighting.setup.devices;
             let new = &proposal.lighting.setup.devices;
@@ -855,11 +866,42 @@ impl Runtime {
             }
             let inputs = Self::temperature_inputs(&proposal);
             self.sensor_specs.retain(|input, _| inputs.contains(input));
+            if preserve_action_failures {
+                for (id, spec) in &mut self.rgb_specs {
+                    if let Some(error) = self
+                        .host
+                        .status(id)
+                        .filter(|snapshot| snapshot.requires_action)
+                        .and_then(|snapshot| snapshot.error)
+                    {
+                        spec.action_required_error = Some(error);
+                    }
+                }
+            }
             if let Some(outputs) = outputs {
                 self.rgb_specs = outputs
                     .rgb
                     .into_iter()
-                    .map(|(id, keys, factory)| (id, RgbSpec { keys, factory }))
+                    .map(|(id, keys, factory)| {
+                        // Startup discovery can replace the factory of an unchanged binding.
+                        let action_required_error = if preserve_action_failures && !keys.is_empty()
+                        {
+                            self.rgb_specs
+                                .get(&id)
+                                .filter(|previous| previous.keys == keys)
+                                .and_then(|previous| previous.action_required_error.clone())
+                        } else {
+                            None
+                        };
+                        (
+                            id,
+                            RgbSpec {
+                                keys,
+                                factory,
+                                action_required_error,
+                            },
+                        )
+                    })
                     .collect();
                 self.lcd_specs = outputs
                     .lcd
@@ -929,9 +971,9 @@ impl Runtime {
         }
         if restart {
             if let Some(live) = &live {
-                self.restart_registered_rgb(&live.retained)?;
+                self.restart_registered_rgb(&live.retained, false)?;
                 self.bump()?;
-            } else if let Err(error) = self.restart_registered() {
+            } else if let Err(error) = self.restart_registered(false) {
                 self.stop_channels();
                 return Err(error);
             }
@@ -1219,7 +1261,14 @@ impl Runtime {
         let factory = self.guard_managed_rgb(id, factory);
         let f = factory.clone();
         self.host.attach_claimed(id, keys.clone(), move |c| f(c))?;
-        self.rgb_specs.insert(id.into(), RgbSpec { keys, factory });
+        self.rgb_specs.insert(
+            id.into(),
+            RgbSpec {
+                keys,
+                factory,
+                action_required_error: None,
+            },
+        );
         self.reset_output_recovery(id);
         self.bump_view();
         Ok(())
@@ -1377,6 +1426,7 @@ impl Runtime {
         self.bump_view();
         self.refresh = None;
         self.refresh_started = false;
+        self.retry_action_required_on_refresh = false;
         // A resume can be delivered without a preceding suspend notification.
         // Its old owners must still drain before new factories are invoked.
         if suspended || self.power.resumes != resumes {
@@ -1399,14 +1449,36 @@ impl Runtime {
     pub fn refresh_devices(&mut self, now_us: u64) -> Result<(), String> {
         self.lighting_power(true, now_us)?;
         self.lighting_power(false, now_us)?;
+        self.retry_action_required_on_refresh = true;
         self.error = None;
         Ok(())
     }
-    fn restart_registered_rgb(&mut self, retained: &BTreeSet<String>) -> Result<(), String> {
+    fn rgb_requires_action(&self, id: &str) -> bool {
+        self.rgb_specs
+            .get(id)
+            .is_some_and(|spec| spec.action_required_error.is_some())
+            || self
+                .host
+                .status(id)
+                .is_some_and(|status| status.requires_action)
+    }
+
+    fn restart_registered_rgb(
+        &mut self,
+        retained: &BTreeSet<String>,
+        retry_action_required: bool,
+    ) -> Result<(), String> {
+        if retry_action_required {
+            for spec in self.rgb_specs.values_mut() {
+                spec.action_required_error = None;
+            }
+        }
         let rgb = self
             .rgb_specs
             .iter()
-            .filter(|(id, _)| !retained.contains(*id))
+            .filter(|(id, _)| {
+                !retained.contains(*id) && (retry_action_required || !self.rgb_requires_action(id))
+            })
             .map(|(id, s)| (id.clone(), s.keys.clone(), s.factory.clone()))
             .collect::<Vec<_>>();
         let mut first_error = None;
@@ -1422,9 +1494,10 @@ impl Runtime {
         first_error.map_or(Ok(()), Err)
     }
 
-    fn restart_registered(&mut self) -> Result<(), String> {
-        // Called only after all previous owners have been reaped.
-        self.restart_registered_rgb(&BTreeSet::new())?;
+    fn restart_registered(&mut self, retry_action_required: bool) -> Result<(), String> {
+        // Called only after all previous owners have been reaped. Never reuse a
+        // native handle across suspend; every factory revalidates its binding.
+        self.restart_registered_rgb(&BTreeSet::new(), retry_action_required)?;
         let lcd = self
             .lcd_specs
             .iter()
@@ -1465,12 +1538,12 @@ impl Runtime {
         self.sensor_stamps.clear();
         self.bump()
     }
-    fn ready(&self, will_retry: impl Fn(&str) -> bool) -> Result<bool, String> {
+    fn ready(&self, recovers_independently: impl Fn(&str) -> bool) -> Result<bool, String> {
         let mut ready = true;
         if let Some(error) = self
             .output_recovery
             .iter()
-            .filter(|(id, _)| !will_retry(id))
+            .filter(|(id, _)| !recovers_independently(id))
             .find_map(|(_, state)| state.start_error.as_ref())
         {
             return Err(error.clone());
@@ -1478,7 +1551,7 @@ impl Runtime {
         // A failed synchronous start may leave the old stopped worker as the
         // only snapshot. Its committed route still has a retry budget.
         let retry_start = |id: &str| {
-            will_retry(id)
+            recovers_independently(id)
                 && self
                     .output_recovery
                     .get(id)
@@ -1486,7 +1559,13 @@ impl Runtime {
         };
         // This is lighting-output readiness. Optional temperature readers may
         // connect/fail independently; absence is not a temperature reading.
-        for id in self.rgb_specs.keys() {
+        for (id, spec) in &self.rgb_specs {
+            if let Some(error) = &spec.action_required_error {
+                if recovers_independently(id) {
+                    continue;
+                }
+                return Err(error.clone());
+            }
             if retry_start(id) {
                 continue;
             }
@@ -1496,8 +1575,10 @@ impl Runtime {
                 .ok_or("RGB owner missing after refresh")?;
             match s.phase {
                 crate::runtime::output::Phase::Ready => {}
+                crate::runtime::output::Phase::Connecting
+                | crate::runtime::output::Phase::Failed
+                    if recovers_independently(id) => {}
                 crate::runtime::output::Phase::Connecting => ready = false,
-                crate::runtime::output::Phase::Failed if will_retry(id) => {}
                 _ => return Err(s.error.unwrap_or_else(|| "RGB refresh stopped".into())),
             }
         }
@@ -1508,8 +1589,9 @@ impl Runtime {
             let s = worker.snapshot();
             match s.phase {
                 lcd_worker::Phase::Ready => {}
+                lcd_worker::Phase::Connecting | lcd_worker::Phase::Failed
+                    if recovers_independently(id) => {}
                 lcd_worker::Phase::Connecting => ready = false,
-                lcd_worker::Phase::Failed if will_retry(id) => {}
                 _ => return Err(s.error.unwrap_or_else(|| "LCD refresh stopped".into())),
             }
         }
@@ -1536,9 +1618,11 @@ impl Runtime {
                 self.stop_channels();
                 return Ok(false);
             }
-            // A known output with its own finite retry budget can recover
-            // after resume without discarding successfully reopened owners.
-            match self.ready(|id| self.output_recovery.contains_key(id)) {
+            // Healthy outputs can submit while others connect, retry, or wait
+            // for the user to resolve an authorization failure.
+            match self
+                .ready(|id| self.output_recovery.contains_key(id) || self.rgb_requires_action(id))
+            {
                 Ok(true) => {
                     self.power
                         .refreshed(generation, now / 1000, Ok(()))
@@ -1564,10 +1648,12 @@ impl Runtime {
             {
                 Some(Action::Refresh { generation }) => {
                     self.refresh_started = true;
+                    let retry_action_required =
+                        std::mem::take(&mut self.retry_action_required_on_refresh);
                     let configuring = self.pending.is_some();
                     let restart = if configuring {
                         match self.configuration_tick(false) {
-                            Ok(true) => self.restart_registered(),
+                            Ok(true) => self.restart_registered(retry_action_required),
                             Ok(false) => Err(self
                                 .configuration_error()
                                 .unwrap_or("Configuration is still draining")
@@ -1575,7 +1661,7 @@ impl Runtime {
                             Err(error) => Err(error),
                         }
                     } else {
-                        self.restart_registered()
+                        self.restart_registered(retry_action_required)
                     };
                     if let Err(e) = restart {
                         self.stop_channels();

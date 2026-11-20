@@ -17,6 +17,7 @@ struct Link {
     calls: AtomicUsize,
     fail: AtomicBool,
     fail_open: AtomicBool,
+    retry: AtomicBool,
     frames: Mutex<Vec<Vec<Rgb>>>,
 }
 struct RgbLink(Arc<Link>);
@@ -28,6 +29,12 @@ impl RgbDriver for RgbLink {
         1
     }
     fn write(&mut self, colors: &[Rgb], _: &Cancellation) -> Result<WriteResult, String> {
+        if self.0.retry.load(Ordering::SeqCst) {
+            return Ok(WriteResult::Retrying(
+                Duration::from_millis(20),
+                "Temporary stand transport error".into(),
+            ));
+        }
         if self.0.fail.load(Ordering::SeqCst) {
             return Err("Disconnected stand output".into());
         }
@@ -120,6 +127,35 @@ fn disconnected(runtime: &mut Runtime, link: &Link, id: &str, now: &mut u64) {
 fn drain(runtime: &mut Runtime) {
     runtime.stop();
     wait(|| runtime.drained());
+}
+
+#[cfg(windows)]
+#[test]
+fn output_activity_keeps_retry_reason_until_the_next_submission() {
+    let mut runtime = runtime();
+    let link = Arc::new(Link::default());
+    runtime.attach_rgb("a", vec![], factory(&link)).unwrap();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+    let generation = runtime.host.status("a").unwrap().generation;
+    link.retry.store(true, Ordering::SeqCst);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.host.status("a").unwrap().phase == Phase::Connecting
+    });
+    let device = runtime.document().lighting.setup.devices[0].clone();
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Retrying(error) if error == "Temporary stand transport error"
+    ));
+    link.retry.store(false, Ordering::SeqCst);
+    working(&mut runtime, "a", &mut now);
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Sent(_)
+    ));
+    assert_eq!(runtime.host.status("a").unwrap().generation, generation);
+    drain(&mut runtime);
 }
 
 #[test]
@@ -502,9 +538,9 @@ fn startup_registers_managed_outputs_on_commit_and_retries_on_new_inventory() {
         .unwrap(),
     )
     .unwrap();
-    runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
-        endpoint, 1,
-    ));
+    let task = state.join("backend-task.json");
+    // A bad task descriptor makes backend creation fail before any process can start.
+    std::fs::write(&task, "{").unwrap();
     let mut outputs = local.prepare(&document, &state.join("assets")).unwrap();
     // Even a fixture that reports SDK readiness cannot grant native I/O.
     let a = Arc::new(Link::default());
@@ -518,6 +554,9 @@ fn startup_registers_managed_outputs_on_commit_and_retries_on_new_inventory() {
     let mut now = 0;
     working(&mut runtime, "b", &mut now);
     assert_eq!(runtime.managed_backend_ids, BTreeSet::from(["a".into()]));
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+    let initial_error = runtime.host.status("a").unwrap().error.unwrap();
+    assert!(initial_error.contains("EOF"), "{initial_error}");
     let healthy = runtime.host.status("b").unwrap().generation;
     for delay in [1_000_000, 5_000_000, 15_000_000] {
         wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
@@ -536,18 +575,41 @@ fn startup_registers_managed_outputs_on_commit_and_retries_on_new_inventory() {
     tick(&mut runtime, &mut now);
     assert_eq!(runtime.host.status("a").unwrap().generation, exhausted);
     runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
-        endpoint, 2,
+        ([127, 0, 0, 1], 17423).into(),
+        2,
     ));
     tick(&mut runtime, &mut now);
     now += 1_000_000;
     wait(|| {
         tick(&mut runtime, &mut now);
-        runtime.host.status("a").unwrap().generation != exhausted
+        let status = runtime.host.status("a").unwrap();
+        status.generation != exhausted && status.phase == Phase::Failed
     });
+    let wrong_endpoint = runtime.host.status("a").unwrap();
+    assert_eq!(
+        wrong_endpoint.error.as_deref(),
+        Some(initial_error.as_str())
+    );
+
+    runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
+        endpoint, 3,
+    ));
+    tick(&mut runtime, &mut now);
+    now += 1_000_000;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.host.status("a").unwrap().generation != wrong_endpoint.generation
+    });
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+    assert_eq!(
+        runtime.host.status("a").unwrap().error.as_deref(),
+        Some("Software fixture cannot own a backend")
+    );
     assert_eq!(a.calls.load(Ordering::SeqCst), 0);
     assert_eq!(b.calls.load(Ordering::SeqCst), 1);
     assert_eq!(runtime.host.status("b").unwrap().generation, healthy);
     drain(&mut runtime);
+    std::fs::remove_file(task).unwrap();
     std::fs::remove_file(config).unwrap();
     std::fs::remove_dir(state).unwrap();
 }
@@ -1488,6 +1550,75 @@ fn resume_keeps_ready_outputs_live_while_a_known_output_recovers() {
         runtime.host.status("b").unwrap().generation,
         healthy_generation
     );
+    drain(&mut runtime);
+}
+
+#[test]
+fn resume_keeps_ready_output_live_past_slow_neighbors_refresh_deadline() {
+    let mut runtime = runtime();
+    let slow = Arc::new(Link::default());
+    let healthy = Arc::new(Link::default());
+    let block_open = Arc::new(AtomicBool::new(false));
+    let slow_factory = factory(&slow);
+    let gate = block_open.clone();
+    runtime
+        .attach_rgb(
+            "a",
+            vec![],
+            Arc::new(move |cancel| {
+                while gate.load(Ordering::SeqCst) {
+                    if cancel.cancelled() {
+                        return Err("Slow stand output opening cancelled".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                slow_factory(cancel)
+            }),
+        )
+        .unwrap();
+    runtime.attach_rgb("b", vec![], factory(&healthy)).unwrap();
+    runtime.enable_registered_output_recovery();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+    working(&mut runtime, "b", &mut now);
+
+    block_open.store(true, Ordering::SeqCst);
+    runtime.notify_power(true, now).unwrap();
+    runtime.notify_power(false, now).unwrap();
+    wait(|| runtime.lighting_drained());
+    now += 7_000_000;
+    tick(&mut runtime, &mut now);
+    wait(|| runtime.host.status("b").unwrap().phase == Phase::Ready);
+    assert_eq!(runtime.host.status("a").unwrap().phase, Phase::Connecting);
+    let generation = runtime.host.status("b").unwrap().generation;
+    tick(&mut runtime, &mut now);
+    assert_eq!(runtime.power.error(), None);
+
+    // Only the simulated clock crosses the legacy global refresh deadline.
+    let last_requested = runtime.host.requested("b");
+    now += 30_000_000;
+    tick(&mut runtime, &mut now);
+    assert_eq!(runtime.power.error(), None);
+    assert_eq!(runtime.host.status("a").unwrap().phase, Phase::Connecting);
+    assert_eq!(runtime.outputs_ready(), Ok(false));
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime
+            .host
+            .status("b")
+            .unwrap()
+            .last_submitted
+            .is_some_and(|ticket| {
+                last_requested.is_none_or(|previous| ticket.sequence > previous.sequence)
+            })
+    });
+    assert_eq!(runtime.host.status("b").unwrap().generation, generation);
+    assert_eq!(healthy.calls.load(Ordering::SeqCst), 2);
+
+    block_open.store(false, Ordering::SeqCst);
+    working(&mut runtime, "a", &mut now);
+    assert_eq!(slow.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(runtime.outputs_ready(), Ok(true));
     drain(&mut runtime);
 }
 
