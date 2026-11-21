@@ -46,5 +46,7 @@ pub mod sensor_sources;
 pub mod sensor_stream;
 pub mod sensor_worker;
 pub mod sensors;
+#[cfg(windows)]
+pub mod setup_candidate;
 pub mod shutdown;
 pub(crate) mod strict_json;
