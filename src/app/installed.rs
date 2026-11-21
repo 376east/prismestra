@@ -1,4 +1,7 @@
 //! Installed frontend entrypoints. The legacy and portable arguments pass through.
+#[path = "installed_startup.rs"]
+mod startup;
+
 use super::{
     config::{Groups, Project},
     document::{self, Document},
@@ -75,6 +78,7 @@ enum Command {
     Shutdown,
     CheckSetupUser(OsString),
     ReadSetupUser,
+    SetSetupStartup(bool),
 }
 
 fn command(args: &[OsString]) -> Result<Command, String> {
@@ -91,6 +95,8 @@ fn command(args: &[OsString]) -> Result<Command, String> {
         [flag] if flag == "--setup-launch-installed" => Ok(Command::LaunchForSetup),
         [flag, sid] if flag == "--setup-check-user" => Ok(Command::CheckSetupUser(sid.clone())),
         [flag] if flag == "--setup-current-user" => Ok(Command::ReadSetupUser),
+        [flag] if flag == "--setup-enable-startup" => Ok(Command::SetSetupStartup(true)),
+        [flag] if flag == "--setup-disable-startup" => Ok(Command::SetSetupStartup(false)),
         _ if args.iter().any(|a| {
             a == "--installed"
                 || a == "--autostart"
@@ -98,6 +104,8 @@ fn command(args: &[OsString]) -> Result<Command, String> {
                 || a == "--prepare-installed"
                 || a == "--setup-check-user"
                 || a == "--setup-current-user"
+                || a == "--setup-enable-startup"
+                || a == "--setup-disable-startup"
                 || a == "--setup-prepare-installed"
                 || a == "--setup-launch-installed"
         }) =>
@@ -144,6 +152,14 @@ pub fn dispatch(args: Vec<OsString>) -> Result<Dispatch, String> {
     let executable = checked_local_path(&executable).map_err(|e| e.to_string())?;
     match command {
         Command::Legacy | Command::CheckSetupUser(_) | Command::ReadSetupUser => unreachable!(),
+        Command::SetSetupStartup(enable) => {
+            let manifest = Manifest::read(&executable)?;
+            Ok(Dispatch::Exit(startup::set(
+                &executable,
+                manifest.data_namespace.as_deref(),
+                enable,
+            )?))
+        }
         Command::Shutdown => {
             windows::shutdown_installed(&executable)?;
             Ok(Dispatch::Exit(0))
@@ -800,6 +816,14 @@ pub(crate) mod tests {
             Ok(Command::CheckSetupUser("S-1-5-18".into()))
         );
         assert_eq!(parse(&["--setup-current-user"]), Ok(Command::ReadSetupUser));
+        assert_eq!(
+            parse(&["--setup-enable-startup"]),
+            Ok(Command::SetSetupStartup(true))
+        );
+        assert_eq!(
+            parse(&["--setup-disable-startup"]),
+            Ok(Command::SetSetupStartup(false))
+        );
         for args in [
             &["--autostart"][..],
             &["--installed", "--project", "foreign.json"],

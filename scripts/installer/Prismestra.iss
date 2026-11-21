@@ -60,6 +60,7 @@ const
 
 var
   RebootRequired: Boolean;
+  VcRuntimeRestartRequired: Boolean;
 
 function PowerShell: String;
 begin
@@ -106,6 +107,20 @@ begin
     Result := ExecAsOriginalUser(PowerShell,
       ScriptArgs('{#UserCode}', Action, ' ' + PSQuote('{#StartupValue}') + ' ' + PSQuote(ExpectedSid)),
       ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
+  except
+    Log(GetExceptionMessage);
+    Result := False;
+  end;
+end;
+
+function RunOriginalInstalledCommand(const Arguments: String): Boolean;
+var
+  Code: Integer;
+begin
+  try
+    Result := GuardInstall('Check') and
+      ExecAsOriginalUser(InstallPath + '\Prismestra.exe', Arguments,
+        InstallPath, SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
   except
     Log(GetExceptionMessage);
     Result := False;
@@ -182,30 +197,26 @@ var
   Output: TExecOutput;
 begin
   Result := '';
-  if GuardInstall('Check') and ExecAndCaptureOutput(InstallPath + '\Prismestra.exe',
-    '--setup-current-user',
-    ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code, Output) and
-    (Code = 0) and not Output.Error and (GetArrayLength(Output.StdOut) = 1) and
-    ValidSID(Trim(Output.StdOut[0])) then Result := Trim(Output.StdOut[0]);
-end;
-
-function RunOriginalInstalledCommand(const Arguments: String): Boolean;
-var
-  Code: Integer;
-begin
-  try
-    Result := GuardInstall('Check') and
-      ExecAsOriginalUser(InstallPath + '\Prismestra.exe', Arguments,
-        InstallPath, SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
-  except
-    Log(GetExceptionMessage);
-    Result := False;
+  if VcRuntimeRestartRequired then begin
+    if not ExecAndCaptureOutput(PowerShell,
+      '-NoProfile -NonInteractive -Command "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value"',
+      ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code, Output) then Exit;
+  end else begin
+    if not GuardInstall('Check') or not ExecAndCaptureOutput(InstallPath + '\Prismestra.exe',
+      '--setup-current-user', ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code, Output) then Exit;
   end;
+  if (Code = 0) and not Output.Error and (GetArrayLength(Output.StdOut) = 1) and
+    ValidSID(Trim(Output.StdOut[0])) then Result := Trim(Output.StdOut[0]);
 end;
 
 function ProbeOriginalUser(const SID: String): Boolean;
 begin
-  Result := ValidSID(SID) and RunOriginalInstalledCommand('--setup-check-user ' + SID);
+  Result := False;
+  if not ValidSID(SID) then Exit;
+  if VcRuntimeRestartRequired then
+    Result := OriginalUser('Probe', SID)
+  else
+    Result := RunOriginalInstalledCommand('--setup-check-user ' + SID);
 end;
 
 function Policy(const Action, SID: String): Boolean;
@@ -296,7 +307,10 @@ begin
   if not VcRuntimeReady then begin
     if not InstallPrerequisite('vc_redist.x64.exe', '/install /quiet /norestart', Code) then
       Result := 'Could not start the offline Visual C++ installer.'
-    else if (Code = 3010) or (Code = 1641) then RebootRequired := True
+    else if (Code = 3010) or (Code = 1641) then begin
+      VcRuntimeRestartRequired := True;
+      RebootRequired := True;
+    end
     else if (Code <> 0) and (Code <> 1638) then
       Result := 'The required x64 Visual C++ runtime could not be installed.'
     else if not VcRuntimeReady then
@@ -344,11 +358,18 @@ begin
 #endif
     StartupReady := False;
     if WizardIsTaskSelected('autostart') then begin
-      StartupReady := OriginalUser('EnableStartup', '');
+      { The app imports the VC++ runtime, which may be unavailable until restart. }
+      if VcRuntimeRestartRequired then
+        StartupReady := OriginalUser('EnableStartup', '')
+      else
+        StartupReady := RunOriginalInstalledCommand('--setup-enable-startup');
       if not StartupReady then
         Log('Could not enable sign-in startup for the original ordinary user.');
     end else begin
-      StartupReady := OriginalUser('DisableStartup', '');
+      if VcRuntimeRestartRequired then
+        StartupReady := OriginalUser('DisableStartup', '')
+      else
+        StartupReady := RunOriginalInstalledCommand('--setup-disable-startup');
       if not StartupReady then
         Log('Could not check sign-in startup for the original ordinary user.');
     end;
