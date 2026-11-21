@@ -156,7 +156,7 @@ jobs:
           name: ${{ needs.package.outputs.candidate }}
           path: ${{ runner.temp }}/candidate
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        if: matrix.test == 'upgrade-fixtures'
+        if: matrix.test == 'upgrade-fixtures' || matrix.test == 'standard-user'
         with:
           name: ${{ needs.package.outputs.fixtures }}
           path: ${{ runner.temp }}/fixtures
@@ -190,7 +190,9 @@ jobs:
           SUMS_SHA256: ${{ needs.package.outputs.sums_sha256 }}
         run: |
           $candidate = ./scripts/installer/verify_candidate.ps1 -Directory (Join-Path $env:RUNNER_TEMP candidate) -Commit $env:GITHUB_SHA -SumsSha256 $env:SUMS_SHA256
-          ./scripts/installer/test_standard_user.ps1 -Installer $candidate.Setup -InstallerSha256 $candidate.SetupSha256 -ManifestSha256 $candidate.ManifestSha256 -Commit $env:GITHUB_SHA -ReportDirectory evidence -DisposableRunner
+          $fixtures = Join-Path $env:RUNNER_TEMP fixtures
+          $probeSha = (Get-Content -LiteralPath (Join-Path $fixtures 'webview-probe.sha256') -Raw).Trim()
+          ./scripts/installer/test_standard_user.ps1 -Installer $candidate.Setup -InstallerSha256 $candidate.SetupSha256 -ManifestSha256 $candidate.ManifestSha256 -Commit $env:GITHUB_SHA -ReportDirectory evidence -WebViewProbe (Join-Path $fixtures 'Prismestra-Setup-Probe.exe') -WebViewProbeSha256 $probeSha -DisposableRunner
       - name: Exercise repair, upgrade and retention in an isolated namespace
         if: matrix.test == 'upgrade-fixtures'
         shell: pwsh
