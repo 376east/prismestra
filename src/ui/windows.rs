@@ -47,6 +47,7 @@ mod portable;
 mod resident;
 pub(crate) use resident::{Instance, shutdown_installed};
 mod runtime_client;
+mod updates;
 mod web_shell;
 const MODERN_RETURN: i32 = 109;
 mod sources;

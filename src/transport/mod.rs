@@ -27,5 +27,7 @@ pub mod skydimo;
 pub mod valkyrie;
 #[cfg(windows)]
 mod windows_io;
+#[cfg(windows)]
+pub(crate) mod winhttp_get;
 pub mod wled;
 pub mod wled_info;
