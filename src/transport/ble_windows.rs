@@ -31,9 +31,9 @@ use windows::{
     Storage::Streams::{DataReader, DataWriter},
     Win32::{
         Foundation::E_ACCESSDENIED,
-        System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
+        System::WinRT::{RO_INIT_MULTITHREADED, RoActivateInstance, RoInitialize, RoUninitialize},
     },
-    core::GUID,
+    core::{GUID, HSTRING, Interface, RuntimeName},
 };
 
 const ACCESS_DENIED: &str =
@@ -202,8 +202,14 @@ struct Discovery {
 }
 impl Discovery {
     fn passive() -> Result<Self, String> {
+        // Callers hold an initialized WinRT apartment. Let Windows release the
+        // activation factory here instead of caching it across apartment lifetimes.
+        let class = HSTRING::from(BluetoothLEAdvertisementWatcher::NAME);
+        let watcher = unsafe { RoActivateInstance(&class) }
+            .and_then(|instance| instance.cast::<BluetoothLEAdvertisementWatcher>())
+            .map_err(error)?;
         let scan = Self {
-            watcher: BluetoothLEAdvertisementWatcher::new().map_err(error)?,
+            watcher,
             token: None,
         };
         scan.watcher
