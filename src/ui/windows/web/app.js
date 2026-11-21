@@ -30,6 +30,7 @@ let state = null, draft = null, draftOrigin = null, draftName = 'Текущая 
 let view = 'library', search = '', previewTimer = null, frame = null, commandPending = false, error = '', dialogMode = 'new', dialogReturn = null, savedSceneRequest = null, previewQueued = false, closing = false, nativeAwaitingAck = false, pendingView = null, advancedOpen = false, submittedStages = [], pointerGesture = false, keyGesture = false, composing = false, renderQueued = false, awaitingCommandAck = false, errorIsCommand = false;
 const formStages = new Map();
 let deviceInspection = null;
+let visibleCandidateIds = new Set();
 let settingsOpener = null, settingsFocusReturn = null;
 const busy = () => closing || !state || !!state.pending || commandPending || savedSceneRequest !== null;
 const disabled = () => busy() ? 'disabled' : '';
@@ -245,6 +246,18 @@ function syncDeviceAnnouncement() {
  }
  deviceInspection.status=status;
 }
+function announceDeviceDiscovery(candidates) {
+ const newCandidates=candidates.filter(candidate=>!visibleCandidateIds.has(candidate.id));
+ visibleCandidateIds=new Set(candidates.map(candidate=>candidate.id));
+ const region=$('#device-discovery-announcement');
+ if(!candidates.length){
+  if(region.textContent)region.textContent='';
+ } else if(newCandidates.length){
+  region.textContent=newCandidates.length===1
+   ? `Найдено устройство: ${newCandidates[0].label}.`
+   : `Найдено устройств: ${newCandidates.length}.`;
+ }
+}
 function pageButton(page, label=pages[page]) {
  return `<button class="button" data-view="${page}">${label}</button>`;
 }
@@ -253,7 +266,7 @@ function outputPageAvailable(page) {
  return !outputPage(page) || !!state?.devices.some(device=>device.role===page);
 }
 
-function renderDevices() {
+function renderDevices(candidates) {
  const devices=state.devices.map(d=>{
   const statusId=`device-status-${encodeURIComponent(d.id)}`;
   return `<article class="device">
@@ -263,8 +276,7 @@ function renderDevices() {
   <button class="icon-button" data-device-id="${esc(d.id)}" data-mutation aria-disabled="${busy()}" aria-label="Свойства: ${esc(d.label)}" aria-describedby="${statusId}">${icon('edit')}</button>
  </article>`;
  });
- const appliedIds=new Set(state.devices.map(device=>device.id));
- const found=(state.deviceCandidates??[]).filter(candidate=>!appliedIds.has(candidate.id)).map(candidate=>`<article class="device" data-candidate-id="${esc(candidate.id)}">
+ const found=candidates.map(candidate=>`<article class="device" data-candidate-id="${esc(candidate.id)}">
   <div class="device-symbol">${icon('devices')}</div>
   <div class="device-info"><h2>${esc(candidate.label)}</h2><p>${esc(candidate.role)}</p></div>
   <div class="device-meta"><small>Найдено</small></div>
@@ -334,9 +346,11 @@ function render() {
  const hiddenNavFocused = node?.closest?.('nav') && !outputPageAvailable(node.dataset.view);
  renderedOutputEditor = outputPage(view)&&state?.editor?.page===view?state.editor:null;
  const selectedPage = settingsPages.includes(view)?'settings':view;
+ const appliedIds = new Set(view==='devices' ? state?.devices.map(device=>device.id) : []);
+ const candidates = view==='devices' ? (state?.deviceCandidates??[]).filter(candidate=>!appliedIds.has(candidate.id)) : [];
  $('nav').innerHTML=Object.entries(pages).filter(([key])=>!settingsPages.includes(key)&&outputPageAvailable(key)).map(([key,title])=>`<button data-view="${key}" class="${selectedPage===key?'active':''}" aria-label="${title}" title="${title}" ${selectedPage===key?'aria-current="page"':''}>${icon(key)}<span>${title}</span></button>`).join('');
  if(!state)$('#main').innerHTML='<div class="native-wait"><h1>Подключение к Prismestra…</h1><p>Ожидание локального профиля.</p></div>';
- else {$('#main').innerHTML=view==='library'?renderLibrary():view==='editor'?renderScene():view==='devices'?renderDevices():renderProfilePage();$('.project-context').innerHTML=`<span>Локальный профиль</span><small title="${esc(state.profilePath||'')}">${esc(state.profilePath?.split(/[\\/]/).pop()||'Не сохранён')}</small>`;}
+ else {$('#main').innerHTML=view==='library'?renderLibrary():view==='editor'?renderScene():view==='devices'?renderDevices(candidates):renderProfilePage();$('.project-context').innerHTML=`<span>Локальный профиль</span><small title="${esc(state.profilePath||'')}">${esc(state.profilePath?.split(/[\\/]/).pop()||'Не сохранён')}</small>`;}
  document.querySelectorAll('[data-native-kind="secret"]').forEach(input=>{const staged=formStages.get(stageKey('native',input.dataset.nativeField));if(staged)input.value=staged.value;});
  if(view==='devices')window.outputMap?.mount(state,send,currentGenericStages);
  syncControls();paintPreview();paintLibraryPreviews();
@@ -344,6 +358,7 @@ function render() {
  else if(headingFocused || (node?.dataset?.field && detachedOutputEdits()))focusHeading();
  else if(hiddenNavFocused)$('nav [data-view="devices"]')?.focus({preventScroll:true});
  else restoreFocus(key,selection);
+ announceDeviceDiscovery(candidates);
  syncDeviceAnnouncement();
 }
 function flushPreview(force=false) {
