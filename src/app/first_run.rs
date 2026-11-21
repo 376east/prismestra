@@ -1328,16 +1328,24 @@ mod tests {
         let path = r"\\?\hid#vid_264a&pid_233c&mi_01#stand#{synthetic-interface}";
         let keyboard = controller("Keyboard");
         let asset = AssetId::try_from("0".repeat(64)).unwrap();
-        for (case, drivers) in [
-            ("no devices", vec![]),
-            ("only BLE", vec![SurplifeE1Pixels]),
-            ("only LCD", vec![TtLcd]),
-            ("only OpenRGB", vec![OpenRgb]),
+        for (case, drivers, rgb_failed) in [
+            ("no devices", vec![], false),
+            ("only BLE", vec![SurplifeE1Pixels], false),
+            ("only LCD", vec![TtLcd], false),
+            ("only OpenRGB", vec![OpenRgb], false),
+            ("BLE and LCD", vec![SurplifeE1Pixels, TtLcd], false),
+            ("OpenRGB and BLE", vec![OpenRgb, SurplifeE1Pixels], false),
+            ("OpenRGB and LCD", vec![OpenRgb, TtLcd], false),
             (
                 "BLE and LCD with failed OpenRGB",
                 vec![SurplifeE1Pixels, TtLcd],
+                true,
             ),
-            ("all local families", vec![OpenRgb, SurplifeE1Pixels, TtLcd]),
+            (
+                "all local families",
+                vec![OpenRgb, SurplifeE1Pixels, TtLcd],
+                false,
+            ),
         ] {
             let (document, local) = empty();
             let (rgb_found, lcd_found, ble_found) = (
@@ -1345,7 +1353,6 @@ mod tests {
                 drivers.contains(&TtLcd),
                 drivers.contains(&SurplifeE1Pixels),
             );
-            let rgb_failed = !rgb_found && lcd_found && ble_found;
             let inventory = scan_fixture(
                 true,
                 if rgb_failed {
