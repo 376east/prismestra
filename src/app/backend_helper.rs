@@ -550,23 +550,43 @@ fn task_guard(
     snapshot: Arc<Mutex<Snapshot>>,
     stop: Arc<AtomicBool>,
 ) -> Arc<dyn Fn() -> Result<(), String> + Send + Sync> {
+    task_guard_with_owner_query(snapshot, stop, move || {
+        super::managed_backend::listener_owner(endpoint)
+    })
+}
+
+fn task_guard_with_owner_query(
+    snapshot: Arc<Mutex<Snapshot>>,
+    stop: Arc<AtomicBool>,
+    listener_owner: impl Fn() -> Result<Option<u32>, String> + Send + Sync + 'static,
+) -> Arc<dyn Fn() -> Result<(), String> + Send + Sync> {
     Arc::new(move || {
-        let snapshot = snapshot.lock().unwrap_or_else(|p| p.into_inner());
-        let now = now_ms()?;
-        if stop.load(Ordering::SeqCst)
-            || !snapshot.ready
-            || !clock::fresh(snapshot.timestamp_ms, now, FRESH_MS)
-        {
-            return Err("Managed backend helper is not ready or its status is stale".into());
-        }
-        let pid = snapshot
-            .backend_pid
-            .ok_or("Managed backend helper has no owned child")?;
-        if super::managed_backend::listener_owner(endpoint)? != Some(pid) {
+        let expected = current_task_owner(&snapshot, &stop)?;
+        // A system TCP-table query can block. The proxy must be able to
+        // publish its snapshot and continue renewing the owner's lease.
+        if listener_owner()? != Some(expected.0) {
             return Err("OpenRGB endpoint is not owned by the managed backend child".into());
+        }
+        if current_task_owner(&snapshot, &stop)? != expected {
+            return Err("Managed backend helper changed while checking the endpoint".into());
         }
         Ok(())
     })
+}
+
+fn current_task_owner(snapshot: &Mutex<Snapshot>, stop: &AtomicBool) -> Result<(u32, u64), String> {
+    let snapshot = snapshot.lock().unwrap_or_else(|p| p.into_inner());
+    let now = now_ms()?;
+    if stop.load(Ordering::SeqCst)
+        || !snapshot.ready
+        || !clock::fresh(snapshot.timestamp_ms, now, FRESH_MS)
+    {
+        return Err("Managed backend helper is not ready or its status is stale".into());
+    }
+    let pid = snapshot
+        .backend_pid
+        .ok_or("Managed backend helper has no owned child")?;
+    Ok((pid, snapshot.ready_generation))
 }
 
 /// Called only by the product's explicit --backend-helper entrypoint.
@@ -2084,6 +2104,48 @@ mod tests {
         let _ = fs::remove_file(directory.join("backend-events.json"));
         fs::remove_dir(directory).unwrap();
     }
+    #[cfg(windows)]
+    #[test]
+    fn task_guard_keeps_status_updates_free_and_rechecks_after_listener_lookup() {
+        let pid = std::process::id();
+        for change in [
+            "refresh",
+            "new generation",
+            "new PID",
+            "not ready",
+            "stale",
+            "stop",
+        ] {
+            let snapshot = Arc::new(Mutex::new(Snapshot {
+                ready_generation: 1,
+                ready: true,
+                backend_pid: Some(pid),
+                timestamp_ms: now_ms().unwrap(),
+                detail: String::new(),
+            }));
+            let stop = Arc::new(AtomicBool::new(false));
+            let during_lookup = snapshot.clone();
+            let cancel = stop.clone();
+            let guard = task_guard_with_owner_query(snapshot, stop, move || {
+                // A slow listener query can overlap the proxy publishing its status.
+                let mut status = during_lookup
+                    .try_lock()
+                    .expect("listener lookup holds proxy status mutex");
+                match change {
+                    "refresh" => status.timestamp_ms = now_ms().unwrap(),
+                    "new generation" => status.ready_generation += 1,
+                    "new PID" => status.backend_pid = Some(pid.wrapping_add(1)),
+                    "not ready" => status.ready = false,
+                    "stale" => status.timestamp_ms = now_ms().unwrap().saturating_sub(FRESH_MS + 1),
+                    "stop" => cancel.store(true, Ordering::SeqCst),
+                    _ => unreachable!(),
+                }
+                Ok(Some(pid))
+            });
+            assert_eq!(guard().is_ok(), change == "refresh", "{change}");
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn task_guard_rejects_foreign_stale_and_dropped_ownership() {
