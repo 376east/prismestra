@@ -245,8 +245,18 @@ fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
             .collect(),
     };
     let mut colors = Vec::new();
-    if let Ok(mut renderer) = crate::runtime::scene::Renderer::new(entry.scene.clone()) {
-        for _ in 0..8 {
+    let mut thumbnail_scene = entry.scene.clone();
+    let steps = if thumbnail_scene.effect == crate::lighting::scene::Effect::Breathing {
+        // A 1.57 radian step samples the first breath near its peak.
+        // Only the thumbnail clock changes; the card still stores the original scene.
+        thumbnail_scene.speed = 157;
+        thumbnail_scene.fps = 1;
+        1
+    } else {
+        8
+    };
+    if let Ok(mut renderer) = crate::runtime::scene::Renderer::new(thumbnail_scene) {
+        for _ in 0..steps {
             if let Ok(frame) = renderer.step(&canvas) {
                 colors = frame.iter().map(|c| c.rrggbb()).collect::<Vec<_>>();
             }
@@ -1092,4 +1102,34 @@ pub(super) fn return_to_editor(state: &State) -> Result<(), String> {
         app.show_page();
     }
     send(state, &snapshot(state)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lighting::scene::Effect;
+
+    #[test]
+    fn slow_breathing_card_shows_its_lit_phase_without_changing_scene_settings() {
+        let mut entry = crate::ui::catalog::plum_dawn();
+        entry.scene.effect = Effect::Breathing;
+        entry.scene.speed = 10;
+        entry.scene.fps = 144;
+        entry.scene.colors = vec![0x526681];
+        let saved = serde_json::to_value(&entry.scene).unwrap();
+        let card = scene_card(&entry);
+        let colors = card["preview"]["colors"].as_array().unwrap();
+        assert_eq!(colors.len(), 24 * 12);
+        assert!(colors.iter().all(|color| color.as_u64().unwrap() != 0));
+        assert_eq!(card["scene"], saved);
+
+        entry.scene.brightness = 0;
+        assert!(
+            scene_card(&entry)["preview"]["colors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|color| color.as_u64().unwrap() == 0)
+        );
+    }
 }
