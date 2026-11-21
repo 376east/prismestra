@@ -45,7 +45,7 @@ fn sensitive_scene_inputs_require_apply_even_after_connected_restore() {
     let mut runtime = Runtime::new(serde_json::from_slice(&saved).unwrap(), None).unwrap();
     runtime.enable_native_scene_inputs();
     assert!(runtime.wanted_reactive(true).is_none());
-    runtime.tick(1_000, 0).unwrap();
+    runtime.tick(now(), wall()).unwrap();
     assert!(!runtime.reactive.wanted());
 
     let mut scene = profile.lighting.scene;
