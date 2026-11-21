@@ -36,6 +36,9 @@ Name: "pawnio"; Description: "Enable supported RAM and motherboard lighting (sha
 #endif
 
 [Files]
+#ifndef LifecycleTest
+Source: "prerequisites\Prismestra-Setup-Probe.exe"; Flags: dontcopy solidbreak
+#endif
 Source: "payload\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 #ifndef LifecycleTest
 Source: "prerequisites\vc_redist.x64.exe"; Flags: dontcopy solidbreak
@@ -61,6 +64,9 @@ const
 var
   RebootRequired: Boolean;
   VcRuntimeRestartRequired: Boolean;
+#ifndef LifecycleTest
+  WebViewProbeExtracted: Boolean;
+#endif
 
 function PowerShell: String;
 begin
@@ -90,14 +96,7 @@ begin
     PSQuote(Encoded) + ')))) ' + PSQuote(Action) + ' ' + PSQuote(InstallPath) + Extra + '"';
 end;
 
-function GuardInstall(const Action: String): Boolean;
-var
-  Code: Integer;
-begin
-  Result := FixedInstallPath and ExecAndLogOutput(PowerShell,
-    ScriptArgs('{#GuardCode}', Action, ''), ExpandConstant('{sys}'), SW_HIDE,
-    ewWaitUntilTerminated, Code, nil) and (Code = 0);
-end;
+#include "guard-native.iss"
 
 function OriginalUser(const Action, ExpectedSid: String): Boolean;
 var
@@ -156,6 +155,35 @@ begin
     (ComparePackedVersion(VersionNumber, PackVersionComponents(105, 0, 0, 0)) >= 0);
 end;
 
+function OriginalUserWebViewReady: Boolean;
+var
+  ProbePath: String;
+  Code: Integer;
+begin
+  try
+    if not WebViewProbeExtracted then begin
+      ExtractTemporaryFile('Prismestra-Setup-Probe.exe');
+      WebViewProbeExtracted := True;
+    end;
+    ProbePath := ExpandConstant('{tmp}\Prismestra-Setup-Probe.exe');
+    if CompareText(GetSHA256OfFile(ProbePath), '{#WebViewProbeSha256}') = 0 then begin
+      if ExecAsOriginalUser(ProbePath, '', ExpandConstant('{sys}'), SW_HIDE,
+        ewWaitUntilTerminated, Code) then begin
+        Log('Native WebView2 user probe exit code ' + IntToStr(Code));
+        if (Code = 0) or (Code = 1) then begin
+          Result := Code = 0;
+          Exit;
+        end;
+      end;
+    end else Log('Native WebView2 user probe failed its SHA-256 check.');
+  except
+    Log(GetExceptionMessage);
+  end;
+  { A different elevation account can have a private Setup temporary directory. }
+  Log('Native WebView2 user probe unavailable; using the existing user probe.');
+  Result := OriginalUser('WebView', '');
+end;
+
 function WebViewReady: Boolean;
 var
   Version: String;
@@ -163,7 +191,7 @@ begin
   Result := RegQueryStringValue(HKLM32,
     'Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
     'pv', Version) and SupportedWebViewVersion(Version);
-  if not Result then Result := OriginalUser('WebView', '');
+  if not Result then Result := OriginalUserWebViewReady;
 end;
 
 function PawnIOPresent: Boolean;

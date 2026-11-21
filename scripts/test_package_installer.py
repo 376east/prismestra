@@ -259,6 +259,18 @@ exit 0
         self.assertTrue(all(m["data_namespace"] == self.namespace and not m["prerequisites"] for m in manifests))
         self.assertTrue(all(m["backend"]["relative_executable"].endswith("/runtime/OpenRGB.exe") for m in manifests))
 
+    @unittest.skipUnless(os.name == "nt", "Requires the x64 Windows Rust toolchain")
+    def test_builds_webview_probe_without_a_redistributable_and_checks_versions(self):
+        probe_hash = installer.stage_webview_probe(self.root)
+        self.assertEqual(probe_hash, installer.sha256(self.root / installer.WEBVIEW_PROBE))
+        test_image = self.root / "probe-tests.exe"
+        subprocess.run([
+            "rustc", "--edition", "2024", "--target", "x86_64-pc-windows-msvc",
+            "-C", "target-feature=+crt-static", "--test", "--crate-name", "prismestra_setup_probe_tests",
+            "-o", str(test_image), str(installer.ROOT / "installer/webview-probe.rs"),
+        ], check=True)
+        subprocess.run([str(test_image)], check=True)
+
 
 if __name__ == "__main__":
     unittest.main()

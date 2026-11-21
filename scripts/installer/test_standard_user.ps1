@@ -5,6 +5,8 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string]$ManifestSha256,
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$Commit,
     [Parameter(Mandatory)][string]$ReportDirectory,
+    [string]$WebViewProbe,
+    [ValidatePattern('^[0-9a-f]{64}$')][string]$WebViewProbeSha256,
     [switch]$DisposableRunner
 )
 
@@ -146,12 +148,42 @@ $receiptPath = Join-Path $local ("Prismestra-CI-" + $Id + ".json")
 $result = [ordered]@{ sid = $identity.User.Value; standard_user = $true; startup_command = $null;
     empty_profile = $false; local_bindings = $false; backend_pin = $false; resident_shell = 'not_observed';
     automatic_setup = $false; first_run = $null; native_identity_probe = $false; native_profile_prepare = $false;
-    native_current_sid = $false; native_startup = $false }
+    native_current_sid = $false; native_startup = $false; native_webview_probe = $false }
 $app = $null
 $stop = $null
 try {
     $profile = Join-Path $local 'Prismestra'
     if (Test-Path -LiteralPath $profile) { throw 'The standard-user profile was not fresh.' }
+    $probePath = Join-Path $PSScriptRoot 'Prismestra-Setup-Probe.exe'
+    if (Test-Path -LiteralPath $probePath) {
+        function Assert-UserWebViewProbe([int]$Expected) {
+            $child = Start-Process -FilePath $probePath -PassThru -WindowStyle Hidden
+            $null = $child.Handle
+            try {
+                if (-not $child.WaitForExit(20000)) { $child.Kill(); throw 'WebView2 probe timed out.' }
+                if ($child.ExitCode -ne $Expected) {
+                    throw ('WebView2 probe returned ' + $child.ExitCode + ' instead of ' + $Expected)
+                }
+            } finally { $child.Dispose() }
+        }
+        $webView = 'Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+        Assert-UserWebViewProbe 1
+        $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($webView)
+        $changed = $false
+        try {
+            if ($null -ne $key.GetValue('pv')) { throw 'Disposable user already has a WebView2 version value.' }
+            foreach ($case in @(@{v='104.65535.65535.65535'; exit=1}, @{v='105.0.0.0'; exit=0}, @{v='105.0.0'; exit=1})) {
+                $key.SetValue('pv', $case.v, [Microsoft.Win32.RegistryValueKind]::String)
+                $changed = $true
+                Assert-UserWebViewProbe $case.exit
+            }
+        } finally {
+            if ($changed) { $key.DeleteValue('pv', $false) }
+            $key.Dispose()
+        }
+        $result.native_webview_probe = $true
+    }
+    $ps = Join-Path $PSHOME powershell.exe
     $image = Join-Path $Install 'Prismestra.exe'
     $currentSidOutput = Join-Path $PSScriptRoot 'native-current-sid.log'
     $sidProbe = Start-Process -FilePath $image -ArgumentList '--setup-current-user' -PassThru -WindowStyle Hidden -RedirectStandardOutput $currentSidOutput
@@ -357,6 +389,13 @@ try {
     Set-Acl -LiteralPath $scratch -AclObject $permissions
     # Inno embeds this checkout's script in Setup; it is not an installed file.
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'original-user.ps1') -Destination $scratch
+    if ($WebViewProbe) {
+        $stagedProbe = Join-Path $scratch 'Prismestra-Setup-Probe.exe'
+        Copy-Item -LiteralPath $WebViewProbe -Destination $stagedProbe
+        if ((Get-FileHash -LiteralPath $stagedProbe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $WebViewProbeSha256) {
+            throw 'WebView2 probe differs from the original installer input.'
+        }
+    }
     $workerFile = Join-Path $scratch 'worker.ps1'
     # Windows PowerShell 5.1 needs a BOM for non-ASCII source on every system locale.
     [IO.File]::WriteAllText($workerFile, $worker, [Text.UTF8Encoding]::new($true))
@@ -426,6 +465,7 @@ try {
         $actual.native_identity_probe -and $actual.native_profile_prepare -and $actual.native_current_sid -and $actual.native_startup -and
         $actual.resident_shell -eq 'process_drained_by_shutdown' -and -not $actual.startup_error_file) 'Standard-user verification failed. See standard-user.json.'
     Assert-Expected ($actual.startup_command -ceq ('"' + (Join-Path $install 'Prismestra.exe') + '" --installed --autostart')) 'Standard-user HKCU Run verification failed.'
+    Assert-Expected (!$WebViewProbe -or $actual.native_webview_probe) 'Native original-user WebView2 probe was not verified.'
 } finally {
     try {
         if ($setupAttempted -and (Test-Path -LiteralPath $registry)) {
@@ -452,7 +492,7 @@ try {
         }
         if ($password) { $password.Dispose() }
         if (Test-Path -LiteralPath $scratch) {
-            foreach ($name in @('worker.ps1', 'invoke-worker.ps1', 'original-user.ps1', 'startup-helper.stderr.log', 'startup-helper.stdout.log', 'worker-output.log', 'app.stderr.log', 'app.stdout.log', 'native-current-sid.log')) {
+            foreach ($name in @('worker.ps1', 'invoke-worker.ps1', 'original-user.ps1', 'startup-helper.stderr.log', 'startup-helper.stdout.log', 'worker-output.log', 'app.stderr.log', 'app.stdout.log', 'native-current-sid.log', 'Prismestra-Setup-Probe.exe')) {
                 $file = Join-Path $scratch $name
                 if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
             }

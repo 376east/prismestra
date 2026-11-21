@@ -13,7 +13,7 @@ import uuid
 from zipfile import ZipFile
 
 from package_release import sha256
-from package_installer import json_object
+from package_installer import WEBVIEW_PROBE, json_object
 
 REPO = Path(__file__).resolve().parent.parent
 COMPONENT = REPO / "components/openrgb"
@@ -179,6 +179,8 @@ def package_candidate(root, commit, version, component, prerequisites, iscc, paw
     fixtures = root / "fixtures"
     namespace = str(uuid.uuid4())
     (fixtures / "first").mkdir(parents=True)
+    shutil.copyfile(production / "stage/prerequisites" / WEBVIEW_PROBE, fixtures / WEBVIEW_PROBE)
+    (fixtures / "webview-probe.sha256").write_text(receipt["webview_probe_sha256"] + "\n", encoding="ascii")
     (fixtures / "namespace.txt").write_text(namespace + "\n", encoding="ascii")
     for name, fixture_version in (("first", "0.0.0.0"), ("upgrade", version)):
         build = root / f"fixture-{name}"

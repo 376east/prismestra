@@ -16,12 +16,17 @@ from urllib.parse import urlsplit
 import zipfile
 
 from package_release import sha256
+from components.verify_openrgb_component import pe_imports
 
 
 ROOT = Path(__file__).resolve().parent
 BACKEND = "components/openrgb/runtime/OpenRGB.exe"
 SHA256 = re.compile(r"[0-9a-f]{64}")
 APP_ID = "9bb22971-3e88-434d-b212-ab8cf717799a"
+WEBVIEW_PROBE = "Prismestra-Setup-Probe.exe"
+WEBVIEW_PROBE_IMPORTS = {
+    "advapi32.dll", "api-ms-win-core-synch-l1-2-0.dll", "kernel32.dll", "ntdll.dll",
+}
 PREREQUISITES = {
     "vc_redist_x64": ("vc_redist.x64.exe", 10 << 20, "Microsoft Corporation", {"aka.ms", "download.visualstudio.microsoft.com"}),
     "webview2_x64": ("MicrosoftEdgeWebView2RuntimeInstallerX64.exe", 30 << 20, "Microsoft Corporation", {"go.microsoft.com", "msedge.sf.dl.delivery.mp.microsoft.com", "msedge.api.cdp.microsoft.com"}),
@@ -243,6 +248,20 @@ def stage_app_notices(release_dir, payload, app_sha, commit):
     return source_name.as_posix()
 
 
+def stage_webview_probe(destination):
+    probe = destination / WEBVIEW_PROBE
+    subprocess.run([
+        "rustc", "--edition", "2024", "--target", "x86_64-pc-windows-msvc",
+        "-C", "target-feature=+crt-static", "-C", "opt-level=s",
+        "--crate-name", "prismestra_setup_probe", "-o", str(probe),
+        str(ROOT / "installer/webview-probe.rs"),
+    ], check=True)
+    imports = pe_imports(probe.read_bytes())
+    if not imports["normal"] or imports["delay"] or set(imports["normal"]) - WEBVIEW_PROBE_IMPORTS:
+        raise ValueError(f"Setup WebView2 probe must use only inbox Windows libraries: {imports}")
+    return sha256(probe)
+
+
 def package(args):
     if not re.fullmatch(r"[0-9a-f]{40}", args.expected_commit):
         raise ValueError("Use a full lowercase Git commit SHA")
@@ -279,8 +298,10 @@ def package(args):
     shutil.copyfile(args.app_exe, app)
     file_pin(app, args.app_sha256)
     release_source = stage_app_notices(args.release_dir, payload, args.app_sha256, args.expected_commit) if args.release_dir else None
+    webview_probe_hash = None
     if not test_mode:
         stage_prerequisites(packages, args.prerequisite_dir, stage / "prerequisites")
+        webview_probe_hash = stage_webview_probe(stage / "prerequisites")
         policy = ROOT / "installer_policy.ps1"
         if policy.is_symlink() or not policy.is_file():
             raise ValueError("Missing maintained installer policy provisioner")
@@ -312,20 +333,24 @@ def package(args):
         ("StartupValue", f"Prismestra-Test-{args.test_namespace}" if test_mode else "Prismestra"),
     ]
     defs = [f'#define {name} "{value}"' for name, value in compiler_defs]
-    for name, filename in [("GuardCode", "guard.ps1"), ("UserCode", "original-user.ps1")]:
-        encoded = base64.b64encode((ROOT / "installer" / filename).read_bytes()).decode()
-        defs.append(f'#define {name} "{encoded}"')
+    user_code = base64.b64encode((ROOT / "installer/original-user.ps1").read_bytes()).decode()
+    defs.append(f'#define UserCode "{user_code}"')
     if test_mode:
         defs.append("#define LifecycleTest")
+    else:
+        defs.append(f'#define WebViewProbeSha256 "{webview_probe_hash}"')
     if "pawnio" in packages:
         defs.append("#define IncludePawnIO")
     if runtime_floor is not None:
         for name, part in zip(("VcMajor", "VcMinor", "VcBuild", "VcRevision"), runtime_floor):
             defs.append(f"#define {name} {part}")
     (stage / "generated.iss").write_bytes(("\n".join(defs) + "\n").encode("utf-8"))
-    shutil.copyfile(ROOT / "installer/Prismestra.iss", stage / "Prismestra.iss")
+    for name in ("Prismestra.iss", "guard-native.iss"):
+        shutil.copyfile(ROOT / "installer" / name, stage / name)
 
     receipt = {"scope": "staged_only", "manifest_sha256": sha256(payload / "install-manifest.json")}
+    if webview_probe_hash is not None:
+        receipt["webview_probe_sha256"] = webview_probe_hash
     if not args.stage_only:
         iscc = args.iscc.resolve(strict=True)
         subprocess.run([str(iscc), "/Qp", str(stage / "Prismestra.iss")], cwd=stage, check=True)
