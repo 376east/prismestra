@@ -36,6 +36,7 @@ use windows_sys::Win32::{
     },
 };
 const TBM_GETPOS: u32 = WM_USER;
+mod alice;
 mod brand_icon;
 mod connections;
 mod first_run;

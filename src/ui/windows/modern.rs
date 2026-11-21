@@ -34,6 +34,9 @@ struct NativeValue {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
     Snapshot,
+    Alice {
+        request: super::alice::Action,
+    },
     PreviewOutput {
         request: u32,
         device: String,
@@ -138,6 +141,7 @@ struct CloseRequest {
 mod scene_files;
 
 pub(super) struct Session {
+    alice: super::alice::Session,
     close_request: Option<CloseRequest>,
     close_id: u32,
     close_ready: bool,
@@ -181,6 +185,7 @@ impl Session {
             })
             .collect();
         let mut result = Self {
+            alice: Default::default(),
             catalog_view,
             built_in_cards,
             close_request: None,
@@ -671,6 +676,9 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             | Command::PreviewOutput { .. }
             | Command::PreviewScene { .. }
             | Command::CloseReady { .. }
+            | Command::Alice {
+                request: super::alice::Action::Status | super::alice::Action::Cancel
+            }
     ) {
         let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
         if slot
@@ -681,6 +689,18 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
         }
     }
     match command {
+        Command::Alice { request } => {
+            let result = {
+                let mut slot = state.modern_session.borrow_mut();
+                slot.as_mut().ok_or("Нет интерфейса")?.alice.handle(request)
+            };
+            let message = match result {
+                Ok(value) => json!({"kind":"alice","state":value}),
+                Err(error) => json!({"kind":"alice","error":error}),
+            };
+            send(state, &message)?;
+            return Ok(false);
+        }
         Command::CloseReady {
             id,
             scene,

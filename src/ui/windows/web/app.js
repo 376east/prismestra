@@ -404,6 +404,7 @@ function renderSettings() {
  return heading('Настройки','Настройки локального профиля.')
   + `<div class="settings-sections">
     <section class="parameter-panel"><h2>Диагностика</h2><div class="settings-links">${pageButton('temperatures')}${pageButton('connections')}${pageButton('sources','Источники температур')}</div></section>
+    <section class="parameter-panel"><h2>Алиса</h2><button class="button" data-action="alice-open">Подключить лампу кабинета</button></section>
     <section class="parameter-panel"><h2>Расписание</h2><p class="parameter-note">${schedule}</p><div class="settings-links">${pageButton('schedule','Управлять расписанием')}</div></section>
   </div>`;
 }
@@ -547,6 +548,7 @@ function nameDialog(mode) {
 window.prismestraReceive = message => {
  try {
   if(typeof message==='string')message=JSON.parse(message);
+  if(message.kind==='alice'){receiveAlice(message);return;}
   if(message.kind==='output_preview'){window.outputMap?.receive(message);return;}
   if(message.kind==='output_retry'){receiveOutputRetry(message);return;}
   if(message.kind==='flush'){
@@ -605,6 +607,60 @@ window.prismestraReceive = message => {
   }
  }catch(e){awaitingCommandAck=false;closing=false;commandPending=false;showError('Ошибка ответа приложения: '+e.message);syncControls();}
 };
+let aliceTimer, aliceTicket;
+function aliceRequest(action, options={}) {
+ send({op:'alice',request:{action,...options}});
+}
+function aliceWait() {
+ clearTimeout(aliceTimer);
+ aliceTimer=setTimeout(()=>{if($('#alice-dialog')?.open)aliceRequest('status');},500);
+}
+function aliceSelection() {
+ const level=$('#alice-brightness');
+ $('#alice-apply').disabled=!aliceTicket || $('#alice-lamp').value==='' || !level.value || !level.checkValidity();
+}
+function receiveAlice(message) {
+ const dialog=$('#alice-dialog');
+ if(!dialog?.open)return;
+ clearTimeout(aliceTimer);
+ const signIn=dialog.querySelector('[data-action="alice-sign-in"]');
+ const status=$('#alice-status');
+ if(message.error){
+  status.textContent=message.error;
+  signIn.disabled=false;
+  aliceSelection();
+  return;
+ }
+ const state=message.state;
+ status.textContent=state.message;
+ signIn.disabled=state.busy;
+ if(aliceTicket!==state.ticket){
+  aliceTicket=state.ticket;
+  const picker=$('#alice-lamp');
+  picker.replaceChildren();
+  const placeholder=document.createElement('option');
+  placeholder.value='';
+  placeholder.textContent='Выберите лампу';
+  picker.append(placeholder);
+  state.lamps.forEach((label,index)=>{
+   const option=document.createElement('option');
+   option.value=String(index);
+   option.textContent=label;
+   picker.append(option);
+  });
+  $('#alice-choice').hidden=!state.lamps.length;
+ }
+ aliceSelection();
+ if(state.busy)aliceWait();
+}
+$('#alice-dialog')?.addEventListener('close',()=>{
+ clearTimeout(aliceTimer);
+ aliceTicket=undefined;
+ $('#alice-choice').hidden=true;
+ aliceRequest('cancel');
+});
+$('#alice-lamp')?.addEventListener('change',aliceSelection);
+$('#alice-brightness')?.addEventListener('input',aliceSelection);
 document.addEventListener('click',event=>{
  const b=event.target.closest('button');if(!b||b.disabled||(busy()&&b.hasAttribute('data-mutation')&&!recoveryAction(b.dataset.action)))return;
  if(b.id==='library-more'){
@@ -650,6 +706,22 @@ document.addEventListener('click',event=>{
   return;
  }
  switch(b.dataset.action){
+ case 'alice-open':$('#alice-dialog').showModal();aliceRequest('status');break;
+ case 'alice-close':$('#alice-dialog').close();break;
+ case 'alice-sign-in':
+  b.disabled=true;
+  $('#alice-choice').hidden=true;
+  aliceTicket=undefined;
+  aliceRequest('sign_in',{client:$('#alice-client').value.trim()});
+  break;
+ case 'alice-apply':{
+  const ticket=aliceTicket;
+  if(!ticket||$('#alice-lamp').value==='')break;
+  aliceTicket=undefined;
+  aliceSelection();
+  aliceRequest('apply',{ticket,lamp:Number($('#alice-lamp').value),brightness:Number($('#alice-brightness').value)});
+  break;
+ }
  case 'focus-device-setup':$(`[data-native-field="${devicePresetField}"]`)?.focus();break;
  case 'new':case 'clone':case 'rename':return nameDialog(b.dataset.action);
  case 'save-scene':return nameDialog('save');

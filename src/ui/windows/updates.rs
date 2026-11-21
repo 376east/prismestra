@@ -79,7 +79,11 @@ fn show(message: &str, flags: u32) -> i32 {
 }
 
 fn open_page(version: Version) -> Result<(), String> {
-    let url = wide(&version.page());
+    open_url(&version.page())
+}
+
+pub(super) fn open_url(address: &str) -> Result<(), String> {
+    let url = wide(address);
     let result = with_browser_sta(|| unsafe {
         ShellExecuteW(
             null_mut(),
@@ -94,7 +98,7 @@ fn open_page(version: Version) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "Не удалось открыть страницу выпуска (код {result})."
+            "Не удалось открыть страницу в браузере (код {result})."
         ))
     }
 }
