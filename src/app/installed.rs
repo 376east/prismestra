@@ -104,7 +104,7 @@ pub fn dispatch(args: Vec<OsString>) -> Result<Dispatch, String> {
         return Ok(Dispatch::Ui(args));
     }
     if let Command::CheckSetupUser(expected) = &command {
-        let actual = super::installed_policy::current_process_sid()?;
+        let actual = super::installed_policy::process_user_sid(unsafe { GetCurrentProcess() })?;
         return Ok(Dispatch::Exit(i32::from(
             expected.as_os_str() != actual.as_str(),
         )));

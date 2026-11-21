@@ -769,11 +769,6 @@ fn token_sid(token: &Handle) -> Result<String, String> {
     sid_string(unsafe { (*data.as_ptr().cast::<TOKEN_USER>()).User.Sid })
 }
 
-pub(super) fn current_process_sid() -> Result<String, String> {
-    let token = process_token(unsafe { GetCurrentProcess() }, TOKEN_QUERY)?;
-    token_sid(&token)
-}
-
 fn session(token: &Handle) -> Result<u32, String> {
     token_value(token, TokenSessionId)
 }
