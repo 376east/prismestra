@@ -18,8 +18,25 @@ In each measured desktop, record visible console shows and windows already visib
 
 Normalize one JSON file per scenario with `scenario`, `revision`, `artifact_sha256`, and `controls`. The `controls` keys are `process_start_stop`, `visible_console`, and `full_scenario`. Include `product_roots` and `harness_roots` as process identity lists. Each `processes` entry has `id`, `parent` (identity or null), and `image`. Each `windows` entry has `process` (identity or null), `class`, and boolean `visible`. Retain only the process and window data needed for the test. Harness shells are recognized by ancestry, including when a shell launches a product root. A shell under a product root still counts against the product.
 
+Every non-null parent must be present in the trace and refer to the current process instance at the child's start. If a parent cannot be resolved and the missing process affects coverage, set `process_start_stop` to false.
+
+For process capture, open an elevated PowerShell session in a disposable guest. Set the interval long enough for the planned scenario, wait for the capture-ready message, and perform the scenario from the intended desktop. The harness writes start and stop events plus a short `cmd.exe` control on each side of the measured interval. [CIM event capture](https://learn.microsoft.com/en-us/powershell/module/cimcmdlets/register-cimindicationevent)
+
 ```powershell
-python scripts/shell_acceptance.py evidence.json --revision <commit> --artifact-sha256 <sha256>
+.\scripts\installer\capture_process_events.ps1 -DisposableGuest -DurationSeconds 900 -OutputPath .\uninstall-processes.json
+python scripts/normalize_process_events.py uninstall-processes.json --scenario uninstall --revision <commit> --artifact-sha256 <sha256> --product-root '<pid>:<start-filetime>' --output uninstall-partial.json
+```
+
+Identify each `--product-root` from its observed launch, including detached scheduled tasks when applicable. The normalizer writes a partial receipt. Add actual window observations and establish scenario coverage before using the result as a complete acceptance receipt.
+
+Start the window observer on each measured desktop before the process interval. Allow time for an actual visible control console before and after the product action. The observer retains the desktop and session, the window class, and the window owner's PID and creation time when available. It does not collect window titles. The owner can be a console host or Terminal broker. Leave the owner unresolved in the acceptance receipt unless the evidence identifies the owning product or harness process instance. [Window ownership API](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowthreadprocessid)
+
+```powershell
+python scripts/capture_console_windows.py --disposable-guest --duration-seconds 1000 --output uninstall-windows.json
+```
+
+```powershell
+python scripts/shell_acceptance.py evidence.json --scenario uninstall --revision <commit> --artifact-sha256 <sha256>
 ```
 
 Exit code `0` confirms the scenario on the expected artifact with complete controls. Exit code `1` reports a shell started by the product or a visible product console. Exit code `2` means evidence is invalid or incomplete, including an unattributed shell or visible console. Apply the same checker to the control release and to the combined Setup, runtime and portable candidate. Preserve the three component heads and the final candidate tree in the evidence.

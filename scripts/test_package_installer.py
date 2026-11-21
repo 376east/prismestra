@@ -1,6 +1,7 @@
 """Packaging fixtures exercise archive, prerequisite and isolation boundaries."""
 
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -19,11 +20,12 @@ def fingerprint(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def amd64_fixture(linker=(14, 51)):
-    pe = bytearray(28)
+def amd64_fixture(linker=(14, 51), subsystem=3):
+    pe = bytearray(24 + 240)
     pe[:6] = b"PE\0\0\x64\x86"
     struct.pack_into("<H", pe, 20, 240)
     struct.pack_into("<HBB", pe, 24, 0x20B, *linker)
+    struct.pack_into("<H", pe, 24 + 68, subsystem)
     return b"MZ" + bytes(58) + struct.pack("<I", 64) + pe
 
 
@@ -258,6 +260,44 @@ exit 0
         self.assertEqual([m["installer_version"] for m in manifests], ["0.1.0.5", "0.1.0.6"])
         self.assertTrue(all(m["data_namespace"] == self.namespace and not m["prerequisites"] for m in manifests))
         self.assertTrue(all(m["backend"]["relative_executable"].endswith("/runtime/OpenRGB.exe") for m in manifests))
+
+    def test_setup_stages_only_native_companions_with_expected_imports(self):
+        policy = amd64_fixture(subsystem=2) + b"policy"
+        legacy = amd64_fixture(subsystem=2) + b"legacy"
+
+        def fake_build(command, **_kwargs):
+            output = Path(command[command.index("--target-dir") + 1]) / "x86_64-pc-windows-msvc/release"
+            output.mkdir(parents=True)
+            (output / "prismestra-setup-policy.exe").write_bytes(policy)
+            (output / "prismestra-legacy-startup.exe").write_bytes(legacy)
+
+        with patch.object(installer.subprocess, "run", side_effect=fake_build) as build, patch.object(
+            installer, "pe_imports", side_effect=[
+                {"normal": ["kernel32.dll"], "delay": []},
+                {"normal": ["kernel32.dll", "user32.dll"], "delay": []},
+            ]
+        ):
+            hashes = installer.stage_setup_tools(self.root)
+        self.assertIn("--bins", build.call_args.args[0])
+        self.assertEqual(build.call_args.kwargs["env"]["CARGO_ENCODED_RUSTFLAGS"], "-C\x1ftarget-feature=+crt-static")
+        self.assertEqual(hashes, {
+            installer.POLICY_TOOL: fingerprint(policy),
+            installer.LEGACY_STARTUP_TOOL: fingerprint(legacy),
+        })
+
+    def test_native_setup_companions_cannot_use_the_console_subsystem(self):
+        with self.assertRaisesRegex(ValueError, "Windows GUI executable"):
+            installer.check_amd64_executable(io.BytesIO(amd64_fixture()), "helper.exe", require_gui=True)
+
+    def test_setup_and_uninstall_have_no_shell_entry_and_keep_legacy_order(self):
+        source = (installer.ROOT / "installer/Prismestra.iss").read_text(encoding="utf-8")
+        guard = (installer.ROOT / "installer/guard-native.iss").read_text(encoding="utf-8")
+        for shell in ("powershell.exe", "pwsh.exe", "cmd.exe", "sh.exe", ".ps1"):
+            self.assertNotIn(shell, (source + guard).lower())
+        retirement = source.split("procedure RetireLegacyStartup;", 1)[1]
+        self.assertLess(retirement.index("LegacyStartup('Prepare'"), retirement.index("--setup-prepare-installed"))
+        self.assertLess(retirement.index("--setup-prepare-installed"), retirement.index("LegacyStartup('Disable'"))
+        self.assertIn("RunManagedPolicy('--uninstall'", source)
 
     @unittest.skipUnless(os.name == "nt", "Requires the x64 Windows Rust toolchain")
     def test_builds_webview_probe_without_a_redistributable_and_checks_versions(self):

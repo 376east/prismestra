@@ -3,6 +3,7 @@
 import argparse
 import json
 import re
+from bisect import bisect_right
 from pathlib import Path, PureWindowsPath
 
 
@@ -21,6 +22,7 @@ PROCESS_ID = re.compile(r'[1-9][0-9]*:[1-9][0-9]*')
 
 def index_processes(processes):
     index = {}
+    starts_by_pid = {}
     for process in processes:
         identity = process['id']
         parent = process['parent']
@@ -29,25 +31,47 @@ def index_processes(processes):
                 or not PureWindowsPath(process['image']).name):
             raise ValueError(f'Invalid process instance {identity!r}')
         index[identity] = process
+        pid, start = map(int, identity.split(':'))
+        starts_by_pid.setdefault(pid, []).append(start)
+    for starts in starts_by_pid.values():
+        starts.sort()
+    verified = set()
+    for identity, process in index.items():
+        parent = process['parent']
+        if parent is None:
+            continue
+        if parent not in index:
+            raise ValueError(f'Unresolved parent {parent} for {identity}')
+        pid, start = map(int, identity.split(':'))
+        parent_pid, parent_start = map(int, parent.split(':'))
+        if pid == parent_pid or parent_start > start:
+            raise ValueError(f'Impossible parent {parent} for {identity}')
+        starts = starts_by_pid[parent_pid]
+        if starts[bisect_right(starts, start) - 1] != parent_start:
+            raise ValueError(f'Superseded parent {parent} for {identity}')
+    for identity in index:
+        chain = set()
+        while identity is not None and identity not in verified:
+            if identity in chain:
+                raise ValueError(f'Process ancestry cycle at {identity}')
+            chain.add(identity)
+            identity = index[identity]['parent']
+        verified.update(chain)
     return index
 
 
 def family(identity, processes, product_roots, harness_roots):
-    seen = set()
     harness = False
     while identity in processes:
         if identity in product_roots:
             return 'product'
         if identity in harness_roots:
             harness = True
-        if identity in seen:
-            raise ValueError(f'Process ancestry cycle at {identity}')
-        seen.add(identity)
         identity = processes[identity]['parent']
     return 'harness' if harness else 'unattributed'
 
 
-def check_trace(trace, revision, artifact):
+def check_trace(trace, revision, artifact, expected_scenario=None):
     if not SHA.fullmatch(revision) or not SHA256.fullmatch(artifact):
         raise ValueError('Expected a full revision and a lowercase SHA-256')
     scenario = trace['scenario']
@@ -59,8 +83,11 @@ def check_trace(trace, revision, artifact):
     gaps = []
     violations = []
     exact_artifact = trace['revision'] == revision and trace['artifact_sha256'] == artifact
+    exact_scenario = expected_scenario is None or expected_scenario == scenario
     if not exact_artifact:
         gaps.append('Trace revision or artifact differs from the requested build')
+    if not exact_scenario:
+        gaps.append('Trace scenario differs from the requested scenario')
     if not product_roots or not product_roots <= processes.keys():
         gaps.append('One or more product process roots were not captured')
     if not harness_roots <= processes.keys():
@@ -96,7 +123,7 @@ def check_trace(trace, revision, artifact):
         'scenario': scenario,
         'revision': revision,
         'artifact_sha256': artifact,
-        'status': 'fail' if violations and exact_artifact else 'inconclusive' if gaps else 'pass',
+        'status': 'fail' if violations and exact_artifact and exact_scenario else 'inconclusive' if gaps else 'pass',
         'violations': violations,
         'gaps': gaps,
     }
@@ -107,10 +134,11 @@ def main():
     parser.add_argument('trace', type=Path)
     parser.add_argument('--revision', required=True)
     parser.add_argument('--artifact-sha256', required=True)
+    parser.add_argument('--scenario', choices=sorted(SCENARIOS))
     args = parser.parse_args()
     try:
         trace = json.loads(args.trace.read_text(encoding='utf-8-sig'))
-        result = check_trace(trace, args.revision, args.artifact_sha256)
+        result = check_trace(trace, args.revision, args.artifact_sha256, args.scenario)
     except (OSError, KeyError, TypeError, ValueError) as error:
         parser.exit(2, f'Invalid trace: {error}\n')
     print(json.dumps(result, indent=2))
