@@ -7,6 +7,9 @@ use std::{
     ptr::{null, null_mut},
     sync::Mutex,
 };
+use windows::Win32::System::Com::{
+    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+};
 use windows_sys::Win32::UI::{
     Shell::ShellExecuteW,
     WindowsAndMessaging::{
@@ -66,7 +69,7 @@ fn show(message: &str, flags: u32) -> i32 {
 
 fn open_page(version: Version) -> Result<(), String> {
     let url = wide(&version.page());
-    let result = unsafe {
+    let result = with_browser_sta(|| unsafe {
         ShellExecuteW(
             null_mut(),
             wide("open").as_ptr(),
@@ -74,13 +77,79 @@ fn open_page(version: Version) -> Result<(), String> {
             null(),
             null(),
             SW_SHOWNORMAL,
-        )
-    } as isize;
+        ) as isize
+    })?;
     if result > 32 {
         Ok(())
     } else {
         Err(format!(
             "Не удалось открыть страницу выпуска (код {result})."
         ))
+    }
+}
+
+fn with_browser_sta<T>(launch: impl FnOnce() -> T) -> Result<T, String> {
+    struct Uninitialize;
+
+    impl Drop for Uninitialize {
+        fn drop(&mut self) {
+            unsafe { CoUninitialize() };
+        }
+    }
+
+    // HTTPS handlers may activate apartment-threaded Shell extensions.
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).ok() }
+        .map_err(|error| format!("Не удалось подготовить открытие страницы выпуска: {error}"))?;
+    let _apartment = Uninitialize;
+    Ok(launch())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::{
+        Foundation::CO_E_NOTINITIALIZED,
+        System::Com::{
+            APTTYPE, APTTYPE_MAINSTA, APTTYPE_MTA, APTTYPE_STA, APTTYPEQUALIFIER,
+            CoGetApartmentType,
+        },
+    };
+
+    fn apartment_type() -> Result<APTTYPE, windows::core::HRESULT> {
+        let mut apartment = APTTYPE::default();
+        let mut qualifier = APTTYPEQUALIFIER::default();
+        unsafe { CoGetApartmentType(&mut apartment, &mut qualifier) }
+            .map_err(|error| error.code())?;
+        Ok(apartment)
+    }
+
+    #[test]
+    fn browser_launch_uses_and_releases_sta_on_the_worker() {
+        std::thread::spawn(|| {
+            assert!(matches!(
+                apartment_type(),
+                Err(CO_E_NOTINITIALIZED) | Ok(APTTYPE_MTA)
+            ));
+            let result = with_browser_sta(|| {
+                let expected = apartment_type().unwrap();
+                assert!(matches!(expected, APTTYPE_STA | APTTYPE_MAINSTA));
+                // S_FALSE from a second initialization also needs a matching release.
+                let launch_result = with_browser_sta(|| {
+                    assert_eq!(apartment_type().unwrap(), expected);
+                    31
+                })
+                .unwrap();
+                assert_eq!(apartment_type().unwrap(), expected);
+                launch_result
+            })
+            .unwrap();
+            assert_eq!(result, 31);
+            assert!(matches!(
+                apartment_type(),
+                Err(CO_E_NOTINITIALIZED) | Ok(APTTYPE_MTA)
+            ));
+        })
+        .join()
+        .unwrap();
     }
 }
