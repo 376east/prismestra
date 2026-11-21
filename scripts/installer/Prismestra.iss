@@ -96,14 +96,7 @@ begin
     PSQuote(Encoded) + ')))) ' + PSQuote(Action) + ' ' + PSQuote(InstallPath) + Extra + '"';
 end;
 
-function GuardInstall(const Action: String): Boolean;
-var
-  Code: Integer;
-begin
-  Result := FixedInstallPath and ExecAndLogOutput(PowerShell,
-    ScriptArgs('{#GuardCode}', Action, ''), ExpandConstant('{sys}'), SW_HIDE,
-    ewWaitUntilTerminated, Code, nil) and (Code = 0);
-end;
+#include "guard-native.iss"
 
 function OriginalUser(const Action, ExpectedSid: String): Boolean;
 var

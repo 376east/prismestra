@@ -333,9 +333,8 @@ def package(args):
         ("StartupValue", f"Prismestra-Test-{args.test_namespace}" if test_mode else "Prismestra"),
     ]
     defs = [f'#define {name} "{value}"' for name, value in compiler_defs]
-    for name, filename in [("GuardCode", "guard.ps1"), ("UserCode", "original-user.ps1")]:
-        encoded = base64.b64encode((ROOT / "installer" / filename).read_bytes()).decode()
-        defs.append(f'#define {name} "{encoded}"')
+    user_code = base64.b64encode((ROOT / "installer/original-user.ps1").read_bytes()).decode()
+    defs.append(f'#define UserCode "{user_code}"')
     if test_mode:
         defs.append("#define LifecycleTest")
     else:
@@ -346,7 +345,8 @@ def package(args):
         for name, part in zip(("VcMajor", "VcMinor", "VcBuild", "VcRevision"), runtime_floor):
             defs.append(f"#define {name} {part}")
     (stage / "generated.iss").write_bytes(("\n".join(defs) + "\n").encode("utf-8"))
-    shutil.copyfile(ROOT / "installer/Prismestra.iss", stage / "Prismestra.iss")
+    for name in ("Prismestra.iss", "guard-native.iss"):
+        shutil.copyfile(ROOT / "installer" / name, stage / name)
 
     receipt = {"scope": "staged_only", "manifest_sha256": sha256(payload / "install-manifest.json")}
     if webview_probe_hash is not None:

@@ -48,10 +48,11 @@ function Read-TestInstaller($BuildDirectory) {
     Assert-Expected ((Sha256 $exe) -ceq $receipt.installer_sha256) 'Build receipt does not match installer.'
     [pscustomobject]@{ Path = $exe; Manifest = $manifest }
 }
-function Run-Setup($Path, $Options, $Log) {
+function Run-Setup($Path, $Options, $Log, [switch]$ExpectFailure) {
     $process = Start-Process -WindowStyle Hidden -FilePath $Path -Wait -PassThru -ArgumentList (
         '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART ' + $Options + ' /LOG="' + $Log + '"')
-    Assert-Expected ($process.ExitCode -eq 0) ("Setup exited with code " + $process.ExitCode + ". See $Log")
+    Assert-Expected (($process.ExitCode -ne 0) -eq $ExpectFailure.IsPresent) (
+        "Unexpected exit code " + $process.ExitCode + ". See $Log")
 }
 function Read-Run {
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
@@ -128,6 +129,36 @@ Run-Setup $first.Path '/TASKS=autostart' (Join-Path $report 'install.log')
 Check-Payload $first.Manifest
 Assert-Expected (Test-Path -LiteralPath $arp) 'Installer did not register the isolated uninstaller.'
 Assert-Expected (Test-Path -LiteralPath $shortcut) 'Installer did not create the isolated Start menu entry.'
+$guardFixtures = $ElevatedFilesOnly -and $env:GITHUB_ACTIONS -ceq 'true'
+if ($guardFixtures) {
+    $target = Join-Path $install 'guard-fixture-target.txt'
+    $link = Join-Path $install 'guard-fixture-hardlink.txt'
+    $junction = Join-Path $install 'guard-fixture-junction'
+    $junctionTarget = Join-Path $report 'guard-fixture-junction-target'
+    [IO.File]::WriteAllText($target, 'disposable guard sentinel')
+    try {
+        New-Item -ItemType HardLink -Path $link -Target $target | Out-Null
+        $blocked = Join-Path $report 'blocked-hardlink-upgrade.log'
+        Run-Setup $upgrade.Path '/TASKS=autostart' $blocked -ExpectFailure
+        Assert-Expected ((Get-Content -LiteralPath $blocked -Raw).Contains(
+            'Installation contains a hard-linked file')) 'Setup did not identify the fixture hard link.'
+    } finally {
+        if (Test-Path -LiteralPath $link) { [IO.File]::Delete($link) }
+        [IO.File]::Delete($target)
+    }
+    [void][IO.Directory]::CreateDirectory($junctionTarget)
+    try {
+        New-Item -ItemType Junction -Path $junction -Target $junctionTarget | Out-Null
+        $blocked = Join-Path $report 'blocked-junction-upgrade.log'
+        Run-Setup $upgrade.Path '/TASKS=autostart' $blocked -ExpectFailure
+        Assert-Expected ((Get-Content -LiteralPath $blocked -Raw).Contains(
+            'Installation contains a reparse point')) 'Setup did not identify the fixture junction.'
+    } finally {
+        if (Test-Path -LiteralPath $junction) { [IO.Directory]::Delete($junction) }
+        [IO.Directory]::Delete($junctionTarget)
+    }
+    Check-Payload $first.Manifest
+}
 $asset = Join-Path $user 'state\assets\lifecycle-sentinel.txt'
 $startupVerified = $true
 if ($ElevatedFilesOnly) {
@@ -170,6 +201,22 @@ $uninstallCommand = (Get-ItemProperty -LiteralPath $arp).QuietUninstallString
 Assert-Expected ($uninstallCommand -match '^"(.+\\unins\d{3}\.exe)"') 'Expected the isolated registered uninstaller.'
 $uninstaller = [IO.Path]::GetFullPath($Matches[1])
 Assert-Expected ([IO.Path]::GetDirectoryName($uninstaller) -ceq $install) 'Uninstaller is outside the isolated test directory.'
+if ($guardFixtures) {
+    $writable = Join-Path $install 'guard-fixture-writable.txt'
+    [IO.File]::WriteAllText($writable, 'disposable guard sentinel')
+    try {
+        $acl = Get-Acl -LiteralPath $writable
+        $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'), 'WriteData', 'Allow'))
+        Set-Acl -LiteralPath $writable -AclObject $acl
+        $blocked = Join-Path $report 'blocked-writable-uninstall.log'
+        Run-Setup $uninstaller '' $blocked -ExpectFailure
+        Assert-Expected ((Get-Content -LiteralPath $blocked -Raw).Contains(
+            'Installation is writable by an unprivileged identity')) 'Uninstall did not identify the fixture write grant.'
+        Check-Payload $upgrade.Manifest
+    } finally { [IO.File]::Delete($writable) }
+}
 Run-Setup $uninstaller '' (Join-Path $report 'uninstall.log')
 if (-not $ElevatedFilesOnly) {
     Assert-Expected ($new.WaitForExit(5000)) 'Uninstall did not drain the installed process.'
@@ -187,6 +234,7 @@ Assert-Expected ((Sha256 $profile) -ceq $profileHash -and (Sha256 $bindings) -ce
     upgraded_version = $upgrade.Manifest.installer_version
     startup_registry = if ($startupVerified) { 'exact_command_verified_in_original_hive' } else { 'absent_no_linked_token_reported' }
     damaged_manifest_repair = [bool]$ElevatedFilesOnly
+    native_guard_rejections = if ($guardFixtures) { @('hard_link','reparse_point','unprivileged_writer') } else { @() }
     graceful_upgrade = if ($ElevatedFilesOnly) { 'no_live_session_exercised' } else { 'resident_process_drained' }
     graceful_uninstall = if ($ElevatedFilesOnly) { 'no_live_session_exercised' } else { 'resident_process_drained' }
     profile_sha256 = $profileHash
