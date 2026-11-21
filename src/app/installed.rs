@@ -36,6 +36,11 @@ const BACKEND_PATH: &str = "components/openrgb/runtime/OpenRGB.exe";
 const CONFIG_LIMIT: usize = 16 * 1024;
 const MANIFEST_LIMIT: usize = 256 * 1024;
 static SESSION: OnceLock<Session> = OnceLock::new();
+static RELEASE_VERSION: OnceLock<super::release_check::Version> = OnceLock::new();
+
+pub(crate) fn release_version() -> Option<super::release_check::Version> {
+    RELEASE_VERSION.get().copied()
+}
 
 pub enum Dispatch {
     Ui(Vec<OsString>),
@@ -139,6 +144,14 @@ pub fn dispatch(args: Vec<OsString>) -> Result<Dispatch, String> {
             SESSION
                 .set(mode)
                 .map_err(|_| "Installed frontend already dispatched")?;
+            if manifest.data_namespace.is_none()
+                && let Some(version) = manifest
+                    .installer_version
+                    .as_str()
+                    .and_then(super::release_check::Version::from_setup)
+            {
+                let _ = RELEASE_VERSION.set(version);
+            }
             Ok(Dispatch::InstalledUi(InstalledLaunch {
                 args,
                 instance,
@@ -184,6 +197,8 @@ struct Manifest {
     product: String,
     commit: String,
     app_sha256: String,
+    #[serde(default)]
+    installer_version: serde_json::Value,
     backend: Backend,
     data_namespace: Option<String>,
 }

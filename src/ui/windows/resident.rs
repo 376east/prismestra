@@ -33,6 +33,7 @@ const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 const OPEN: u32 = 1;
 const STOP: u32 = 2;
 const EXIT: u32 = 3;
+const CHECK_UPDATES: u32 = 4;
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 static INSTALLED_EXIT_MSG: AtomicU32 = AtomicU32::new(0);
 
@@ -1095,6 +1096,7 @@ fn create_tray_menu() -> Option<HMENU> {
     }
     for (id, text) in [
         (OPEN, "Открыть Prismestra"),
+        (CHECK_UPDATES, "Проверить обновления…"),
         (STOP, "Остановить работу"),
         (EXIT, "Выйти"),
     ] {
@@ -1178,6 +1180,7 @@ fn menu(state: &State, hwnd: HWND, anchor_to_icon: bool) {
     }
     let result = match id as u32 {
         OPEN => open_editor(state),
+        CHECK_UPDATES => super::updates::start(),
         STOP => request(state, Action::Stop, false),
         EXIT => request(state, Action::Exit, true),
         _ => Ok(()),
@@ -2155,7 +2158,7 @@ mod tests {
     fn native_tray_menu_marks_open_as_its_first_and_default_command() {
         let menu = create_tray_menu().expect("native popup menu");
         let mut label = [0u16; 64];
-        let (first, default, length) = unsafe {
+        let (first, default, length, updates) = unsafe {
             let first = GetMenuItemID(menu, 0);
             let default = GetMenuDefaultItem(menu, 0, 0);
             let length = GetMenuStringW(
@@ -2165,10 +2168,12 @@ mod tests {
                 label.len() as i32,
                 MF_BYCOMMAND,
             );
+            let updates = GetMenuItemID(menu, 1);
             DestroyMenu(menu);
-            (first, default, length)
+            (first, default, length, updates)
         };
         assert_eq!((first, default), (OPEN, OPEN));
+        assert_eq!(updates, CHECK_UPDATES);
         assert_eq!(
             String::from_utf16_lossy(&label[..length as usize]),
             "Открыть Prismestra"
