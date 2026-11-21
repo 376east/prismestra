@@ -31,6 +31,57 @@ let view = 'library', search = '', previewTimer = null, frame = null, commandPen
 const formStages = new Map();
 let deviceInspection = null;
 let visibleCandidateIds = new Set();
+const outputRetries = new Map();
+let retryRequest = 0;
+const retryScope = () => state?.deviceActivity?.retryScope;
+const selectedRetryOutput = () => view==='devices' && state?.editor?.page==='devices'
+ ? state.draftDevices?.[state.editor.index]?.id
+ : undefined;
+function outputRetryTicket(id) {
+ if(selectedRetryOutput()!==id)return null;
+ const tickets=state?.deviceActivity?.retryTickets;
+ const ticket=tickets&&Object.hasOwn(tickets,id)?tickets[id]:null;
+ return ticket===outputRetries.get(id)?.ticket?null:ticket;
+}
+function reconcileRetryActivity(activity) {
+ if(!activity)return;
+ for(const [id,retry] of outputRetries) {
+  const label=activity.labels?.[id];
+  if(retry.awaitingActivity && label && label!=='Подключается')retry.awaitingActivity=false;
+ }
+}
+function syncOutputStatuses() {
+ document.querySelectorAll('[data-output-status]').forEach(node=>{
+  const status=deviceStatus(state?.devices.find(device=>device.id===node.dataset.outputStatus));
+  if(node.textContent!==status)node.textContent=status;
+ });
+}
+function syncOutputRetries(keepFocus) {
+ document.querySelectorAll('[data-output-retry]').forEach(button=>{
+  const id=button.dataset.outputRetry, retry=outputRetries.get(id), ticket=outputRetryTicket(id);
+  const status=button.parentElement.querySelector('[data-retry-status]');
+  const preserveFocus=button===document.activeElement||id===keepFocus;
+  const message=retry?.status==='pending'?'Подключаемся…':retry?.status==='submitted'&&!preserveFocus?'':retry?.message||'';
+  if(status.textContent!==message)status.textContent=message;
+  button.setAttribute('aria-disabled',String(busy()||!!pendingView||!ticket||retry?.status==='pending'));
+  button.hidden=selectedRetryOutput()!==id||(!ticket&&retry?.status!=='pending'&&!preserveFocus);
+  button.parentElement.hidden=button.hidden&&!message;
+ });
+}
+function receiveOutputRetry({id,request,scope,status,message}) {
+ const retry=outputRetries.get(id);
+ if(!retry||scope!==retryScope()||retry.request!==request||retry.status!=='pending')return;
+ if(status==='failed')retry.message=message||'Подключение не удалось';
+ else if(status==='submitted')retry.message='Кадры отправлены';
+ else if(status==='cancelled')retry.message='Подключение отменено';
+ else return;
+ retry.status=status;
+ if(status==='submitted' && state.deviceActivity?.labels?.[id]==='Подключается'){
+  retry.awaitingActivity=true;
+  syncOutputStatuses();
+ }
+ syncOutputRetries();
+}
 let settingsOpener = null, settingsFocusReturn = null;
 const busy = () => closing || !state || !!state.pending || commandPending || savedSceneRequest !== null;
 const disabled = () => busy() ? 'disabled' : '';
@@ -127,7 +178,7 @@ function send(command, mutation=false) {
  if(!window.ipc || typeof window.ipc.postMessage !== 'function') {showError('Нет подключения к приложению Prismestra. Откройте интерфейс из нативного приложения.');return false;}
  try {window.ipc.postMessage(JSON.stringify(command));if(mutation||command.op==='page')awaitingCommandAck=true;if(stagedCommand){const keys=discardNative?[...formStages].filter(([,record])=>record.page===view).map(([key])=>key):nativeCommand?[...(command.fields||[]).map(item=>stageKey('native',item.id)),...(command.editor_fields||[]).map(item=>stageKey('generic',item.key))]:(command.fields||[]).map(item=>stageKey('generic',item.key));submittedStages=keys.filter(key=>formStages.has(key)).map(key=>[key,formStages.get(key).value]);if(nativeCommand&&!discardNative){for(const [key] of submittedStages)if(formStages.get(key)?.secret)formStages.delete(key);document.querySelectorAll('[data-native-kind="secret"]').forEach(input=>{if(!formStages.has(stageKey('native',input.dataset.nativeField)))input.value='';});}}if(mutation){commandPending=true;nativeAwaitingAck=nativeCommand||stagedCommand;syncControls();}return true;}catch(e){awaitingCommandAck=false;commandPending=false;showError(e.message);syncControls();return false;}
 }
-function syncControls() {
+function syncControls(keepRetryFocus) {
  document.querySelectorAll('[data-mutation]').forEach(node=>{
   const disabled=controlDisabled(node);
   // Keep the row focusable across the command acknowledgement and list updates.
@@ -143,10 +194,8 @@ function syncControls() {
  $('#player-name').textContent=state?(effects[state.scene.effect]||state.scene.effect):'Prismestra';
  $('#player-status').textContent=state?.status||'Подключение к приложению…';
  const runtimeDetail=$('#native-runtime-detail');if(runtimeDetail)runtimeDetail.textContent=state?.detail||'';
- document.querySelectorAll('[data-output-status]').forEach(node=>{
-  const status=deviceStatus(state?.devices.find(device=>device.id===node.dataset.outputStatus));
-  if(node.textContent!==status)node.textContent=status;
- });
+ syncOutputStatuses();
+ syncOutputRetries(keepRetryFocus);
  $('#save-status').textContent=busy()&&state?'Выполняется…':state?.dirty?'Профиль изменён':'Локальный профиль';
  if(draft){$('#master-brightness').value=draft.brightness;$('#master-value').textContent=draft.brightness+'%';}
  const status=$('.scene-status');if(status)status.textContent=changed()?'Изменения ещё не применены':'Эта версия применена';
@@ -227,6 +276,7 @@ function nativeProperties() {
 function deviceStatus(device) {
  if(!device)return '';
  const labels=state.deviceActivity?.labels;
+ if(labels?.[device.id]==='Подключается' && outputRetries.get(device.id)?.awaitingActivity)return 'Кадры отправлены';
  if(labels&&Object.hasOwn(labels,device.id))return labels[device.id];
  return !device.enabled?'Выключено':state.native?'Недоступно':'Предпросмотр';
 }
@@ -278,6 +328,7 @@ function renderDevices(candidates) {
   <div class="device-info"><h2>${esc(d.label)}</h2><p>${esc(d.driver?.type)} · ${esc(d.role)}</p></div>
   <div class="device-meta"><span>${esc(d.leds)} LED · ${esc(d.rate_hz)} Гц</span><small id="${statusId}" data-output-status="${esc(d.id)}">${esc(deviceStatus(d))}</small></div>
   <button class="icon-button" data-device-id="${esc(d.id)}" data-mutation aria-disabled="${busy()}" aria-label="Свойства: ${esc(d.label)}" aria-describedby="${statusId}">${icon('edit')}</button>
+  <div class="device-retry" hidden><button class="button" id="${statusId}-retry" data-output-retry="${esc(d.id)}" aria-describedby="${statusId}-retry-status" aria-disabled="true" hidden>Повторить подключение</button><span id="${statusId}-retry-status" data-retry-status role="status"></span></div>
  </article>`;
  });
  const found=candidates.map(candidate=>`<article class="device" data-candidate-id="${esc(candidate.id)}">
@@ -357,7 +408,7 @@ function render() {
  else {$('#main').innerHTML=view==='library'?renderLibrary():view==='editor'?renderScene():view==='devices'?renderDevices(candidates):renderProfilePage();$('.project-context').innerHTML=`<span>Локальный профиль</span><small title="${esc(state.profilePath||'')}">${esc(state.profilePath?.split(/[\\/]/).pop()||'Не сохранён')}</small>`;}
  document.querySelectorAll('[data-native-kind="secret"]').forEach(input=>{const staged=formStages.get(stageKey('native',input.dataset.nativeField));if(staged)input.value=staged.value;});
  if(view==='devices')window.outputMap?.mount(state,send,currentGenericStages);
- syncControls();paintPreview();paintLibraryPreviews();
+ syncControls(node?.dataset?.outputRetry);paintPreview();paintLibraryPreviews();
  if(returnKey)restoreFocus(returnKey);
  else if(headingFocused || (node?.dataset?.field && detachedOutputEdits()))focusHeading();
  else if(hiddenNavFocused)$('nav [data-view="devices"]')?.focus({preventScroll:true});
@@ -455,6 +506,7 @@ window.prismestraReceive = message => {
  try {
   if(typeof message==='string')message=JSON.parse(message);
   if(message.kind==='output_preview'){window.outputMap?.receive(message);return;}
+  if(message.kind==='output_retry'){receiveOutputRetry(message);return;}
   if(message.kind==='flush'){
    if(!Number.isSafeInteger(message.id)||message.id<0)throw Error('Некорректный запрос закрытия');
    if(window.sceneFile?.blockClose()){
@@ -468,7 +520,10 @@ window.prismestraReceive = message => {
   if(message.kind==='error'){awaitingCommandAck=false;closing=false;submittedStages=[];savedSceneRequest=null;commandPending=false;nativeAwaitingAck=false;if(pendingView){view=pendingView.previous;pendingView=null;render();focusHeading();}showError(message.message,true);syncControls();return;}
   if(['scene_file','scene_file_frame','scene_file_lcd_frame'].includes(message.kind)){window.sceneFile?.receive(message);return;}
   if(message.kind==='snapshot') {
-   const acknowledged=awaitingCommandAck;awaitingCommandAck=false;completeStageAck();state=message.state;
+   const acknowledged=awaitingCommandAck;awaitingCommandAck=false;completeStageAck();
+   if(retryScope()!==message.state.deviceActivity?.retryScope)outputRetries.clear();
+   state=message.state;
+   reconcileRetryActivity(message.state.deviceActivity);
    window.outputMap?.update(state);
    if(acknowledged&&errorIsCommand&&!state.error){error='';errorIsCommand=false;$('#native-error').hidden=true;$('#native-error').innerHTML='';}commandPending=false;nativeAwaitingAck=false;
    if(pendingView){
@@ -496,7 +551,10 @@ window.prismestraReceive = message => {
    render();if(!busy())flushPreview();
   } else if(message.kind==='status'&&state) {
    const foundChanged=view==='devices'&&Object.hasOwn(message.state,'deviceCandidates')&&!same(state.deviceCandidates,message.state.deviceCandidates);
-   const nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));Object.assign(state,message.state);
+   const nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));
+   if(message.state.deviceActivity&&retryScope()!==message.state.deviceActivity.retryScope)outputRetries.clear();
+   Object.assign(state,message.state);
+   reconcileRetryActivity(message.state.deviceActivity);
    if(state.pending||Object.hasOwn(message.state,'mapConnection'))window.outputMap?.update(state);
    followActiveScene();
    if(!state.pending&&!nativeAwaitingAck&&!savedSceneRequest)commandPending=false;
@@ -507,6 +565,15 @@ window.prismestraReceive = message => {
 };
 document.addEventListener('click',event=>{
  const b=event.target.closest('button');if(!b||b.disabled||(busy()&&b.hasAttribute('data-mutation')&&!recoveryAction(b.dataset.action)))return;
+ if(b.dataset.outputRetry!==undefined){
+  const id=b.dataset.outputRetry, ticket=outputRetryTicket(id);
+  if(view!=='devices'||busy()||pendingView||!ticket||outputRetries.get(id)?.status==='pending')return;
+  const request=++retryRequest;
+  outputRetries.set(id,{request,ticket,status:'pending'});
+  if(!send({op:'retry_output',id,request,ticket}))outputRetries.delete(id);
+  syncOutputRetries();
+  return;
+ }
  if(b.dataset.nativeAction!==undefined)return void send({op:'native_action',id:b.dataset.nativeAction},true);
  if(b.dataset.view)return changeView(b.dataset.view,b);
  if(b.dataset.edit){const entry=state.library.find(e=>e.id===b.dataset.edit);if(entry)openEntry(entry);return;}
@@ -623,7 +690,7 @@ $('#save-status').before(projectActions);
 document.addEventListener('pointerdown',()=>{pointerGesture=true;},true);
 document.addEventListener('pointerup',()=>{pointerGesture=false;releaseGesture();},true);
 document.addEventListener('pointercancel',()=>{pointerGesture=false;releaseGesture();},true);
-document.addEventListener('focusin',syncDeviceAnnouncement);
+document.addEventListener('focusin',()=>{syncDeviceAnnouncement();syncOutputRetries();});
 document.addEventListener('keydown',event=>{
  if((event.key===' '||event.key==='Spacebar')&&event.target.closest('button'))keyGesture=true;
  if(event.key!=='Escape'||event.defaultPrevented||event.isComposing||!deviceInspection||

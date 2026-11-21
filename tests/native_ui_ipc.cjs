@@ -5,7 +5,7 @@ const nodes=new Map(),commands=[],events={},rafQueue=[];
 class Node {constructor(){this.tagName='INPUT';this.validity={valid:true};this.dataset={};this.width=104;this.height=72;this.value='';this.disabled=false;this.innerHTML='';this.textContent='';}setAttribute(){}focus(){document.activeElement=this;}select(){}hasAttribute(name){return name==='data-target'&&this.dataset.target!==undefined;}before(){}append(){}addEventListener(){}setCustomValidity(){}reportValidity(){}showModal(){this.open=true;}close(){this.open=false;}getContext(){return {fillRect(){},clearRect(){},createImageData:(w,h)=>({data:new Uint8ClampedArray(w*h*4)}),putImageData:pixels=>{this.lastPixels=pixels;}};}}
 const find=s=>{if(!nodes.has(s))nodes.set(s,new Node());return nodes.get(s);};
 const main=find('#main');let mainMarkup='';Object.defineProperty(main,'innerHTML',{get:()=>mainMarkup,set:markup=>{mainMarkup=markup;for(const match of markup.matchAll(/<input id="(field-\d+)" data-field="([^"]*)" value="([^"]*)"/g)){const field=new Node();field.id=match[1];field.dataset.field=match[2];field.value=match[3];nodes.set('#'+match[1],field);}for(const match of markup.matchAll(/<input id="(native-field-\d+)" data-native-field="([^"]*)" data-native-kind="([^"]*)"[^>]*type="([^"]*)"[^>]*value="([^"]*)"/g)){const field=new Node();field.id=match[1];field.dataset.nativeField=match[2];field.dataset.nativeKind=match[3];field.type=match[4];field.value=match[5];nodes.set('#'+match[1],field);}if(markup.includes('data-local-discard')){const button=new Node();button.dataset.action='discard-page-fields';button.dataset.localDiscard='';nodes.set('local-discard',button);}for(const match of markup.matchAll(/<canvas data-library-preview="([^"]*)"/g)){const canvas=new Node();canvas.dataset.libraryPreview=match[1];nodes.set('library-canvas-'+match[1],canvas);}}});
-const document={querySelector:find,querySelectorAll:selector=>[...nodes.values()].filter(n=>selector==='[data-local-discard]'?n.dataset.localDiscard!==undefined:selector==='[data-library-preview]'?n.dataset.libraryPreview!==undefined:selector==='[data-native-kind="secret"]'?n.dataset.nativeKind==='secret':selector==='[data-native-control]'?(n.dataset.nativeField!==undefined||n.dataset.nativeAction!==undefined):n.dataset.action),getElementById:id=>find('#'+id),createElement:()=>new Node(),body:new Node(),activeElement:null,addEventListener:(name,fn)=>events[name]=fn};
+const document={querySelector:find,querySelectorAll:selector=>[...nodes.values()].filter(n=>selector==='[data-output-retry]'?n.dataset.outputRetry!==undefined:selector==='[data-local-discard]'?n.dataset.localDiscard!==undefined:selector==='[data-library-preview]'?n.dataset.libraryPreview!==undefined:selector==='[data-native-kind="secret"]'?n.dataset.nativeKind==='secret':selector==='[data-native-control]'?(n.dataset.nativeField!==undefined||n.dataset.nativeAction!==undefined):n.dataset.action),getElementById:id=>find('#'+id),createElement:()=>new Node(),body:new Node(),activeElement:null,addEventListener:(name,fn)=>events[name]=fn};
 const context=vm.createContext({document,window:{addEventListener:(name,fn)=>events[name]=fn,ipc:{postMessage:v=>commands.push(JSON.parse(v))}},requestAnimationFrame:fn=>rafQueue.push(fn),CSS:{escape:s=>s},structuredClone,setTimeout:()=>1,clearTimeout(){},console});
 vm.runInContext(source,context);
 assert.equal(commands[0].op,'snapshot');
@@ -282,6 +282,54 @@ events.click({target:{closest:()=>secondButton}});
 assert.equal(commands.length,beforePendingPage,'Do not send a card selection before native navigation is acknowledged');
 vm.runInContext('pendingView=null',context);
 console.log('PASS: device cards select by logical identity and the draft dropdown still uses indices');
+
+// A retry belongs to one saved row, request and profile scope.
+{
+ const button=new Node(), status=new Node(), disabled=new Map();
+ button.dataset.outputRetry='rgb';
+ button.parentElement={querySelector:()=>status};
+ button.setAttribute=(name,value)=>disabled.set(name,value);
+ nodes.set('openrgb-retry-test',button);
+ const device={id:'rgb',label:'OpenRGB',role:'canvas',leds:2,rate_hz:25,enabled:true};
+ const stateForScope=(scope,ticket,index=0)=>({
+  ...initial,devices:[device],draftDevices:[device],
+  editor:{page:'devices',index,targets:[device.label],fields:[],dirty:false},
+  deviceActivity:{retryScope:scope,retryTickets:{rgb:ticket}},
+ });
+ const receive=message=>{context.payload=message;vm.runInContext('window.prismestraReceive(payload)',context);};
+ const click=()=>events.click({target:{closest:()=>button}});
+ receive({kind:'snapshot',state:stateForScope('before','first',1)});
+ assert(button.hidden);
+ const beforeSelection=commands.length;
+ click();
+ assert.equal(commands.length,beforeSelection);
+ receive({kind:'snapshot',state:stateForScope('before','first')});
+ assert(!button.hidden);
+ button.focus();
+ const start=commands.length;
+ click();click();
+ const first=commands.at(-1);
+ assert.deepEqual(first,{op:'retry_output',id:'rgb',ticket:'first',request:first.request});
+ assert.equal(commands.length,start+1);
+ assert.equal(status.textContent,'Подключаемся…');
+ assert.equal(disabled.get('aria-disabled'),'true');
+ const reply=(id,request,scope,message)=>receive({kind:'output_retry',id,request,scope,status:'failed',message});
+ reply('wled',first.request,'before','wrong row');
+ reply('rgb',first.request,'older','wrong profile');
+ assert.equal(status.textContent,'Подключаемся…');
+ reply('rgb',first.request,'before','Identity changed');
+ assert.equal(status.textContent,'Identity changed');
+ receive({kind:'snapshot',state:stateForScope('after','next')});
+ click();
+ assert.equal(status.textContent,'Подключаемся…');
+ reply('rgb',first.request,'before','late response');
+ reply('rgb',first.request,'after','wrong request');
+ assert.equal(status.textContent,'Подключаемся…');
+ assert.equal(document.activeElement,button);
+ receive({kind:'snapshot',state:initial});
+ nodes.delete('openrgb-retry-test');
+}
+console.log('PASS: targeted OpenRGB retry, duplicate click suppression, isolated row error and stale replies');
 
 // An active device inspection announces transitions once and follows its logical ID.
 {
