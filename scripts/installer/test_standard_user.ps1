@@ -145,7 +145,7 @@ if ($identity.User.Value -ne $ExpectedSid -or $admin -or $local -cne $env:LOCALA
 $receiptPath = Join-Path $local ("Prismestra-CI-" + $Id + ".json")
 $result = [ordered]@{ sid = $identity.User.Value; standard_user = $true; startup_command = $null;
     empty_profile = $false; local_bindings = $false; backend_pin = $false; resident_shell = 'not_observed';
-    automatic_setup = $false; first_run = $null; native_identity_probe = $false }
+    automatic_setup = $false; first_run = $null; native_identity_probe = $false; native_profile_prepare = $false }
 $app = $null
 $stop = $null
 try {
@@ -162,6 +162,8 @@ try {
         } finally { $probe.Dispose() }
     }
     $result.native_identity_probe = $true
+    $wrongUser = Start-Process -FilePath $image -ArgumentList '--setup-prepare-installed', 'S-1-5-18' -Wait -PassThru -WindowStyle Hidden
+    if ($wrongUser.ExitCode -ne 1 -or (Test-Path -LiteralPath $profile)) { throw 'Profile preparation accepted a foreign SID.' }
     $value = 'Prismestra'
     $command = '"' + (Join-Path $Install Prismestra.exe) + '" --installed --autostart'
     $helper = Start-Process -FilePath $ps -ArgumentList ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
@@ -269,6 +271,16 @@ public static class PrismestraCiShell {
             Start-Sleep -Milliseconds 200
         }
     } catch { $result.resident_shell_error = $_.Exception.Message }
+    if ($result.resident_shell -eq 'process_drained_by_shutdown') {
+        $profileHash = (Get-FileHash -LiteralPath $documentPath).Hash
+        $bindingsHash = (Get-FileHash -LiteralPath $bindingPath).Hash
+        $prep = Start-Process -FilePath $image -ArgumentList '--setup-prepare-installed', $ExpectedSid -Wait -PassThru -WindowStyle Hidden
+        if ($prep.ExitCode -ne 0 -or (Get-FileHash -LiteralPath $documentPath).Hash -cne $profileHash -or
+            (Get-FileHash -LiteralPath $bindingPath).Hash -cne $bindingsHash) {
+            throw 'Native profile preparation changed the saved profile or bindings.'
+        }
+        $result.native_profile_prepare = $true
+    }
     $result.startup_error_file = Test-Path -LiteralPath (Join-Path $profile 'state\startup-error.txt')
     $result | ConvertTo-Json | Set-Content -LiteralPath $receiptPath -Encoding UTF8
     exit 0
@@ -376,7 +388,8 @@ try {
     $actual | Add-Member -NotePropertyName commit -NotePropertyValue $manifest.commit
     $actual | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $report 'standard-user.json') -Encoding UTF8
     Assert-Expected ($status -eq 0 -and $actual.sid -ceq $sid -and $actual.standard_user -and $actual.empty_profile -and
-        $actual.local_bindings -and $actual.backend_pin -and $actual.automatic_setup -and $actual.native_identity_probe -and
+        $actual.local_bindings -and $actual.backend_pin -and $actual.automatic_setup -and
+        $actual.native_identity_probe -and $actual.native_profile_prepare -and
         $actual.resident_shell -eq 'process_drained_by_shutdown' -and -not $actual.startup_error_file) 'Standard-user verification failed. See standard-user.json.'
     Assert-Expected ($actual.startup_command -ceq ('"' + (Join-Path $install 'Prismestra.exe') + '" --installed --autostart')) 'Standard-user HKCU Run verification failed.'
 } finally {

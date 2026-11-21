@@ -70,6 +70,8 @@ enum Command {
     Legacy,
     Start(Session),
     Prepare,
+    PrepareForSetup(OsString),
+    LaunchForSetup,
     Shutdown,
     CheckSetupUser(OsString),
 }
@@ -82,6 +84,10 @@ fn command(args: &[OsString]) -> Result<Command, String> {
         }
         [flag] if flag == "--shutdown-installed" => Ok(Command::Shutdown),
         [flag] if flag == "--prepare-installed" => Ok(Command::Prepare),
+        [flag, sid] if flag == "--setup-prepare-installed" => {
+            Ok(Command::PrepareForSetup(sid.clone()))
+        }
+        [flag] if flag == "--setup-launch-installed" => Ok(Command::LaunchForSetup),
         [flag, sid] if flag == "--setup-check-user" => Ok(Command::CheckSetupUser(sid.clone())),
         _ if args.iter().any(|a| {
             a == "--installed"
@@ -89,6 +95,8 @@ fn command(args: &[OsString]) -> Result<Command, String> {
                 || a == "--shutdown-installed"
                 || a == "--prepare-installed"
                 || a == "--setup-check-user"
+                || a == "--setup-prepare-installed"
+                || a == "--setup-launch-installed"
         }) =>
         {
             Err("Use --installed [--autostart], --prepare-installed or --shutdown-installed".into())
@@ -109,6 +117,21 @@ pub fn dispatch(args: Vec<OsString>) -> Result<Dispatch, String> {
             expected.as_os_str() != actual.as_str(),
         )));
     }
+    if matches!(
+        command,
+        Command::PrepareForSetup(_) | Command::LaunchForSetup
+    ) {
+        require_ordinary_user()?;
+        if super::installed_policy::current_process_has_admin_membership()? {
+            return Err("Setup requires the original user without administrative rights.".into());
+        }
+        if let Command::PrepareForSetup(expected) = &command {
+            let actual = super::installed_policy::process_user_sid(unsafe { GetCurrentProcess() })?;
+            if expected.as_os_str() != actual.as_str() {
+                return Ok(Dispatch::Exit(1));
+            }
+        }
+    }
     let executable = env::current_exe().map_err(|e| e.to_string())?;
     let executable = checked_local_path(&executable).map_err(|e| e.to_string())?;
     match command {
@@ -117,7 +140,18 @@ pub fn dispatch(args: Vec<OsString>) -> Result<Dispatch, String> {
             windows::shutdown_installed(&executable)?;
             Ok(Dispatch::Exit(0))
         }
-        Command::Start(_) | Command::Prepare => {
+        Command::LaunchForSetup => {
+            let directory = executable
+                .parent()
+                .ok_or("Missing installed application directory")?;
+            std::process::Command::new(&executable)
+                .arg("--installed")
+                .current_dir(directory)
+                .spawn()
+                .map_err(|error| error.to_string())?;
+            Ok(Dispatch::Exit(0))
+        }
+        Command::Start(_) | Command::Prepare | Command::PrepareForSetup(_) => {
             require_ordinary_user()?;
             let manifest = Manifest::read(&executable)?;
             verify_backend(&manifest, &executable)?;
@@ -746,6 +780,14 @@ pub(crate) mod tests {
         assert_eq!(parse(&["--shutdown-installed"]), Ok(Command::Shutdown));
         assert_eq!(parse(&["--prepare-installed"]), Ok(Command::Prepare));
         assert_eq!(
+            parse(&["--setup-prepare-installed", "S-1-5-18"]),
+            Ok(Command::PrepareForSetup("S-1-5-18".into()))
+        );
+        assert_eq!(
+            parse(&["--setup-launch-installed"]),
+            Ok(Command::LaunchForSetup)
+        );
+        assert_eq!(
             parse(&["--setup-check-user", "S-1-5-18"]),
             Ok(Command::CheckSetupUser("S-1-5-18".into()))
         );
@@ -757,6 +799,8 @@ pub(crate) mod tests {
             &["--prepare-installed", "--installed"],
             &["--setup-check-user"],
             &["--setup-check-user", "S-1-5-18", "--installed"],
+            &["--setup-prepare-installed"],
+            &["--setup-launch-installed", "--autostart"],
         ] {
             assert!(parse(args).is_err());
         }

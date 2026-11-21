@@ -189,18 +189,23 @@ begin
     ValidSID(Trim(Output.StdOut[0])) then Result := Trim(Output.StdOut[0]);
 end;
 
-function ProbeOriginalUser(const SID: String): Boolean;
+function RunOriginalInstalledCommand(const Arguments: String): Boolean;
 var
   Code: Integer;
 begin
   try
-    Result := ValidSID(SID) and GuardInstall('Check') and
-      ExecAsOriginalUser(InstallPath + '\Prismestra.exe', '--setup-check-user ' + SID,
+    Result := GuardInstall('Check') and
+      ExecAsOriginalUser(InstallPath + '\Prismestra.exe', Arguments,
         InstallPath, SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
   except
     Log(GetExceptionMessage);
     Result := False;
   end;
+end;
+
+function ProbeOriginalUser(const SID: String): Boolean;
+begin
+  Result := ValidSID(SID) and RunOriginalInstalledCommand('--setup-check-user ' + SID);
 end;
 
 function Policy(const Action, SID: String): Boolean;
@@ -266,7 +271,7 @@ begin
     Log('Verified legacy source saved for next launch; profile preparation and prior task retirement require Setup after restart.');
     Exit;
   end;
-  if not OriginalUser('PrepareProfile', SID) then begin
+  if not RunOriginalInstalledCommand('--setup-prepare-installed ' + SID) then begin
     Log('Legacy profile could not be prepared as the original ordinary user; previous startup entries kept.');
     Exit;
   end;
@@ -353,7 +358,7 @@ begin
 #endif
   end;
   if (Step = ssDone) and not WizardSilent and not RebootRequired and
-    WizardIsTaskSelected('launch') and not OriginalUser('Launch', '') then
+    WizardIsTaskSelected('launch') and not RunOriginalInstalledCommand('--setup-launch-installed') then
     Log('Prismestra start deferred. Open it from the Start menu under your ordinary account.');
 end;
 

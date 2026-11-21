@@ -713,6 +713,15 @@ pub(super) fn process_user_sid(process: HANDLE) -> Result<String, String> {
     token_sid(&process_token(process, TOKEN_QUERY)?)
 }
 
+pub(super) fn current_process_has_admin_membership() -> Result<bool, String> {
+    let token = process_token(
+        unsafe { GetCurrentProcess() },
+        TOKEN_QUERY | TOKEN_DUPLICATE,
+    )?;
+    let impersonation = impersonation_token(&token).map_err(error)?;
+    member(&impersonation, WinBuiltinAdministratorsSid)
+}
+
 fn token_data(token: &Handle, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<usize>, String> {
     let mut length = 0;
     if unsafe { GetTokenInformation(token.0, class, null_mut(), 0, &mut length) } == 0 {
