@@ -2457,6 +2457,112 @@ fn resume_recovers_a_known_lcd_whose_endpoint_is_still_claimed() {
 }
 
 #[test]
+fn resume_restores_rgb_while_the_previous_lcd_write_is_still_draining() {
+    use crate::lcd::protocol::ReportTransport;
+    use std::sync::mpsc::{self, Receiver, SyncSender};
+
+    struct HeldReports {
+        reports: Reports,
+        first: Option<(SyncSender<()>, Receiver<()>)>,
+    }
+
+    impl ReportTransport for HeldReports {
+        fn now_ms(&self) -> u64 {
+            self.reports.now_ms()
+        }
+
+        fn write_report(&mut self, data: &[u8; 1025], deadline: u64) -> Result<usize, String> {
+            if let Some((entered, release)) = self.first.take() {
+                entered.send(()).map_err(|error| error.to_string())?;
+                release
+                    .recv_timeout(Duration::from_secs(8))
+                    .map_err(|error| error.to_string())?;
+                return Err("old LCD write completed after suspend".into());
+            }
+            self.reports.write_report(data, deadline)
+        }
+
+        fn read_ack(&mut self, bytes: &mut [u8; 17], deadline: u64) -> Result<usize, String> {
+            self.reports.read_ack(bytes, deadline)
+        }
+    }
+
+    let (document, dir) = arrival_lcd_document(runtime().document().clone(), "resume-held-write");
+    let mut runtime = Runtime::new(document, None).unwrap();
+    let lcd = Arc::new(Link::default());
+    let rgb = Arc::new(Link::default());
+    let (entered, blocked) = mpsc::sync_channel(1);
+    let (release, finished) = mpsc::channel();
+    let gate = Mutex::new(Some((entered, finished)));
+    let root = dir.clone();
+    let sink = lcd.clone();
+    runtime
+        .attach_lcd(
+            "lcd",
+            vec![],
+            Arc::new(move |config, _| {
+                sink.calls.fetch_add(1, Ordering::SeqCst);
+                Ok((
+                    lcd::Controller::new(config, &Assets::new(root.clone())?)?,
+                    Box::new(HeldReports {
+                        reports: Reports(sink.clone()),
+                        first: gate.lock().unwrap().take(),
+                    }),
+                ))
+            }),
+        )
+        .unwrap();
+    runtime.attach_rgb("b", vec![], factory(&rgb)).unwrap();
+    runtime.enable_registered_output_recovery();
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        blocked.try_recv().is_ok()
+    });
+    let old_lcd = runtime.lcd_status("lcd").unwrap().generation;
+    let old_rgb = runtime.host.status("b").unwrap().generation;
+    runtime.notify_power(true, now).unwrap();
+    runtime.notify_power(false, now).unwrap();
+    now += 7_000_000;
+    tick(&mut runtime, &mut now);
+    assert!(
+        runtime.refresh_started,
+        "a draining LCD blocked independent resume"
+    );
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime
+            .host
+            .status("b")
+            .is_some_and(|snapshot| snapshot.generation != old_rgb && snapshot.submitted > 0)
+    });
+    assert!(!runtime.lcd["lcd"].is_reaped());
+    assert_eq!(runtime.lcd_status("lcd").unwrap().generation, old_lcd);
+    assert_eq!(lcd.calls.load(Ordering::SeqCst), 1);
+    #[cfg(windows)]
+    assert!(matches!(
+        runtime.output_activity(runtime.document().lighting.setup.devices.last().unwrap()),
+        OutputActivity::Retrying(error) if error == "Previous LCD owner is still stopping"
+    ));
+    let new_rgb = runtime.host.status("b").unwrap().generation;
+    release.send(()).unwrap();
+    now += 1_000_000;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime
+            .lcd_status("lcd")
+            .is_some_and(|snapshot| snapshot.generation != old_lcd && snapshot.frames_sent > 0)
+    });
+    assert_eq!(lcd.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(rgb.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(runtime.host.status("b").unwrap().generation, new_rgb);
+    assert_eq!(runtime.power.error(), None);
+    drain(&mut runtime);
+    remove_lcd_assets(runtime, dir);
+}
+
+#[test]
 fn second_resume_restores_independent_rgb_before_the_old_write_releases() {
     for autonomous in [false, true] {
         assert_second_resume_preserves_independent_rgb(autonomous);

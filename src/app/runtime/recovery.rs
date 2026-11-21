@@ -290,6 +290,11 @@ impl Runtime {
         keys: Vec<String>,
         factory: LcdFactory,
     ) -> Result<(), String> {
+        // Resume can restore other outputs while the old LCD call unwinds.
+        // Keep this logical owner until it has actually released its worker.
+        if self.lcd.get(id).is_some_and(|worker| !worker.is_reaped()) {
+            return Err("Previous LCD owner is still stopping".into());
+        }
         let config = self
             .document
             .lcd
