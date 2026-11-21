@@ -807,6 +807,7 @@ fn supervise_channels(
         );
     }
     let mut lease_deadline = clock::deadline(request.timestamp_ms, now)?;
+    let mut last_valid_poll_ms = now;
     let mut status_write_failed = false;
     let mut owner_read_failed = false;
     let mut last_backend_state = None;
@@ -864,12 +865,27 @@ fn supervise_channels(
                 Err(ControlRead::Invalid(_)) => true,
             }))
         {
+            let owner = match &current {
+                Ok(current) => now
+                    .checked_sub(current.timestamp_ms)
+                    .map_or_else(|| "future".into(), |age| format!("age:{age}")),
+                Err(error) => error.diagnostic_code(),
+            };
+            let cancel = match &cancellation {
+                None => "not-read".into(),
+                Some(Ok(_)) => "read".into(),
+                Some(Err(error)) => error.diagnostic_code(),
+            };
             helper_note(
                 output,
                 request,
                 "helper_stop",
                 None,
-                "Managed helper stopping: parent heartbeat lease expired",
+                &format!(
+                    "Managed helper stopping: parent heartbeat lease expired late_ms={} poll_ms={} owner={owner} cancel={cancel}",
+                    now.saturating_sub(lease_deadline),
+                    now.saturating_sub(last_valid_poll_ms),
+                ),
             );
             break;
         }
@@ -931,6 +947,7 @@ fn supervise_channels(
                     break;
                 }
                 lease_deadline = clock::deadline(current.timestamp_ms, now)?;
+                last_valid_poll_ms = now;
                 if !current.restarting {
                     stop_restarting();
                 }
@@ -1008,6 +1025,17 @@ fn control_error(error: ControlRead) -> String {
 enum ControlRead {
     Io(std::io::Error),
     Invalid(String),
+}
+impl ControlRead {
+    fn diagnostic_code(&self) -> String {
+        match self {
+            Self::Invalid(_) => "invalid".into(),
+            Self::Io(error) if error.kind() == std::io::ErrorKind::NotFound => "missing".into(),
+            Self::Io(error) => error
+                .raw_os_error()
+                .map_or_else(|| "io".into(), |code| format!("io:{code}")),
+        }
+    }
 }
 fn read_json_typed<T: DeserializeOwned>(path: &Path) -> Result<T, ControlRead> {
     let metadata = fs::symlink_metadata(path).map_err(ControlRead::Io)?;
@@ -1494,6 +1522,16 @@ mod tests {
             )
             .unwrap();
             drop(blocked_file.into_inner());
+            let expected_detail = match case {
+                "stale" => Some("late_ms=300 poll_ms=5300 owner=age:5300 cancel=missing"),
+                "after deadline" => Some("late_ms=300 poll_ms=5300 owner=age:299 cancel=missing"),
+                "cancel locked" => Some("late_ms=300 poll_ms=5300 owner=age:500 cancel=io:32"),
+                _ => None,
+            };
+            if let Some(expected) = expected_detail {
+                let history = fs::read_to_string(directory.join("backend-events.json")).unwrap();
+                assert!(history.contains(expected), "{case}: {history}");
+            }
             for name in [
                 "owner-request.json",
                 "owner-cancel.json",
@@ -1762,6 +1800,11 @@ mod tests {
         .unwrap();
         assert_eq!(clock.active_ms.get(), 10_600);
         assert_eq!(clock.polls.get(), 3);
+        let history = fs::read_to_string(directory.join("backend-events.json")).unwrap();
+        assert!(
+            history.contains("late_ms=100 poll_ms=600 owner=io:32 cancel=not-read"),
+            "{history}"
+        );
         drop(reader);
         fs::remove_file(directory.join("owner-request.json")).unwrap();
         let _ = fs::remove_file(directory.join("backend-events.json"));
