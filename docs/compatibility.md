@@ -27,6 +27,7 @@ Successful compilation does not complete the other stages. A report should say w
 
 ## Output boundaries
 
+- Prismestra can open with an empty map or any combination of supported outputs. First run adds detected compatible devices and skips BLE scanning when Windows reports no Bluetooth radio. Saved bindings remain when devices become unavailable. Home Assistant and WLED use configured endpoints. Local USB, PC and Bluetooth outputs can work without Wi-Fi or internet access. [First-run tests](../src/app/first_run.rs) · [Windows radio detection](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/guid-bthport-device-interface)
 - The OpenRGB adapter requires SDK6. Inventory does not initialize hardware. Explicit activation can select a direct mode. Limits and topology handling are documented in its [source](../src/transport/openrgb.rs) and [patch record](../vendor/openrgb2/LOCAL-CHANGES.md).
 - Virtual controllers are excluded. The same physical identity cannot be activated through multiple SDK addresses. Identical ambiguous metadata on separate servers is conservatively rejected until the physical namespace can be distinguished. A full controller needs a complete point map; synthetic fallback positions are not physical calibration.
 - WLED can discover advertised LAN controllers or query an explicit endpoint, read configured LED count and save identity. Verified bindings recheck identity/count before DDP activation; legacy explicit DDP-only bindings remain supported. There is no remote confirmation of visible pixels.

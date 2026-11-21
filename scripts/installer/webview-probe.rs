@@ -5,9 +5,15 @@ compile_error!("Compile the Setup probe with a static Windows CRT.");
 
 use std::{
     ffi::c_void,
+    io::{self, Write},
     mem::size_of,
+    os::windows::ffi::OsStrExt,
+    path::Path,
     ptr::{null, null_mut},
 };
+
+#[path = "../../src/app/setup_run_key.rs"]
+mod setup_run_key;
 
 type Handle = *mut c_void;
 const TOKEN_QUERY: u32 = 0x0008;
@@ -205,11 +211,11 @@ fn probe(mut sid: Vec<u16>) -> bool {
         .is_some_and(supported_version)
 }
 
-fn ready() -> Option<bool> {
+fn with_original_user<T>(action: impl FnOnce(Vec<u16>) -> T) -> Option<T> {
     let token = Token::current()?;
     let sid = token.sid()?;
     if token.info::<u32>(TOKEN_ELEVATION)? == 0 && !token.impersonation()?.is_admin()? {
-        return Some(probe(sid));
+        return Some(action(sid));
     }
     if token.info::<u32>(TOKEN_ELEVATION_TYPE)? != ELEVATION_FULL {
         return None;
@@ -227,22 +233,46 @@ fn ready() -> Option<bool> {
     {
         return None;
     }
-    let result = probe(sid);
+    let result = action(sid);
     if unsafe { RevertToSelf() } == 0 {
         std::process::abort();
     }
     Some(result)
 }
 
+fn run() -> Option<u8> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    match args.as_slice() {
+        [] => with_original_user(probe).map(|ready| u8::from(!ready)),
+        [flag] if flag == "--current-sid" => {
+            let sid = String::from_utf16(&Token::current()?.sid()?).ok()?;
+            writeln!(io::stdout().lock(), "{sid}").ok()?;
+            Some(0)
+        }
+        [flag, expected] if flag == "--check-user" => {
+            let sid = Token::current()?.sid()?;
+            Some(u8::from(!expected.encode_wide().eq(sid)))
+        }
+        [flag, target] if flag == "--enable-startup" || flag == "--disable-startup" => {
+            let target = Path::new(target);
+            if !target.is_absolute() || !target.is_file() || target.file_name()? != "Prismestra.exe"
+            {
+                return None;
+            }
+            let command =
+                setup_run_key::command(&target.as_os_str().encode_wide().collect::<Vec<_>>());
+            let result = with_original_user(|sid| {
+                setup_run_key::set(&sid, "Prismestra", &command, flag == "--enable-startup")
+            })?
+            .ok()?;
+            u8::try_from(result).ok()
+        }
+        _ => None,
+    }
+}
+
 fn main() -> std::process::ExitCode {
-    if std::env::args_os().len() != 1 {
-        return std::process::ExitCode::from(2);
-    }
-    match ready() {
-        Some(true) => std::process::ExitCode::SUCCESS,
-        Some(false) => std::process::ExitCode::FAILURE,
-        None => std::process::ExitCode::from(2),
-    }
+    std::process::ExitCode::from(run().unwrap_or(2))
 }
 
 #[cfg(test)]

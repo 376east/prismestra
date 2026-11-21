@@ -89,28 +89,7 @@ begin
   Result := '''' + Value + '''';
 end;
 
-function ScriptArgs(const Encoded, Action, Extra: String): String;
-begin
-  Result := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + ProtectedModules + '& ' +
-    '([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(' +
-    PSQuote(Encoded) + ')))) ' + PSQuote(Action) + ' ' + PSQuote(InstallPath) + Extra + '"';
-end;
-
 #include "guard-native.iss"
-
-function OriginalUser(const Action, ExpectedSid: String): Boolean;
-var
-  Code: Integer;
-begin
-  try
-    Result := ExecAsOriginalUser(PowerShell,
-      ScriptArgs('{#UserCode}', Action, ' ' + PSQuote('{#StartupValue}') + ' ' + PSQuote(ExpectedSid)),
-      ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
-  except
-    Log(GetExceptionMessage);
-    Result := False;
-  end;
-end;
 
 function RunOriginalInstalledCommand(const Arguments: String): Boolean;
 var
@@ -155,33 +134,61 @@ begin
     (ComparePackedVersion(VersionNumber, PackVersionComponents(105, 0, 0, 0)) >= 0);
 end;
 
-function OriginalUserWebViewReady: Boolean;
-var
-  ProbePath: String;
-  Code: Integer;
+function SetupProbePath: String;
 begin
+  if not WebViewProbeExtracted then begin
+    ExtractTemporaryFile('Prismestra-Setup-Probe.exe');
+    WebViewProbeExtracted := True;
+  end;
+  Result := ExpandConstant('{tmp}\Prismestra-Setup-Probe.exe');
+  if CompareText(GetSHA256OfFile(Result), '{#WebViewProbeSha256}') <> 0 then
+    RaiseException('Native Setup probe failed its SHA-256 check.');
+end;
+
+function RunOriginalSetupProbe(const Arguments: String; var Code: Integer): Boolean;
+var
+  Source, Suffix, Directory, Image: String;
+  Bytes: AnsiString;
+  Attempt, I: Integer;
+begin
+  Result := False;
   try
-    if not WebViewProbeExtracted then begin
-      ExtractTemporaryFile('Prismestra-Setup-Probe.exe');
-      WebViewProbeExtracted := True;
-    end;
-    ProbePath := ExpandConstant('{tmp}\Prismestra-Setup-Probe.exe');
-    if CompareText(GetSHA256OfFile(ProbePath), '{#WebViewProbeSha256}') = 0 then begin
-      if ExecAsOriginalUser(ProbePath, '', ExpandConstant('{sys}'), SW_HIDE,
-        ewWaitUntilTerminated, Code) then begin
-        Log('Native WebView2 user probe exit code ' + IntToStr(Code));
-        if (Code = 0) or (Code = 1) then begin
-          Result := Code = 0;
-          Exit;
-        end;
+    Source := SetupProbePath;
+    { The elevated user's private temporary directory cannot be assumed readable
+      when the account used for UAC differs from Setup's original user. }
+    Suffix := Lowercase(ExtractFileName(ExpandConstant('{tmp}')));
+    if (Length(Suffix) < 8) or (Length(Suffix) > 40) or
+      (Copy(Suffix, 1, 3) <> 'is-') or (Copy(Suffix, Length(Suffix) - 3, 4) <> '.tmp') then Exit;
+    for I := 4 to Length(Suffix) - 4 do
+      if not (((Suffix[I] >= 'a') and (Suffix[I] <= 'z')) or ((Suffix[I] >= '0') and (Suffix[I] <= '9')))
+        then Exit;
+    if not GuardInstall('Check') then Exit;
+    Directory := ExpandConstant('{autopf}\Prismestra Setup Probe-') + Suffix;
+    Image := Directory + '\Prismestra-Setup-Probe.exe';
+    GuardPrepareDirectory(Directory, False);
+    try
+      if not LoadStringFromFile(Source, Bytes) or not SaveStringToFile(Image, Bytes, False) then Exit;
+      if CompareText(GetSHA256OfFile(Image), '{#WebViewProbeSha256}') <> 0 then Exit;
+      Result := ExecAsOriginalUser(Image, Arguments, ExpandConstant('{sys}'), SW_HIDE,
+        ewWaitUntilTerminated, Code);
+    finally
+      for Attempt := 1 to 5 do begin
+        if not FileExists(Image) or DeleteFile(Image) then Break;
+        Sleep(100);
       end;
-    end else Log('Native WebView2 user probe failed its SHA-256 check.');
+      if not RemoveDir(Directory) then Log('Could not remove the protected Setup probe directory.');
+    end;
   except
     Log(GetExceptionMessage);
+    Result := False;
   end;
-  { A different elevation account can have a private Setup temporary directory. }
-  Log('Native WebView2 user probe unavailable; using the existing user probe.');
-  Result := OriginalUser('WebView', '');
+end;
+
+function OriginalUserWebViewReady: Boolean;
+var
+  Code: Integer;
+begin
+  Result := RunOriginalSetupProbe('', Code) and (Code = 0);
 end;
 
 function WebViewReady: Boolean;
@@ -226,9 +233,13 @@ var
 begin
   Result := '';
   if VcRuntimeRestartRequired then begin
-    if not ExecAndCaptureOutput(PowerShell,
-      '-NoProfile -NonInteractive -Command "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value"',
-      ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code, Output) then Exit;
+    try
+      if not ExecAndCaptureOutput(SetupProbePath, '--current-sid',
+        ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code, Output) then Exit;
+    except
+      Log(GetExceptionMessage);
+      Exit;
+    end;
   end else begin
     if not GuardInstall('Check') or not ExecAndCaptureOutput(InstallPath + '\Prismestra.exe',
       '--setup-current-user', ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code, Output) then Exit;
@@ -238,11 +249,13 @@ begin
 end;
 
 function ProbeOriginalUser(const SID: String): Boolean;
+var
+  Code: Integer;
 begin
   Result := False;
   if not ValidSID(SID) then Exit;
   if VcRuntimeRestartRequired then
-    Result := OriginalUser('Probe', SID)
+    Result := RunOriginalSetupProbe('--check-user ' + SID, Code) and (Code = 0)
   else
     Result := RunOriginalInstalledCommand('--setup-check-user ' + SID);
 end;
@@ -377,6 +390,9 @@ end;
 procedure CurStepChanged(Step: TSetupStep);
 var
   StartupReady: Boolean;
+#ifndef LifecycleTest
+  ProbeCode: Integer;
+#endif
 begin
   if Step = ssPostInstall then begin
     if not GuardInstall('Check') then
@@ -387,16 +403,22 @@ begin
     StartupReady := False;
     if WizardIsTaskSelected('autostart') then begin
       { The app imports the VC++ runtime, which may be unavailable until restart. }
+#ifndef LifecycleTest
       if VcRuntimeRestartRequired then
-        StartupReady := OriginalUser('EnableStartup', '')
+        StartupReady := RunOriginalSetupProbe('--enable-startup "' + InstallPath + '\Prismestra.exe"', ProbeCode) and
+          (ProbeCode = 0)
       else
+#endif
         StartupReady := RunOriginalInstalledCommand('--setup-enable-startup');
       if not StartupReady then
         Log('Could not enable sign-in startup for the original ordinary user.');
     end else begin
+#ifndef LifecycleTest
       if VcRuntimeRestartRequired then
-        StartupReady := OriginalUser('DisableStartup', '')
+        StartupReady := RunOriginalSetupProbe('--disable-startup "' + InstallPath + '\Prismestra.exe"', ProbeCode) and
+          (ProbeCode = 0)
       else
+#endif
         StartupReady := RunOriginalInstalledCommand('--setup-disable-startup');
       if not StartupReady then
         Log('Could not check sign-in startup for the original ordinary user.');

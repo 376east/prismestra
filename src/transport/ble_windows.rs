@@ -35,6 +35,13 @@ use windows::{
     },
     core::{GUID, HSTRING, Interface, RuntimeName},
 };
+use windows_sys::Win32::{
+    Devices::DeviceAndDriverInstallation::{
+        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO, SP_DEVICE_INTERFACE_DATA,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+    },
+    Foundation::{ERROR_NO_MORE_ITEMS, INVALID_HANDLE_VALUE},
+};
 
 const ACCESS_DENIED: &str =
     "Нет доступа к Bluetooth-контроллеру. Проверьте разрешение или сопряжение в Windows.";
@@ -200,6 +207,40 @@ struct Discovery {
     watcher: BluetoothLEAdvertisementWatcher,
     token: Option<i64>,
 }
+fn has_local_radio() -> Result<bool, String> {
+    // GUID_BTHPORT_DEVICE_INTERFACE from bthdef.h. Check presence without
+    // loading Bluetooth services or activating a WinRT watcher.
+    const RADIO_INTERFACE: windows_sys::core::GUID =
+        windows_sys::core::GUID::from_u128(0x0850302a_b344_4fda_9be9_90576b8d46f0);
+    let list = unsafe {
+        SetupDiGetClassDevsW(
+            &RADIO_INTERFACE,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+        )
+    };
+    let enumeration_error =
+        |failure| format!("Не удалось проверить наличие Bluetooth-адаптера: {failure}");
+    if list == INVALID_HANDLE_VALUE as HDEVINFO {
+        return Err(enumeration_error(std::io::Error::last_os_error()));
+    }
+    let mut interface = SP_DEVICE_INTERFACE_DATA {
+        cbSize: std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
+        ..Default::default()
+    };
+    let found = unsafe {
+        SetupDiEnumDeviceInterfaces(list, std::ptr::null(), &RADIO_INTERFACE, 0, &mut interface)
+    };
+    let failure = (found == 0).then(std::io::Error::last_os_error);
+    unsafe { SetupDiDestroyDeviceInfoList(list) };
+    match failure {
+        None => Ok(true),
+        Some(error) if error.raw_os_error() == Some(ERROR_NO_MORE_ITEMS as i32) => Ok(false),
+        Some(error) => Err(enumeration_error(error)),
+    }
+}
+
 impl Discovery {
     fn passive() -> Result<Self, String> {
         // Callers hold an initialized WinRT apartment. Let Windows release the
@@ -227,6 +268,9 @@ impl Drop for Discovery {
     }
 }
 fn discover(target: u64, control: &mut dyn Control) -> Result<(), String> {
+    if !has_local_radio()? {
+        return Err("Windows не обнаружила Bluetooth-адаптер.".into());
+    }
     let seen = Arc::new(AtomicBool::new(false));
     let mut scan = Discovery::passive()?;
     let callback_seen = seen.clone();
@@ -339,6 +383,9 @@ fn scan_pixel_addresses(
 ) -> Result<BTreeMap<u64, bool>, String> {
     let started = control.now();
     ble::check_wait(control, started)?;
+    if !has_local_radio()? {
+        return Ok(BTreeMap::new());
+    }
     let _apartment = Apartment::new()?;
     let mut scan = Discovery::passive()?;
     let addresses = Arc::new(Mutex::new(Some(BTreeMap::new())));

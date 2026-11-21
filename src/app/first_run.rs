@@ -1288,6 +1288,219 @@ mod tests {
         "127.0.0.1:17422".parse().unwrap()
     }
 
+    fn scan_fixture(
+        progressive: bool,
+        openrgb: Result<Discovery, String>,
+        lcd: Result<Discovery, String>,
+        ble: Result<Discovery, String>,
+    ) -> Discovery {
+        let mut scan = Scan {
+            cancel: Cancellation::default(),
+            probes: Vec::new(),
+            inventory: Discovery::default(),
+            updated: false,
+            progressive,
+        };
+        scan.spawn("OpenRGB", move || openrgb);
+        scan.spawn("TT LCD", move || lcd);
+        scan.spawn("Surplife E1", move || ble);
+        let mut worker = Worker {
+            scan: Some(scan),
+            task: None,
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut inventory = None;
+        while !worker.is_idle() {
+            if let Some(update) = worker.poll_inventory() {
+                inventory = Some(update);
+            }
+            assert!(Instant::now() < deadline, "fixture scan did not finish");
+            thread::sleep(Duration::from_millis(5));
+        }
+        inventory.expect("fixture scan produced no inventory")
+    }
+
+    #[test]
+    fn first_run_matrix_maps_only_available_local_devices() {
+        use devices::Driver::{OpenRgb, SurplifeE1Pixels, TtLcd};
+
+        let address = 0x1234_5678_9abc;
+        let path = r"\\?\hid#vid_264a&pid_233c&mi_01#stand#{synthetic-interface}";
+        let keyboard = controller("Keyboard");
+        let asset = AssetId::try_from("0".repeat(64)).unwrap();
+        for (case, drivers, rgb_failed) in [
+            ("no devices", vec![], false),
+            ("only BLE", vec![SurplifeE1Pixels], false),
+            ("only LCD", vec![TtLcd], false),
+            ("only OpenRGB", vec![OpenRgb], false),
+            ("BLE and LCD", vec![SurplifeE1Pixels, TtLcd], false),
+            ("OpenRGB and BLE", vec![OpenRgb, SurplifeE1Pixels], false),
+            ("OpenRGB and LCD", vec![OpenRgb, TtLcd], false),
+            (
+                "BLE and LCD with failed OpenRGB",
+                vec![SurplifeE1Pixels, TtLcd],
+                true,
+            ),
+            (
+                "all local families",
+                vec![OpenRgb, SurplifeE1Pixels, TtLcd],
+                false,
+            ),
+        ] {
+            let (document, local) = empty();
+            let (rgb_found, lcd_found, ble_found) = (
+                drivers.contains(&OpenRgb),
+                drivers.contains(&TtLcd),
+                drivers.contains(&SurplifeE1Pixels),
+            );
+            let inventory = scan_fixture(
+                true,
+                if rgb_failed {
+                    Err("fixture backend unavailable".into())
+                } else {
+                    Ok(Discovery {
+                        controllers: rgb_found.then(|| keyboard.clone()).into_iter().collect(),
+                        ..Default::default()
+                    })
+                },
+                Ok(Discovery {
+                    lcd_paths: lcd_found.then(|| path.to_owned()).into_iter().collect(),
+                    ..Default::default()
+                }),
+                Ok(Discovery {
+                    ble_pixels: ble_found.then_some((address, 3)).into_iter().collect(),
+                    ..Default::default()
+                }),
+            );
+            let mut media_requests = 0;
+            let plan = assemble(document.clone(), local, endpoint(), inventory, || {
+                media_requests += 1;
+                Ok(asset.clone())
+            })
+            .unwrap_or_else(|error| panic!("{case}: {error}"));
+            let lighting = &plan.document.lighting;
+            assert_eq!(plan.changed, !drivers.is_empty(), "{case}");
+            assert_eq!(lighting.setup.devices.len(), drivers.len(), "{case}");
+            assert_eq!(plan.local.devices.len(), drivers.len(), "{case}");
+            assert_eq!(plan.issues.len(), usize::from(rgb_failed), "{case}");
+            if rgb_failed {
+                assert_eq!(plan.issues[0], "OpenRGB: fixture backend unavailable");
+            }
+            assert_eq!(media_requests, usize::from(lcd_found), "{case}");
+            assert_eq!(plan.document.lcd.len(), usize::from(lcd_found), "{case}");
+            assert_eq!(lighting.scene, document.lighting.scene, "{case}");
+            if drivers.is_empty() {
+                assert_eq!(plan.document, document);
+                let outputs = plan
+                    .local
+                    .prepare(&plan.document, &std::env::temp_dir())
+                    .unwrap();
+                assert!(outputs.rgb.is_empty() && outputs.lcd.is_empty());
+                assert!(outputs.capture.is_none());
+            }
+            assert_eq!(
+                lighting.setup.canvas.points.len(),
+                3 * (usize::from(rgb_found) + usize::from(ble_found)),
+                "{case}"
+            );
+            for (device, driver) in lighting.setup.devices.iter().zip(drivers) {
+                assert!(device.enabled, "{case}");
+                assert_eq!(device.driver, driver, "{case}");
+                let expected_binding = match driver {
+                    OpenRgb => Binding::OpenRgb {
+                        endpoint: endpoint(),
+                        identity: devices::openrgb::identity(&keyboard),
+                        topology: devices::openrgb::topology(&keyboard),
+                    },
+                    SurplifeE1Pixels => Binding::Ble { address },
+                    TtLcd => Binding::Hid { path: path.into() },
+                    _ => unreachable!(),
+                };
+                assert_eq!(plan.local.devices[&device.id], expected_binding, "{case}");
+                let group = if driver == SurplifeE1Pixels {
+                    &lighting.groups.door
+                } else {
+                    &lighting.groups.pc
+                };
+                assert!(group.contains(&device.id), "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn absent_and_failed_local_probes_preserve_saved_network_devices() {
+        use crate::schedule::Target;
+
+        let (mut document, mut local) = empty();
+        let ha_endpoint = "http://ha.example.test:8123";
+        for (preset, id, enabled, x, binding) in [
+            (
+                "home-assistant-light",
+                "saved-ha",
+                true,
+                7,
+                Binding::HomeAssistant {
+                    endpoint: ha_endpoint.into(),
+                    entity: "light.office".into(),
+                    credential_id: devices::home_assistant::credential_id(ha_endpoint).unwrap(),
+                },
+            ),
+            (
+                "wled-ddp",
+                "saved-wled",
+                false,
+                25,
+                Binding::WledDdp {
+                    endpoint: "192.0.2.10:4048".parse().unwrap(),
+                    controller: None,
+                },
+            ),
+        ] {
+            let mut device = device_setup::preset(preset)
+                .unwrap()
+                .device_with_leds(id, 1)
+                .unwrap();
+            device.label = format!("Fixture {id}");
+            device.enabled = enabled;
+            document = device_setup::add(
+                &document,
+                device,
+                Target::Pc,
+                Some(device_setup::Layout::Line {
+                    x0: x,
+                    y0: 4,
+                    x1: x,
+                    y1: 4,
+                }),
+            )
+            .unwrap();
+            local.devices.insert(id.into(), binding);
+        }
+
+        let original_local = serde_json::to_value(&local).unwrap();
+        for openrgb in [Ok(Discovery::default()), Err("fixture SDK failed".into())] {
+            let failed = openrgb.is_err();
+            let inventory = scan_fixture(
+                false,
+                openrgb,
+                Ok(Discovery::default()),
+                Ok(Discovery::default()),
+            );
+            let plan = assemble(
+                document.clone(),
+                local.clone(),
+                endpoint(),
+                inventory,
+                || unreachable!("no LCD was discovered"),
+            )
+            .unwrap();
+            assert!(!plan.changed);
+            assert_eq!(plan.issues.len(), usize::from(failed));
+            assert_eq!(plan.document, document);
+            assert_eq!(serde_json::to_value(plan.local).unwrap(), original_local);
+        }
+    }
+
     #[test]
     fn clean_scan_builds_lcd_and_ble_map_before_openrgb_is_available() {
         let (_fixture, path, state, _) = super::super::installed::tests::fresh_profile();
