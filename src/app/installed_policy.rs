@@ -746,11 +746,29 @@ fn token_data(token: &Handle, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<usiz
 }
 
 fn token_value<T: Copy>(token: &Handle, class: TOKEN_INFORMATION_CLASS) -> Result<T, String> {
-    let data = token_data(token, class)?;
-    if data.len() * size_of::<usize>() < size_of::<T>() {
+    let mut value = std::mem::MaybeUninit::<T>::uninit();
+    let capacity = size_of::<T>() as u32;
+    let mut length = 0;
+    // Some fixed-size token classes return ERROR_BAD_LENGTH for a size-only query.
+    if unsafe {
+        GetTokenInformation(
+            token.0,
+            class,
+            value.as_mut_ptr().cast(),
+            capacity,
+            &mut length,
+        )
+    } == 0
+    {
+        return Err(error(format_args!(
+            "GetTokenInformation(class {class}, data): {}",
+            io::Error::last_os_error()
+        )));
+    }
+    if length != capacity {
         return Err(error("unexpected Windows token information size"));
     }
-    Ok(unsafe { data.as_ptr().cast::<T>().read() })
+    Ok(unsafe { value.assume_init() })
 }
 
 fn sid_string(sid: PSID) -> Result<String, String> {
@@ -913,7 +931,22 @@ fn is_interactive_medium(token: &Handle) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows_sys::Win32::Security::SecurityIdentification;
+    use windows_sys::Win32::Security::{SecurityIdentification, TokenElevationTypeDefault};
+
+    #[test]
+    fn split_token_can_query_its_linked_token() {
+        let token = process_token(unsafe { GetCurrentProcess() }, TOKEN_QUERY).unwrap();
+        let mode = elevation_type(&token).unwrap();
+        let expected = match mode {
+            mode if mode == TokenElevationTypeDefault => return,
+            mode if mode == TokenElevationTypeFull => TokenElevationTypeLimited,
+            mode if mode == TokenElevationTypeLimited => TokenElevationTypeFull,
+            _ => panic!("unexpected token elevation type {mode}"),
+        };
+        let linked = linked_token(&token).unwrap();
+        assert_eq!(elevation_type(&linked).unwrap(), expected);
+        assert_eq!(token_sid(&linked).unwrap(), token_sid(&token).unwrap());
+    }
 
     #[test]
     fn identification_token_cannot_be_used_for_limited_file_access() {
