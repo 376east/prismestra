@@ -524,13 +524,7 @@ fn refresh_heartbeat_with_clock(
         .filter(|gap| (1..clock::LEASE_MS).contains(gap))
         .map(|_| previous);
     current.restarting = restarting;
-    let result = serde_json::to_vec(&current)
-        .map_err(|error| error.to_string())
-        .and_then(|bytes| {
-            crate::storage::atomic_write_heartbeat(&path, &bytes, LIMIT)
-                .map_err(|error| error.to_string())
-        });
-    match result {
+    match write_live_record(&path, &current) {
         Ok(()) => Heartbeat::Published,
         Err(error) => Heartbeat::Retry(error),
     }
@@ -996,7 +990,15 @@ fn supervise_channels(
                     backend_pid: snapshot.backend_pid,
                     detail: snapshot.detail.chars().take(1000).collect(),
                 };
-                match write_json(&output.join("helper-status.json"), &status) {
+                let status_path = output.join("helper-status.json");
+                // The installed outbox is opened by the ordinary client.
+                // Keep legacy private control directories on their existing path.
+                let result = if output != channels.input {
+                    write_live_record(&status_path, &status)
+                } else {
+                    write_json(&status_path, &status)
+                };
+                match result {
                     Ok(()) => {
                         if status_write_failed {
                             helper_note(
@@ -1109,6 +1111,10 @@ fn read_json_typed<T: DeserializeOwned>(path: &Path) -> Result<T, ControlRead> {
 fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
     crate::storage::atomic_write(path, &bytes, LIMIT).map_err(|e| e.to_string())
+}
+fn write_live_record(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
+    crate::storage::atomic_write_live_record(path, &bytes, LIMIT).map_err(|e| e.to_string())
 }
 fn now_ms() -> Result<u64, String> {
     ActiveClock.now_ms()
@@ -1642,6 +1648,10 @@ mod tests {
         let owner_path = input.join("owner-request.json");
         write_json(&owner_path, &request).unwrap();
         let owner = fs::read(&owner_path).unwrap();
+        let status_path = outbox.join("helper-status.json");
+        fs::write(&status_path, b"{}").unwrap();
+        // Keep the previous status open with Rust's default delete sharing.
+        let mut reader = File::open(&status_path).unwrap();
         let channels = HelperChannels {
             input: &input,
             output: &outbox,
@@ -1664,13 +1674,19 @@ mod tests {
         assert!(!input.join("helper-status.json").exists());
         assert!(!input.join("backend-events.json").exists());
         assert!(!outbox.join("owner-request.json").exists());
-        let status: Status = read_json(&outbox.join("helper-status.json")).unwrap();
-        assert_eq!(status.nonce, request.nonce);
-        fs::remove_file(outbox.join("helper-status.json")).unwrap();
+        let bytes = fs::read(&status_path).unwrap();
+        let mut previous = Vec::new();
+        reader.read_to_end(&mut previous).unwrap();
+        drop(reader);
+        assert_eq!(previous, b"{}");
+        fs::remove_file(&status_path).unwrap();
         fs::remove_file(outbox.join("backend-events.json")).unwrap();
         fs::remove_file(owner_path).unwrap();
         fs::remove_dir(outbox).unwrap();
         fs::remove_dir(input).unwrap();
+        let status: Status = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status.nonce, request.nonce);
+        assert_eq!(status.timestamp_ms, request.timestamp_ms);
     }
     #[cfg(windows)]
     fn sharing_fixture(label: &str) -> (PathBuf, Request, Identity) {

@@ -23,9 +23,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8], max_bytes: usize) -> io::Result<(
     atomic_write_with(path, bytes, max_bytes, replace)
 }
 
-/// Publish the recurring helper lease even while a reader permits delete sharing.
-/// Other configuration and elevated output files keep their normal replacement.
-pub(crate) fn atomic_write_heartbeat(
+/// Publish a live helper record while existing readers permit delete sharing.
+/// Durable configuration and other control writes use the normal replacement.
+pub(crate) fn atomic_write_live_record(
     path: &Path,
     bytes: &[u8],
     max_bytes: usize,
@@ -190,7 +190,7 @@ fn replace_shared_target(source: &Path, destination: &Path) -> io::Result<()> {
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(io::Error::other(
-            "Heartbeat staging path must be a regular file",
+            "Live record staging path must be a regular file",
         ));
     }
     let name = wide(destination)?;
