@@ -30,6 +30,8 @@ pub mod lighting_outputs;
 #[cfg(windows)]
 pub mod managed_backend;
 pub mod preview;
+#[cfg(windows)]
+pub(crate) mod release_check;
 pub mod runtime;
 pub mod scene_file;
 pub mod sensor_bindings;
