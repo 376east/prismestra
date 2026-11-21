@@ -1,4 +1,5 @@
 //! The installed helper's only authority comes from the protected machine policy.
+use super::backend_helper::{Identity, identity_from_handle};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -15,8 +16,8 @@ use std::{
 use windows_sys::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_INSUFFICIENT_BUFFER, GENERIC_ALL, GENERIC_WRITE, HANDLE,
-            INVALID_HANDLE_VALUE, LUID, LocalFree,
+            CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, GENERIC_ALL,
+            GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LUID, LocalFree, WAIT_TIMEOUT,
         },
         Security::{
             ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
@@ -28,8 +29,9 @@ use windows_sys::{
             TOKEN_IMPERSONATE, TOKEN_INFORMATION_CLASS, TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL,
             TOKEN_OWNER, TOKEN_QUERY, TOKEN_STATISTICS, TOKEN_USER, TokenElevation,
             TokenElevationType, TokenElevationTypeFull, TokenElevationTypeLimited,
-            TokenImpersonation, TokenIntegrityLevel, TokenLinkedToken, TokenOwner, TokenSessionId,
-            TokenStatistics, TokenUser, WinBuiltinAdministratorsSid, WinInteractiveSid,
+            TokenImpersonation, TokenIntegrityLevel, TokenLinkedToken, TokenOwner, TokenPrimary,
+            TokenSessionId, TokenStatistics, TokenUser, WinBuiltinAdministratorsSid,
+            WinInteractiveSid,
         },
         Storage::FileSystem::{
             BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_APPEND_DATA,
@@ -41,13 +43,18 @@ use windows_sys::{
         },
         System::{
             Com::CoTaskMemFree,
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+                TH32CS_SNAPPROCESS,
+            },
             EventLog::{
                 DeregisterEventSource, EVENTLOG_ERROR_TYPE, RegisterEventSourceW, ReportEventW,
             },
             SystemInformation::{GetSystemDirectoryW, GetSystemWindowsDirectoryW},
             Threading::{
-                GetCurrentProcess, OpenProcessToken, PROCESS_NAME_NATIVE,
-                QueryFullProcessImageNameW, SetThreadToken,
+                GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_NATIVE,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
+                SetThreadToken, WaitForSingleObject,
             },
         },
         UI::Shell::{
@@ -115,7 +122,6 @@ fn valid_runtime_path(path: &str) -> bool {
 }
 
 pub(super) struct InstalledPolicy {
-    pub(super) state: PathBuf,
     pub(super) outbox: PathBuf,
     pub(super) config_dir: PathBuf,
     pub(super) backend: PathBuf,
@@ -156,24 +162,20 @@ impl InstalledPolicy {
         {
             return Ok(None);
         }
-        Self::load(&sid, expected_state, &executable)
+        Self::load(&sid, &executable)
     }
 
-    pub(super) fn helper() -> Result<(Self, HelperAuthority), String> {
-        let authority = HelperAuthority::current()?;
-        let state = authority
-            .with_limited(current_state)?
-            .map_err(|err| authority_stage("resolve state under linked limited token", err))?;
-        let policy = Self::load(&authority.sid, state, &authority.executable)?
+    pub(super) fn helper() -> Result<(Self, Vec<HelperAuthority>), String> {
+        let expected = ExpectedOwner::current()?;
+        let policy = Self::load(&expected.sid, &expected.executable)?
             .ok_or("Installed backend policy is missing")?;
         for directory in [&policy.config_dir, &policy.outbox] {
             visit_tree(directory, &mut 0, &mut |_, _| Ok(()))?;
         }
-        authority.set_creator_owner()?;
-        Ok((policy, authority))
+        Ok((policy, expected.candidates()?))
     }
 
-    fn load(sid: &str, state: PathBuf, executable: &Path) -> Result<Option<Self>, String> {
+    fn load(sid: &str, executable: &Path) -> Result<Option<Self>, String> {
         let program_data = known_folder(&FOLDERID_ProgramData)?;
         let program_files = known_folder(&FOLDERID_ProgramFiles)?;
         let policy_home = program_data.join("Prismestra").join("Policies").join(sid);
@@ -214,7 +216,6 @@ impl InstalledPolicy {
             }
         }
         Ok(Some(Self {
-            state,
             outbox,
             config_dir,
             backend: runtime.join(BACKEND),
@@ -225,16 +226,15 @@ impl InstalledPolicy {
     }
 }
 
-pub(super) struct HelperAuthority {
+struct ExpectedOwner {
     sid: String,
     session: u32,
     logon: LUID,
     executable: PathBuf,
     native_image: OsString,
-    limited: Handle,
 }
 
-impl HelperAuthority {
+impl ExpectedOwner {
     fn current() -> Result<Self, String> {
         let current = process_token(
             unsafe { GetCurrentProcess() },
@@ -252,14 +252,10 @@ impl HelperAuthority {
         let session = session(&current)?;
         let linked = linked_token(&current)
             .map_err(|err| authority_stage("get helper linked token", err))?;
-        let limited = impersonation_token(&linked).map_err(|failure| {
-            report_linked_token_failure(&failure);
-            authority_stage("duplicate helper linked token", error(failure))
-        })?;
         if session == 0
-            || session != self::session(&limited)?
-            || token_sid(&limited)? != sid
-            || !is_interactive_medium(&limited)
+            || session != self::session(&linked)?
+            || token_sid(&linked)? != sid
+            || !is_medium_limited(&linked)
                 .map_err(|err| authority_stage("validate helper linked token", err))?
         {
             return Err(
@@ -269,46 +265,185 @@ impl HelperAuthority {
         Ok(Self {
             sid,
             session,
-            logon: token_value::<TOKEN_STATISTICS>(&limited, TokenStatistics)?.AuthenticationId,
-            executable: std::env::current_exe().map_err(error)?,
+            logon: token_value::<TOKEN_STATISTICS>(&linked, TokenStatistics)?.AuthenticationId,
+            executable: process_image(unsafe { GetCurrentProcess() }, 0)?.into(),
             native_image: native_image(unsafe { GetCurrentProcess() })?,
-            limited,
         })
     }
 
-    pub(super) fn validate_parent(&self, process: HANDLE, image: &Path) -> Result<(), String> {
-        if image != self.executable || native_image(process)? != self.native_image {
-            return Err(
-                "Installed backend helper owner image differs from its installed executable".into(),
-            );
+    fn candidates(&self) -> Result<Vec<HelperAuthority>, String> {
+        let name = self
+            .executable
+            .file_name()
+            .ok_or("Missing installed backend helper executable name")?;
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(error(io::Error::last_os_error()));
         }
-        let token = process_token(process, TOKEN_QUERY | TOKEN_DUPLICATE)
-            .map_err(|err| authority_stage("open owner process token", err))?;
-        let logon = token_value::<TOKEN_STATISTICS>(&token, TokenStatistics)
-            .map_err(|err| authority_stage("query owner logon", err))?
-            .AuthenticationId;
-        if token_sid(&token)? != self.sid
-            || session(&token)? != self.session
-            || logon.HighPart != self.logon.HighPart
-            || logon.LowPart != self.logon.LowPart
-            || !is_interactive_medium(
-                &impersonation_token(&token)
-                    .map_err(|err| authority_stage("duplicate owner process token", error(err)))?,
+        let snapshot = Handle(snapshot);
+        let mut entry = PROCESSENTRY32W {
+            dwSize: size_of::<PROCESSENTRY32W>() as u32,
+            ..PROCESSENTRY32W::default()
+        };
+        if unsafe { Process32FirstW(snapshot.0, &mut entry) } == 0 {
+            return Err(error(io::Error::last_os_error()));
+        }
+        let mut candidates = Vec::new();
+        let mut rejected = None;
+        loop {
+            let end = entry.szExeFile.iter().position(|&ch| ch == 0);
+            if entry.th32ProcessID != std::process::id()
+                && end.is_some_and(|end| {
+                    OsString::from_wide(&entry.szExeFile[..end]).eq_ignore_ascii_case(name)
+                })
+            {
+                match self.open_candidate(entry.th32ProcessID) {
+                    Ok(authority) if candidates.len() < 64 => candidates.push(authority),
+                    Ok(_) => return Err(error("too many authenticated owner process candidates")),
+                    Err(cause) => rejected = Some(cause),
+                }
+            }
+            if unsafe { Process32NextW(snapshot.0, &mut entry) } == 0 {
+                let failure = io::Error::last_os_error();
+                if failure.raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+                    return Err(error(failure));
+                }
+                break;
+            }
+        }
+        if candidates.is_empty() {
+            return Err(rejected.unwrap_or_else(|| error("installed owner process is unavailable")));
+        }
+        Ok(candidates)
+    }
+
+    fn open_candidate(&self, pid: u32) -> Result<HelperAuthority, String> {
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                0,
+                pid,
             )
-            .map_err(|err| authority_stage("validate owner process token", err))?
+        };
+        if process.is_null() {
+            return Err(authority_stage(
+                "open owner process",
+                error(io::Error::last_os_error()),
+            ));
+        }
+        let process = Handle(process);
+        let parent = identity_from_handle(process.0, pid, |handle, dos| {
+            // Compare kernel-reported names before opening any candidate image path.
+            if dos != self.executable || native_image(handle)? != self.native_image {
+                return Err(error(
+                    "owner image differs from the protected helper executable",
+                ));
+            }
+            Ok(())
+        })?;
+        let token = process_token(process.0, TOKEN_QUERY | TOKEN_DUPLICATE)
+            .map_err(|err| authority_stage("open owner process token", err))?;
+        let stats = token_value::<TOKEN_STATISTICS>(&token, TokenStatistics)?;
+        validate_owner_token(
+            &self.sid,
+            self.session,
+            self.logon,
+            &token_sid(&token)?,
+            session(&token)?,
+            &stats,
+            is_medium_limited(&token)?,
+        )?;
+        let limited = impersonation_token(&token).map_err(|failure| {
+            report_owner_token_failure(&failure);
+            authority_stage("duplicate owner primary token", error(failure))
+        })?;
+        if !is_interactive_medium(&limited)? {
+            return Err(error("owner token is not interactive limited medium"));
+        }
+        let authority = HelperAuthority {
+            process,
+            parent,
+            token_id: stats.TokenId,
+            limited,
+        };
+        authority.check_pid(pid)?;
+        Ok(authority)
+    }
+}
+
+fn validate_owner_token(
+    expected_sid: &str,
+    expected_session: u32,
+    expected_logon: LUID,
+    sid: &str,
+    session: u32,
+    stats: &TOKEN_STATISTICS,
+    medium_limited: bool,
+) -> Result<(), String> {
+    if sid != expected_sid
+        || session == 0
+        || session != expected_session
+        || stats.AuthenticationId.HighPart != expected_logon.HighPart
+        || stats.AuthenticationId.LowPart != expected_logon.LowPart
+        || stats.TokenType != TokenPrimary
+        || !medium_limited
+    {
+        return Err(error(
+            "owner does not have the expected interactive primary token",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) struct HelperAuthority {
+    process: Handle,
+    parent: Identity,
+    token_id: LUID,
+    limited: Handle,
+}
+
+impl HelperAuthority {
+    fn check_pid(&self, pid: u32) -> Result<(), String> {
+        if self.parent.pid != pid
+            || unsafe { WaitForSingleObject(self.process.0, 0) } != WAIT_TIMEOUT
         {
-            return Err(
-                "Installed backend helper owner has a different user, logon or session".into(),
-            );
+            return Err(error(
+                "owner process differs from the authenticated instance or has exited",
+            ));
         }
         Ok(())
     }
 
-    pub(super) fn with_limited<T>(&self, read: impl FnOnce() -> T) -> Result<T, String> {
-        with_thread_token(&self.limited, read)
+    pub(super) fn parent_identity(&self, pid: u32) -> Result<Identity, String> {
+        self.check_pid(pid)?;
+        let token = process_token(self.process.0, TOKEN_QUERY)?;
+        let stats = token_value::<TOKEN_STATISTICS>(&token, TokenStatistics)?;
+        if stats.TokenId.LowPart != self.token_id.LowPart
+            || stats.TokenId.HighPart != self.token_id.HighPart
+            || !is_medium_limited(&token)?
+        {
+            return Err(error("authenticated owner's primary token changed"));
+        }
+        self.check_pid(pid)?;
+        Ok(self.parent.clone())
     }
 
-    fn set_creator_owner(&self) -> Result<(), String> {
+    pub(super) fn state(&self) -> Result<PathBuf, String> {
+        let local =
+            self.with_limited(|| known_folder_for(&FOLDERID_LocalAppData, self.limited.0))??;
+        // Establish impersonation again after the shell call, before opening user paths.
+        self.with_limited(|| canonical_user_state_path(&local.join("Prismestra").join("state")))?
+            .map_err(|err| authority_stage("resolve state under owner token", err))
+    }
+
+    pub(super) fn with_limited<T>(&self, read: impl FnOnce() -> T) -> Result<T, String> {
+        self.check_pid(self.parent.pid)?;
+        let value = with_thread_token(&self.limited, read)?;
+        self.check_pid(self.parent.pid)?;
+        Ok(value)
+    }
+
+    pub(super) fn set_creator_owner(&self) -> Result<(), String> {
         let token = process_token(unsafe { GetCurrentProcess() }, TOKEN_ADJUST_DEFAULT)?;
         let mut sid = well_known_sid(WinBuiltinAdministratorsSid)?;
         let owner = TOKEN_OWNER {
@@ -333,16 +468,13 @@ impl HelperAuthority {
 }
 
 fn native_image(process: HANDLE) -> Result<OsString, String> {
+    process_image(process, PROCESS_NAME_NATIVE)
+}
+
+fn process_image(process: HANDLE, flags: u32) -> Result<OsString, String> {
     let mut buffer = vec![0u16; 32768];
     let mut length = buffer.len() as u32;
-    if unsafe {
-        QueryFullProcessImageNameW(
-            process,
-            PROCESS_NAME_NATIVE,
-            buffer.as_mut_ptr(),
-            &mut length,
-        )
-    } == 0
+    if unsafe { QueryFullProcessImageNameW(process, flags, buffer.as_mut_ptr(), &mut length) } == 0
     {
         return Err(error(io::Error::last_os_error()));
     }
@@ -382,9 +514,12 @@ fn authority_stage(stage: &str, error: String) -> String {
 }
 
 fn known_folder(id: &GUID) -> Result<PathBuf, String> {
+    known_folder_for(id, null_mut())
+}
+
+fn known_folder_for(id: &GUID, token: HANDLE) -> Result<PathBuf, String> {
     let mut raw = null_mut();
-    let result =
-        unsafe { SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY as u32, null_mut(), &mut raw) };
+    let result = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY as u32, token, &mut raw) };
     if result < 0 || raw.is_null() {
         if !raw.is_null() {
             unsafe { CoTaskMemFree(raw.cast()) };
@@ -884,7 +1019,7 @@ impl DuplicationError {
     fn event_data(&self) -> String {
         let number = |value: Option<i32>| value.map_or_else(|| "unknown".into(), |n| n.to_string());
         format!(
-            "stage=duplicate_helper_linked_token api=DuplicateTokenEx win32={} token_type={} impersonation_level={}",
+            "stage=duplicate_helper_owner_token api=DuplicateTokenEx win32={} token_type={} impersonation_level={}",
             number(self.failure.raw_os_error()),
             number(self.token_type),
             number(self.impersonation_level),
@@ -892,7 +1027,7 @@ impl DuplicationError {
     }
 }
 
-fn report_linked_token_failure(failure: &DuplicationError) {
+fn report_owner_token_failure(failure: &DuplicationError) {
     // The scheduled GUI executable may start without stderr. This fixed event
     // carries numeric token metadata only and does not need a profile path.
     let source = unsafe { RegisterEventSourceW(null(), w!("Prismestra Installed Backend")) };
@@ -977,15 +1112,173 @@ fn is_high_admin(token: &Handle) -> Result<bool, String> {
 }
 
 fn is_interactive_medium(token: &Handle) -> Result<bool, String> {
+    Ok(is_medium_limited(token)? && member(token, WinInteractiveSid)?)
+}
+
+fn is_medium_limited(token: &Handle) -> Result<bool, String> {
     Ok(elevation_type(token)? == TokenElevationTypeLimited
-        && (0x2000..0x3000).contains(&integrity(token)?)
-        && member(token, WinInteractiveSid)?)
+        && (0x2000..0x3000).contains(&integrity(token)?))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Child, Command, Stdio};
     use windows_sys::Win32::Security::{SecurityIdentification, TokenElevationTypeDefault};
+
+    #[test]
+    fn owner_requires_exact_sid_session_logon_and_limited_primary() {
+        let sid = "S-1-5-21-42";
+        let logon = LUID {
+            LowPart: 39,
+            HighPart: 1,
+        };
+        let mut stats = TOKEN_STATISTICS {
+            AuthenticationId: logon,
+            TokenType: TokenPrimary,
+            ..Default::default()
+        };
+        let validate =
+            |sid_found: &str, session_found, stats: &TOKEN_STATISTICS, medium_limited| {
+                validate_owner_token(
+                    sid,
+                    7,
+                    logon,
+                    sid_found,
+                    session_found,
+                    stats,
+                    medium_limited,
+                )
+            };
+        assert!(validate(sid, 7, &stats, true).is_ok());
+        assert!(validate("S-1-5-21-43", 7, &stats, true).is_err());
+        assert!(validate(sid, 0, &stats, true).is_err());
+        assert!(validate(sid, 8, &stats, true).is_err());
+        assert!(validate(sid, 7, &stats, false).is_err());
+        stats.AuthenticationId.LowPart += 1;
+        assert!(validate(sid, 7, &stats, true).is_err());
+        stats.AuthenticationId.LowPart = logon.LowPart;
+        stats.AuthenticationId.HighPart += 1;
+        assert!(validate(sid, 7, &stats, true).is_err());
+        stats.AuthenticationId = logon;
+        stats.TokenType = TokenImpersonation;
+        stats.ImpersonationLevel = SecurityIdentification;
+        assert!(validate(sid, 7, &stats, true).is_err());
+    }
+
+    #[test]
+    #[ignore = "owned test child, held by a parent with a private stdin pipe"]
+    fn installed_owner_child() {
+        let _ = io::stdin().read(&mut [0]);
+    }
+
+    struct OwnerChild(Child);
+
+    impl OwnerChild {
+        fn start() -> Self {
+            Self(
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "app::installed_policy::tests::installed_owner_child",
+                        "--ignored",
+                    ])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            )
+        }
+    }
+
+    impl Drop for OwnerChild {
+        fn drop(&mut self) {
+            if matches!(self.0.try_wait(), Ok(None)) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    #[test]
+    fn retained_handle_rejects_wrong_image_pid_and_restarted_owner() {
+        let mut child = OwnerChild::start();
+        let pid = child.0.id();
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                0,
+                pid,
+            )
+        };
+        assert!(!handle.is_null());
+        let handle = Handle(handle);
+        let parent = identity_from_handle(handle.0, pid, |_, _| Ok(())).unwrap();
+        assert!(identity_from_handle(handle.0, std::process::id(), |_, _| Ok(())).is_err());
+
+        let token = process_token(handle.0, TOKEN_QUERY | TOKEN_DUPLICATE).unwrap();
+        let stats = token_value::<TOKEN_STATISTICS>(&token, TokenStatistics).unwrap();
+        let mut expectation = ExpectedOwner {
+            sid: token_sid(&token).unwrap(),
+            session: session(&token).unwrap(),
+            logon: stats.AuthenticationId,
+            executable: process_image(handle.0, 0).unwrap().into(),
+            native_image: OsString::from("incorrect native image"),
+        };
+        assert!(
+            expectation
+                .open_candidate(pid)
+                .err()
+                .unwrap()
+                .contains("owner image")
+        );
+        expectation.native_image = native_image(handle.0).unwrap();
+        if expectation.session != 0 && is_medium_limited(&token).unwrap() {
+            let verified = expectation.open_candidate(pid).unwrap();
+            assert_eq!(verified.parent_identity(pid).unwrap(), parent);
+            assert_eq!(
+                token_value::<TOKEN_STATISTICS>(&verified.limited, TokenStatistics)
+                    .unwrap()
+                    .ImpersonationLevel,
+                SecurityImpersonation,
+            );
+            let local = verified
+                .with_limited(|| known_folder_for(&FOLDERID_LocalAppData, verified.limited.0))
+                .unwrap()
+                .unwrap();
+            assert!(local.is_absolute());
+            eprintln!(
+                "native limited child: primary token admitted and explicit known folder resolved under impersonation"
+            );
+        }
+
+        // The lifetime test also runs on accounts without a split token.
+        let limited = impersonation_token(&token).map_err(error).unwrap();
+        let authority = HelperAuthority {
+            process: handle,
+            parent,
+            token_id: stats.TokenId,
+            limited,
+        };
+        assert!(authority.check_pid(pid).is_ok());
+        let restart = OwnerChild::start();
+        assert!(authority.check_pid(restart.0.id()).is_err());
+        assert!(
+            authority
+                .with_limited(|| {
+                    drop(child.0.stdin.take());
+                    assert!(child.0.wait().unwrap().success());
+                })
+                .is_err()
+        );
+        assert!(authority.check_pid(pid).is_err());
+        assert!(
+            authority
+                .with_limited(|| panic!("exited owner must not authorize file access"))
+                .is_err()
+        );
+    }
 
     #[test]
     fn split_token_can_query_its_linked_token() {
@@ -1039,7 +1332,7 @@ mod tests {
         assert_eq!(failure.failure.raw_os_error(), Some(1346));
         assert_eq!(
             failure.event_data(),
-            "stage=duplicate_helper_linked_token api=DuplicateTokenEx win32=1346 token_type=2 impersonation_level=1"
+            "stage=duplicate_helper_owner_token api=DuplicateTokenEx win32=1346 token_type=2 impersonation_level=1"
         );
     }
 
