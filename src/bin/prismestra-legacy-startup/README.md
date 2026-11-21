@@ -1,6 +1,6 @@
 # Native legacy startup retirement
 
-Build the Windows x64 helper from the same commit as Setup with `cargo build --release --locked --bin prismestra-legacy-startup`. Package the resulting EXE in the protected installation directory. Check it with the installer’s existing path and ownership guard before launch. The helper is an independent binary target and has no startup hook.
+Setup packaging builds the Windows x64 helper from the same commit as Setup through `scripts/installer/policy-tool/Cargo.toml`. It requires a static CRT and a Windows GUI PE subsystem, checks the inbox imports, and pins the resulting EXE by SHA-256. Setup checks the protected installation path and the hash before each invocation. The helper is an independent binary and has no startup hook.
 
 ## Setup call order
 
@@ -8,7 +8,7 @@ Build the Windows x64 helper from the same commit as Setup with `cargo build --r
 2. Run the existing installed migration command as that original ordinary user. Observe the existing restart and runtime-readiness gates.
 3. After successful migration, run `prismestra-legacy-startup.exe Disable <original-sid>` elevated and wait. The helper independently verifies the installed migration receipt and destination hashes before each change.
 
-Keep the command line limited to the phase and the SID. Setup supplies the EXE path and a trusted working directory. Exercise both invocations on the intended installer runtime floor before replacing the current entry point.
+Keep the command line limited to the phase and the SID. Setup supplies the EXE path and a trusted working directory. Exercise both invocations on the intended installer runtime floor.
 
 The helper exits 0 and prints one JSON object. `prepared` confirms the source hint, `disabled` confirms the named tasks and returns the receipt path, and `verified` means there was no active verified legacy task. `unchanged_*` records a deferral for an unverified original logon, ambiguous sources, unconfirmed import or insufficient protection of the task or root folder. A nonzero exit reports an operation failure on stderr and includes a protected receipt path when one was created. Capture both streams.
 

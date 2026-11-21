@@ -4,9 +4,19 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[[bin]]
+name = "prismestra-setup-policy"
+path = "src/main.rs"
+
+[[bin]]
+name = "prismestra-legacy-startup"
+path = "../../../src/bin/prismestra-legacy-startup/main.rs"
+
 [dependencies]
+getrandom = "=0.4.3"
+roxmltree = "=0.21.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 sha2 = "=0.11.1"
 windows = { version = "=0.62.2", features = ["Win32_Globalization", "Win32_System_Com", "Win32_System_Ole", "Win32_System_TaskScheduler", "Win32_System_Variant"] }
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Threading", "Win32_UI_Shell"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

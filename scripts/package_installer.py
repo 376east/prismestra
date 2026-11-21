@@ -28,9 +28,11 @@ WEBVIEW_PROBE_IMPORTS = {
     "advapi32.dll", "api-ms-win-core-synch-l1-2-0.dll", "kernel32.dll", "ntdll.dll",
 }
 POLICY_TOOL = "Prismestra-Setup-Policy.exe"
+LEGACY_STARTUP_TOOL = "Prismestra-Legacy-Startup.exe"
 POLICY_TOOL_IMPORTS = WEBVIEW_PROBE_IMPORTS | {
     "combase.dll", "ole32.dll", "oleaut32.dll", "shell32.dll",
 }
+LEGACY_STARTUP_TOOL_IMPORTS = POLICY_TOOL_IMPORTS | {"bcryptprimitives.dll", "user32.dll"}
 PREREQUISITES = {
     "vc_redist_x64": ("vc_redist.x64.exe", 10 << 20, "Microsoft Corporation", {"aka.ms", "download.visualstudio.microsoft.com"}),
     "webview2_x64": ("MicrosoftEdgeWebView2RuntimeInstallerX64.exe", 30 << 20, "Microsoft Corporation", {"go.microsoft.com", "msedge.sf.dl.delivery.mp.microsoft.com", "msedge.api.cdp.microsoft.com"}),
@@ -66,7 +68,7 @@ def file_pin(path, expected):
         raise ValueError(f"Missing, unsafe, or unpinned file: {path.name}")
 
 
-def check_amd64_executable(stream, name, runtime_floor=None):
+def check_amd64_executable(stream, name, runtime_floor=None, *, require_gui=False):
     header = stream.read(64)
     if len(header) != 64 or header[:2] != b"MZ":
         raise ValueError(f"Missing PE header: {name}")
@@ -75,6 +77,11 @@ def check_amd64_executable(stream, name, runtime_floor=None):
     pe = stream.read(28)
     if pe[:6] != b"PE\0\0\x64\x86":
         raise ValueError(f"Expected an AMD64 executable: {name}")
+    if require_gui:
+        stream.seek(offset + 24 + 68)
+        if (len(pe) < 28 or struct.unpack_from("<H", pe, 20)[0] < 70
+                or pe[24:26] != b"\x0b\x02" or stream.read(2) != b"\x02\x00"):
+            raise ValueError(f"Expected a PE32+ Windows GUI executable: {name}")
     if runtime_floor is not None:
         # PE signature + 20-byte COFF header precede the PE32+ optional
         # header's magic and MajorLinkerVersion / MinorLinkerVersion bytes.
@@ -260,27 +267,37 @@ def stage_webview_probe(destination):
         "--crate-name", "prismestra_setup_probe", "-o", str(probe),
         str(ROOT / "installer/webview-probe.rs"),
     ], check=True)
+    with probe.open("rb") as image:
+        check_amd64_executable(image, WEBVIEW_PROBE, require_gui=True)
     imports = pe_imports(probe.read_bytes())
     if not imports["normal"] or imports["delay"] or set(imports["normal"]) - WEBVIEW_PROBE_IMPORTS:
         raise ValueError(f"Setup WebView2 probe must use only inbox Windows libraries: {imports}")
     return sha256(probe)
 
 
-def stage_policy_tool(destination):
+def stage_setup_tools(destination):
     target = "x86_64-pc-windows-msvc"
-    with tempfile.TemporaryDirectory(prefix="prismestra-policy-build-") as build:
+    hashes = {}
+    with tempfile.TemporaryDirectory(prefix="prismestra-setup-tools-") as build:
         subprocess.run([
-            "cargo", "build", "--locked", "--release", "--target", target,
+            "cargo", "build", "--locked", "--release", "--bins", "--target", target,
             "--manifest-path", str(ROOT / "installer/policy-tool/Cargo.toml"),
             "--target-dir", build,
         ], check=True, env={**os.environ, "CARGO_ENCODED_RUSTFLAGS": "-C\x1ftarget-feature=+crt-static"})
-        source = Path(build) / target / "release/prismestra-setup-policy.exe"
-        imports = pe_imports(source.read_bytes())
-        if not imports["normal"] or imports["delay"] or set(imports["normal"]) - POLICY_TOOL_IMPORTS:
-            raise ValueError(f"Setup policy tool must use only inbox Windows libraries: {imports}")
-        tool = destination / POLICY_TOOL
-        shutil.copyfile(source, tool)
-    return sha256(tool)
+        for binary, installed_name, allowed_imports in (
+            ("prismestra-setup-policy.exe", POLICY_TOOL, POLICY_TOOL_IMPORTS),
+            ("prismestra-legacy-startup.exe", LEGACY_STARTUP_TOOL, LEGACY_STARTUP_TOOL_IMPORTS),
+        ):
+            source = Path(build) / target / "release" / binary
+            with source.open("rb") as image:
+                check_amd64_executable(image, installed_name, require_gui=True)
+            imports = pe_imports(source.read_bytes())
+            if not imports["normal"] or imports["delay"] or set(imports["normal"]) - allowed_imports:
+                raise ValueError(f"{installed_name} must use only inbox Windows libraries: {imports}")
+            tool = destination / installed_name
+            shutil.copyfile(source, tool)
+            hashes[installed_name] = sha256(tool)
+    return hashes
 
 
 def package(args):
@@ -323,15 +340,7 @@ def package(args):
     if not test_mode:
         stage_prerequisites(packages, args.prerequisite_dir, stage / "prerequisites")
         webview_probe_hash = stage_webview_probe(stage / "prerequisites")
-        policy_tool_hash = stage_policy_tool(payload)
-        policy = ROOT / "installer_policy.ps1"
-        if policy.is_symlink() or not policy.is_file():
-            raise ValueError("Missing maintained installer policy provisioner")
-        shutil.copyfile(policy, payload / policy.name)
-        retirement = ROOT / "installer" / "retire-legacy-startup.ps1"
-        if retirement.is_symlink() or not retirement.is_file():
-            raise ValueError("Missing maintained legacy startup migration")
-        shutil.copyfile(retirement, payload / retirement.name)
+        setup_tool_hashes = stage_setup_tools(payload)
     manifest = {
         "version": 1, "product": "Prismestra", "commit": args.expected_commit,
         "app_sha256": args.app_sha256, "app_release_source": release_source,
@@ -359,7 +368,8 @@ def package(args):
         defs.append("#define LifecycleTest")
     else:
         defs.append(f'#define WebViewProbeSha256 "{webview_probe_hash}"')
-        defs.append(f'#define PolicyToolSha256 "{policy_tool_hash}"')
+        defs.append(f'#define PolicyToolSha256 "{setup_tool_hashes[POLICY_TOOL]}"')
+        defs.append(f'#define LegacyStartupToolSha256 "{setup_tool_hashes[LEGACY_STARTUP_TOOL]}"')
     if "pawnio" in packages:
         defs.append("#define IncludePawnIO")
     if runtime_floor is not None:

@@ -59,7 +59,6 @@ const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
   ProductKey = 'Software\Prismestra\Installer\{#InstallerAppId}';
   VcKey = 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64';
-  ProtectedModules = '$env:PSModulePath = $PSHOME + ''\Modules''; ';
 
 var
   RebootRequired: Boolean;
@@ -67,11 +66,6 @@ var
 #ifndef LifecycleTest
   WebViewProbeExtracted: Boolean;
 #endif
-
-function PowerShell: String;
-begin
-  Result := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
-end;
 
 function InstallPath: String;
 begin
@@ -81,12 +75,6 @@ end;
 function FixedInstallPath: Boolean;
 begin
   Result := CompareText(InstallPath, ExpandConstant('{autopf}\{#ProductDirectory}')) = 0;
-end;
-
-function PSQuote(Value: String): String;
-begin
-  StringChangeEx(Value, '''', '''''', True);
-  Result := '''' + Value + '''';
 end;
 
 #include "guard-native.iss"
@@ -319,13 +307,14 @@ end;
 
 function LegacyStartup(const Action, SID: String): Boolean;
 var
+  Tool: String;
   Code: Integer;
 begin
-  Result := GuardInstall('Check') and ExecAndLogOutput(PowerShell,
-    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + ProtectedModules +
-    '& ' + PSQuote(InstallPath + '\retire-legacy-startup.ps1') +
-    ' -OriginalSid ' + PSQuote(SID) + ' -Action ' + PSQuote(Action) + '; exit $LASTEXITCODE"',
-    ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code, nil) and (Code = 0);
+  Tool := InstallPath + '\Prismestra-Legacy-Startup.exe';
+  Result := ValidSID(SID) and GuardInstall('Check') and FileExists(Tool) and
+    (GetSHA256OfFile(Tool) = '{#LegacyStartupToolSha256}') and
+    ExecAndLogOutput(Tool, Action + ' ' + SID, ExpandConstant('{sys}'), SW_HIDE,
+      ewWaitUntilTerminated, Code, nil) and (Code = 0);
 end;
 
 procedure RetireLegacyStartup;
