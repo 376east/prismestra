@@ -200,9 +200,7 @@ impl Runtime {
             }
         };
         self.reuse_unchanged_native_outputs(previous, local, &document, &mut outputs, true);
-        let revision = self.request_outputs_for(document, outputs)?;
-        self.pending.as_mut().unwrap().startup_managed_ids = Some(ids);
-        Ok(revision)
+        self.request_output_plan(document, outputs, Some(ids))
     }
 
     fn record_openrgb_policies(
@@ -264,11 +262,13 @@ impl Runtime {
             }
             if self.device_unchanged(document, id)
                 && previous.devices.get(id) == Some(binding)
-                && self.host.status(id).is_some_and(|snapshot| {
-                    use crate::runtime::output::Phase;
-                    snapshot.phase == Phase::Ready
-                        || (startup && snapshot.phase == Phase::Connecting)
-                })
+                && {
+                    let phase = self.host.status(id).map(|snapshot| snapshot.phase);
+                    phase == Some(Phase::Ready)
+                        || (startup
+                            && (phase == Some(Phase::Connecting)
+                                || self.can_keep_rgb_failure(id, phase)))
+                }
                 && let Some(spec) = self.rgb_specs.get(id).filter(|spec| spec.keys == *keys)
                 && (!matches!(binding, Binding::OpenRgb { .. })
                     || self.openrgb_policies.matches(&spec.factory, factory))
