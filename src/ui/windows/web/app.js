@@ -712,7 +712,7 @@ document.addEventListener('click',event=>{
   b.disabled=true;
   $('#alice-choice').hidden=true;
   aliceTicket=undefined;
-  aliceRequest('sign_in',{client:$('#alice-client').value.trim()});
+  aliceRequest('sign_in');
   break;
  case 'alice-apply':{
   const ticket=aliceTicket;

@@ -18,6 +18,8 @@ use std::{
 const HOST: &str = "127.0.0.1:45183";
 const CALLBACK: &str = "/alice/callback";
 const REDIRECT: &str = "http://127.0.0.1:45183/alice/callback";
+// Public identifier of the Prismestra Desktop Pilot registration in Yandex OAuth.
+const CLIENT_ID: &str = "8ac66ba305434d54a6a27cf357cc4d92";
 const SCOPES: &str = "iot:view iot:control";
 const RANGE: &str = "devices.capabilities.range";
 const ON: &str = "devices.capabilities.on_off";
@@ -26,9 +28,7 @@ const ON: &str = "devices.capabilities.on_off";
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Action {
     Status,
-    SignIn {
-        client: String,
-    },
+    SignIn,
     Apply {
         ticket: String,
         lamp: usize,
@@ -80,12 +80,12 @@ impl Session {
                 self.grant = None;
                 self.message.clear();
             }
-            Action::SignIn { client } => {
+            Action::SignIn => {
                 if self.job.is_some() {
                     return Err("Дождитесь завершения операции Алисы.".into());
                 }
                 self.grant = None;
-                let attempt = Attempt::new(client.trim())?;
+                let attempt = Attempt::new()?;
                 let listener =
                     TcpListener::bind(HOST).map_err(|_| "Порт входа Алисы 45183 занят.")?;
                 listener
@@ -238,18 +238,13 @@ fn encode(value: &str) -> String {
 }
 
 struct Attempt {
-    client: String,
     state: String,
     verifier: String,
 }
 
 impl Attempt {
-    fn new(client: &str) -> Result<Self, String> {
-        if client.len() != 32 || !client.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err("Введите Client ID приложения Яндекс OAuth.".into());
-        }
+    fn new() -> Result<Self, String> {
         Ok(Self {
-            client: client.into(),
             state: nonce()?,
             verifier: nonce()?,
         })
@@ -259,7 +254,7 @@ impl Attempt {
         let challenge = base64url(&Sha256::digest(self.verifier.as_bytes()));
         format!(
             "https://oauth.yandex.ru/authorize?response_type=code&client_id={}&redirect_uri={}&state={}&scope={}&force_confirm=yes&code_challenge={challenge}&code_challenge_method=S256",
-            self.client,
+            CLIENT_ID,
             encode(REDIRECT),
             self.state,
             encode(SCOPES)
@@ -287,7 +282,7 @@ impl Attempt {
     fn exchange(&self, code: &str, cancel: &AtomicBool) -> Result<Grant, String> {
         let body = format!(
             "grant_type=authorization_code&client_id={}&code={}&code_verifier={}&redirect_uri={}",
-            self.client,
+            CLIENT_ID,
             encode(code),
             self.verifier,
             encode(REDIRECT)
@@ -640,7 +635,6 @@ mod tests {
     #[test]
     fn callback_requires_exact_path_and_one_state_and_code() {
         let attempt = Attempt {
-            client: "a".repeat(32),
             state: "token".into(),
             verifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk".into(),
         };
@@ -649,7 +643,9 @@ mod tests {
                 .url()
                 .contains("code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
         );
-        assert!(attempt.url().contains("scope=iot%3Aview%20iot%3Acontrol"));
+        let url = attempt.url();
+        assert!(url.contains(&format!("&client_id={CLIENT_ID}&")));
+        assert!(url.contains("scope=iot%3Aview%20iot%3Acontrol"));
         assert!(parse_callback("/not-callback?state=token&code=ok", "token").is_none());
         assert!(parse_callback("/alice/callback?state=token&state=bad&code=ok", "token").is_none());
         assert!(
