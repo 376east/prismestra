@@ -124,6 +124,11 @@ impl Worker {
     }
 
     pub(crate) fn poll_inventory(&mut self) -> Option<Discovery> {
+        // The next inventory must be applied to the map that is being prepared.
+        // Leave it in the scan until the caller has collected the current plan.
+        if self.task.is_some() {
+            return None;
+        }
         let scan = self.scan.as_mut()?;
         let result = scan.poll();
         if scan.probes.is_empty() {
@@ -1318,6 +1323,80 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         inventory.expect("fixture scan produced no inventory")
+    }
+
+    #[test]
+    fn progressive_inventory_waits_for_the_map_already_being_built() {
+        let (document, local) = empty();
+        let initial = Discovery {
+            ble_pixels: vec![(0x1122_3344_5501, 3)],
+            ..Default::default()
+        };
+        let first = assemble(document, local, endpoint(), initial.clone(), || {
+            panic!("the BLE fixture must not create LCD media")
+        })
+        .unwrap();
+        let first_device = first.document.lighting.setup.devices[0].clone();
+        let (release, hold) = std::sync::mpsc::channel();
+        let task = Task {
+            cancel: Cancellation::default(),
+            thread: thread::spawn(move || {
+                hold.recv().map_err(|error| error.to_string())?;
+                Ok(first)
+            }),
+        };
+        let mut scan = Scan {
+            cancel: Cancellation::default(),
+            probes: Vec::new(),
+            inventory: initial,
+            updated: false,
+            progressive: true,
+        };
+        scan.spawn("OpenRGB", || {
+            Ok(Discovery {
+                controllers: vec![controller("Keyboard")],
+                ..Default::default()
+            })
+        });
+        let until = Instant::now() + Duration::from_secs(5);
+        while !scan.probes[0].1.is_finished() {
+            assert!(Instant::now() < until, "late probe did not finish");
+            thread::sleep(Duration::from_millis(5));
+        }
+        let mut worker = Worker {
+            scan: Some(scan),
+            task: Some(task),
+        };
+        assert!(worker.poll().is_none());
+        assert!(
+            worker.poll_inventory().is_none(),
+            "worker delivered a new inventory while its first map was pending"
+        );
+
+        release.send(()).unwrap();
+        let first = loop {
+            if let Some(first) = worker.poll() {
+                break first.unwrap();
+            }
+            assert!(Instant::now() < until, "first map did not finish");
+            thread::sleep(Duration::from_millis(5));
+        };
+        let inventory = worker.poll_inventory().expect("late inventory was lost");
+        let complete = assemble(first.document, first.local, endpoint(), inventory, || {
+            panic!("the BLE/OpenRGB fixture must not create LCD media")
+        })
+        .unwrap();
+        assert_eq!(complete.document.lighting.setup.devices.len(), 2);
+        assert!(
+            complete
+                .document
+                .lighting
+                .setup
+                .devices
+                .contains(&first_device)
+        );
+        assert!(worker.is_idle());
+        assert!(worker.poll_inventory().is_none());
     }
 
     #[test]
