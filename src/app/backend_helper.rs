@@ -262,15 +262,18 @@ impl Proxy {
         let worker = thread::Builder::new()
             .name("backend-helper-client".into())
             .spawn(move || {
-                let _client_lock = client_lock;
                 proxy_loop(
                     &directory,
                     &status_dir,
                     &task_name,
                     &request,
                     &output,
-                    &cancel,
-                    &restart,
+                    &ProxyControl {
+                        client_lock: Arc::new(client_lock),
+                        stop: cancel,
+                        restarting: restart,
+                    },
+                    launch_task,
                 );
             })
             .map_err(|e| e.to_string())?;
@@ -311,21 +314,31 @@ impl Drop for Proxy {
     }
 }
 
+struct ProxyControl {
+    client_lock: Arc<File>,
+    stop: Arc<AtomicBool>,
+    restarting: Arc<AtomicBool>,
+}
+
 fn proxy_loop(
     directory: &Path,
     status_dir: &Path,
     task_name: &str,
     request: &Request,
     output: &Mutex<Snapshot>,
-    stop: &AtomicBool,
-    restarting: &AtomicBool,
+    control: &ProxyControl,
+    launcher: impl Fn(&str, &AtomicBool) -> Result<(), String> + Clone + Send + 'static,
 ) {
+    let stop = &control.stop;
+    let restarting = &control.restarting;
     let mut attempts = VecDeque::new();
     let mut next_attempt = Instant::now();
     let mut generation = 0u64;
     let mut previous = None;
     let mut failure_detail = String::new();
     let mut heartbeat = Instant::now();
+    let mut launch: Option<thread::JoinHandle<Result<(), String>>> = None;
+    let mut report_launch_result = false;
     while !stop.load(Ordering::SeqCst) {
         if heartbeat.elapsed() >= Duration::from_millis(600) {
             match refresh_heartbeat(directory, request, restarting.load(Ordering::SeqCst)) {
@@ -343,6 +356,16 @@ fn proxy_loop(
                 Heartbeat::Published => {}
             }
             heartbeat = Instant::now();
+        }
+        if launch.as_ref().is_some_and(|worker| worker.is_finished()) {
+            let result = launch
+                .take()
+                .unwrap()
+                .join()
+                .unwrap_or_else(|_| Err("Backend helper launch worker panicked".into()));
+            if report_launch_result {
+                failure_detail = result.err().unwrap_or_default();
+            }
         }
         let status_path = status_dir.join("helper-status.json");
         let installed = status_dir != directory;
@@ -367,6 +390,7 @@ fn proxy_loop(
         };
         if let Some(status) = status {
             failure_detail.clear();
+            report_launch_result = false;
             let key = (
                 status.helper.created,
                 status.helper.pid,
@@ -383,7 +407,10 @@ fn proxy_loop(
                 backend_pid: status.backend_pid,
                 timestamp_ms: status.timestamp_ms,
             };
-        } else if restarting.load(Ordering::SeqCst) && Instant::now() >= next_attempt {
+        } else if launch.is_none()
+            && restarting.load(Ordering::SeqCst)
+            && Instant::now() >= next_attempt
+        {
             let now = Instant::now();
             while attempts
                 .front()
@@ -393,7 +420,29 @@ fn proxy_loop(
             }
             if attempts.len() < 6 {
                 attempts.push_back(now);
-                failure_detail = launch_task(task_name, stop).err().unwrap_or_default();
+                let task_name = task_name.to_owned();
+                let lock = control.client_lock.clone();
+                let cancelled = stop.clone();
+                let may_restart = restarting.clone();
+                let launcher = launcher.clone();
+                failure_detail.clear();
+                match thread::Builder::new()
+                    .name("backend-helper-launch".into())
+                    .spawn(move || {
+                        // Retain the client lease until any in-flight call finishes.
+                        // A new proxy must not race a delayed request from this one.
+                        let _lock = lock;
+                        if cancelled.load(Ordering::SeqCst) || !may_restart.load(Ordering::SeqCst) {
+                            return Ok(());
+                        }
+                        launcher(&task_name, &cancelled)
+                    }) {
+                    Ok(worker) => {
+                        launch = Some(worker);
+                        report_launch_result = true;
+                    }
+                    Err(error) => failure_detail = error.to_string(),
+                }
                 next_attempt = now + Duration::from_secs((1u64 << attempts.len().min(5)).max(3));
             } else {
                 failure_detail =
@@ -407,6 +456,7 @@ fn proxy_loop(
         *output.lock().unwrap_or_else(|p| p.into_inner()) = snapshot;
         thread::sleep(POLL);
     }
+    stop.store(true, Ordering::SeqCst);
     let mut snapshot = output.lock().unwrap_or_else(|p| p.into_inner());
     snapshot.ready = false;
     snapshot.detail = "Backend helper client ownership ended".into();
@@ -1215,6 +1265,9 @@ fn launch_task(name: &str, stop: &AtomicBool) -> Result<(), String> {
     use std::os::windows::ffi::OsStringExt;
     let executable =
         PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])).join("schtasks.exe");
+    if stop.load(Ordering::SeqCst) {
+        return Err("Authorized backend task launch cancelled".into());
+    }
     let mut child = Command::new(executable)
         .args(["/Run", "/TN", name])
         .creation_flags(0x0800_0000)
@@ -2104,6 +2157,84 @@ mod tests {
         let _ = fs::remove_file(directory.join("backend-events.json"));
         fs::remove_dir(directory).unwrap();
     }
+    #[cfg(windows)]
+    #[test]
+    fn proxy_renews_heartbeat_while_one_task_launch_is_blocked() {
+        use std::sync::mpsc;
+
+        let (directory, request, _) = sharing_fixture("blocked-task-launch");
+        let control = ProxyControl {
+            client_lock: Arc::new(client_lock(&directory).unwrap()),
+            stop: Arc::new(AtomicBool::new(false)),
+            restarting: Arc::new(AtomicBool::new(true)),
+        };
+        let snapshot = Mutex::new(Snapshot::default());
+        let attempts = Arc::new(AtomicU64::new(0));
+        let (launch_started, started) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        let blocked = Arc::new(Mutex::new(blocked));
+        let poll_until = |predicate: &dyn Fn() -> bool| {
+            let until = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < until {
+                if predicate() {
+                    return true;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            false
+        };
+        let renewed = thread::scope(|scope| {
+            scope.spawn(|| {
+                let attempts = attempts.clone();
+                proxy_loop(
+                    &directory,
+                    &directory,
+                    "fixture",
+                    &request,
+                    &snapshot,
+                    &control,
+                    move |_, _| {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        let _ = launch_started.send(());
+                        let _ = blocked
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(10));
+                        Ok(())
+                    },
+                );
+            });
+            let running = started.recv_timeout(Duration::from_secs(2)).is_ok();
+            let renewed = running
+                && poll_until(&|| {
+                    read_json::<Request>(&directory.join("owner-request.json"))
+                        .is_ok_and(|owner| owner.timestamp_ms > request.timestamp_ms)
+                });
+            if renewed {
+                // Reach the first retry deadline while the first call is still held.
+                thread::sleep(Duration::from_millis(3_200));
+            } else {
+                let _ = release.send(());
+            }
+            control.stop.store(true, Ordering::SeqCst);
+            renewed
+        });
+        drop(control);
+        if renewed {
+            assert!(client_lock(&directory).is_err());
+            release.send(()).unwrap();
+        }
+        assert!(poll_until(&|| client_lock(&directory).is_ok()));
+        fs::remove_file(directory.join("owner-request.json")).unwrap();
+        fs::remove_file(directory.join("backend-client.lock")).unwrap();
+        fs::remove_dir(directory).unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(
+            renewed,
+            "a blocked scheduler launch prevented heartbeat publication"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn task_guard_keeps_status_updates_free_and_rechecks_after_listener_lookup() {
