@@ -32,6 +32,20 @@ use std::{
     time::{Duration, Instant},
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(windows)]
+#[test]
+fn lighting_resume_does_not_wait_for_a_stalled_audio_worker() {
+    let stand = Stand::new();
+    let mut runtime = stand.runtime(false);
+    let (audio, release) = sound::Input::held_for_test();
+    runtime.sound = audio;
+    runtime.stop_channels();
+    assert!(runtime.sound.has_worker());
+    assert!(runtime.resume_owners_drained());
+    release.send(()).unwrap();
+}
+
 fn gpu_binding() -> crate::sensors::nvidia::PciIdentity {
     crate::sensors::nvidia::PciIdentity {
         device_id: 0x2684_10de,

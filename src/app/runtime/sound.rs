@@ -11,6 +11,18 @@ pub(super) struct Input {
 }
 
 impl Input {
+    #[cfg(test)]
+    pub(super) fn held_for_test() -> (Self, std::sync::mpsc::Sender<()>) {
+        let (worker, release) = Loopback::held_for_test();
+        (
+            Self {
+                worker: Some(worker),
+                ..Self::default()
+            },
+            release,
+        )
+    }
+
     pub(super) fn has_worker(&self) -> bool {
         self.worker.is_some()
     }

@@ -43,6 +43,24 @@ pub(crate) struct Loopback {
 }
 
 impl Loopback {
+    #[cfg(test)]
+    pub(crate) fn held_for_test() -> (Self, mpsc::Sender<()>) {
+        let (stop, cancelled) = mpsc::sync_channel(1);
+        let (release, held) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _ = held.recv_timeout(Duration::from_secs(2));
+            drop(cancelled);
+        });
+        (
+            Self {
+                state: Arc::new(Mutex::new(State::default())),
+                stop,
+                worker,
+            },
+            release,
+        )
+    }
+
     pub(crate) fn start() -> Result<Self, String> {
         let state = Arc::new(Mutex::new(State::default()));
         let worker_state = Arc::clone(&state);
