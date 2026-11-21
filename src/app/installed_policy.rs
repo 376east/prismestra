@@ -4,45 +4,33 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ffi::{OsString, c_void},
+    ffi::OsString,
     fs::{self, File},
     io::{self, Read},
-    mem::{size_of, zeroed},
+    mem::size_of,
     net::{Ipv4Addr, SocketAddr},
-    os::windows::ffi::{OsStrExt, OsStringExt},
-    path::{Component, Path, PathBuf, Prefix},
+    os::windows::ffi::OsStringExt,
+    path::{Path, PathBuf},
     ptr::{addr_of, null, null_mut},
 };
 use windows_sys::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, GENERIC_ALL,
-            GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LUID, LocalFree, WAIT_TIMEOUT,
+            ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE, LUID,
+            WAIT_TIMEOUT,
         },
         Security::{
-            ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
-            Authorization::{ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT},
-            CheckTokenMembership, CreateWellKnownSid, DACL_SECURITY_INFORMATION, DuplicateTokenEx,
-            GetAce, GetTokenInformation, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION,
-            PSECURITY_DESCRIPTOR, PSID, RevertToSelf, SECURITY_MAX_SID_SIZE, SecurityImpersonation,
-            SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_DUPLICATE, TOKEN_ELEVATION,
-            TOKEN_IMPERSONATE, TOKEN_INFORMATION_CLASS, TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL,
-            TOKEN_OWNER, TOKEN_QUERY, TOKEN_STATISTICS, TOKEN_USER, TokenElevation,
-            TokenElevationType, TokenElevationTypeFull, TokenElevationTypeLimited,
-            TokenImpersonation, TokenIntegrityLevel, TokenLinkedToken, TokenOwner, TokenPrimary,
-            TokenSessionId, TokenStatistics, TokenUser, WinBuiltinAdministratorsSid,
-            WinInteractiveSid,
+            CheckTokenMembership, CreateWellKnownSid, DuplicateTokenEx, GetTokenInformation,
+            RevertToSelf, SECURITY_MAX_SID_SIZE, SecurityImpersonation, SetTokenInformation,
+            TOKEN_ADJUST_DEFAULT, TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_IMPERSONATE,
+            TOKEN_INFORMATION_CLASS, TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_OWNER,
+            TOKEN_QUERY, TOKEN_STATISTICS, TOKEN_USER, TokenElevation, TokenElevationType,
+            TokenElevationTypeFull, TokenElevationTypeLimited, TokenImpersonation,
+            TokenIntegrityLevel, TokenLinkedToken, TokenOwner, TokenPrimary, TokenSessionId,
+            TokenStatistics, TokenUser, WinBuiltinAdministratorsSid, WinInteractiveSid,
         },
-        Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_APPEND_DATA,
-            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD,
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
-            FILE_WRITE_DATA, FILE_WRITE_EA, GetDriveTypeW, GetFileInformationByHandle,
-            OPEN_EXISTING, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
-        },
+        Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT,
         System::{
-            Com::CoTaskMemFree,
             Diagnostics::ToolHelp::{
                 CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
                 TH32CS_SNAPPROCESS,
@@ -57,12 +45,19 @@ use windows_sys::{
                 SetThreadToken, WaitForSingleObject,
             },
         },
-        UI::Shell::{
-            FOLDERID_LocalAppData, FOLDERID_ProgramData, FOLDERID_ProgramFiles,
-            KF_FLAG_DONT_VERIFY, SHGetKnownFolderPath,
-        },
+        UI::Shell::{FOLDERID_LocalAppData, FOLDERID_ProgramData, FOLDERID_ProgramFiles},
     },
-    core::{GUID, w},
+    core::w,
+};
+
+#[path = "windows_protected_path.rs"]
+mod windows_protected_path;
+
+#[cfg(test)]
+use windows_protected_path::{ADMINISTRATORS, SYSTEM, TRUSTED_INSTALLER, privileged_sid};
+use windows_protected_path::{
+    Handle, checked_disk_path, error, known_folder, known_folder_for, protected_chain,
+    protected_entry, sid_string,
 };
 
 const POLICY_LIMIT: usize = 128 * 1024;
@@ -70,10 +65,6 @@ const MAX_FILES: usize = 1024;
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const RUNTIME: &str = "components/openrgb/runtime";
 const BACKEND: &str = "OpenRGB.exe";
-const ADMINISTRATORS: &str = "S-1-5-32-544";
-const SYSTEM: &str = "S-1-5-18";
-const TRUSTED_INSTALLER: &str = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PolicyFile {
@@ -500,10 +491,6 @@ fn canonical_user_state_path(path: &Path) -> Result<PathBuf, String> {
     fs::canonicalize(path).map_err(error)
 }
 
-fn error(e: impl std::fmt::Display) -> String {
-    format!("Installed backend authority: {e}")
-}
-
 fn authority_stage(stage: &str, error: String) -> String {
     format!(
         "Installed backend authority ({stage}): {}",
@@ -513,208 +500,11 @@ fn authority_stage(stage: &str, error: String) -> String {
     )
 }
 
-fn known_folder(id: &GUID) -> Result<PathBuf, String> {
-    known_folder_for(id, null_mut())
-}
-
-fn known_folder_for(id: &GUID, token: HANDLE) -> Result<PathBuf, String> {
-    let mut raw = null_mut();
-    let result = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY as u32, token, &mut raw) };
-    if result < 0 || raw.is_null() {
-        if !raw.is_null() {
-            unsafe { CoTaskMemFree(raw.cast()) };
-        }
-        return Err(error(format!(
-            "Windows Known Folder lookup failed: {result:#x}"
-        )));
-    }
-    let path = unsafe { from_wide(raw) };
-    unsafe { CoTaskMemFree(raw.cast()) };
-    checked_disk_path(Path::new(&path))
-}
-
-unsafe fn from_wide(wide: *const u16) -> OsString {
-    let mut len = 0;
-    while unsafe { *wide.add(len) } != 0 {
-        len += 1;
-    }
-    OsString::from_wide(unsafe { std::slice::from_raw_parts(wide, len) })
-}
-
-fn checked_disk_path(path: &Path) -> Result<PathBuf, String> {
-    let mut components = path.components();
-    let Some(Component::Prefix(prefix)) = components.next() else {
-        return Err(error("expected a local disk path"));
-    };
-    let (Prefix::Disk(letter) | Prefix::VerbatimDisk(letter)) = prefix.kind() else {
-        return Err(error("network and device paths are forbidden"));
-    };
-    let Some(Component::RootDir) = components.next() else {
-        return Err(error("expected an absolute local disk path"));
-    };
-    let drive = [u16::from(letter), b':' as u16, b'\\' as u16, 0];
-    if unsafe { GetDriveTypeW(drive.as_ptr()) } != 3 {
-        return Err(error("expected a fixed local disk"));
-    }
-    let mut result = PathBuf::from(OsString::from_wide(&drive[..3]));
-    for part in components {
-        let Component::Normal(part) = part else {
-            return Err(error("expected a normalized local disk path"));
-        };
-        let wide: Vec<_> = part.encode_wide().collect();
-        if wide.iter().any(|b| matches!(*b, 0 | 58))
-            || wide.last().is_some_and(|b| matches!(*b, 32 | 46))
-        {
-            return Err(error("filesystem aliases and streams are forbidden"));
-        }
-        result.push(part);
-    }
-    Ok(result)
-}
-
-fn protected_chain(path: &Path, system_root: &Path, optional: bool) -> Result<bool, String> {
-    let path = checked_disk_path(path)?;
-    let ancestors: Vec<_> = path.ancestors().collect();
-    for ancestor in ancestors.into_iter().rev() {
-        if optional {
-            match fs::symlink_metadata(ancestor) {
-                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-                Err(e) => return Err(error(e)),
-                Ok(_) => {}
-            }
-        }
-        let system_path = system_root.starts_with(ancestor);
-        let shared_data = ancestor == system_root
-            && system_root
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("ProgramData"));
-        let exception = if shared_data {
-            FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES
-        } else if ancestor.parent().is_none() {
-            FILE_APPEND_DATA // Windows volume root permits creation of unrelated directories.
-        } else {
-            0
-        };
-        let directory = protected_entry(ancestor, system_path, exception)?;
-        if !directory && ancestor != path {
-            return Err(error("protected path ancestor is not a directory"));
-        }
-        // A stock ProgramData grants Users 0x116 on the directory itself.
-        // Its protected Microsoft child keeps it nonempty, which forbids
-        // assigning a reparse point. Neither path grants DELETE/DELETE_CHILD.
-        if shared_data && !protected_entry(&ancestor.join("Microsoft"), true, 0)? {
-            return Err(error("expected a protected Windows ProgramData anchor"));
-        }
-    }
-    Ok(true)
-}
-
-fn protected_entry(path: &Path, system_path: bool, exception: u32) -> Result<bool, String> {
-    let wide: Vec<_> = path.as_os_str().encode_wide().chain([0]).collect();
-    let file = unsafe {
-        CreateFileW(
-            wide.as_ptr(),
-            READ_CONTROL | FILE_READ_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            null(),
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            null_mut(),
-        )
-    };
-    if file == INVALID_HANDLE_VALUE {
-        return Err(error(format!(
-            "{}: {}",
-            path.display(),
-            io::Error::last_os_error()
-        )));
-    }
-    let file = Handle(file);
-    let mut attributes: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
-    if unsafe { GetFileInformationByHandle(file.0, &mut attributes) } == 0
-        || attributes.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    {
-        return Err(error(format!("invalid protected path: {}", path.display())));
-    }
-    let mut owner: PSID = null_mut();
-    let mut dacl: *mut ACL = null_mut();
-    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
-    let result = unsafe {
-        GetSecurityInfo(
-            file.0,
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &mut owner,
-            null_mut(),
-            &mut dacl,
-            null_mut(),
-            &mut descriptor,
-        )
-    };
-    let _descriptor = LocalAllocation(descriptor.cast());
-    if result != 0 || owner.is_null() || dacl.is_null() {
-        return Err(error(format!(
-            "missing protected ACL on {}",
-            path.display()
-        )));
-    }
-    if !privileged_sid(&sid_string(owner)?, system_path) {
-        return Err(error(format!("untrusted owner of {}", path.display())));
-    }
-    let dangerous = (DELETE
-        | WRITE_DAC
-        | WRITE_OWNER
-        | FILE_DELETE_CHILD
-        | FILE_WRITE_ATTRIBUTES
-        | FILE_WRITE_EA
-        | FILE_WRITE_DATA
-        | FILE_APPEND_DATA
-        | GENERIC_WRITE
-        | GENERIC_ALL)
-        & !exception;
-    for index in 0..u32::from(unsafe { (*dacl).AceCount }) {
-        let mut ace: *mut c_void = null_mut();
-        if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
-            return Err(error("unable to read protected ACL entry"));
-        }
-        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
-        // System ancestors may have inheritance-only entries. Their descendants
-        // are checked individually, including inheritance on private directories.
-        if system_path && u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0 {
-            continue;
-        }
-        match header.AceType {
-            1 => {} // ACCESS_DENIED_ACE_TYPE
-            0 if usize::from(header.AceSize) >= size_of::<ACCESS_ALLOWED_ACE>() => {
-                let ace = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
-                let sid = addr_of!(ace.SidStart).cast_mut().cast();
-                if ace.Mask & dangerous != 0 && !privileged_sid(&sid_string(sid)?, system_path) {
-                    return Err(error(format!(
-                        "unprivileged write grants on {}",
-                        path.display()
-                    )));
-                }
-            }
-            _ => {
-                return Err(error(format!(
-                    "unsupported ACL entry on {}",
-                    path.display()
-                )));
-            }
-        }
-    }
-    Ok(attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0)
-}
-
 pub(super) fn verify_status(path: &Path) -> Result<(), String> {
     if protected_entry(path, false, 0)? {
         return Err(error("expected an installed helper status file"));
     }
     Ok(())
-}
-
-fn privileged_sid(sid: &str, system_path: bool) -> bool {
-    sid == ADMINISTRATORS || sid == SYSTEM || (system_path && sid == TRUSTED_INSTALLER)
 }
 
 fn visit_tree(
@@ -800,22 +590,6 @@ pub(super) fn windows_dirs() -> Result<(PathBuf, PathBuf), String> {
         directory(GetSystemWindowsDirectoryW)?,
         directory(GetSystemDirectoryW)?,
     ))
-}
-
-struct Handle(HANDLE);
-impl Drop for Handle {
-    fn drop(&mut self) {
-        unsafe { CloseHandle(self.0) };
-    }
-}
-
-struct LocalAllocation(*mut c_void);
-impl Drop for LocalAllocation {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe { LocalFree(self.0) };
-        }
-    }
 }
 
 fn process_token(process: HANDLE, access: u32) -> Result<Handle, String> {
@@ -958,17 +732,6 @@ fn token_value<T: Copy>(token: &Handle, class: TOKEN_INFORMATION_CLASS) -> Resul
         return Err(error("unexpected Windows token information size"));
     }
     Ok(unsafe { value.assume_init() })
-}
-
-fn sid_string(sid: PSID) -> Result<String, String> {
-    let mut text = null_mut();
-    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 || text.is_null() {
-        return Err(error(io::Error::last_os_error()));
-    }
-    let _text = LocalAllocation(text.cast());
-    unsafe { from_wide(text) }
-        .into_string()
-        .map_err(|_| error("invalid SID"))
 }
 
 fn token_sid(token: &Handle) -> Result<String, String> {

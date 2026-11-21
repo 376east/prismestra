@@ -64,6 +64,22 @@ jobs:
         run: python scripts/test_package_release.py
       - name: Check installer packaging boundaries
         run: python scripts/test_package_installer.py
+      - name: Test native installer policy checks
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo fmt --manifest-path scripts/installer/policy-tool/Cargo.toml -- --check
+          cargo test --locked --manifest-path scripts/installer/policy-tool/Cargo.toml --target x86_64-pc-windows-msvc
+          cargo clippy --locked --manifest-path scripts/installer/policy-tool/Cargo.toml --target x86_64-pc-windows-msvc --all-targets -- -D warnings
+      - name: Exercise native policy provisioning on the disposable runner
+        if: >-
+          github.repository_id == '1450402221' && github.event_name == 'workflow_dispatch' &&
+          inputs.validation == 'setup' && runner.environment == 'github-hosted'
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          $env:PRISMESTRA_POLICY_FIXTURE_SID = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          cargo test --locked --manifest-path scripts/installer/policy-tool/Cargo.toml --target x86_64-pc-windows-msvc -- --ignored hosted_provisioning_fixture
       - name: Check legacy startup retirement without system changes
         run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/installer/test_legacy_startup.ps1
       - name: Check portable launchers without hardware
