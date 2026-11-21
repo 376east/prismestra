@@ -2,14 +2,25 @@ name: CI
 
 on:
   push:
+    branches: [master]
   pull_request:
   workflow_dispatch:
     inputs:
+      validation:
+        description: Run the full software suite or also build and test Setup
+        required: true
+        default: software
+        type: choice
+        options: [software, setup]
       installer_version:
         description: Four-part Windows installer version for a candidate build
         required: true
         default: '0.1.0.8'
         type: string
+      publish_release:
+        description: Publish the tested Setup when running on an annotated release tag
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -19,8 +30,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  quick:
+    name: Quick checks
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check formatting
+        run: cargo +stable fmt --all -- --check
+      - name: Check embedded editor commands
+        run: |
+          node --check src/ui/windows/web/app.js
+          node tests/native_ui_ipc.cjs
+
   software:
-    name: Rust software checks
+    name: Full software checks
+    if: github.event_name == 'workflow_dispatch'
+    needs: quick
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -32,8 +60,6 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           rustup default stable
-      - name: Check formatting
-        run: cargo fmt --all -- --check
       - name: Check release packaging boundaries
         run: python scripts/test_package_release.py
       - name: Check installer packaging boundaries
@@ -66,10 +92,6 @@ jobs:
         run: python scripts/components/test_verify_openrgb_component.py
       - name: Check component packaging without executing binaries
         run: python scripts/components/test_package_openrgb_component.py
-      - name: Check embedded editor commands
-        run: |
-          node --check src/ui/windows/web/app.js
-          node tests/native_ui_ipc.cjs
       - name: Test without physical devices
         run: cargo test --locked -- --test-threads=1
       - name: Check Clippy
@@ -79,10 +101,7 @@ jobs:
     name: Build Windows Setup candidate
     if: >-
       github.repository_id == '1450402221' &&
-      (github.event_name == 'workflow_dispatch' ||
-       (github.event_name == 'push' &&
-        (startsWith(github.ref, 'refs/tags/v') ||
-         startsWith(github.ref, 'refs/heads/codex/delivery-ci-'))))
+      github.event_name == 'workflow_dispatch' && inputs.validation == 'setup'
     # VS 2022 keeps linker output within the pinned VC runtime floor.
     runs-on: windows-2022
     timeout-minutes: 65
@@ -231,7 +250,9 @@ jobs:
   candidate:
     name: Retain verified Windows candidate
     needs: [software, package, installer]
-    if: github.ref_type != 'tag'
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.validation == 'setup' &&
+      (!inputs.publish_release || !startsWith(github.ref, 'refs/tags/v'))
     runs-on: windows-2025
     timeout-minutes: 10
     steps:
@@ -260,7 +281,9 @@ jobs:
   publish:
     name: Publish the tested Windows Setup
     needs: [software, package, installer]
-    if: github.repository_id == '1450402221' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      github.repository_id == '1450402221' && github.event_name == 'workflow_dispatch' &&
+      inputs.validation == 'setup' && inputs.publish_release && startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-2025
     timeout-minutes: 15
     permissions:
