@@ -524,7 +524,13 @@ fn refresh_heartbeat_with_clock(
         .filter(|gap| (1..clock::LEASE_MS).contains(gap))
         .map(|_| previous);
     current.restarting = restarting;
-    match write_json(&path, &current) {
+    let result = serde_json::to_vec(&current)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| {
+            crate::storage::atomic_write_heartbeat(&path, &bytes, LIMIT)
+                .map_err(|error| error.to_string())
+        });
+    match result {
         Ok(()) => Heartbeat::Published,
         Err(error) => Heartbeat::Retry(error),
     }
@@ -1888,6 +1894,23 @@ mod tests {
         assert_eq!(current.nonce, request.nonce);
         assert!(!current.restarting);
         assert!(current.timestamp_ms > request.timestamp_ms);
+
+        // A concurrent helper reader uses the full default sharing mode.
+        let mut reader = fs::OpenOptions::new().read(true).open(&path).unwrap();
+        assert!(matches!(
+            refresh_heartbeat(&directory, &request, true),
+            Heartbeat::Published
+        ));
+        let latest = read_json::<Request>(&path).unwrap();
+        assert!(latest.restarting);
+        assert_eq!(latest.nonce, request.nonce);
+        let mut previous_bytes = Vec::new();
+        reader.read_to_end(&mut previous_bytes).unwrap();
+        let previous: Request = serde_json::from_slice(&previous_bytes).unwrap();
+        assert!(!previous.restarting);
+        assert_eq!(previous.timestamp_ms, current.timestamp_ms);
+        drop(reader);
+
         let reader = fs::OpenOptions::new()
             .read(true)
             .share_mode(0)
