@@ -62,6 +62,8 @@ struct Request {
     nonce: String,
     parent: Identity,
     timestamp_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_timestamp_ms: Option<u64>,
     restarting: bool,
 }
 #[derive(Serialize, Deserialize)]
@@ -240,6 +242,7 @@ impl Proxy {
             nonce: nonce.clone(),
             parent,
             timestamp_ms: now_ms()?,
+            previous_timestamp_ms: None,
             restarting: true,
         };
         write_json(&state_dir.join("owner-request.json"), &request)?;
@@ -501,18 +504,25 @@ fn refresh_heartbeat_with_clock(
         Err(_) => return Heartbeat::Lost,
     };
     let path = directory.join("owner-request.json");
-    match read_json_typed::<Request>(&path) {
+    let previous = match read_json_typed::<Request>(&path) {
         Ok(current)
             if current.version == clock::PROTOCOL
                 && current.clock_domain == clock::DOMAIN
                 && current.timestamp_ms <= now
                 && current.nonce == request.nonce
-                && current.parent == request.parent => {}
+                && current.parent == request.parent =>
+        {
+            current.timestamp_ms
+        }
         Ok(_) | Err(ControlRead::Invalid(_)) => return Heartbeat::Lost,
         Err(ControlRead::Io(error)) => return Heartbeat::Retry(error.to_string()),
-    }
+    };
     let mut current = request.clone();
     current.timestamp_ms = now;
+    current.previous_timestamp_ms = now
+        .checked_sub(previous)
+        .filter(|gap| (1..clock::LEASE_MS).contains(gap))
+        .map(|_| previous);
     current.restarting = restarting;
     match write_json(&path, &current) {
         Ok(()) => Heartbeat::Published,
@@ -852,17 +862,17 @@ fn supervise_channels(
             .is_ok()
             .then(|| channels.read::<Cancel>("owner-cancel.json"));
         let now = clock.now_ms()?;
-        // A late poll can observe a heartbeat issued before the cached lease
-        // expired. Without that evidence, never revive an expired lease.
+        // A late poll needs a fresh heartbeat with a timely publication.
+        // The current heartbeat may have already replaced that publication.
         if now >= lease_deadline
-            && (!current.as_ref().is_ok_and(|current| {
-                current.timestamp_ms < lease_deadline
-                    && clock::deadline(current.timestamp_ms, now).is_ok_and(|next| now < next)
-            }) || cancellation.as_ref().is_some_and(|result| match result {
-                Ok(_) => false,
-                Err(ControlRead::Io(error)) => error.kind() != std::io::ErrorKind::NotFound,
-                Err(ControlRead::Invalid(_)) => true,
-            }))
+            && (!current
+                .as_ref()
+                .is_ok_and(|current| covers_lease_deadline(current, lease_deadline, now))
+                || cancellation.as_ref().is_some_and(|result| match result {
+                    Ok(_) => false,
+                    Err(ControlRead::Io(error)) => error.kind() != std::io::ErrorKind::NotFound,
+                    Err(ControlRead::Invalid(_)) => true,
+                }))
         {
             helper_note(
                 output,
@@ -1074,6 +1084,21 @@ fn live_request(request: &Request, now: u64) -> bool {
         && request.clock_domain == clock::DOMAIN
         && clock::fresh(request.timestamp_ms, now, clock::LEASE_MS)
 }
+fn covers_lease_deadline(request: &Request, deadline: u64, now: u64) -> bool {
+    clock::deadline(request.timestamp_ms, now).is_ok_and(|next| now < next)
+        && (request.timestamp_ms < deadline
+            || request.previous_timestamp_ms.is_some_and(|previous| {
+                // Require a bridge from the last observed lease, with no gap
+                // between the two publications large enough to have expired it.
+                previous >= deadline.saturating_sub(clock::LEASE_MS)
+                    && previous < deadline
+                    && request
+                        .timestamp_ms
+                        .checked_sub(previous)
+                        .is_some_and(|gap| (1..clock::LEASE_MS).contains(&gap))
+            }))
+}
+
 fn matches_control(control: &Cancel, request: &Request) -> bool {
     control.version == clock::PROTOCOL
         && control.clock_domain == clock::DOMAIN
@@ -1415,6 +1440,11 @@ mod tests {
 
         for (case, issued_ms, wake_ms, expected_publications) in [
             ("renewed", 14_800, 15_100, 2),
+            ("overwritten renewal", 14_800, 15_650, 2),
+            ("overwritten gap", 15_000, 15_650, 1),
+            ("overwritten cancelled", 14_800, 15_650, 1),
+            ("overwritten cancel locked", 14_800, 15_650, 1),
+            ("overwritten clock gap", 10_400, 15_650, 1),
             ("stale", 10_000, 15_100, 1),
             ("stale successor", 14_800, 19_800, 1),
             ("at deadline", 15_000, 15_100, 1),
@@ -1464,12 +1494,28 @@ mod tests {
                             renewed.parent.created ^= 1;
                         }
                         write_json(&path, &renewed).unwrap();
-                        if matches!(case, "cancelled" | "cancel locked") {
+                        if case.starts_with("overwritten ") {
+                            clock.active_ms.set(15_400);
+                            assert!(matches!(
+                                refresh_heartbeat_with_clock(&directory, &request, true, &clock),
+                                Heartbeat::Published
+                            ));
+                        }
+                        if matches!(
+                            case,
+                            "cancelled"
+                                | "cancel locked"
+                                | "overwritten cancelled"
+                                | "overwritten cancel locked"
+                        ) {
                             cancel(request.nonce.clone());
                         } else if case == "old cancel" {
                             cancel("old-nonce".into());
                         }
-                        if matches!(case, "owner locked" | "cancel locked") {
+                        if matches!(
+                            case,
+                            "owner locked" | "cancel locked" | "overwritten cancel locked"
+                        ) {
                             let locked = if case == "owner locked" {
                                 &path
                             } else {
@@ -1597,6 +1643,7 @@ mod tests {
             nonce: label.into(),
             parent: helper.clone(),
             timestamp_ms: now_ms().unwrap(),
+            previous_timestamp_ms: None,
             restarting: true,
         };
         write_json(&directory.join("owner-request.json"), &request).unwrap();
@@ -1832,6 +1879,7 @@ mod tests {
             nonce: "new-session".into(),
             parent: parent.clone(),
             timestamp_ms: 10_000,
+            previous_timestamp_ms: None,
             restarting: true,
         };
         let status = Status {
@@ -2010,6 +2058,7 @@ mod tests {
             nonce: "cancelled-owner".into(),
             parent: identity(std::process::id()).unwrap(),
             timestamp_ms: now_ms().unwrap(),
+            previous_timestamp_ms: None,
             restarting: true,
         };
         let path = directory.join("owner-request.json");
