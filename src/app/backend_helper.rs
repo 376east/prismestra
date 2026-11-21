@@ -49,8 +49,8 @@ impl TaskConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct Identity {
-    pid: u32,
+pub(super) struct Identity {
+    pub(super) pid: u32,
     created: u64,
     executable: PathBuf,
 }
@@ -591,21 +591,42 @@ fn run_helper_inner(state_dir: &Path, pin: Option<(&Path, &str)>) -> Result<(), 
 /// Task Scheduler action. All paths and the endpoint are resolved by trusted policy.
 #[cfg(windows)]
 pub fn run_installed_helper() -> Result<(), String> {
-    let (policy, authority) = InstalledPolicy::helper()?;
-    let channels = HelperChannels {
-        input: &policy.state,
-        output: &policy.outbox,
-        authority: Some(&authority),
-    };
-    let Some((request, helper)) = helper_owner(&channels)? else {
-        return Ok(());
-    };
-    own_backend(
-        &channels,
-        &request,
-        &helper,
-        Manager::start_installed(&policy)?,
-    )
+    let (policy, candidates) = InstalledPolicy::helper()?;
+    let mut rejected = None;
+    for authority in candidates {
+        let state = match authority.state() {
+            Ok(state) => state,
+            Err(error) => {
+                rejected = Some(error);
+                continue;
+            }
+        };
+        let channels = HelperChannels {
+            input: &state,
+            output: &policy.outbox,
+            authority: Some(&authority),
+        };
+        match helper_owner(&channels) {
+            Ok(None) => return Ok(()),
+            Ok(Some((request, _))) => {
+                authority.set_creator_owner()?;
+                let Some((current, helper)) = helper_owner(&channels)? else {
+                    return Ok(());
+                };
+                if current.parent != request.parent || current.nonce != request.nonce {
+                    return Err("Backend helper owner identity changed before launch".into());
+                }
+                return own_backend(
+                    &channels,
+                    &current,
+                    &helper,
+                    Manager::start_installed(&policy)?,
+                );
+            }
+            Err(error) => rejected = Some(error),
+        }
+    }
+    Err(rejected.unwrap_or_else(|| "Backend helper owner is unavailable".into()))
 }
 
 struct HelperChannels<'a> {
@@ -641,12 +662,32 @@ impl<'a> HelperChannels<'a> {
             .is_ok_and(|value| matches_control(&value, request))
     }
 
+    fn admission_control(&self, name: &str, request: &Request) -> Result<bool, String> {
+        #[cfg(windows)]
+        if self.authority.is_some() {
+            return installed_admission_control(self.read(name), request);
+        }
+        Ok(self.control(name, request))
+    }
+
     fn parent_identity(&self, pid: u32) -> Result<Identity, String> {
         #[cfg(windows)]
         if let Some(authority) = self.authority {
-            return identity_checked(pid, |handle, path| authority.validate_parent(handle, path));
+            return authority.parent_identity(pid);
         }
         identity(pid)
+    }
+}
+
+#[cfg(windows)]
+fn installed_admission_control(
+    result: Result<Cancel, ControlRead>,
+    request: &Request,
+) -> Result<bool, String> {
+    match result {
+        Ok(value) => Ok(matches_control(&value, request)),
+        Err(ControlRead::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(control_error(error)),
     }
 }
 
@@ -662,10 +703,17 @@ fn helper_owner(channels: &HelperChannels<'_>) -> Result<Option<(Request, Identi
         return Err("Backend helper owner identity is invalid".into());
     }
     if !request.restarting
-        || channels.control("owner-pause.json", &request)
-        || channels.control("owner-cancel.json", &request)
+        || channels.admission_control("owner-pause.json", &request)?
+        || channels.admission_control("owner-cancel.json", &request)?
     {
         return Ok(None);
+    }
+    #[cfg(windows)]
+    if let Some(authority) = channels.authority
+        && (authority.parent_identity(request.parent.pid)? != request.parent
+            || !live_request(&request, now_ms()?))
+    {
+        return Err("Backend helper owner identity or lease changed during admission".into());
     }
     Ok(Some((request, helper)))
 }
@@ -1121,21 +1169,9 @@ fn launch_task(_: &str, _: &AtomicBool) -> Result<(), String> {
 
 #[cfg(windows)]
 fn identity(pid: u32) -> Result<Identity, String> {
-    identity_checked(pid, |_, _| Ok(()))
-}
-
-#[cfg(windows)]
-fn identity_checked(
-    pid: u32,
-    validate: impl FnOnce(windows_sys::Win32::Foundation::HANDLE, &Path) -> Result<(), String>,
-) -> Result<Identity, String> {
-    use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, FILETIME, WAIT_TIMEOUT},
-        System::Threading::{
-            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-            QueryFullProcessImageNameW, WaitForSingleObject,
-        },
+        Foundation::CloseHandle,
+        System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE},
     };
     let handle = unsafe {
         OpenProcess(
@@ -1147,40 +1183,57 @@ fn identity_checked(
     if handle.is_null() {
         return Err(std::io::Error::last_os_error().to_string());
     }
-    let result = (|| {
-        if unsafe { WaitForSingleObject(handle, 0) } != WAIT_TIMEOUT {
-            return Err("Backend owner/helper has exited".into());
-        }
-        let mut times = [FILETIME {
-            dwLowDateTime: 0,
-            dwHighDateTime: 0,
-        }; 4];
-        let [created, exited, kernel, user] = &mut times;
-        if unsafe { GetProcessTimes(handle, created, exited, kernel, user) } == 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        let created = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
-        let mut buffer = vec![0u16; 32768];
-        let mut length = buffer.len() as u32;
-        if unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) } == 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        let image = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
-        validate(handle, &image)?;
-        let executable = image.canonicalize().map_err(|e| e.to_string())?;
-        if unsafe { WaitForSingleObject(handle, 0) } != WAIT_TIMEOUT {
-            return Err("Backend owner/helper has exited".into());
-        }
-        Ok(Identity {
-            pid,
-            created,
-            executable,
-        })
-    })();
+    let result = identity_from_handle(handle, pid, |_, _| Ok(()));
     unsafe {
         CloseHandle(handle);
     }
     result
+}
+
+#[cfg(windows)]
+pub(super) fn identity_from_handle(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    pid: u32,
+    validate: impl FnOnce(windows_sys::Win32::Foundation::HANDLE, &Path) -> Result<(), String>,
+) -> Result<Identity, String> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::{
+        Foundation::{FILETIME, WAIT_TIMEOUT},
+        System::Threading::{
+            GetProcessId, GetProcessTimes, QueryFullProcessImageNameW, WaitForSingleObject,
+        },
+    };
+    if pid == 0
+        || unsafe { GetProcessId(handle) } != pid
+        || unsafe { WaitForSingleObject(handle, 0) } != WAIT_TIMEOUT
+    {
+        return Err("Backend owner/helper PID differs or process has exited".into());
+    }
+    let mut times = [FILETIME::default(); 4];
+    let [created, exited, kernel, user] = &mut times;
+    if unsafe { GetProcessTimes(handle, created, exited, kernel, user) } == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let created = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+    if created == 0 {
+        return Err("Backend owner/helper has no creation time".into());
+    }
+    let mut buffer = vec![0u16; 32768];
+    let mut length = buffer.len() as u32;
+    if unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) } == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let image = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
+    validate(handle, &image)?;
+    let executable = image.canonicalize().map_err(|e| e.to_string())?;
+    if unsafe { WaitForSingleObject(handle, 0) } != WAIT_TIMEOUT {
+        return Err("Backend owner/helper has exited".into());
+    }
+    Ok(Identity {
+        pid,
+        created,
+        executable,
+    })
 }
 #[cfg(not(windows))]
 fn identity(_: u32) -> Result<Identity, String> {
@@ -2009,5 +2062,67 @@ mod tests {
             std::env::current_exe().unwrap().canonicalize().unwrap()
         );
         assert!(identity(u32::MAX).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn helper_admission_requires_live_instance_and_unpaused_request() {
+        let (directory, request, _) = sharing_fixture("helper-admission");
+        let path = directory.join("owner-request.json");
+        let channels = HelperChannels::private(&directory);
+        assert!(helper_owner(&channels).unwrap().is_some());
+
+        let mut stale = request.clone();
+        stale.parent.created -= 1;
+        write_json(&path, &stale).unwrap();
+        assert!(helper_owner(&channels).is_err());
+        stale = request.clone();
+        stale.parent.pid = u32::MAX;
+        write_json(&path, &stale).unwrap();
+        assert!(helper_owner(&channels).is_err());
+        stale = request.clone();
+        stale.parent.executable = directory.join("other.exe");
+        write_json(&path, &stale).unwrap();
+        assert!(helper_owner(&channels).is_err());
+        stale = request.clone();
+        stale.timestamp_ms += 60_000;
+        write_json(&path, &stale).unwrap();
+        assert!(helper_owner(&channels).is_err());
+        write_json(&path, &request).unwrap();
+
+        let control = Cancel {
+            version: request.version,
+            clock_domain: request.clock_domain.clone(),
+            nonce: request.nonce.clone(),
+        };
+        assert!(
+            installed_admission_control(
+                Err(ControlRead::Io(std::io::ErrorKind::NotFound.into())),
+                &request
+            )
+            .is_ok_and(|present| !present)
+        );
+        assert!(
+            installed_admission_control(
+                Err(ControlRead::Io(std::io::ErrorKind::PermissionDenied.into())),
+                &request
+            )
+            .is_err()
+        );
+        assert!(
+            installed_admission_control(
+                Err(ControlRead::Invalid("retained owner exited".into())),
+                &request
+            )
+            .is_err()
+        );
+        for name in ["owner-pause.json", "owner-cancel.json"] {
+            let control_path = directory.join(name);
+            write_json(&control_path, &control).unwrap();
+            assert!(helper_owner(&channels).unwrap().is_none());
+            fs::remove_file(control_path).unwrap();
+        }
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
     }
 }
