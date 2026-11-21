@@ -72,7 +72,9 @@ jobs:
           cargo test --locked --manifest-path scripts/installer/policy-tool/Cargo.toml --target x86_64-pc-windows-msvc
           cargo clippy --locked --manifest-path scripts/installer/policy-tool/Cargo.toml --target x86_64-pc-windows-msvc --all-targets -- -D warnings
       - name: Exercise native policy provisioning on the disposable runner
-        if: github.repository_id == '1450402221' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/codex/delivery-ci-')
+        if: >-
+          github.repository_id == '1450402221' && github.event_name == 'workflow_dispatch' &&
+          inputs.validation == 'setup' && runner.environment == 'github-hosted'
         env:
           RUSTFLAGS: -C target-feature=+crt-static
         run: |
