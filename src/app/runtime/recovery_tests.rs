@@ -2214,6 +2214,7 @@ fn retry_lcd_after_frame_timeout_restores_the_gif_and_card_without_reopening_rgb
                 .unwrap(),
         ),
         overlay_enabled: true,
+        gauge_style: crate::lcd::overlay::GaugeStyle::default(),
         sources: vec![lcd::OverlaySource {
             key: "gpu".into(),
             label: "GPU".into(),

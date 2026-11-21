@@ -928,6 +928,22 @@ impl Editor {
             .into_iter()
             .map(|n| (n.to_string(), n.to_string()))
             .collect();
+        let styles = crate::lcd::overlay::GaugeStyle::OPTIONS;
+        let key = styles
+            .iter()
+            .find(|(style, _, _)| *style == c.gauge_style)
+            .unwrap()
+            .1;
+        let mut gauge = field(
+            "gauge_style",
+            "Вид показаний",
+            key,
+            "Шкала, столбик и пламя меняются с температурой.",
+        );
+        gauge.choices = styles
+            .into_iter()
+            .map(|(_, key, label)| (label.into(), key.into()))
+            .collect();
         vec![
             boolean(
                 "enabled",
@@ -943,6 +959,7 @@ impl Editor {
                 c.overlay_enabled,
                 "Показания выводятся только пока они свежие.",
             ),
+            gauge,
             font,
             field(
                 "interval",
@@ -1104,6 +1121,13 @@ impl Editor {
             }
             "rotation" => c.rotation = parse(value)?,
             "overlay" => c.overlay_enabled = boolean_value(value)?,
+            "gauge_style" => {
+                c.gauge_style = crate::lcd::overlay::GaugeStyle::OPTIONS
+                    .into_iter()
+                    .find(|(_, key, _)| *key == value)
+                    .ok_or("Неизвестный вид показаний")?
+                    .0;
+            }
             "interval" => c.interval_seconds = parse(value)?,
             "sources" => {
                 let sources = value

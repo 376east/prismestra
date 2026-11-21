@@ -4,6 +4,7 @@ use image::{
     Rgb, RgbImage, RgbaImage,
     imageops::{self, FilterType},
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
@@ -11,6 +12,29 @@ pub const LAYOUT_SIZE: u32 = 480;
 pub const CARD_WIDTH: u32 = 188;
 pub const CARD_HEIGHT: u32 = 76;
 pub const MAX_BLOCKS: usize = 4;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GaugeStyle {
+    #[default]
+    Reading,
+    Arc,
+    Bar,
+    Flame,
+}
+
+impl GaugeStyle {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub const OPTIONS: [(Self, &str, &str); 4] = [
+        (Self::Reading, "reading", "Число и значок"),
+        (Self::Arc, "arc", "Круговая шкала"),
+        (Self::Bar, "bar", "Столбик"),
+        (Self::Flame, "flame", "Высота пламени"),
+    ];
+}
 
 /// Top-left position in the upright 480×480 LCD view.
 pub struct Block<'a> {
@@ -31,6 +55,7 @@ const TT_FALLBACK_BACKGROUND: Rgb<u8> = Rgb([16, 16, 20]);
 pub struct Renderer {
     font: fontdue::Font,
     glyphs: HashMap<char, (fontdue::Metrics, Vec<u8>)>,
+    style: GaugeStyle,
 }
 fn rounded(x: f32, y: f32, w: f32, h: f32, r: f32) -> tiny_skia::Path {
     let mut p = PathBuilder::new();
@@ -103,7 +128,12 @@ impl Renderer {
         Ok(Self {
             font,
             glyphs: HashMap::new(),
+            style: GaugeStyle::default(),
         })
+    }
+    pub fn with_style(mut self, style: GaugeStyle) -> Self {
+        self.style = style;
+        self
     }
     fn width(&self, text: &str) -> f32 {
         text.chars()
@@ -284,22 +314,91 @@ impl Renderer {
         paint.set_color_rgba8(255, 255, 255, 255);
         let transform =
             Transform::from_row(48. / 26., 0., 0., 48. / 26., x as f32 + 8., y as f32 + 14.);
-        layer.stroke_path(
-            &icon(name),
-            &paint,
-            &Stroke {
-                width: 1.8,
-                line_cap: LineCap::Round,
-                line_join: LineJoin::Round,
-                ..Stroke::default()
-            },
-            transform,
-            None,
-        );
+        if self.style == GaugeStyle::Reading {
+            layer.stroke_path(
+                &icon(name),
+                &paint,
+                &Stroke {
+                    width: 1.8,
+                    line_cap: LineCap::Round,
+                    line_join: LineJoin::Round,
+                    ..Stroke::default()
+                },
+                transform,
+                None,
+            );
+        } else {
+            paint_gauge(layer, self.style, celsius.round(), transform);
+        }
         self.text(layer, &self.title(name), x as i32 + 62, y as i32 + 4);
         // Actual Qt QString fixed0 uses ties away from zero and suppresses -0.
         let reading = format!("{}°C", celsius.round() as i32);
         self.text(layer, &reading, x as i32 + 62, y as i32 + 38);
+    }
+}
+
+fn gauge_shape(style: GaugeStyle, fill: f32) -> Option<tiny_skia::Path> {
+    if fill <= 0. {
+        return None;
+    }
+    let mut path = PathBuilder::new();
+    match style {
+        GaugeStyle::Reading => return None,
+        GaugeStyle::Arc => {
+            let steps = (fill * 32.).ceil() as u32;
+            for point in 0..=steps {
+                let angle =
+                    (0.75 + 1.5 * fill * point as f32 / steps as f32) * std::f32::consts::PI;
+                let x = 13. + 10. * angle.cos();
+                let y = 13. + 10. * angle.sin();
+                if point == 0 {
+                    path.move_to(x, y);
+                } else {
+                    path.line_to(x, y);
+                }
+            }
+        }
+        GaugeStyle::Bar => {
+            let height = 22. * fill;
+            let cap = (height * 0.5).min(2.);
+            return Some(rounded(8., 24. - height, 10., height, cap));
+        }
+        GaugeStyle::Flame => {
+            let height = 5. + 17. * fill;
+            let tip = 24. - height;
+            path.move_to(13., 24.);
+            path.cubic_to(1., 24., 3., 24. - height * 0.45, 10., tip + height * 0.23);
+            path.cubic_to(11., tip + height * 0.38, 13., tip + height * 0.25, 16., tip);
+            path.cubic_to(24., tip + height * 0.46, 26., 24., 13., 24.);
+            path.close();
+        }
+    }
+    path.finish()
+}
+
+fn paint_gauge(layer: &mut Pixmap, style: GaugeStyle, value: f64, transform: Transform) {
+    // This is a fixed visual scale, independent of alert or sensor thresholds.
+    let level = ((value + 20.) / 140.).clamp(0., 1.) as f32;
+    let accent = match style {
+        GaugeStyle::Flame => [255, 139, 71, 255],
+        _ => [104, 221, 225, 255],
+    };
+    for (fill, rgba) in [(1., [255, 255, 255, 41]), (level, accent)] {
+        let Some(path) = gauge_shape(style, fill) else {
+            continue;
+        };
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(rgba[0], rgba[1], rgba[2], rgba[3]);
+        if style == GaugeStyle::Arc {
+            let stroke = Stroke {
+                width: 2.8,
+                line_cap: LineCap::Round,
+                ..Stroke::default()
+            };
+            layer.stroke_path(&path, &paint, &stroke, transform, None);
+        } else {
+            layer.fill_path(&path, &paint, FillRule::Winding, transform, None);
+        }
     }
 }
 
@@ -368,6 +467,23 @@ mod tests {
         );
         block.x = u32::MAX;
         assert!(renderer.render_blocks(&background, &[block]).is_err());
+    }
+
+    #[test]
+    fn gauges_change_shape_with_the_reading_and_stay_aligned_after_rotation() {
+        let background = RgbImage::new(LAYOUT_SIZE, LAYOUT_SIZE);
+        let mut glyphs = Vec::new();
+        for style in [GaugeStyle::Arc, GaugeStyle::Bar, GaugeStyle::Flame] {
+            let mut renderer = renderer().with_style(style);
+            let low = renderer.render(&background, 0, "CPU", 25.).unwrap();
+            let high = renderer.render(&background, 0, "CPU", 90.).unwrap();
+            let glyph = |image: &RgbImage| imageops::crop_imm(image, 154, 364, 48, 48).to_image();
+            assert_ne!(glyph(&low), glyph(&high), "{style:?}");
+            assert!(!glyphs.contains(&glyph(&high)), "{style:?}");
+            glyphs.push(glyph(&high));
+            let rotated = renderer.render(&background, 90, "CPU", 90.).unwrap();
+            assert_eq!(imageops::rotate270(&rotated), high);
+        }
     }
 
     #[test]
