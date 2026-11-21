@@ -233,7 +233,9 @@ mod tests {
         );
         assert_eq!(stored.delay(current, completed - 1), START_DELAY);
         assert_eq!(Schedule::load(&dir, current).available(), Some(newer));
-        let switched_channel = Version::from_setup("0.1.0.0").unwrap();
+        // The Preview is numerically newer than this Stable build, so only
+        // the channel check can exclude it.
+        let switched_channel = Version::from_setup("0.0.9.0").unwrap();
         for installed in [
             switched_channel,
             newer,
