@@ -11,7 +11,10 @@ import stat
 from pathlib import Path, PurePosixPath
 import zipfile
 
-import verify_openrgb_component as verifier
+if __package__:
+    from . import verify_openrgb_component as verifier
+else:
+    import verify_openrgb_component as verifier
 
 
 RECIPES = ("build_openrgb.ps1", "build_openrgb_dependencies.ps1",

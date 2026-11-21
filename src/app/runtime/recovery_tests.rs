@@ -605,6 +605,70 @@ fn first_start_lease_contention_exposes_one_manual_openrgb_retry() {
 
 #[cfg(windows)]
 #[test]
+fn manual_retry_for_owned_openrgb_preserves_the_guard_and_neighbor() {
+    let mut runtime = runtime();
+    runtime.document.lighting.setup.devices[0].driver = Driver::OpenRgb;
+    let endpoint = ([127, 0, 0, 207], 40495).into();
+    runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
+        endpoint, 1,
+    ));
+    runtime.managed_backend_ids.insert("a".into());
+    runtime.managed_backend_generation = 1;
+
+    let output = Arc::new(Link::default());
+    let neighbor = Arc::new(Link::default());
+    runtime
+        .attach_rgb("a", vec![], factory_for(&output, Driver::OpenRgb))
+        .unwrap();
+    runtime.enable_output_recovery("a").unwrap();
+    runtime.attach_rgb("b", vec![], factory(&neighbor)).unwrap();
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    let neighbor_generation = runtime.host.status("b").unwrap().generation;
+
+    // Software readiness does not grant writes. Every attempt must use the
+    // original guard, which rejects this synthetic backend as an actual writer.
+    for delay in [1_000_000, 5_000_000, 15_000_000] {
+        wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+        tick(&mut runtime, &mut now);
+        let failed = runtime.host.status("a").unwrap().generation;
+        now += delay;
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            runtime.host.status("a").unwrap().generation != failed
+        });
+    }
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+    tick(&mut runtime, &mut now);
+    let ticket = runtime
+        .openrgb_retry_ticket("a")
+        .expect("owned output can retry");
+    let previous_backend =
+        runtime
+            .managed_backend
+            .replace(crate::app::backend_helper::Backend::software_ready(
+                endpoint, 1,
+            ));
+    assert!(!runtime.request_openrgb_retry("a", ticket));
+    runtime.managed_backend = previous_backend;
+    assert!(runtime.request_openrgb_retry("a", ticket));
+    assert!(!runtime.request_openrgb_retry("a", ticket));
+    let failed = runtime.host.status("a").unwrap().generation;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        let status = runtime.host.status("a").unwrap();
+        status.generation != failed && status.phase == Phase::Failed
+    });
+    assert_eq!(output.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        neighbor_generation
+    );
+    drain(&mut runtime);
+}
+
+#[cfg(windows)]
+#[test]
 fn startup_registers_managed_outputs_on_commit_and_retries_on_new_inventory() {
     let mut runtime = runtime();
     let mut document = runtime.document().clone();

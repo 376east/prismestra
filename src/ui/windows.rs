@@ -3461,9 +3461,13 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
             app.status = format!("Новый интерфейс недоступен: {error}");
             app.show_page();
         }
-        unsafe {
-            ShowWindow(raw, SW_SHOWNORMAL);
-            UpdateWindow(raw);
+        if crate::app::installed::session() == Some(crate::app::installed::Session::Interactive) {
+            resident::activate_editor_window(raw)?;
+        } else {
+            unsafe {
+                ShowWindow(raw, SW_SHOWNORMAL);
+                UpdateWindow(raw);
+            }
         }
     }
     if !o.selftest {
