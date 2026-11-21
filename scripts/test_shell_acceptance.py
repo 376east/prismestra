@@ -1,5 +1,6 @@
 import unittest
 
+from normalize_process_events import normalize
 from shell_acceptance import check_trace
 
 
@@ -114,6 +115,79 @@ class ShellAcceptanceTests(unittest.TestCase):
         ])
         with self.assertRaisesRegex(ValueError, 'Process ancestry cycle'):
             check_trace(data, REVISION, ARTIFACT)
+
+
+def event(kind, pid, time, image, parent=0, session=1):
+    return {'kind': kind, 'filetime': str(time), 'pid': pid, 'parent_pid': parent,
+            'session_id': session, 'image': image}
+
+
+def capture():
+    return {
+        'format': 'prismestra-windows-process-events-v1',
+        'started_filetime': '100',
+        'ended_filetime': '200',
+        'harness_pid': 1,
+        'before_control': {'pid': 9, 'start_filetime': '90', 'stop_filetime': '91'},
+        'after_control': {'pid': 9, 'start_filetime': '201', 'stop_filetime': '202'},
+        'events': [
+            event('stop', 9, 202, 'cmd.exe'),
+            event('stop', 2, 190, 'Setup.exe'),
+            event('start', 9, 90, 'cmd.exe', 1),
+            event('start', 2, 110, 'Setup.exe', 1),
+            event('start', 9, 201, 'cmd.exe', 1),
+            event('stop', 9, 91, 'cmd.exe'),
+        ],
+    }
+
+
+class NormalizeProcessEventsTests(unittest.TestCase):
+    def normalize(self, data, roots=('2:110',)):
+        return normalize(data, 'setup', REVISION, ARTIFACT, roots)
+
+    def test_control_shells_are_outside_the_scenario_and_windows_are_uncovered(self):
+        trace = self.normalize(capture())
+        self.assertEqual([process['id'] for process in trace['processes']], ['2:110'])
+        self.assertTrue(trace['controls']['process_start_stop'])
+        self.assertFalse(trace['controls']['visible_console'])
+        self.assertEqual(check_trace(trace, REVISION, ARTIFACT)['status'], 'inconclusive')
+
+    def test_pids_are_resolved_at_creation_across_start_stop_and_reuse(self):
+        data = capture()
+        data['events'].extend([
+            event('start', 4, 115, 'background.exe', 1),
+            event('stop', 4, 120, 'background.exe'),
+            event('start', 4, 130, 'SetupWorker.exe', 2),
+            event('start', 5, 135, 'powershell.exe', 4),
+            event('stop', 5, 137, 'powershell.exe'),
+            event('stop', 4, 150, 'SetupWorker.exe'),
+        ])
+        trace = self.normalize(data)
+        process = next(row for row in trace['processes'] if row['id'] == '5:135')
+        self.assertEqual(process['parent'], '4:130')
+        self.assertEqual(check_trace(trace, REVISION, ARTIFACT)['violations'],
+                         ['Product started powershell.exe (5:135)'])
+
+    def test_inactive_or_simultaneous_parent_leaves_an_explicit_gap(self):
+        for parent_stop in (120, 130):
+            data = capture()
+            data['events'].extend([
+                event('start', 4, 115, 'worker.exe', 2),
+                event('stop', 4, parent_stop, 'worker.exe'),
+                event('start', 5, 130, 'cmd.exe', 4),
+            ])
+            trace = self.normalize(data)
+            self.assertFalse(trace['controls']['process_start_stop'])
+            self.assertIsNone(trace['processes'][-1]['parent'])
+            self.assertEqual(check_trace(trace, REVISION, ARTIFACT)['status'], 'inconclusive')
+
+    def test_missing_stop_control_or_root_rejects_receipt(self):
+        data = capture()
+        with self.assertRaisesRegex(ValueError, 'declared root'):
+            self.normalize(data, roots=('2:111',))
+        data['events'].pop(0)
+        with self.assertRaisesRegex(ValueError, 'matching command'):
+            self.normalize(data)
 
 
 if __name__ == '__main__':

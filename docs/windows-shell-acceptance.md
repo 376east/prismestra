@@ -20,6 +20,15 @@ Normalize one JSON file per scenario with `scenario`, `revision`, `artifact_sha2
 
 Every non-null parent must be present in the trace and refer to the current process instance at the child's start. If a parent cannot be resolved and the missing process affects coverage, set `process_start_stop` to false.
 
+For process capture, open an elevated PowerShell session in a disposable guest. Set the interval long enough for the planned scenario, wait for the capture-ready message, and perform the scenario from the intended desktop. The harness writes start and stop events plus a short `cmd.exe` control on each side of the measured interval. [CIM event capture](https://learn.microsoft.com/en-us/powershell/module/cimcmdlets/register-cimindicationevent)
+
+```powershell
+.\scripts\installer\capture_process_events.ps1 -DisposableGuest -DurationSeconds 900 -OutputPath .\uninstall-processes.json
+python scripts/normalize_process_events.py uninstall-processes.json --scenario uninstall --revision <commit> --artifact-sha256 <sha256> --product-root '<pid>:<start-filetime>' --output uninstall-partial.json
+```
+
+Identify each `--product-root` from its observed launch, including detached scheduled tasks when applicable. The normalizer writes a partial receipt. Add actual window observations and establish scenario coverage before using the result as a complete acceptance receipt.
+
 ```powershell
 python scripts/shell_acceptance.py evidence.json --scenario uninstall --revision <commit> --artifact-sha256 <sha256>
 ```
