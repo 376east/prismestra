@@ -18,6 +18,11 @@ pub enum Effect {
 }
 impl Effect {
     #[cfg(windows)]
+    pub(crate) fn uses_normalized_canvas(self) -> bool {
+        !matches!(self, Self::NoiseMap | Self::Breathing | Self::RainbowWave)
+    }
+
+    #[cfg(windows)]
     pub(crate) const ALL: [Self; 11] = [
         Self::NoiseMap,
         Self::Breathing,

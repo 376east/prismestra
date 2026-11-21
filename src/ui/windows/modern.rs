@@ -151,6 +151,7 @@ pub(super) struct Session {
     lcd_layout_preview: Option<scene_files::Layout>,
     preview: Option<crate::runtime::scene::Renderer>,
     canvas: crate::devices::Canvas,
+    detailed_canvas: crate::devices::Canvas,
     last_send: Instant,
     last_native_send: Instant,
     context: u64,
@@ -166,20 +167,6 @@ impl Session {
         let catalog = Catalog::load(&catalog_path, &app.runtime.project().scene)?;
         let draft_path = app.state_dir.join("editor-scene-draft.json");
         let draft = Draft::load(&draft_path)?;
-        let canvas = crate::devices::Canvas {
-            width: 36,
-            height: 18,
-            points: (0..18)
-                .flat_map(|y| {
-                    (0..36).map(move |x| crate::devices::Point {
-                        device: "editor-preview".into(),
-                        led: (y * 36 + x) as usize,
-                        x,
-                        y,
-                    })
-                })
-                .collect(),
-        };
         let catalog_view = catalog
             .entries
             .iter()
@@ -188,7 +175,7 @@ impl Session {
         let built_in_cards = crate::ui::catalog::built_in()
             .into_iter()
             .map(|entry| {
-                let mut card = scene_card_at_size(&entry, 16, 8);
+                let mut card = scene_card(&entry);
                 card["builtIn"] = json!(true);
                 card
             })
@@ -206,7 +193,8 @@ impl Session {
             portable_preview: None,
             lcd_layout_preview: None,
             preview: None,
-            canvas,
+            canvas: preview_canvas(36, 18),
+            detailed_canvas: preview_canvas(96, 48),
             last_send: Instant::now(),
             last_native_send: Instant::now(),
             context: u64::MAX,
@@ -243,25 +231,30 @@ impl Session {
         Ok(())
     }
 }
-fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
-    scene_card_at_size(entry, 24, 12)
-}
-
-fn scene_card_at_size(entry: &crate::ui::catalog::Entry, width: u32, height: u32) -> Value {
-    let canvas = crate::devices::Canvas {
+fn preview_canvas(width: u32, height: u32) -> crate::devices::Canvas {
+    crate::devices::Canvas {
         width,
         height,
         points: (0..height)
             .flat_map(|y| {
                 (0..width).map(move |x| crate::devices::Point {
-                    device: "thumbnail".into(),
+                    device: "preview".into(),
                     led: (y * width + x) as usize,
                     x,
                     y,
                 })
             })
             .collect(),
+    }
+}
+
+fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
+    let (width, height) = if entry.scene.effect.uses_normalized_canvas() {
+        (48, 24)
+    } else {
+        (24, 12)
     };
+    let canvas = preview_canvas(width, height);
     let mut colors = Vec::new();
     let mut thumbnail_scene = entry.scene.clone();
     let steps = if thumbnail_scene.effect == crate::lighting::scene::Effect::Breathing {
@@ -1099,13 +1092,17 @@ pub(super) fn maintain(state: &State) {
         let frames = (session.last_send.elapsed().as_millis() / 50).min(1000) as u32;
         session.last_send += Duration::from_millis(u64::from(frames) * 50);
         let mut pixels = Vec::new();
+        let mut canvas = &session.canvas;
         if let Some(renderer) = session.preview.as_mut() {
+            if renderer.scene().effect.uses_normalized_canvas() {
+                canvas = &session.detailed_canvas;
+            }
             for _ in 0..frames.clamp(1, 8) {
-                pixels = renderer.step(&session.canvas)?;
+                pixels = renderer.step(canvas)?;
             }
         }
         let colors = pixels.iter().map(|c| c.rrggbb()).collect::<Vec<_>>();
-        let mut value = json!({"kind":"status","state":{"scene":app.runtime.project().scene,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"preview":{"width":36,"height":18,"colors":colors}}});
+        let mut value = json!({"kind":"status","state":{"scene":app.runtime.project().scene,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"preview":{"width":canvas.width,"height":canvas.height,"colors":colors}}});
         if session.last_native_send.elapsed() >= Duration::from_millis(250) {
             session.last_native_send = Instant::now();
             value["state"]["deviceCandidates"] = json!(device_candidates(app));
@@ -1157,6 +1154,17 @@ pub(super) fn return_to_editor(state: &State) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::lighting::scene::Effect;
+
+    #[test]
+    fn procedural_card_uses_a_dense_canvas_and_preserves_scene_settings() {
+        let mut entry = crate::ui::catalog::plum_dawn();
+        entry.scene.effect = Effect::PrismLattice;
+        let card = scene_card(&entry);
+        assert_eq!(card["preview"]["width"], 48);
+        assert_eq!(card["preview"]["height"], 24);
+        assert_eq!(card["preview"]["colors"].as_array().unwrap().len(), 48 * 24);
+        assert_eq!(card["scene"], serde_json::to_value(&entry.scene).unwrap());
+    }
 
     #[test]
     fn slow_breathing_card_shows_its_lit_phase_without_changing_scene_settings() {
