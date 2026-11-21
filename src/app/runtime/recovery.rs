@@ -252,6 +252,35 @@ impl Runtime {
         }
     }
 
+    /// Retry the selected failed LCD once after its automatic attempts are exhausted.
+    /// A stale generation, an active recovery or a draining worker returns `Ok(false)`.
+    pub fn retry_lcd_output(&mut self, id: &str, failed_generation: u64) -> Result<bool, String> {
+        if self.output_recovery_paused() || self.lcd_arrivals.contains(id) {
+            return Ok(false);
+        }
+        let (Some(worker), Some(spec), Some(recovery)) = (
+            self.lcd.get(id),
+            self.lcd_specs.get(id),
+            self.output_recovery.get(id),
+        ) else {
+            return Ok(false);
+        };
+        let snapshot = worker.snapshot();
+        if snapshot.phase != lcd_worker::Phase::Failed
+            || snapshot.generation != failed_generation
+            || recovery.failed_generation != Some(failed_generation)
+            || recovery.attempts != RETRY_DELAYS_US.len()
+            || recovery.retry_scheduled()
+            || !worker.is_reaped()
+        {
+            return Ok(false);
+        }
+        let result = self.start_registered_lcd(id, spec.keys.clone(), spec.factory.clone());
+        self.handle_output_start(id, result.clone())?;
+        self.bump_view();
+        result.map(|()| true)
+    }
+
     pub(super) fn start_registered_lcd(
         &mut self,
         id: &str,
