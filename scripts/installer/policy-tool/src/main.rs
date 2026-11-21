@@ -300,7 +300,17 @@ fn read_policy_state(
     let record: Option<Ownership> =
         read_json(&policy_home.join("installation.json"), OWNERSHIP_LIMIT)?;
     let policy: Option<Policy> = read_json(&policy_home.join("policy.json"), POLICY_LIMIT)?;
-    if let Some(record) = &record
+    validate_policy_state(sid, install, record.as_ref(), policy.as_ref())?;
+    Ok((record, policy))
+}
+
+fn validate_policy_state(
+    sid: &str,
+    install: &Path,
+    record: Option<&Ownership>,
+    policy: Option<&Policy>,
+) -> Result<(), String> {
+    if let Some(record) = record
         && (record.version != 1
             || !path_matches(
                 &install.join("Prismestra.exe"),
@@ -311,8 +321,8 @@ fn read_policy_state(
     {
         return Err("The existing policy belongs to another installation.".into());
     }
-    if let Some(policy) = &policy
-        && !record.as_ref().is_some_and(|record| {
+    if let Some(policy) = policy
+        && !record.is_some_and(|record| {
             policy.version == 1
                 && policy.sid == sid
                 && hash_pin(&policy.app_sha256)
@@ -326,7 +336,7 @@ fn read_policy_state(
         );
     }
 
-    Ok((record, policy))
+    Ok(())
 }
 
 fn uninstall(sid: &str, install: &Path, policy_home: &Path) -> Result<(), String> {
@@ -475,6 +485,37 @@ fn main() -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interrupted_upgrade_accepts_only_the_bound_previous_or_current_policy() {
+        let sid = "S-1-5-21-1-2-3-1001";
+        let install = Path::new(r"C:\Program Files\Prismestra");
+        let mut policy = Policy {
+            version: 1,
+            sid: sid.into(),
+            app_sha256: "a".repeat(64),
+        };
+        let mut record = Ownership {
+            version: 1,
+            executable: r"c:\PROGRAM FILES\PRISMESTRA\Prismestra.exe".into(),
+            sid: sid.into(),
+            app_sha256: "b".repeat(64),
+            previous_app_sha256: Some(policy.app_sha256.clone()),
+        };
+        let stored = serde_json::to_vec(&record).unwrap();
+        let restored: Ownership = serde_json::from_slice(&stored).unwrap();
+        assert!(validate_policy_state(sid, install, Some(&restored), Some(&policy)).is_ok());
+        assert!(validate_policy_state(sid, install, None, Some(&policy)).is_err());
+        policy.app_sha256 = "b".repeat(64);
+        assert!(validate_policy_state(sid, install, Some(&record), Some(&policy)).is_ok());
+        policy.app_sha256 = "c".repeat(64);
+        assert!(validate_policy_state(sid, install, Some(&record), Some(&policy)).is_err());
+        policy.app_sha256 = "a".repeat(64);
+        policy.sid.push('0');
+        assert!(validate_policy_state(sid, install, Some(&record), Some(&policy)).is_err());
+        record.executable.push_str(":other");
+        assert!(validate_policy_state(sid, install, Some(&record), None).is_err());
+    }
 
     #[test]
     fn task_acl_allows_execution_without_write_and_requires_a_trusted_owner() {
