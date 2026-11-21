@@ -1063,6 +1063,118 @@ fn live_plan_native_discovery_keeps_ready_bindings_when_preparing_fresh_factorie
 
 #[cfg(windows)]
 #[test]
+fn startup_addition_preserves_exhausted_recovery_for_an_unchanged_rgb_binding() {
+    use crate::{app::lighting_outputs::Local, devices::Binding};
+
+    let mut runtime = runtime();
+    let mut applied = runtime.document().clone();
+    let state = std::env::temp_dir().join(format!(
+        "prismestra-startup-retained-recovery-{}",
+        std::process::id()
+    ));
+    let binding = |port| Binding::WledDdp {
+        endpoint: ([127, 0, 0, 207], port).into(),
+        controller: None,
+    };
+    let previous = Local {
+        version: 1,
+        devices: [("a".into(), binding(40511)), ("b".into(), binding(40512))].into(),
+        monitors: Default::default(),
+        door_brightness: 60,
+    };
+    let failed = Arc::new(Link::default());
+    let healthy = Arc::new(Link::default());
+    let discovered = Arc::new(Link::default());
+    failed.fail_open.store(true, Ordering::SeqCst);
+    let mut initial = previous.prepare(&applied, &state).unwrap();
+    initial.rgb[0].2 = factory(&failed);
+    initial.rgb[1].2 = factory(&healthy);
+    runtime
+        .request_startup_outputs_for(&state, None, &previous, applied.clone(), initial)
+        .unwrap();
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.host.status("a").unwrap().phase == Phase::Failed
+    });
+    tick(&mut runtime, &mut now);
+    for delay in [1_000_000, 5_000_000, 15_000_000] {
+        let generation = runtime.host.status("a").unwrap().generation;
+        now += delay;
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            let status = runtime.host.status("a").unwrap();
+            status.generation != generation && status.phase == Phase::Failed
+        });
+        tick(&mut runtime, &mut now);
+    }
+    let failed_generation = runtime.host.status("a").unwrap().generation;
+    let healthy_generation = runtime.host.status("b").unwrap().generation;
+    assert_eq!(failed.calls.load(Ordering::SeqCst), 4);
+    assert!(!runtime.output_recovery["a"].retry_scheduled());
+    // If discovery renews the exhausted budget, it will now wrongly start A.
+    failed.fail_open.store(false, Ordering::SeqCst);
+
+    let mut added = applied.lighting.setup.devices[1].clone();
+    added.id = "c".into();
+    applied.lighting.setup.devices.push(added);
+    applied.lighting.setup.canvas.width = 3;
+    applied.lighting.setup.canvas.points.push(Point {
+        device: "c".into(),
+        led: 0,
+        x: 2,
+        y: 0,
+    });
+    applied.lighting.groups.pc.push("c".into());
+    let mut local = previous.clone();
+    local.devices.insert("c".into(), binding(40513));
+    let mut candidate = local.prepare(&applied, &state).unwrap();
+    candidate.rgb[0].2 = factory(&failed);
+    candidate.rgb[1].2 = factory(&healthy);
+    candidate.rgb[2].2 = factory(&discovered);
+    runtime
+        .request_startup_outputs_for(&state, Some(&previous), &local, applied, candidate)
+        .unwrap();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime
+            .host
+            .status("c")
+            .is_some_and(|snapshot| snapshot.submitted > 0)
+    });
+    assert_eq!(
+        runtime.host.status("a").unwrap().generation,
+        failed_generation
+    );
+    assert_eq!(runtime.host.status("a").unwrap().phase, Phase::Failed);
+    assert_eq!(failed.calls.load(Ordering::SeqCst), 4);
+    assert!(!runtime.output_recovery["a"].retry_scheduled());
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        healthy_generation
+    );
+    assert_eq!(healthy.calls.load(Ordering::SeqCst), 1);
+
+    // Explicit Apply may still renew recovery for the same binding.
+    runtime.request_outputs(runtime.output_plan()).unwrap();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime
+            .host
+            .status("a")
+            .is_some_and(|snapshot| snapshot.submitted > 0)
+    });
+    assert_eq!(failed.calls.load(Ordering::SeqCst), 5);
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        healthy_generation
+    );
+    drain(&mut runtime);
+}
+
+#[cfg(windows)]
+#[test]
 fn live_plan_native_discovery_keeps_ready_external_openrgb() {
     use crate::{app::lighting_outputs::Local, devices::Binding};
 
