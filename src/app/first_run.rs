@@ -1567,7 +1567,11 @@ mod tests {
 
     #[test]
     fn empty_installed_profile_reaches_first_sdk6_frame_and_saves_map() {
+        use crate::app::runtime::{OpenRgbRetryStatus, OutputActivity};
         use crate::app::{installed, managed_backend, runtime::Runtime};
+        use crate::runtime::output::{Lease, Phase};
+        use crate::ui::windows::device_activity_for;
+        use std::net::UdpSocket;
 
         let (_fixture, profile, state, _) = installed::tests::fresh_profile();
         let document = Document::load(&profile).unwrap();
@@ -1619,12 +1623,45 @@ mod tests {
         assert_eq!(plan.document.lighting.setup.devices.len(), 1);
         assert_eq!(plan.document.lighting.setup.canvas.points.len(), 2);
         assert_eq!(plan.local.devices.len(), 1);
+        let rgb_id = plan.document.lighting.setup.devices[0].id.clone();
+        let wled = UdpSocket::bind("127.0.0.1:0").unwrap();
+        wled.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let setup = &mut plan.document.lighting.setup;
+        setup.devices.push(Device {
+            id: "wled".into(),
+            label: "Explicitly selected loopback WLED".into(),
+            driver: devices::Driver::WledDdp,
+            leds: 1,
+            ..setup.devices[0].clone()
+        });
+        setup.canvas.points.push(Point {
+            device: "wled".into(),
+            led: 0,
+            x: 0,
+            y: setup.canvas.height,
+        });
+        setup.canvas.height += 1;
+        plan.document.lighting.groups.pc.push("wled".into());
+        plan.local.devices.insert(
+            "wled".into(),
+            Binding::WledDdp {
+                endpoint: wled.local_addr().unwrap(),
+                controller: None,
+            },
+        );
 
         let mut runtime = Runtime::new(document, None).unwrap();
         let outputs = plan
             .local
             .prepare(&plan.document, &state.join("assets"))
             .unwrap();
+        let rgb_keys = outputs
+            .rgb
+            .iter()
+            .find(|(id, _, _)| id == &rgb_id)
+            .unwrap()
+            .1
+            .clone();
         let revision = runtime
             .request_startup_outputs_for(&state, None, &plan.local, plan.document.clone(), outputs)
             .unwrap();
@@ -1669,6 +1706,110 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&local).unwrap(),
             serde_json::to_value(&plan.local).unwrap()
+        );
+        let mut datagram = [0; 64];
+        assert_eq!(wled.recv(&mut datagram).unwrap(), 13);
+        let neighbor = runtime.host().status("wled").unwrap();
+        let first = runtime.host().status(&rgb_id).unwrap();
+        assert_eq!(first.phase, Phase::Ready);
+        assert!(runtime.openrgb_retry_ticket(&rgb_id).is_none());
+        let ipc = |runtime: &Runtime| device_activity_for(runtime, true, false, 1);
+        assert_eq!(ipc(&runtime)["reasons"], serde_json::json!({}));
+        let step = |runtime: &mut Runtime, now| runtime.tick(now, 1_700_000_000).unwrap();
+        let wait_until = |runtime: &mut Runtime, now, done: &dyn Fn(&Runtime) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                step(runtime, now);
+                if done(runtime) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "no expected recovery transition");
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let mut now = crate::clock::monotonic_us() + 50_000;
+        peer.set_paused(true);
+        wait_until(&mut runtime, now, &|runtime| {
+            runtime.host().status(&rgb_id).unwrap().phase == Phase::Failed
+        });
+        for delay in [1_000_000, 5_000_000] {
+            step(&mut runtime, now);
+            let generation = runtime.host().status(&rgb_id).unwrap().generation;
+            now += delay;
+            wait_until(&mut runtime, now, &|runtime| {
+                let state = runtime.host().status(&rgb_id).unwrap();
+                state.generation != generation && state.phase == Phase::Failed
+            });
+        }
+        step(&mut runtime, now);
+        assert_eq!(ipc(&runtime)["reasons"], serde_json::json!({}));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let competing_lease = loop {
+            step(&mut runtime, now);
+            if let Ok(lease) = Lease::acquire(rgb_keys.clone()) {
+                break lease;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "failed worker did not release its lease"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert!(Lease::acquire(rgb_keys).is_err());
+        peer.set_paused(false);
+        let before_conflict = peer.calls.lock().unwrap().len();
+        now += 15_000_000;
+        step(&mut runtime, now);
+        let rgb = runtime
+            .document()
+            .lighting
+            .setup
+            .devices
+            .iter()
+            .find(|device| device.id == rgb_id)
+            .unwrap();
+        let activity = runtime.output_activity(rgb);
+        assert!(
+            matches!(activity,OutputActivity::Unavailable(Some(ref error)) if error.contains("still owned by another output"))
+        );
+        assert_eq!(peer.calls.lock().unwrap().len(), before_conflict);
+        let activity = ipc(&runtime);
+        assert_eq!(
+            activity["reasons"],
+            serde_json::json!({ (rgb_id.clone()): "endpointLeaseBusy" })
+        );
+        assert_eq!(activity["retryTickets"].as_object().unwrap().len(), 1);
+        assert!(activity["retryTickets"][rgb_id.as_str()].is_string());
+        assert_eq!(
+            device_activity_for(&runtime, false, false, 1)["reasons"],
+            serde_json::json!({})
+        );
+        let ticket = runtime
+            .openrgb_retry_ticket(&rgb_id)
+            .expect("automatically created binding can retry");
+        eprintln!(
+            "last automatic attempt blocked by a held external-output lease; SDK commands=0, manual token present"
+        );
+        drop(competing_lease);
+        assert!(runtime.request_openrgb_retry(&rgb_id, ticket));
+        assert!(!runtime.request_openrgb_retry(&rgb_id, ticket));
+        wait_until(&mut runtime, now + 50_000, &|runtime| {
+            runtime.openrgb_retry_status(&rgb_id, ticket) == OpenRgbRetryStatus::Submitted
+        });
+        let after = runtime.host().status("wled").unwrap();
+        assert_eq!(after.generation, neighbor.generation);
+        assert!(after.submitted > neighbor.submitted);
+        let activity = ipc(&runtime);
+        assert_eq!(activity["reasons"], serde_json::json!({}));
+        assert_eq!(activity["retryTickets"], serde_json::json!({}));
+        assert_eq!(wled.recv(&mut datagram).unwrap(), 13);
+        assert_eq!(runtime.output_revision(), revision);
+        let calls = peer.calls.lock().unwrap();
+        assert_eq!(calls.iter().filter(|call| call.1 == 1101).count(), 2);
+        drop(calls);
+        eprintln!(
+            "auto-assigned external OpenRGB: {rgb_id}, first generation {}, retry submitted, WLED generation {} retained, frames {} -> {}",
+            first.generation, after.generation, neighbor.submitted, after.submitted
         );
         runtime.stop();
         let deadline = Instant::now() + Duration::from_secs(5);

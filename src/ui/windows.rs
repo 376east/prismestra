@@ -40,6 +40,8 @@ mod brand_icon;
 mod connections;
 mod first_run;
 mod modern;
+#[cfg(test)]
+pub(crate) use modern::device_activity_for;
 mod native_forms;
 mod portable;
 mod resident;

@@ -11,9 +11,46 @@ use std::{
 };
 
 static ENDPOINTS: OnceLock<Mutex<std::collections::BTreeSet<String>>> = OnceLock::new();
+
+#[derive(Debug)]
+pub(crate) enum OutputStartError {
+    EndpointLeaseBusy(&'static str),
+    Other(String),
+}
+
+impl OutputStartError {
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            Self::EndpointLeaseBusy(message) => message,
+            Self::Other(message) => message,
+        }
+    }
+}
+
+impl From<&str> for OutputStartError {
+    fn from(message: &str) -> Self {
+        Self::Other(message.into())
+    }
+}
+
+impl From<String> for OutputStartError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+impl From<OutputStartError> for String {
+    fn from(error: OutputStartError) -> Self {
+        match error {
+            OutputStartError::EndpointLeaseBusy(message) => message.into(),
+            OutputStartError::Other(message) => message,
+        }
+    }
+}
+
 pub(crate) struct Lease(Vec<String>);
 impl Lease {
-    pub(crate) fn acquire(keys: Vec<String>) -> Result<Self, String> {
+    pub(crate) fn acquire(keys: Vec<String>) -> Result<Self, OutputStartError> {
         if keys.len() > 4
             || keys.iter().any(|k| k.is_empty() || k.len() > 4100)
             || keys.iter().collect::<std::collections::BTreeSet<_>>().len() != keys.len()
@@ -25,7 +62,9 @@ impl Lease {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if keys.iter().any(|k| active.contains(k)) {
-            return Err("Hardware endpoint is still owned by another output".into());
+            return Err(OutputStartError::EndpointLeaseBusy(
+                "Hardware endpoint is still owned by another output",
+            ));
         }
         active.extend(keys.iter().cloned());
         Ok(Self(keys))
@@ -154,7 +193,7 @@ impl Output {
     where
         F: FnOnce(Cancellation) -> Result<Box<dyn RgbDriver>, String> + Send + 'static,
     {
-        Self::start_claimed(protocol, leds, generation, Vec::new(), factory)
+        Self::start_claimed(protocol, leds, generation, Vec::new(), factory).map_err(Into::into)
     }
     pub(crate) fn start_claimed<F>(
         protocol: Driver,
@@ -162,7 +201,7 @@ impl Output {
         generation: u64,
         keys: Vec<String>,
         factory: F,
-    ) -> Result<Self, String>
+    ) -> Result<Self, OutputStartError>
     where
         F: FnOnce(Cancellation) -> Result<Box<dyn RgbDriver>, String> + Send + 'static,
     {

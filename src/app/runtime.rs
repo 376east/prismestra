@@ -1623,7 +1623,7 @@ impl Runtime {
             .collect::<Vec<_>>();
         for (id, keys, f) in lcd {
             let result = self.start_registered_lcd(&id, keys, f);
-            self.handle_output_start(&id, result)?;
+            self.handle_output_start(&id, result.map_err(Into::into))?;
         }
         Ok(())
     }
@@ -1635,7 +1635,7 @@ impl Runtime {
             .filter(|(id, _)| !recovers_independently(id))
             .find_map(|(_, state)| state.start_error.as_ref())
         {
-            return Err(error.clone());
+            return Err(error.message().into());
         }
         // A failed synchronous start may leave the old stopped worker as the
         // only snapshot. Its committed route still has a retry budget.

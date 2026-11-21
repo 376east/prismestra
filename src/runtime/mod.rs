@@ -123,7 +123,7 @@ impl Core {
         id: &str,
         keys: Vec<String>,
         factory: F,
-    ) -> Result<(), String>
+    ) -> Result<(), output::OutputStartError>
     where
         F: FnOnce(Cancellation) -> Result<Box<dyn RgbDriver>, String> + Send + 'static,
     {
@@ -131,16 +131,19 @@ impl Core {
         if keys.len() > 4 || keys.iter().any(|k| k.is_empty() || k.len() > 4100) {
             return Err("Invalid output endpoint lease".into());
         }
-        if keys.iter().collect::<std::collections::BTreeSet<_>>().len() != keys.len()
-            || keys.iter().any(|key| {
-                self.endpoint_leases
-                    .values()
-                    .any(|active| active.contains(key))
-            })
-        {
+        if keys.iter().collect::<std::collections::BTreeSet<_>>().len() != keys.len() {
             return Err(
                 "Hardware endpoint is already owned by an active or draining output".into(),
             );
+        }
+        if keys.iter().any(|key| {
+            self.endpoint_leases
+                .values()
+                .any(|active| active.contains(key))
+        }) {
+            return Err(output::OutputStartError::EndpointLeaseBusy(
+                "Hardware endpoint is already owned by an active or draining output",
+            ));
         }
         let device = self
             .setup

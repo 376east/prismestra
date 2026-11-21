@@ -10,6 +10,13 @@ pub(crate) enum OutputActivity {
     Unavailable(Option<String>),
 }
 
+#[cfg(windows)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum OutputFailureReason {
+    EndpointLeaseBusy,
+}
+
 pub type RgbOutput = (String, Vec<String>, RgbFactory);
 pub type LcdOutput = (String, Vec<String>, LcdFactory);
 #[derive(Clone, Default)]
@@ -103,8 +110,8 @@ impl Runtime {
             Some(error) if retry_scheduled => OutputActivity::Retrying(error),
             error => OutputActivity::Unavailable(error),
         };
-        if let Some(error) = recovery.and_then(|state| state.start_error.clone()) {
-            return failed_activity(Some(error));
+        if let Some(error) = recovery.and_then(|state| state.start_error.as_ref()) {
+            return failed_activity(Some(error.message().into()));
         }
         let (phase, frames, error) = if is_lcd {
             let Some(status) = self.lcd_status(id) else {
@@ -134,6 +141,33 @@ impl Runtime {
             Phase::Failed => failed_activity(error),
             Phase::Stopping | Phase::Stopped => OutputActivity::Unavailable(error),
         }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn output_failure_reason(
+        &self,
+        device: &crate::devices::Device,
+        activity: &OutputActivity,
+    ) -> Option<OutputFailureReason> {
+        use crate::runtime::output::OutputStartError;
+
+        (device.driver == crate::devices::Driver::OpenRgb
+            && !self.managed_backend_ids.contains(&device.id)
+            && matches!(
+                activity,
+                OutputActivity::Retrying(_) | OutputActivity::Unavailable(Some(_))
+            )
+            && self
+                .rgb_specs
+                .get(&device.id)
+                .is_some_and(|spec| spec.action_required_error.is_none())
+            && self.output_recovery.get(&device.id).is_some_and(|state| {
+                matches!(
+                    state.start_error,
+                    Some(OutputStartError::EndpointLeaseBusy(_))
+                )
+            }))
+        .then_some(OutputFailureReason::EndpointLeaseBusy)
     }
 
     /// Retain factories, not live handles. Reversion also drains current owners first.
