@@ -1,5 +1,7 @@
 import unittest
+from unittest.mock import Mock
 
+from capture_console_windows import WindowCapture, window_observation
 from normalize_process_events import normalize
 from shell_acceptance import check_trace
 
@@ -188,6 +190,31 @@ class NormalizeProcessEventsTests(unittest.TestCase):
         data['events'].pop(0)
         with self.assertRaisesRegex(ValueError, 'matching command'):
             self.normalize(data)
+
+
+class ConsoleWindowCaptureTests(unittest.TestCase):
+    def test_records_both_console_classes_without_guessing_an_unresolved_owner(self):
+        for class_name in ('ConsoleWindowClass', 'CASCADIA_HOSTING_WINDOW_CLASS'):
+            row = window_observation(50, class_name, 0, 'show', 123)
+            self.assertEqual(row['class'], class_name)
+            self.assertIsNone(row['window_owner_pid'])
+            self.assertEqual(row['event_tick'], 123)
+        self.assertIsNone(window_observation(50, 'PrismestraMainWindow', 70, 'initial'))
+        observed = window_observation(50, 'ConsoleWindowClass', 70, 'initial', owner_start='123')
+        self.assertEqual(observed['window_owner_created_filetime'], '123')
+
+    def test_hook_filters_accessibility_objects_and_reports_observer_errors(self):
+        observer = WindowCapture.__new__(WindowCapture)
+        observer.gaps = []
+        observer.observe = Mock()
+        observer.on_show(None, 0, 50, -4, 0, 7, 100)
+        observer.on_show(None, 0, 50, 0, 1, 7, 100)
+        observer.observe.assert_not_called()
+        observer.on_show(None, 0, 50, 0, 0, 7, 100)
+        observer.observe.assert_called_once_with(50, 'show', 100)
+        observer.observe.side_effect = OSError('synthetic window access failure')
+        observer.on_show(None, 0, 50, 0, 0, 7, 100)
+        self.assertIn('synthetic window access failure', observer.gaps[0])
 
 
 if __name__ == '__main__':

@@ -29,6 +29,12 @@ python scripts/normalize_process_events.py uninstall-processes.json --scenario u
 
 Identify each `--product-root` from its observed launch, including detached scheduled tasks when applicable. The normalizer writes a partial receipt. Add actual window observations and establish scenario coverage before using the result as a complete acceptance receipt.
 
+Start the window observer on each measured desktop before the process interval. Allow time for an actual visible control console before and after the product action. The observer retains the desktop and session, the window class, and the window owner's PID and creation time when available. It does not collect window titles. The owner can be a console host or Terminal broker. Leave the owner unresolved in the acceptance receipt unless the evidence identifies the owning product or harness process instance. [Window ownership API](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowthreadprocessid)
+
+```powershell
+python scripts/capture_console_windows.py --disposable-guest --duration-seconds 1000 --output uninstall-windows.json
+```
+
 ```powershell
 python scripts/shell_acceptance.py evidence.json --scenario uninstall --revision <commit> --artifact-sha256 <sha256>
 ```
