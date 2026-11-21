@@ -33,6 +33,7 @@ function Run-Setup($Path, $Options, $Log) {
 
 $id = [guid]::NewGuid().ToString('D')
 $install = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Prismestra'
+$probeDirectory = Join-Path (Split-Path -Parent $install) "Prismestra CI Probe-$id"
 $registry = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{9bb22971-3e88-434d-b212-ab8cf717799a}_is1'
 $setup = (Resolve-Path -LiteralPath $Installer).Path
 Assert-Expected ([IO.Path]::GetFileName($setup) -cmatch '^Prismestra-Setup-[0-9]+(?:\.[0-9]+){2,3}-x64\.exe$') 'Expected the production Setup.'
@@ -41,7 +42,7 @@ Assert-Expected ($setupHash -ceq $InstallerSha256) 'Production Setup SHA-256 mis
 
 $username = 'PrismCi' + ([guid]::NewGuid().ToString('N')).Substring(0, 12)
 $scratch = Join-Path $env:ProgramData ("Prismestra-StandardUser-" + [guid]::NewGuid().ToString('N'))
-foreach ($path in @($install, $registry, $scratch, $ReportDirectory)) {
+foreach ($path in @($install, $registry, $scratch, $probeDirectory, $ReportDirectory)) {
     if ($path -eq $install -and (Test-Path -LiteralPath $path -PathType Container) -and
         @(Get-ChildItem -LiteralPath $path -Force).Count -eq 0) { continue }
     Assert-Expected (-not (Test-Path -LiteralPath $path)) ("Expected an unused namespace and output directory: " + $path)
@@ -148,13 +149,14 @@ $receiptPath = Join-Path $local ("Prismestra-CI-" + $Id + ".json")
 $result = [ordered]@{ sid = $identity.User.Value; standard_user = $true; startup_command = $null;
     empty_profile = $false; local_bindings = $false; backend_pin = $false; resident_shell = 'not_observed';
     automatic_setup = $false; first_run = $null; native_identity_probe = $false; native_profile_prepare = $false;
-    native_current_sid = $false; native_startup = $false; native_webview_probe = $false }
+    native_current_sid = $false; native_startup = $false; native_webview_probe = $false;
+    native_bootstrap = $false }
 $app = $null
 $stop = $null
 try {
     $profile = Join-Path $local 'Prismestra'
     if (Test-Path -LiteralPath $profile) { throw 'The standard-user profile was not fresh.' }
-    $probePath = Join-Path $PSScriptRoot 'Prismestra-Setup-Probe.exe'
+    $probePath = Join-Path (Join-Path (Split-Path -Parent $Install) "Prismestra CI Probe-$Id") 'Prismestra-Setup-Probe.exe'
     if (Test-Path -LiteralPath $probePath) {
         function Assert-UserWebViewProbe([int]$Expected) {
             $child = Start-Process -FilePath $probePath -PassThru -WindowStyle Hidden
@@ -183,7 +185,6 @@ try {
         }
         $result.native_webview_probe = $true
     }
-    $ps = Join-Path $PSHOME powershell.exe
     $image = Join-Path $Install 'Prismestra.exe'
     $currentSidOutput = Join-Path $PSScriptRoot 'native-current-sid.log'
     $sidProbe = Start-Process -FilePath $image -ArgumentList '--setup-current-user' -PassThru -WindowStyle Hidden -RedirectStandardOutput $currentSidOutput
@@ -209,9 +210,9 @@ try {
     $value = 'Prismestra'
     $command = '"' + (Join-Path $Install Prismestra.exe) + '" --installed --autostart'
     $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-    function Invoke-Startup([string]$Arg, [int]$Expected) {
+    function Invoke-Startup([string]$Arg, [int]$Expected, [string]$Executable = $image) {
         $stderr = Join-Path $PSScriptRoot 'native-startup.stderr.log'
-        $helper = Start-Process -FilePath $image -ArgumentList $Arg -PassThru -WindowStyle Hidden -RedirectStandardError $stderr
+        $helper = Start-Process -FilePath $Executable -ArgumentList $Arg -PassThru -WindowStyle Hidden -RedirectStandardError $stderr
         $null = $helper.Handle
         try {
             if (-not $helper.WaitForExit(20000)) { $helper.Kill(); throw 'Native startup operation timed out.' }
@@ -231,7 +232,27 @@ try {
     Invoke-Startup '--setup-disable-startup' 0
     $raw = (Get-Item -LiteralPath $runKey).GetValue($value, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
     if ($raw -cne $foreign) { throw 'Native startup did not preserve the foreign value.' }
-    Remove-ItemProperty -LiteralPath $runKey -Name $value
+    if ($result.native_webview_probe) {
+        $sidProbe = Start-Process -FilePath $probePath -ArgumentList '--current-sid' -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $currentSidOutput
+        try {
+            if ($sidProbe.ExitCode -ne 0 -or (Get-Content -LiteralPath $currentSidOutput -Raw).Trim() -cne $ExpectedSid) {
+                throw 'Static bootstrap SID read did not return the standard user.'
+            }
+        } finally { $sidProbe.Dispose() }
+        Invoke-Startup ('--check-user ' + $ExpectedSid) 0 $probePath
+        Invoke-Startup '--check-user S-1-5-18' 1 $probePath
+        Invoke-Startup ('--enable-startup "' + $image + '"') 2 $probePath
+        Invoke-Startup ('--disable-startup "' + $image + '"') 0 $probePath
+        if ((Get-Item -LiteralPath $runKey).GetValue($value, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -cne $foreign) {
+            throw 'Static bootstrap did not preserve the foreign startup value.'
+        }
+        Remove-ItemProperty -LiteralPath $runKey -Name $value
+        Invoke-Startup ('--enable-startup "' + $image + '"') 0 $probePath
+        if ((Get-ItemPropertyValue $runKey $value) -cne $command) { throw 'Static bootstrap wrote an unexpected startup command.' }
+        Invoke-Startup ('--disable-startup "' + $image + '"') 0 $probePath
+        if ($null -ne (Get-Item -LiteralPath $runKey).GetValue($value)) { throw 'Static bootstrap did not remove the owned startup value.' }
+        $result.native_bootstrap = $true
+    } else { Remove-ItemProperty -LiteralPath $runKey -Name $value }
     Invoke-Startup '--setup-enable-startup' 0
     Invoke-Startup '--setup-disable-startup' 0
     if ($null -ne (Get-Item -LiteralPath $runKey).GetValue($value)) { throw 'Native startup did not remove the owned value.' }
@@ -387,10 +408,12 @@ try {
     $permissions.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
         $account.SID, 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
     Set-Acl -LiteralPath $scratch -AclObject $permissions
-    # Inno embeds this checkout's script in Setup; it is not an installed file.
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'original-user.ps1') -Destination $scratch
     if ($WebViewProbe) {
-        $stagedProbe = Join-Path $scratch 'Prismestra-Setup-Probe.exe'
+        [void][IO.Directory]::CreateDirectory($probeDirectory)
+        $acl = [Security.AccessControl.DirectorySecurity]::new()
+        $acl.SetSecurityDescriptorSddlForm('O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FRFX;;;BU)')
+        Set-Acl -LiteralPath $probeDirectory -AclObject $acl
+        $stagedProbe = Join-Path $probeDirectory 'Prismestra-Setup-Probe.exe'
         Copy-Item -LiteralPath $WebViewProbe -Destination $stagedProbe
         if ((Get-FileHash -LiteralPath $stagedProbe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $WebViewProbeSha256) {
             throw 'WebView2 probe differs from the original installer input.'
@@ -466,6 +489,7 @@ try {
         $actual.resident_shell -eq 'process_drained_by_shutdown' -and -not $actual.startup_error_file) 'Standard-user verification failed. See standard-user.json.'
     Assert-Expected ($actual.startup_command -ceq ('"' + (Join-Path $install 'Prismestra.exe') + '" --installed --autostart')) 'Standard-user HKCU Run verification failed.'
     Assert-Expected (!$WebViewProbe -or $actual.native_webview_probe) 'Native original-user WebView2 probe was not verified.'
+    Assert-Expected (!$WebViewProbe -or $actual.native_bootstrap) 'Native pre-runtime SID and startup commands were not verified.'
 } finally {
     try {
         if ($setupAttempted -and (Test-Path -LiteralPath $registry)) {
@@ -491,8 +515,12 @@ try {
             } finally { Remove-LocalUser -SID $account.SID }
         }
         if ($password) { $password.Dispose() }
+        if (Test-Path -LiteralPath $probeDirectory) {
+            [IO.File]::Delete((Join-Path $probeDirectory 'Prismestra-Setup-Probe.exe'))
+            [IO.Directory]::Delete($probeDirectory)
+        }
         if (Test-Path -LiteralPath $scratch) {
-            foreach ($name in @('worker.ps1', 'invoke-worker.ps1', 'original-user.ps1', 'startup-helper.stderr.log', 'startup-helper.stdout.log', 'worker-output.log', 'app.stderr.log', 'app.stdout.log', 'native-current-sid.log', 'Prismestra-Setup-Probe.exe')) {
+            foreach ($name in @('worker.ps1', 'invoke-worker.ps1', 'startup-helper.stderr.log', 'startup-helper.stdout.log', 'worker-output.log', 'app.stderr.log', 'app.stdout.log', 'native-current-sid.log')) {
                 $file = Join-Path $scratch $name
                 if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
             }
