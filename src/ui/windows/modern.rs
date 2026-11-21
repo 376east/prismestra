@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 mod output_preview;
+mod retry_output;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -100,6 +101,11 @@ enum Command {
     SelectDevice {
         id: String,
     },
+    RetryOutput {
+        id: String,
+        request: u32,
+        ticket: String,
+    },
     SetField {
         key: String,
         value: String,
@@ -152,6 +158,7 @@ pub(super) struct Session {
     configuration_error: Option<String>,
     snapshot_requested: bool,
     draft_map: output_preview::DraftRevision,
+    output_retries: BTreeMap<String, retry_output::Pending>,
 }
 impl Session {
     fn new(app: &App) -> Result<Self, String> {
@@ -201,6 +208,7 @@ impl Session {
             configuration_error: None,
             snapshot_requested: false,
             draft_map: Default::default(),
+            output_retries: BTreeMap::new(),
         };
         let scene = result
             .draft
@@ -485,12 +493,9 @@ fn device_candidates(app: &App) -> Vec<first_run::DeviceCandidate<'_>> {
 }
 
 fn device_activity(app: &App) -> Value {
-    let labels = app.runtime.read(|runtime| {
-        runtime
-            .document()
-            .lighting
-            .setup
-            .devices
+    let (labels, tickets) = app.runtime.read(|runtime| {
+        let devices = &runtime.document().lighting.setup.devices;
+        let labels = devices
             .iter()
             .map(|device| {
                 let label = if app.native_lighting.is_none() && device.enabled {
@@ -500,10 +505,28 @@ fn device_activity(app: &App) -> Value {
                 };
                 (device.id.clone(), label)
             })
-            .collect::<BTreeMap<_, _>>()
+            .collect::<BTreeMap<_, _>>();
+        let tickets = if app.native_lighting.is_some() && !busy(app) {
+            devices
+                .iter()
+                .filter_map(|device| {
+                    runtime.openrgb_retry_ticket(&device.id).map(|ticket| {
+                        (
+                            device.id.clone(),
+                            retry_output::encode(app.context_revision, ticket),
+                        )
+                    })
+                })
+                .collect::<BTreeMap<_, _>>()
+        } else {
+            BTreeMap::new()
+        };
+        (labels, tickets)
     });
     json!({
         "labels": labels,
+        "retryScope": app.context_revision.to_string(),
+        "retryTickets": tickets,
         "found": app.newly_found_devices().map(|d| &d.label).collect::<Vec<_>>(),
     })
 }
@@ -620,6 +643,15 @@ fn stage_native(app: &mut App, fields: &[NativeValue]) -> Result<(), String> {
 }
 fn execute(state: &State, command: Command) -> Result<bool, String> {
     let hwnd = state.editor_window.get();
+    if let Command::RetryOutput {
+        id,
+        request,
+        ticket,
+    } = command
+    {
+        retry_output::request(state, id, request, &ticket)?;
+        return Ok(false);
+    }
     if let Command::SceneFile { request, operation } = command {
         scene_files::execute(state, hwnd, request, operation)?;
         return Ok(false);
@@ -1002,6 +1034,7 @@ pub(super) fn maintain(state: &State) {
             }
         }
     }
+    retry_output::maintain(state);
     if let (Ok(slot), Ok(mut sessions)) = (
         state.app.try_borrow(),
         state.modern_session.try_borrow_mut(),
