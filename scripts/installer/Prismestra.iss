@@ -182,8 +182,8 @@ var
   Output: TExecOutput;
 begin
   Result := '';
-  if ExecAndCaptureOutput(PowerShell,
-    '-NoProfile -NonInteractive -Command "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value"',
+  if GuardInstall('Check') and ExecAndCaptureOutput(InstallPath + '\Prismestra.exe',
+    '--setup-current-user',
     ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code, Output) and
     (Code = 0) and not Output.Error and (GetArrayLength(Output.StdOut) = 1) and
     ValidSID(Trim(Output.StdOut[0])) then Result := Trim(Output.StdOut[0]);

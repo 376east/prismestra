@@ -15,7 +15,7 @@ use std::{
     env,
     ffi::OsString,
     fs::{self, File, OpenOptions},
-    io::{self, Read},
+    io::{self, Read, Write},
     mem::size_of,
     os::windows::fs::{MetadataExt, OpenOptionsExt},
     path::{Component, Path, PathBuf, Prefix},
@@ -74,6 +74,7 @@ enum Command {
     LaunchForSetup,
     Shutdown,
     CheckSetupUser(OsString),
+    ReadSetupUser,
 }
 
 fn command(args: &[OsString]) -> Result<Command, String> {
@@ -89,12 +90,14 @@ fn command(args: &[OsString]) -> Result<Command, String> {
         }
         [flag] if flag == "--setup-launch-installed" => Ok(Command::LaunchForSetup),
         [flag, sid] if flag == "--setup-check-user" => Ok(Command::CheckSetupUser(sid.clone())),
+        [flag] if flag == "--setup-current-user" => Ok(Command::ReadSetupUser),
         _ if args.iter().any(|a| {
             a == "--installed"
                 || a == "--autostart"
                 || a == "--shutdown-installed"
                 || a == "--prepare-installed"
                 || a == "--setup-check-user"
+                || a == "--setup-current-user"
                 || a == "--setup-prepare-installed"
                 || a == "--setup-launch-installed"
         }) =>
@@ -117,6 +120,11 @@ pub fn dispatch(args: Vec<OsString>) -> Result<Dispatch, String> {
             expected.as_os_str() != actual.as_str(),
         )));
     }
+    if command == Command::ReadSetupUser {
+        let sid = super::installed_policy::process_user_sid(unsafe { GetCurrentProcess() })?;
+        writeln!(io::stdout().lock(), "{sid}").map_err(|error| error.to_string())?;
+        return Ok(Dispatch::Exit(0));
+    }
     if matches!(
         command,
         Command::PrepareForSetup(_) | Command::LaunchForSetup
@@ -135,7 +143,7 @@ pub fn dispatch(args: Vec<OsString>) -> Result<Dispatch, String> {
     let executable = env::current_exe().map_err(|e| e.to_string())?;
     let executable = checked_local_path(&executable).map_err(|e| e.to_string())?;
     match command {
-        Command::Legacy | Command::CheckSetupUser(_) => unreachable!(),
+        Command::Legacy | Command::CheckSetupUser(_) | Command::ReadSetupUser => unreachable!(),
         Command::Shutdown => {
             windows::shutdown_installed(&executable)?;
             Ok(Dispatch::Exit(0))
@@ -791,6 +799,7 @@ pub(crate) mod tests {
             parse(&["--setup-check-user", "S-1-5-18"]),
             Ok(Command::CheckSetupUser("S-1-5-18".into()))
         );
+        assert_eq!(parse(&["--setup-current-user"]), Ok(Command::ReadSetupUser));
         for args in [
             &["--autostart"][..],
             &["--installed", "--project", "foreign.json"],
@@ -799,6 +808,7 @@ pub(crate) mod tests {
             &["--prepare-installed", "--installed"],
             &["--setup-check-user"],
             &["--setup-check-user", "S-1-5-18", "--installed"],
+            &["--setup-current-user", "S-1-5-18"],
             &["--setup-prepare-installed"],
             &["--setup-launch-installed", "--autostart"],
         ] {

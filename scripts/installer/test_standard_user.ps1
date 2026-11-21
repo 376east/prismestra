@@ -145,7 +145,8 @@ if ($identity.User.Value -ne $ExpectedSid -or $admin -or $local -cne $env:LOCALA
 $receiptPath = Join-Path $local ("Prismestra-CI-" + $Id + ".json")
 $result = [ordered]@{ sid = $identity.User.Value; standard_user = $true; startup_command = $null;
     empty_profile = $false; local_bindings = $false; backend_pin = $false; resident_shell = 'not_observed';
-    automatic_setup = $false; first_run = $null; native_identity_probe = $false; native_profile_prepare = $false }
+    automatic_setup = $false; first_run = $null; native_identity_probe = $false; native_profile_prepare = $false;
+    native_current_sid = $false }
 $app = $null
 $stop = $null
 try {
@@ -153,6 +154,16 @@ try {
     if (Test-Path -LiteralPath $profile) { throw 'The standard-user profile was not fresh.' }
     $ps = Join-Path $PSHOME powershell.exe
     $image = Join-Path $Install 'Prismestra.exe'
+    $currentSidOutput = Join-Path $PSScriptRoot 'native-current-sid.log'
+    $sidProbe = Start-Process -FilePath $image -ArgumentList '--setup-current-user' -PassThru -WindowStyle Hidden -RedirectStandardOutput $currentSidOutput
+    $null = $sidProbe.Handle
+    try {
+        if (-not $sidProbe.WaitForExit(20000)) { $sidProbe.Kill(); throw 'Native SID read timed out.' }
+        if ($sidProbe.ExitCode -ne 0 -or (Get-Content -LiteralPath $currentSidOutput -Raw).Trim() -cne $ExpectedSid) {
+            throw 'Native SID read did not return the standard user.'
+        }
+    } finally { $sidProbe.Dispose() }
+    $result.native_current_sid = $true
     foreach ($case in @(@{sid=$ExpectedSid; exit=0}, @{sid='S-1-5-18'; exit=1})) {
         $probe = Start-Process -FilePath $image -ArgumentList '--setup-check-user', $case.sid -PassThru -WindowStyle Hidden
         $null = $probe.Handle
@@ -389,7 +400,7 @@ try {
     $actual | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $report 'standard-user.json') -Encoding UTF8
     Assert-Expected ($status -eq 0 -and $actual.sid -ceq $sid -and $actual.standard_user -and $actual.empty_profile -and
         $actual.local_bindings -and $actual.backend_pin -and $actual.automatic_setup -and
-        $actual.native_identity_probe -and $actual.native_profile_prepare -and
+        $actual.native_identity_probe -and $actual.native_profile_prepare -and $actual.native_current_sid -and
         $actual.resident_shell -eq 'process_drained_by_shutdown' -and -not $actual.startup_error_file) 'Standard-user verification failed. See standard-user.json.'
     Assert-Expected ($actual.startup_command -ceq ('"' + (Join-Path $install 'Prismestra.exe') + '" --installed --autostart')) 'Standard-user HKCU Run verification failed.'
 } finally {
@@ -418,7 +429,7 @@ try {
         }
         if ($password) { $password.Dispose() }
         if (Test-Path -LiteralPath $scratch) {
-            foreach ($name in @('worker.ps1', 'invoke-worker.ps1', 'original-user.ps1', 'startup-helper.stderr.log', 'startup-helper.stdout.log', 'worker-output.log', 'app.stderr.log', 'app.stdout.log')) {
+            foreach ($name in @('worker.ps1', 'invoke-worker.ps1', 'original-user.ps1', 'startup-helper.stderr.log', 'startup-helper.stdout.log', 'worker-output.log', 'app.stderr.log', 'app.stdout.log', 'native-current-sid.log')) {
                 $file = Join-Path $scratch $name
                 if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
             }
