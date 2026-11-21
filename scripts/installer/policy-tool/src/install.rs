@@ -318,22 +318,31 @@ fn write_protected(
             .map_err(display_error)?;
         drop(file);
         private_entry(&temporary)?;
-        if unsafe {
-            MoveFileExW(
-                wide(&temporary).as_ptr(),
-                wide(path).as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        } == 0
-        {
-            return Err(win32_error());
-        }
-        Ok(())
+        publish_staged(&temporary, path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(temporary);
     }
     result
+}
+
+fn publish_staged(temporary: &Path, path: &Path) -> Result<(), String> {
+    if unsafe {
+        MoveFileExW(
+            wide(temporary).as_ptr(),
+            wide(path).as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        let error = win32_error();
+        let name = path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy();
+        return Err(format!("Cannot publish {name}: {error}"));
+    }
+    Ok(())
 }
 
 struct StringVariant(VARIANT);
@@ -470,12 +479,12 @@ pub(super) fn provision(
             app_sha256: app_hash.clone(),
             previous_app_sha256: prior_policy.map(|policy| policy.app_sha256),
         };
-        // A crash before publishing policy.json leaves the prior policy pin usable for recovery.
-        write_protected(&ownership_path, &record, sid, crate::OWNERSHIP_LIMIT)?;
         if existed {
             let current = folder.GetTask(&name).map_err(display_error)?;
             validate_task(&current, sid, install)?;
         }
+        // A crash before publishing policy.json leaves the prior policy pin usable for recovery.
+        write_protected(&ownership_path, &record, sid, crate::OWNERSHIP_LIMIT)?;
         let task = folder
             .RegisterTaskDefinition(
                 &name,
@@ -516,6 +525,8 @@ pub(super) fn provision(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 
     fn component(extra: &[&str]) -> ComponentManifest {
         let hash = "a".repeat(64);
@@ -571,6 +582,54 @@ mod tests {
     }
 
     #[test]
+    fn locked_publication_preserves_both_files_then_retry_replaces_the_destination() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = std::env::temp_dir().join(format!(
+            "prismestra-policy-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&scratch).unwrap();
+        let path = scratch.join("policy.json");
+        let temporary = scratch.join("staged.json");
+        let result = (|| -> Result<(), String> {
+            fs::write(&path, b"previous").map_err(display_error)?;
+            fs::write(&temporary, b"pending").map_err(display_error)?;
+            let lock = OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(&path)
+                .map_err(display_error)?;
+            let failure = publish_staged(&temporary, &path)
+                .err()
+                .ok_or("Locked policy was replaced.")?;
+            if !failure.starts_with("Cannot publish policy.json:")
+                || fs::read(&path).map_err(display_error)? != b"previous"
+                || fs::read(&temporary).map_err(display_error)? != b"pending"
+            {
+                return Err(
+                    "A failed publication did not preserve the previous and pending files.".into(),
+                );
+            }
+            drop(lock);
+            publish_staged(&temporary, &path)?;
+            if temporary.exists() || fs::read(&path).map_err(display_error)? != b"pending" {
+                return Err("Retry did not publish the pending file.".into());
+            }
+            Ok(())
+        })();
+        for file in [&path, &temporary] {
+            if file.exists() {
+                fs::remove_file(file).unwrap();
+            }
+        }
+        fs::remove_dir(scratch).unwrap();
+        result.unwrap();
+    }
+
+    #[test]
     #[ignore = "registers a non-running fixture task on a disposable GitHub runner"]
     fn hosted_provisioning_fixture() {
         assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
@@ -616,11 +675,7 @@ mod tests {
                 "BU",
                 256 * 1024,
             )?;
-            let mut hashes = Vec::new();
-            for payload in [
-                b"First synthetic application.",
-                b"Second synthetic application.".as_slice(),
-            ] {
+            let stage_app = |payload: &[u8]| -> Result<String, String> {
                 let app_hash = digest_for_test(payload);
                 let app_path = install.join("Prismestra.exe");
                 fs::write(&app_path, payload).map_err(display_error)?;
@@ -633,6 +688,14 @@ mod tests {
                     "BU",
                     256 * 1024,
                 )?;
+                Ok(app_hash)
+            };
+            let mut hashes = Vec::new();
+            for payload in [
+                b"First synthetic application.",
+                b"Second synthetic application.".as_slice(),
+            ] {
+                let app_hash = stage_app(payload)?;
                 provision(&sid, &install, &shared, &policy_home)?;
                 let (record, policy) = read_policy_state(&sid, &install, &policy_home)?;
                 let record = record.ok_or("Missing ownership after fixture provisioning.")?;
@@ -644,6 +707,39 @@ mod tests {
                 }
                 hashes.push(app_hash);
             }
+            let app_hash = stage_app(b"Third synthetic application.")?;
+            let lock = OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(policy_home.join("policy.json"))
+                .map_err(display_error)?;
+            let error = provision(&sid, &install, &shared, &policy_home)
+                .err()
+                .ok_or("Provisioning replaced a policy that was locked against replacement.")?;
+            if !error.starts_with("Cannot publish policy.json:") {
+                return Err(format!(
+                    "Failed before reaching the publication fault: {error}"
+                ));
+            }
+            let (record, policy) = read_policy_state(&sid, &install, &policy_home)?;
+            let record = record.ok_or("Missing ownership after interrupted publication.")?;
+            if record.app_sha256 != app_hash
+                || record.previous_app_sha256.as_ref() != hashes.last()
+                || policy.as_ref().map(|policy| &policy.app_sha256) != hashes.last()
+            {
+                return Err("Interrupted publication did not preserve the previous policy.".into());
+            }
+            drop(lock);
+            provision(&sid, &install, &shared, &policy_home)?;
+            let (record, policy) = read_policy_state(&sid, &install, &policy_home)?;
+            let record = record.ok_or("Missing ownership after retry.")?;
+            if record.app_sha256 != app_hash
+                || record.previous_app_sha256.as_ref() != hashes.last()
+                || policy.as_ref().map(|policy| &policy.app_sha256) != Some(&app_hash)
+            {
+                return Err("Retry did not publish the pending policy.".into());
+            }
+            hashes.push(app_hash);
             fs::write(&engine_path, b"tampered").map_err(display_error)?;
             if provision(&sid, &install, &shared, &policy_home).is_ok() {
                 return Err("Provisioning accepted a changed runtime file.".into());
