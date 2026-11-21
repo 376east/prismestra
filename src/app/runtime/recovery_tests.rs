@@ -498,6 +498,113 @@ fn startup_isolates_endpoint_contention_and_retries_the_returned_output() {
 
 #[cfg(windows)]
 #[test]
+fn first_start_lease_contention_exposes_one_manual_openrgb_retry() {
+    let mut runtime = runtime();
+    let mut document = runtime.document().clone();
+    document.lighting.setup.devices[0].driver = Driver::OpenRgb;
+    let local = crate::app::lighting_outputs::Local {
+        version: 1,
+        devices: [
+            (
+                "a".into(),
+                crate::devices::Binding::OpenRgb {
+                    endpoint: ([127, 0, 0, 207], 40491).into(),
+                    identity: "1".repeat(64),
+                    topology: "2".repeat(64),
+                },
+            ),
+            (
+                "b".into(),
+                crate::devices::Binding::WledDdp {
+                    endpoint: ([127, 0, 0, 207], 40492).into(),
+                    controller: None,
+                },
+            ),
+        ]
+        .into(),
+        monitors: Default::default(),
+        door_brightness: 60,
+    };
+    let state =
+        std::env::temp_dir().join(format!("prismestra-initial-lease-{}", std::process::id()));
+    let mut plan = local.prepare(&document, &state).unwrap();
+    let openrgb = Arc::new(Link::default());
+    let wled = Arc::new(Link::default());
+    plan.rgb[0].2 = factory_for(&openrgb, Driver::OpenRgb);
+    plan.rgb[1].2 = factory(&wled);
+    let held = crate::runtime::output::Lease::acquire(plan.rgb[0].1.clone()).unwrap();
+    runtime
+        .request_startup_outputs_for(&state, None, &local, document.clone(), plan)
+        .unwrap();
+
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    let wled_generation = runtime.host.status("b").unwrap().generation;
+    assert!(runtime.openrgb_retry_ticket("a").is_none());
+    for delay in [1_000_000, 5_000_000, 15_000_000] {
+        assert!(matches!(
+            runtime.output_activity(&document.lighting.setup.devices[0]),
+            OutputActivity::Retrying(_)
+        ));
+        now += delay;
+        tick(&mut runtime, &mut now);
+        tick(&mut runtime, &mut now);
+    }
+    assert!(runtime.host.status("a").is_none());
+    assert_eq!(openrgb.calls.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        runtime.output_activity(&document.lighting.setup.devices[0]),
+        OutputActivity::Unavailable(Some(_))
+    ));
+
+    let activity = crate::ui::windows::device_activity_for(&runtime, true, false, 1);
+    assert_eq!(
+        activity["reasons"],
+        serde_json::json!({"a": "endpointLeaseBusy"})
+    );
+    assert_eq!(activity["retryTickets"].as_object().unwrap().len(), 1);
+    assert!(activity["retryTickets"]["a"].is_string());
+
+    let ticket = runtime
+        .openrgb_retry_ticket("a")
+        .expect("lease failure before the first worker still offers a retry");
+    assert!(!runtime.request_openrgb_retry("b", ticket));
+    assert!(runtime.request_openrgb_retry("a", ticket));
+    assert!(runtime.cancel_openrgb_retry("a", ticket));
+    assert!(!runtime.request_openrgb_retry("a", ticket));
+    let ticket = runtime.openrgb_retry_ticket("a").unwrap();
+    assert!(runtime.request_openrgb_retry("a", ticket));
+    assert!(!runtime.request_openrgb_retry("a", ticket));
+    tick(&mut runtime, &mut now);
+    assert!(matches!(
+        runtime.openrgb_retry_status("a", ticket),
+        OpenRgbRetryStatus::Failed(_)
+    ));
+    assert_eq!(openrgb.calls.load(Ordering::SeqCst), 0);
+
+    let next = runtime
+        .openrgb_retry_ticket("a")
+        .expect("a new one-shot request can retry after releasing the lease");
+    assert_ne!(ticket, next);
+    assert!(!runtime.request_openrgb_retry("a", ticket));
+    drop(held);
+    assert!(runtime.request_openrgb_retry("a", next));
+    working(&mut runtime, "a", &mut now);
+    assert_eq!(
+        runtime.openrgb_retry_status("a", next),
+        OpenRgbRetryStatus::Submitted
+    );
+    assert_eq!(openrgb.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(wled.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        wled_generation
+    );
+    drain(&mut runtime);
+}
+
+#[cfg(windows)]
+#[test]
 fn startup_registers_managed_outputs_on_commit_and_retries_on_new_inventory() {
     let mut runtime = runtime();
     let mut document = runtime.document().clone();
