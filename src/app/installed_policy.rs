@@ -24,12 +24,12 @@ use windows_sys::{
             CheckTokenMembership, CreateWellKnownSid, DACL_SECURITY_INFORMATION, DuplicateTokenEx,
             GetAce, GetTokenInformation, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION,
             PSECURITY_DESCRIPTOR, PSID, RevertToSelf, SECURITY_MAX_SID_SIZE, SecurityImpersonation,
-            SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_DUPLICATE, TOKEN_IMPERSONATE,
-            TOKEN_INFORMATION_CLASS, TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_OWNER,
-            TOKEN_QUERY, TOKEN_STATISTICS, TOKEN_USER, TokenElevationType, TokenElevationTypeFull,
-            TokenElevationTypeLimited, TokenImpersonation, TokenIntegrityLevel, TokenLinkedToken,
-            TokenOwner, TokenSessionId, TokenStatistics, TokenUser, WinBuiltinAdministratorsSid,
-            WinInteractiveSid,
+            SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_DUPLICATE, TOKEN_ELEVATION,
+            TOKEN_IMPERSONATE, TOKEN_INFORMATION_CLASS, TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL,
+            TOKEN_OWNER, TOKEN_QUERY, TOKEN_STATISTICS, TOKEN_USER, TokenElevation,
+            TokenElevationType, TokenElevationTypeFull, TokenElevationTypeLimited,
+            TokenImpersonation, TokenIntegrityLevel, TokenLinkedToken, TokenOwner, TokenSessionId,
+            TokenStatistics, TokenUser, WinBuiltinAdministratorsSid, WinInteractiveSid,
         },
         Storage::FileSystem::{
             BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_APPEND_DATA,
@@ -305,22 +305,7 @@ impl HelperAuthority {
     }
 
     pub(super) fn with_limited<T>(&self, read: impl FnOnce() -> T) -> Result<T, String> {
-        if unsafe { SetThreadToken(null(), self.limited.0) } == 0 {
-            return Err(error(format_args!(
-                "SetThreadToken(linked limited token): {}",
-                io::Error::last_os_error()
-            )));
-        }
-        struct Revert;
-        impl Drop for Revert {
-            fn drop(&mut self) {
-                if unsafe { RevertToSelf() } == 0 {
-                    std::process::abort();
-                }
-            }
-        }
-        let _revert = Revert;
-        Ok(read())
+        with_thread_token(&self.limited, read)
     }
 
     fn set_creator_owner(&self) -> Result<(), String> {
@@ -713,6 +698,75 @@ pub(super) fn process_user_sid(process: HANDLE) -> Result<String, String> {
     token_sid(&process_token(process, TOKEN_QUERY)?)
 }
 
+pub(super) fn current_process_is_elevated() -> Result<bool, String> {
+    let token = process_token(unsafe { GetCurrentProcess() }, TOKEN_QUERY)?;
+    token_is_elevated(&token)
+}
+
+fn token_is_elevated(token: &Handle) -> Result<bool, String> {
+    Ok(token_value::<TOKEN_ELEVATION>(token, TokenElevation)?.TokenIsElevated != 0)
+}
+
+fn with_thread_token<T>(token: &Handle, action: impl FnOnce() -> T) -> Result<T, String> {
+    if unsafe { SetThreadToken(null(), token.0) } == 0 {
+        return Err(error(format_args!(
+            "SetThreadToken(linked limited token): {}",
+            io::Error::last_os_error()
+        )));
+    }
+    struct Revert;
+    impl Drop for Revert {
+        fn drop(&mut self) {
+            if unsafe { RevertToSelf() } == 0 {
+                std::process::abort();
+            }
+        }
+    }
+    let _revert = Revert;
+    Ok(action())
+}
+
+pub(super) fn with_setup_user<T>(
+    action: impl FnOnce(&str) -> Result<T, String>,
+) -> Result<T, String> {
+    let token = process_token(
+        unsafe { GetCurrentProcess() },
+        TOKEN_QUERY | TOKEN_DUPLICATE,
+    )?;
+    let sid = token_sid(&token)?;
+    if !token_is_elevated(&token)?
+        && !member(
+            &impersonation_token(&token).map_err(error)?,
+            WinBuiltinAdministratorsSid,
+        )?
+    {
+        return action(&sid);
+    }
+    if elevation_type(&token)? != TokenElevationTypeFull {
+        return Err(
+            "Start Setup from the ordinary Windows account to configure per-user startup.".into(),
+        );
+    }
+    let limited = linked_token(&token)?;
+    if elevation_type(&limited)? != TokenElevationTypeLimited || token_is_elevated(&limited)? {
+        return Err("Setup could not verify its linked limited token.".into());
+    }
+    let impersonation = impersonation_token(&limited).map_err(error)?;
+    if token_sid(&impersonation)? != sid || member(&impersonation, WinBuiltinAdministratorsSid)? {
+        return Err("Setup refused an unexpected user or elevated impersonation token.".into());
+    }
+    with_thread_token(&impersonation, || action(&sid))?
+}
+
+pub(super) fn current_process_has_admin_membership() -> Result<bool, String> {
+    let token = process_token(
+        unsafe { GetCurrentProcess() },
+        TOKEN_QUERY | TOKEN_DUPLICATE,
+    )?;
+    let impersonation = impersonation_token(&token).map_err(error)?;
+    member(&impersonation, WinBuiltinAdministratorsSid)
+}
+
 fn token_data(token: &Handle, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<usize>, String> {
     let mut length = 0;
     if unsafe { GetTokenInformation(token.0, class, null_mut(), 0, &mut length) } == 0 {
@@ -946,6 +1000,11 @@ mod tests {
         let linked = linked_token(&token).unwrap();
         assert_eq!(elevation_type(&linked).unwrap(), expected);
         assert_eq!(token_sid(&linked).unwrap(), token_sid(&token).unwrap());
+    }
+
+    #[test]
+    fn reads_current_token_elevation() {
+        assert!(current_process_is_elevated().is_ok());
     }
 
     #[test]
