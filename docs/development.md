@@ -21,7 +21,7 @@ Installed releases, profiles, private captures, rollback backups and raw accepta
 
 ## Check and build
 
-Run from the repository root on Windows with the MSVC Rust toolchain:
+Pull requests and pushes to `master` run formatting and embedded editor checks. Start full validation only at the product owner’s explicit request. In GitHub Actions, dispatch CI with `software` for the full software suite or `setup` to also build and test the installer. Run the following commands when checking a full build locally on Windows with the MSVC Rust toolchain:
 
 ```powershell
 cargo fmt --all -- --check
