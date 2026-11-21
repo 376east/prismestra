@@ -1,4 +1,7 @@
 //! Installed frontend entrypoints. The legacy and portable arguments pass through.
+#[path = "installed_startup.rs"]
+mod startup;
+
 use super::{
     config::{Groups, Project},
     document::{self, Document},
@@ -15,19 +18,15 @@ use std::{
     env,
     ffi::OsString,
     fs::{self, File, OpenOptions},
-    io::{self, Read},
-    mem::size_of,
+    io::{self, Read, Write},
     os::windows::fs::{MetadataExt, OpenOptionsExt},
     path::{Component, Path, PathBuf, Prefix},
-    ptr::null_mut,
     sync::OnceLock,
 };
 use windows_sys::Win32::{
-    Foundation::CloseHandle,
-    Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
     Storage::FileSystem::{FILE_ATTRIBUTE_REPARSE_POINT, GetDriveTypeW},
     System::{
-        Threading::{GetCurrentProcess, OpenProcessToken},
+        Threading::GetCurrentProcess,
         WindowsProgramming::{DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOVABLE},
     },
 };
@@ -75,8 +74,12 @@ enum Command {
     Legacy,
     Start(Session),
     Prepare,
+    PrepareForSetup(OsString),
+    LaunchForSetup,
     Shutdown,
     CheckSetupUser(OsString),
+    ReadSetupUser,
+    SetSetupStartup(bool),
 }
 
 fn command(args: &[OsString]) -> Result<Command, String> {
@@ -87,13 +90,25 @@ fn command(args: &[OsString]) -> Result<Command, String> {
         }
         [flag] if flag == "--shutdown-installed" => Ok(Command::Shutdown),
         [flag] if flag == "--prepare-installed" => Ok(Command::Prepare),
+        [flag, sid] if flag == "--setup-prepare-installed" => {
+            Ok(Command::PrepareForSetup(sid.clone()))
+        }
+        [flag] if flag == "--setup-launch-installed" => Ok(Command::LaunchForSetup),
         [flag, sid] if flag == "--setup-check-user" => Ok(Command::CheckSetupUser(sid.clone())),
+        [flag] if flag == "--setup-current-user" => Ok(Command::ReadSetupUser),
+        [flag] if flag == "--setup-enable-startup" => Ok(Command::SetSetupStartup(true)),
+        [flag] if flag == "--setup-disable-startup" => Ok(Command::SetSetupStartup(false)),
         _ if args.iter().any(|a| {
             a == "--installed"
                 || a == "--autostart"
                 || a == "--shutdown-installed"
                 || a == "--prepare-installed"
                 || a == "--setup-check-user"
+                || a == "--setup-current-user"
+                || a == "--setup-enable-startup"
+                || a == "--setup-disable-startup"
+                || a == "--setup-prepare-installed"
+                || a == "--setup-launch-installed"
         }) =>
         {
             Err("Use --installed [--autostart], --prepare-installed or --shutdown-installed".into())
@@ -114,15 +129,54 @@ pub fn dispatch(args: Vec<OsString>) -> Result<Dispatch, String> {
             expected.as_os_str() != actual.as_str(),
         )));
     }
+    if command == Command::ReadSetupUser {
+        let sid = super::installed_policy::process_user_sid(unsafe { GetCurrentProcess() })?;
+        writeln!(io::stdout().lock(), "{sid}").map_err(|error| error.to_string())?;
+        return Ok(Dispatch::Exit(0));
+    }
+    if matches!(
+        command,
+        Command::PrepareForSetup(_) | Command::LaunchForSetup
+    ) {
+        require_ordinary_user()?;
+        if super::installed_policy::current_process_has_admin_membership()? {
+            return Err("Setup requires the original user without administrative rights.".into());
+        }
+        if let Command::PrepareForSetup(expected) = &command {
+            let actual = super::installed_policy::process_user_sid(unsafe { GetCurrentProcess() })?;
+            if expected.as_os_str() != actual.as_str() {
+                return Ok(Dispatch::Exit(1));
+            }
+        }
+    }
     let executable = env::current_exe().map_err(|e| e.to_string())?;
     let executable = checked_local_path(&executable).map_err(|e| e.to_string())?;
     match command {
-        Command::Legacy | Command::CheckSetupUser(_) => unreachable!(),
+        Command::Legacy | Command::CheckSetupUser(_) | Command::ReadSetupUser => unreachable!(),
+        Command::SetSetupStartup(enable) => {
+            let manifest = Manifest::read(&executable)?;
+            Ok(Dispatch::Exit(startup::set(
+                &executable,
+                manifest.data_namespace.as_deref(),
+                enable,
+            )?))
+        }
         Command::Shutdown => {
             windows::shutdown_installed(&executable)?;
             Ok(Dispatch::Exit(0))
         }
-        Command::Start(_) | Command::Prepare => {
+        Command::LaunchForSetup => {
+            let directory = executable
+                .parent()
+                .ok_or("Missing installed application directory")?;
+            std::process::Command::new(&executable)
+                .arg("--installed")
+                .current_dir(directory)
+                .spawn()
+                .map_err(|error| error.to_string())?;
+            Ok(Dispatch::Exit(0))
+        }
+        Command::Start(_) | Command::Prepare | Command::PrepareForSetup(_) => {
             require_ordinary_user()?;
             let manifest = Manifest::read(&executable)?;
             verify_backend(&manifest, &executable)?;
@@ -162,30 +216,7 @@ pub fn dispatch(args: Vec<OsString>) -> Result<Dispatch, String> {
 }
 
 fn require_ordinary_user() -> Result<(), String> {
-    let mut token = null_mut();
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-        return Err(format!(
-            "Read the Prismestra process token: {}",
-            io::Error::last_os_error()
-        ));
-    }
-    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
-    let mut returned = 0;
-    let result = unsafe {
-        GetTokenInformation(
-            token,
-            TokenElevation,
-            (&mut elevation as *mut TOKEN_ELEVATION).cast(),
-            size_of::<TOKEN_ELEVATION>() as u32,
-            &mut returned,
-        )
-    };
-    let error = (result == 0).then(io::Error::last_os_error);
-    unsafe { CloseHandle(token) };
-    if let Some(error) = error {
-        return Err(format!("Verify the Prismestra process token: {error}"));
-    }
-    if elevation.TokenIsElevated != 0 {
+    if super::installed_policy::current_process_is_elevated()? {
         return Err("Запустите Prismestra из меню «Пуск» с обычными правами.".into());
     }
     Ok(())
@@ -761,8 +792,25 @@ pub(crate) mod tests {
         assert_eq!(parse(&["--shutdown-installed"]), Ok(Command::Shutdown));
         assert_eq!(parse(&["--prepare-installed"]), Ok(Command::Prepare));
         assert_eq!(
+            parse(&["--setup-prepare-installed", "S-1-5-18"]),
+            Ok(Command::PrepareForSetup("S-1-5-18".into()))
+        );
+        assert_eq!(
+            parse(&["--setup-launch-installed"]),
+            Ok(Command::LaunchForSetup)
+        );
+        assert_eq!(
             parse(&["--setup-check-user", "S-1-5-18"]),
             Ok(Command::CheckSetupUser("S-1-5-18".into()))
+        );
+        assert_eq!(parse(&["--setup-current-user"]), Ok(Command::ReadSetupUser));
+        assert_eq!(
+            parse(&["--setup-enable-startup"]),
+            Ok(Command::SetSetupStartup(true))
+        );
+        assert_eq!(
+            parse(&["--setup-disable-startup"]),
+            Ok(Command::SetSetupStartup(false))
         );
         for args in [
             &["--autostart"][..],
@@ -772,6 +820,9 @@ pub(crate) mod tests {
             &["--prepare-installed", "--installed"],
             &["--setup-check-user"],
             &["--setup-check-user", "S-1-5-18", "--installed"],
+            &["--setup-current-user", "S-1-5-18"],
+            &["--setup-prepare-installed"],
+            &["--setup-launch-installed", "--autostart"],
         ] {
             assert!(parse(args).is_err());
         }

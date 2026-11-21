@@ -145,14 +145,24 @@ if ($identity.User.Value -ne $ExpectedSid -or $admin -or $local -cne $env:LOCALA
 $receiptPath = Join-Path $local ("Prismestra-CI-" + $Id + ".json")
 $result = [ordered]@{ sid = $identity.User.Value; standard_user = $true; startup_command = $null;
     empty_profile = $false; local_bindings = $false; backend_pin = $false; resident_shell = 'not_observed';
-    automatic_setup = $false; first_run = $null; native_identity_probe = $false }
+    automatic_setup = $false; first_run = $null; native_identity_probe = $false; native_profile_prepare = $false;
+    native_current_sid = $false; native_startup = $false }
 $app = $null
 $stop = $null
 try {
     $profile = Join-Path $local 'Prismestra'
     if (Test-Path -LiteralPath $profile) { throw 'The standard-user profile was not fresh.' }
-    $ps = Join-Path $PSHOME powershell.exe
     $image = Join-Path $Install 'Prismestra.exe'
+    $currentSidOutput = Join-Path $PSScriptRoot 'native-current-sid.log'
+    $sidProbe = Start-Process -FilePath $image -ArgumentList '--setup-current-user' -PassThru -WindowStyle Hidden -RedirectStandardOutput $currentSidOutput
+    $null = $sidProbe.Handle
+    try {
+        if (-not $sidProbe.WaitForExit(20000)) { $sidProbe.Kill(); throw 'Native SID read timed out.' }
+        if ($sidProbe.ExitCode -ne 0 -or (Get-Content -LiteralPath $currentSidOutput -Raw).Trim() -cne $ExpectedSid) {
+            throw 'Native SID read did not return the standard user.'
+        }
+    } finally { $sidProbe.Dispose() }
+    $result.native_current_sid = $true
     foreach ($case in @(@{sid=$ExpectedSid; exit=0}, @{sid='S-1-5-18'; exit=1})) {
         $probe = Start-Process -FilePath $image -ArgumentList '--setup-check-user', $case.sid -PassThru -WindowStyle Hidden
         $null = $probe.Handle
@@ -162,16 +172,42 @@ try {
         } finally { $probe.Dispose() }
     }
     $result.native_identity_probe = $true
+    $wrongUser = Start-Process -FilePath $image -ArgumentList '--setup-prepare-installed', 'S-1-5-18' -Wait -PassThru -WindowStyle Hidden
+    if ($wrongUser.ExitCode -ne 1 -or (Test-Path -LiteralPath $profile)) { throw 'Profile preparation accepted a foreign SID.' }
     $value = 'Prismestra'
     $command = '"' + (Join-Path $Install Prismestra.exe) + '" --installed --autostart'
-    $helper = Start-Process -FilePath $ps -ArgumentList ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
-        (Join-Path $PSScriptRoot 'original-user.ps1') + '" EnableStartup "' + $Install + '" ' + $value + ' ' + $ExpectedSid) -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $PSScriptRoot 'startup-helper.stderr.log') -RedirectStandardOutput (Join-Path $PSScriptRoot 'startup-helper.stdout.log')
-    $null = $helper.Handle
-    if (-not $helper.WaitForExit(20000)) { $helper.Kill(); throw 'Startup registration timed out.' }
-    if ($helper.ExitCode -ne 0) { throw ('Standard-user startup registration failed: ' + $helper.ExitCode) }
-    $prior = Get-ItemPropertyValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' $value
+    $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    function Invoke-Startup([string]$Arg, [int]$Expected) {
+        $stderr = Join-Path $PSScriptRoot 'native-startup.stderr.log'
+        $helper = Start-Process -FilePath $image -ArgumentList $Arg -PassThru -WindowStyle Hidden -RedirectStandardError $stderr
+        $null = $helper.Handle
+        try {
+            if (-not $helper.WaitForExit(20000)) { $helper.Kill(); throw 'Native startup operation timed out.' }
+            if ($helper.ExitCode -ne $Expected) {
+                $diagnostic = ([string](Get-Content -LiteralPath $stderr -Raw)).Trim()
+                throw ('Native startup operation returned ' + $helper.ExitCode + ' instead of ' + $Expected + ': ' + $diagnostic)
+            }
+        } finally {
+            $helper.Dispose()
+            Remove-Item -LiteralPath $stderr -ErrorAction SilentlyContinue
+        }
+    }
+    [void](New-Item -Path $runKey -Force)
+    $foreign = '%TEMP%\disposable-fixture-only.exe'
+    [void](New-ItemProperty -Path $runKey -Name $value -Value $foreign -PropertyType ExpandString -Force)
+    Invoke-Startup '--setup-enable-startup' 2
+    Invoke-Startup '--setup-disable-startup' 0
+    $raw = (Get-Item -LiteralPath $runKey).GetValue($value, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    if ($raw -cne $foreign) { throw 'Native startup did not preserve the foreign value.' }
+    Remove-ItemProperty -LiteralPath $runKey -Name $value
+    Invoke-Startup '--setup-enable-startup' 0
+    Invoke-Startup '--setup-disable-startup' 0
+    if ($null -ne (Get-Item -LiteralPath $runKey).GetValue($value)) { throw 'Native startup did not remove the owned value.' }
+    Invoke-Startup '--setup-enable-startup' 0
+    $prior = Get-ItemPropertyValue $runKey $value
     if ($prior -cne $command) { throw 'HKCU startup command did not match.' }
     $result.startup_command = $prior
+    $result.native_startup = $true
     $manifest = Get-Content -LiteralPath (Join-Path $Install 'install-manifest.json') -Raw | ConvertFrom-Json
     if ($null -ne $manifest.data_namespace) { throw 'Expected the installed production manifest.' }
     $app = Start-Process -FilePath $image -ArgumentList '--installed', '--autostart' -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $PSScriptRoot 'app.stderr.log') -RedirectStandardOutput (Join-Path $PSScriptRoot 'app.stdout.log')
@@ -269,6 +305,16 @@ public static class PrismestraCiShell {
             Start-Sleep -Milliseconds 200
         }
     } catch { $result.resident_shell_error = $_.Exception.Message }
+    if ($result.resident_shell -eq 'process_drained_by_shutdown') {
+        $profileHash = (Get-FileHash -LiteralPath $documentPath).Hash
+        $bindingsHash = (Get-FileHash -LiteralPath $bindingPath).Hash
+        $prep = Start-Process -FilePath $image -ArgumentList '--setup-prepare-installed', $ExpectedSid -Wait -PassThru -WindowStyle Hidden
+        if ($prep.ExitCode -ne 0 -or (Get-FileHash -LiteralPath $documentPath).Hash -cne $profileHash -or
+            (Get-FileHash -LiteralPath $bindingPath).Hash -cne $bindingsHash) {
+            throw 'Native profile preparation changed the saved profile or bindings.'
+        }
+        $result.native_profile_prepare = $true
+    }
     $result.startup_error_file = Test-Path -LiteralPath (Join-Path $profile 'state\startup-error.txt')
     $result | ConvertTo-Json | Set-Content -LiteralPath $receiptPath -Encoding UTF8
     exit 0
@@ -376,7 +422,8 @@ try {
     $actual | Add-Member -NotePropertyName commit -NotePropertyValue $manifest.commit
     $actual | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $report 'standard-user.json') -Encoding UTF8
     Assert-Expected ($status -eq 0 -and $actual.sid -ceq $sid -and $actual.standard_user -and $actual.empty_profile -and
-        $actual.local_bindings -and $actual.backend_pin -and $actual.automatic_setup -and $actual.native_identity_probe -and
+        $actual.local_bindings -and $actual.backend_pin -and $actual.automatic_setup -and
+        $actual.native_identity_probe -and $actual.native_profile_prepare -and $actual.native_current_sid -and $actual.native_startup -and
         $actual.resident_shell -eq 'process_drained_by_shutdown' -and -not $actual.startup_error_file) 'Standard-user verification failed. See standard-user.json.'
     Assert-Expected ($actual.startup_command -ceq ('"' + (Join-Path $install 'Prismestra.exe') + '" --installed --autostart')) 'Standard-user HKCU Run verification failed.'
 } finally {
@@ -405,7 +452,7 @@ try {
         }
         if ($password) { $password.Dispose() }
         if (Test-Path -LiteralPath $scratch) {
-            foreach ($name in @('worker.ps1', 'invoke-worker.ps1', 'original-user.ps1', 'startup-helper.stderr.log', 'startup-helper.stdout.log', 'worker-output.log', 'app.stderr.log', 'app.stdout.log')) {
+            foreach ($name in @('worker.ps1', 'invoke-worker.ps1', 'original-user.ps1', 'startup-helper.stderr.log', 'startup-helper.stdout.log', 'worker-output.log', 'app.stderr.log', 'app.stdout.log', 'native-current-sid.log')) {
                 $file = Join-Path $scratch $name
                 if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
             }
