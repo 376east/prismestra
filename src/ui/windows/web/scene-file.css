@@ -45,6 +45,25 @@
  width: min(100%, calc(min(55vh, 480px) * var(--scene-frame-ratio, 1)));
  margin-inline: auto;
 }
+#scene-file-lcd-layout-toggle { margin-top: 12px; }
+#scene-file-lcd-layout { margin-top: 10px; }
+#scene-file-lcd-layout-stage {
+ position: relative;
+ width: min(100%, 200px);
+ aspect-ratio: 1;
+ margin: 8px 0;
+}
+#scene-file-lcd-layout-canvas { width: 100%; height: 100%; border: 0; }
+#scene-file-lcd-layout-card {
+ position: absolute;
+ width: 39.1667%;
+ height: 15.8333%;
+ background: transparent;
+ border: 1px dashed #fff;
+ padding: 0;
+ cursor: grab;
+ touch-action: none;
+}
 #scene-file-outline {
  position: absolute;
  border: 2px solid #fff;

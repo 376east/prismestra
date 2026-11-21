@@ -161,7 +161,22 @@ impl Controller {
         } else {
             None
         };
-        Ok(Self {
+        Ok(Self::with_player(config, player))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_prepared_test_media(
+        config: Config,
+        media: Arc<media::Media>,
+    ) -> Result<Self, String> {
+        config.validate()?;
+        assert!(config.enabled && !config.overlay_enabled);
+        let player = player::Player::without_overlay(media)?;
+        Ok(Self::with_player(config, Some(player)))
+    }
+
+    fn with_player(config: Config, player: Option<player::Player>) -> Self {
+        Self {
             config,
             player,
             suspended: false,
@@ -169,7 +184,7 @@ impl Controller {
             off_done: false,
             frames_sent: 0,
             preview: vec![],
-        })
+        }
     }
     pub fn config(&self) -> &Config {
         &self.config

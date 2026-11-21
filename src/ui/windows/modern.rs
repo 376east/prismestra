@@ -92,6 +92,7 @@ enum Command {
     Export,
     Page {
         page: String,
+        device: Option<String>,
     },
     SelectItem {
         index: usize,
@@ -141,6 +142,7 @@ pub(super) struct Session {
     draft: Option<Draft>,
     draft_path: PathBuf,
     portable_preview: Option<scene_files::Running>,
+    lcd_layout_preview: Option<scene_files::Layout>,
     preview: Option<crate::runtime::scene::Renderer>,
     canvas: crate::devices::Canvas,
     last_send: Instant,
@@ -189,6 +191,7 @@ impl Session {
             draft,
             draft_path,
             portable_preview: None,
+            lcd_layout_preview: None,
             preview: None,
             canvas,
             last_send: Instant::now(),
@@ -528,7 +531,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
     let mut session = state.modern_session.borrow_mut();
     let session = session.as_mut().ok_or("Нет интерфейса")?;
     let draft_map_revision = session.draft_map.observe(draft_map_input(app));
-    let editor=app.editor.as_ref().map(|e|json!({"page":page_name(e.page),"index":e.index,"deviceId":e.selected_output_id(),"targets":super::super::editor::Editor::targets(&e.document,e.page),"fields":e.fields().iter().map(|f|json!({"key":f.key,"label":f.label,"value":f.value,"hint":f.hint,"file":f.file,"choices":f.choices.iter().map(|(label,value)|json!({"label":if f.key=="group"{match value.as_str(){"pc"=>"Основной свет","door"=>"Дополнительный свет",_=>label.as_str()}}else{label.as_str()},"value":value})).collect::<Vec<_>>()})).collect::<Vec<_>>(),"dirty":app.editor_dirty}));
+    let editor=app.editor.as_ref().map(|e|json!({"page":page_name(e.page),"index":e.index,"deviceId":e.selected_connection_device(),"targets":super::super::editor::Editor::targets(&e.document,e.page),"fields":e.fields().iter().map(|f|json!({"key":f.key,"label":f.label,"value":f.value,"hint":f.hint,"file":f.file,"choices":f.choices.iter().map(|(label,value)|json!({"label":if f.key=="group"{match value.as_str(){"pc"=>"Основной свет","door"=>"Дополнительный свет",_=>label.as_str()}}else{label.as_str()},"value":value})).collect::<Vec<_>>()})).collect::<Vec<_>>(),"dirty":app.editor_dirty}));
     let library = std::iter::once(&session.built_in_card)
         .chain(
             session
@@ -868,11 +871,30 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                     a.runtime.set_group(Target::Door, door)?;
                     a.sync();
                 }
-                Command::Page { page: requested } => {
+                Command::Page {
+                    page: requested,
+                    device,
+                } => {
                     let (next, id) = page(&requested)?;
+                    if let Some(device) = device.as_deref()
+                        && (next != Page::Connections
+                            || !a
+                                .runtime
+                                .document()
+                                .lighting
+                                .setup
+                                .devices
+                                .iter()
+                                .any(|d| d.id == device))
+                    {
+                        return Err("Выход недоступен для настройки подключения".into());
+                    }
                     if next != a.page {
                         native_forms::guard_close(a)?;
                         a.command(id, 0)?;
+                    }
+                    if let Some(device) = device.as_deref() {
+                        a.select_connection_device(device)?;
                     }
                 }
                 Command::SelectItem { index } => {

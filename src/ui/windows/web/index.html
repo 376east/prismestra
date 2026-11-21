@@ -29,6 +29,16 @@
           <div><h3>LCD</h3><canvas id="scene-file-lcd" aria-label="Область LCD" hidden></canvas><p id="scene-file-lcd-note"></p></div>
           <div><h3>Лента</h3><canvas id="scene-file-strip" aria-label="Цвета кромок" hidden></canvas><p id="scene-file-strip-note"></p></div>
         </div>
+        <button type="button" class="button" id="scene-file-lcd-layout-toggle" aria-expanded="false" aria-controls="scene-file-lcd-layout" hidden>GIF и температура</button>
+        <div id="scene-file-lcd-layout" hidden>
+          <p>Эскиз Prismestra Player · 51 °C, тестовое значение</p>
+          <div id="scene-file-lcd-layout-stage">
+            <canvas id="scene-file-lcd-layout-canvas" aria-label="Предпросмотр GIF и температуры"></canvas>
+            <button type="button" id="scene-file-lcd-layout-card" aria-label="Температурная карточка. Перемещение стрелками" aria-describedby="scene-file-lcd-layout-status"></button>
+          </div>
+          <p id="scene-file-lcd-layout-status" role="status"></p>
+          <p>Позиция действует до закрытия эскиза.</p>
+        </div>
       </div>
       <div class="scene-file-fields">
         <label for="scene-file-name">Название</label><input id="scene-file-name" type="text" maxlength="48">

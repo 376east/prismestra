@@ -18,6 +18,15 @@ window.sceneFile = (() => {
   let previewTimer = null;
   let dispatch;
   let paint;
+  const lcdLayout = byId('lcd-layout');
+  const lcdCard = byId('lcd-layout-card');
+  const lcdToggle = byId('lcd-layout-toggle');
+  const lcdStatus = byId('lcd-layout-status');
+  let layoutRequest = null;
+  let sentLayout = null;
+  let layoutAnimation = null;
+  let cardPosition = {x:146,y:300};
+  let cardDrag = null;
 
   function hasUnsaved() {
     return file !== null && JSON.stringify(file) !== JSON.stringify(baseline);
@@ -109,6 +118,8 @@ window.sceneFile = (() => {
 
   function syncOutputs() {
     const lcd = file.outputs.lcd;
+    lcdToggle.hidden = !lcd;
+    if (!lcd) stopLcdLayout();
     byId('lcd-mode').value = !lcd ? 'off' : lcd.region ? 'crop' : 'full';
     byId('region').hidden = !lcd?.region;
     if (lcd?.region) {
@@ -181,6 +192,7 @@ window.sceneFile = (() => {
     if (!canLeave()) return;
     clearTimeout(previewTimer);
     previewRequest = null;
+    stopLcdLayout(false);
     send('stop');
     dialog.close();
     byId('launch')?.focus({preventScroll:true});
@@ -188,6 +200,13 @@ window.sceneFile = (() => {
 
   function receive(message) {
     if (!dialog.open) return;
+    if (message.kind === 'scene_file_lcd_frame') {
+      if (!lcdLayout.hidden && message.request === layoutRequest) {
+        if (message.error) lcdStatus.textContent = message.error;
+        else setCanvas('lcd-layout-canvas',message.frame);
+      }
+      return;
+    }
     if (message.kind === 'scene_file_frame') {
       if (message.request === previewRequest) showFrame(message.frame);
       return;
@@ -197,6 +216,7 @@ window.sceneFile = (() => {
       pending = null;
       if (message.error) status.textContent = message.error;
       else if (data?.document) {
+        stopLcdLayout();
         file = data.document;
         baseline = copy(file);
         previewRequest = message.request;
@@ -222,6 +242,88 @@ window.sceneFile = (() => {
     if (file) refresh();
     else requestFile('from_effect',{scene:draft});
   }
+
+  function stopLcdLayout(notify = true) {
+    if (lcdLayout.hidden) return;
+    lcdLayout.hidden = true;
+    lcdToggle.setAttribute('aria-expanded','false');
+    layoutRequest = null;
+    sentLayout = null;
+    clearTimeout(layoutAnimation);
+    layoutAnimation = null;
+    cardPosition = {x:146,y:300};
+    cardDrag = null;
+    if (notify) send('stop_lcd_layout');
+  }
+
+  function paintCardPosition() {
+    lcdCard.style.left = cardPosition.x / 4.8 + '%';
+    lcdCard.style.top = cardPosition.y / 4.8 + '%';
+    lcdStatus.textContent = `X ${cardPosition.x} · Y ${cardPosition.y}`;
+  }
+
+  function queueLcdLayout() {
+    layoutRequest = null;
+    if (layoutAnimation === null) layoutAnimation = setTimeout(() => {
+      layoutAnimation = null;
+      layoutRequest = send('lcd_layout',cardPosition);
+      if (layoutRequest === null) lcdStatus.textContent = 'Не удалось открыть предпросмотр LCD.';
+      else sentLayout = {request:layoutRequest,...cardPosition};
+    }, 32);
+  }
+
+  function positionCard(x,y) {
+    cardPosition = {x:Math.max(0,Math.min(292,Math.round(x))),y:Math.max(0,Math.min(404,Math.round(y)))};
+    paintCardPosition();
+    queueLcdLayout();
+  }
+
+  function finishCardDrag(event, cancelled) {
+    if (cardDrag?.id !== event.pointerId) return;
+    const {x,y} = cardDrag;
+    cardDrag = null;
+    if (!cancelled) return;
+    clearTimeout(layoutAnimation);
+    layoutAnimation = null;
+    cardPosition = {x,y};
+    paintCardPosition();
+    if (sentLayout?.x === x && sentLayout.y === y) {
+      layoutRequest = sentLayout.request;
+    } else {
+      setCanvas('lcd-layout-canvas',null);
+      queueLcdLayout();
+    }
+  }
+
+  lcdToggle.onclick = () => {
+    if (!lcdLayout.hidden) return stopLcdLayout();
+    lcdLayout.hidden = false;
+    lcdToggle.setAttribute('aria-expanded','true');
+    setCanvas('lcd-layout-canvas',null);
+    positionCard(cardPosition.x,cardPosition.y);
+    lcdCard.focus();
+  };
+  lcdCard.onkeydown = event => {
+    const delta = {ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]}[event.key];
+    if (!delta) return;
+    event.preventDefault();
+    if (cardDrag) return;
+    const step = event.shiftKey ? 10 : 1;
+    positionCard(cardPosition.x+delta[0]*step,cardPosition.y+delta[1]*step);
+  };
+  lcdCard.onpointerdown = event => {
+    if (event.button !== 0 || cardDrag) return;
+    const side = byId('lcd-layout-stage').getBoundingClientRect().width;
+    cardDrag = {id:event.pointerId,clientX:event.clientX,clientY:event.clientY,scale:480/side,...cardPosition};
+    lcdCard.setPointerCapture(event.pointerId);
+  };
+  lcdCard.onpointermove = event => {
+    if (cardDrag?.id !== event.pointerId) return;
+    positionCard(cardDrag.x+(event.clientX-cardDrag.clientX)*cardDrag.scale,cardDrag.y+(event.clientY-cardDrag.clientY)*cardDrag.scale);
+  };
+  lcdCard.onpointerup = event => finishCardDrag(event,false);
+  lcdCard.onpointercancel = event => finishCardDrag(event,true);
+  lcdCard.onlostpointercapture = event => finishCardDrag(event,true);
 
   byId('open').onclick = () => { if (canLeave()) requestFile('open'); };
   byId('save').onclick = () => { if (file && validDraft()) requestFile('save',{file}); };

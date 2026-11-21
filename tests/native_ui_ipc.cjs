@@ -9,6 +9,9 @@ const document={querySelector:find,querySelectorAll:selector=>[...nodes.values()
 const context=vm.createContext({document,window:{addEventListener:(name,fn)=>events[name]=fn,ipc:{postMessage:v=>commands.push(JSON.parse(v))}},requestAnimationFrame:fn=>rafQueue.push(fn),CSS:{escape:s=>s},structuredClone,setTimeout:()=>1,clearTimeout(){},console});
 vm.runInContext(source,context);
 assert.equal(commands[0].op,'snapshot');
+const exportMarkup=vm.runInContext('projectActions.innerHTML',context);
+assert.match(exportMarkup,/<button[^>]*data-action="export"[^>]*aria-describedby="profile-export-scope">Экспорт профиля<\/button>/);
+assert.match(exportMarkup,/<span id="profile-export-scope"[^>]*>[^<]*«Мои сцены» хранятся отдельно\.<\/span>/);
 const scene={effect:'noise_map',colors:[0xff0000,0x00ff00],brightness:80,speed:30,fps:48,temperature:0,tint:0,noise:{frequency:.055,amplitude:1,lacunarity:.75,persistence:.5,octaves:2,motion:1,motion_speed:1},noise_palette:'custom',rainbow_width:10};
 const initial={scene, draftScene:{...scene,brightness:65},library:[{id:'saved',name:'Живая сцена',scene}],devices:[],groups:{pc:true,door:false},native:true,pending:false,dirty:false,status:'Готово',error:null,profilePath:'C:\\sample.json',editor:null};
 context.payload={kind:'snapshot',state:initial};vm.runInContext('window.prismestraReceive(payload)',context);
@@ -217,6 +220,31 @@ assert.equal(commands.length,beforeBindingEdit+1);
 assert.deepEqual(commands.at(-1),{op:'native_action',id:1811,fields:[{id:101,value:'192.0.2.27:4048'}],editor_fields:[]});
 assert.equal(bindingSaveDisabled(),true,'the save remains locked until the native acknowledgement');
 console.log('PASS: first click saves staged connection text only when the host can accept it');
+
+// The selected LCD can have a different index from its binding.
+const connectionDevices=['first-lcd','selected-lcd'].map(id=>({
+ id,label:'LCD',role:'lcd',driver:{type:'tt_lcd'},leds:0,rate_hz:30,enabled:false
+}));
+const connectionEditor={page:'lcd',index:0,targets:['LCD','LCD'],fields:[],dirty:false,deviceId:'selected-lcd'};
+context.payload={kind:'snapshot',state:{...structuredClone(initial),devices:connectionDevices,editor:connectionEditor}};
+vm.runInContext('formStages.clear();view="lcd";window.prismestraReceive(payload)',context);
+assert.ok(find('#main').innerHTML.includes('data-connection-device="selected-lcd"'));
+const repairButton=new Node();
+repairButton.dataset={view:'connections',connectionDevice:'selected-lcd'};
+events.click({target:{closest:()=>repairButton}});
+assert.deepEqual(commands.at(-1),{op:'page',page:'connections',device:'selected-lcd'});
+vm.runInContext('window.prismestraReceive({kind:"error",message:"Target unavailable"})',context);
+assert.equal(vm.runInContext('view',context),'lcd','a rejected target restores the source page');
+context.payload.state.editor.deviceId='draft-only';
+vm.runInContext('window.prismestraReceive(payload)',context);
+assert.ok(!find('#main').innerHTML.includes('data-connection-device'),'draft-only outputs cannot edit applied bindings');
+context.payload.state.editor.deviceId='selected-lcd';
+context.payload.state.editor.dirty=true;
+vm.runInContext('window.prismestraReceive(payload)',context);
+const beforeRepair=commands.length;
+events.click({target:{closest:()=>repairButton}});
+assert.equal(commands.length,beforeRepair,'targeted navigation keeps unsaved editor changes protected');
+console.log('PASS: repair opens the selected logical output and preserves navigation guards');
 
 // Command errors survive failed-followup snapshots/status, and clear only on a new command's successful ack.
 context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeAux:structuredClone(aux),editor:{page:'devices',index:0,targets:[],fields:[],dirty:false}}};vm.runInContext('formStages.clear();view="devices";window.prismestraReceive(payload)',context);const errorName=find('#native-field-0');errorName.value='UI test light';events.input({target:errorName});vm.runInContext('send({op:"native_action",id:410},true);window.prismestraReceive({kind:"error",message:"fixedLEDcount"});window.prismestraReceive(payload)',context);assert.equal(find('#native-error').hidden,false);assert.ok(find('#native-error').innerHTML.includes('fixedLEDcount'));assert.ok(find('#native-error').innerHTML.includes('discard-fields'),'failed command keeps local discard while text remains staged');

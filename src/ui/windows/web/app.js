@@ -219,7 +219,9 @@ function renderScene() {
 function nativeProperties() {
  const editor=state.editor;
  if(!editor || editor.page!==view)return state.nativeAux?.page===view?renderNativeForm(state.nativeAux):'<div class="native-wait">Настройки загружаются…</div>';
- return `<section class="native-properties"><div class="native-inline"><label for="native-target">Объект</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${view==='devices'&&editor.index>=editor.targets.length?'<option value="" disabled selected>Выберите устройство…</option>':''}${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select></div><div class="parameter-panel"><p class="parameter-note" id="native-runtime-detail"${view==='devices'?'':' role="status"'}>${esc(state.detail||'')}</p><div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>Выбрать…</button>`:''}</div>`}${field.hint?`<small>${esc(field.hint)}</small>`:''}</div>`).join('')||'<p class="muted">Параметров объекта нет.</p>'}</div><div class="native-property-actions">${action('Применить','apply-document',true,'data-needs-change="document"')}${action('Отменить изменения','revert-document')}${action('Повторить','retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
+ const repair=state.devices.some(device=>device.id===editor.deviceId)
+  ? `<button class="button" data-view="connections" data-connection-device="${esc(editor.deviceId)}" data-mutation ${disabled()}>Открыть подключение устройства</button>` : '';
+ return `<section class="native-properties"><div class="native-inline"><label for="native-target">Объект</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${view==='devices'&&editor.index>=editor.targets.length?'<option value="" disabled selected>Выберите устройство…</option>':''}${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select>${repair}</div><div class="parameter-panel"><p class="parameter-note" id="native-runtime-detail"${view==='devices'?'':' role="status"'}>${esc(state.detail||'')}</p><div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>Выбрать…</button>`:''}</div>`}${field.hint?`<small>${esc(field.hint)}</small>`:''}</div>`).join('')||'<p class="muted">Параметров объекта нет.</p>'}</div><div class="native-property-actions">${action('Применить','apply-document',true,'data-needs-change="document"')}${action('Отменить изменения','revert-document')}${action('Повторить','retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
 }
 function deviceStatus(device) {
  if(!device)return '';
@@ -376,7 +378,7 @@ function changeView(next, source) {
  view=next;render();focusHeading();
  if(!['library','editor'].includes(next)){
   pendingView={previous,next,opener};
-  if(!send({op:'page',page:next})){view=previous;pendingView=null;render();focusHeading();}
+  if(!send({op:'page',page:next,device:source?.dataset.connectionDevice})){view=previous;pendingView=null;render();focusHeading();}
  } else settingsOpener=null;
  if(next==='editor')requestPreview();
 }
@@ -449,7 +451,7 @@ window.prismestraReceive = message => {
   if(message.kind==='close_cancelled'){closing=false;syncControls();return;}
   if(message.kind==='draft_error'){showError(message.message,true);syncControls();return;}
   if(message.kind==='error'){awaitingCommandAck=false;closing=false;submittedStages=[];savedSceneRequest=null;commandPending=false;nativeAwaitingAck=false;if(pendingView){view=pendingView.previous;pendingView=null;render();focusHeading();}showError(message.message,true);syncControls();return;}
-  if(message.kind==='scene_file'||message.kind==='scene_file_frame'){window.sceneFile?.receive(message);return;}
+  if(['scene_file','scene_file_frame','scene_file_lcd_frame'].includes(message.kind)){window.sceneFile?.receive(message);return;}
   if(message.kind==='snapshot') {
    const acknowledged=awaitingCommandAck;awaitingCommandAck=false;completeStageAck();state=message.state;
    window.outputMap?.update(state);
@@ -596,7 +598,13 @@ $('#cancel-name').onclick=()=>{$('#name-dialog').close();draftSwitchId=null;rest
 $('#name-dialog').addEventListener('cancel',()=>{draftSwitchId=null;restoreFocus(dialogReturn);});
 const removal=document.createElement('dialog');removal.id='remove-dialog';removal.setAttribute('aria-labelledby','remove-title');removal.innerHTML='<form id="remove-form"><h2 id="remove-title">Удалить сцену</h2><p id="remove-description"></p><div class="dialog-actions"><button type="button" class="button" id="cancel-remove">Отмена</button><button type="submit" class="button primary" data-mutation>Удалить</button></div></form>';document.body.append(removal);
 $('#cancel-remove').onclick=()=>{removal.close();restoreFocus(dialogReturn);};removal.addEventListener('cancel',()=>restoreFocus(dialogReturn));$('#remove-form').onsubmit=event=>{event.preventDefault();if(send({op:'delete_scene',id:removal.dataset.id},true)){removal.close();restoreFocus(dialogReturn);}};
-const projectActions=document.createElement('div');projectActions.className='native-project-actions';projectActions.innerHTML=action('Открыть','open')+action('Сохранить','save')+action('Экспорт','export');$('#save-status').before(projectActions);
+const projectActions=document.createElement('div');
+projectActions.className='native-project-actions';
+const exportDescription='Профиль и используемые медиа. «Мои сцены» хранятся отдельно.';
+projectActions.innerHTML=action('Открыть','open')+action('Сохранить','save')+
+ action('Экспорт профиля','export',false,`title="${esc(exportDescription)}" aria-describedby="profile-export-scope"`)+
+ `<span id="profile-export-scope" class="sr-only">${esc(exportDescription)}</span>`;
+$('#save-status').before(projectActions);
 document.addEventListener('pointerdown',()=>{pointerGesture=true;},true);
 document.addEventListener('pointerup',()=>{pointerGesture=false;releaseGesture();},true);
 document.addEventListener('pointercancel',()=>{pointerGesture=false;releaseGesture();},true);
