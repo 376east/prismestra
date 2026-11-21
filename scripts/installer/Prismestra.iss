@@ -189,6 +189,20 @@ begin
     ValidSID(Trim(Output.StdOut[0])) then Result := Trim(Output.StdOut[0]);
 end;
 
+function ProbeOriginalUser(const SID: String): Boolean;
+var
+  Code: Integer;
+begin
+  try
+    Result := ValidSID(SID) and GuardInstall('Check') and
+      ExecAsOriginalUser(InstallPath + '\Prismestra.exe', '--setup-check-user ' + SID,
+        InstallPath, SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
+  except
+    Log(GetExceptionMessage);
+    Result := False;
+  end;
+end;
+
 function Policy(const Action, SID: String): Boolean;
 var
   Code: Integer;
@@ -211,7 +225,7 @@ begin
     Exit;
   end;
   if not PawnIOPresent then Exit;
-  if not ValidSID(SID) or not OriginalUser('Probe', SID) then begin
+  if not ProbeOriginalUser(SID) then begin
     Log('Managed PC task needs matching ordinary and elevated identities; ordinary backend available.');
     Exit;
   end;
@@ -240,7 +254,7 @@ var
   SID: String;
 begin
   SID := CurrentSID;
-  if not ValidSID(SID) or not OriginalUser('Probe', SID) then begin
+  if not ProbeOriginalUser(SID) then begin
     Log('Legacy startup migration requires matching original and elevated user identities.');
     Exit;
   end;
