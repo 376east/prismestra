@@ -109,7 +109,6 @@ function focusKey(node=document.activeElement) {
  if(node.id) return '#'+CSS.escape(node.id);
  if(node.dataset?.deviceId!==undefined)return deviceFocusKey(node.dataset.deviceId);
  for(const key of ['view','action','edit','apply','remove','field','param','color','target','group','effect','asset','remove-color','native-field','native-action']) if(node.dataset?.[key] !== undefined) return `[data-${key}="${CSS.escape(node.dataset[key])}"]`;
- if(node.id==='lcd-theme-preview')return '#lcd-theme-preview';
  return null;
 }
 function restoreFocus(key, selection) {
@@ -423,8 +422,8 @@ function renderLcdThemes() {
      <label for="lcd-theme-preview">LCD-тема</label>
      <select id="lcd-theme-preview" data-mutation ${disabled()}>${options}</select>
      ${action('Выбрать тему','choose-lcd-theme')}
-     ${active?`<small>В профиле · ${esc(active.label)}</small>`:''}
-     <small>Чтобы вывести тему на LCD, нажмите «Применить».</small>
+     ${active?`<small>${state.editor.dirty?'В черновике':'В профиле'} · ${esc(active.label)}</small>`:''}
+     <small>Для вывода на экран включите «Воспроизводить» и нажмите «Применить».</small>
    </div>
  </section>`;
 }
@@ -708,14 +707,15 @@ document.addEventListener('input',event=>{
 });
 document.addEventListener('change',event=>{
  const input=event.target;
- if(input.id==='library-effect'){libraryEffect=input.value;libraryLimit=libraryPageSize;render();return;}
- if(input.dataset.nativeField!==undefined){if(['text','secret'].includes(input.dataset.nativeKind)){stageText(input);return;}if(nativeControlDisabled(input))return;send({op:'native_field',id:input.dataset.nativeField,value:input.dataset.nativeKind==='checkbox'?String(input.checked):input.value},true);return;}
- if(busy())return;
  if(input.id==='lcd-theme-preview'){
+  if(busy())return;
   lcdThemePreview=input.value;
   $('#lcd-theme-art').src=`/lcd-backgrounds/${encodeURIComponent(input.value)}.png`;
   return;
  }
+ if(input.id==='library-effect'){libraryEffect=input.value;libraryLimit=libraryPageSize;render();return;}
+ if(input.dataset.nativeField!==undefined){if(['text','secret'].includes(input.dataset.nativeKind)){stageText(input);return;}if(nativeControlDisabled(input))return;send({op:'native_field',id:input.dataset.nativeField,value:input.dataset.nativeKind==='checkbox'?String(input.checked):input.value},true);return;}
+ if(busy())return;
  if(input.dataset.group){send({op:'groups',...state.groups,[input.dataset.group]:input.checked},true);return;}
  if(input.hasAttribute('data-target')){
   if(input.value!=='' && selectTarget({op:'select_item',index:+input.value},input)){
