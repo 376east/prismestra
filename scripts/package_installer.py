@@ -1,7 +1,6 @@
 """Stage hash-pinned inputs and build Prismestra-Setup-<version>-x64.exe."""
 
 import argparse
-import base64
 import hashlib
 import json
 import os
@@ -333,8 +332,6 @@ def package(args):
         ("StartupValue", f"Prismestra-Test-{args.test_namespace}" if test_mode else "Prismestra"),
     ]
     defs = [f'#define {name} "{value}"' for name, value in compiler_defs]
-    user_code = base64.b64encode((ROOT / "installer/original-user.ps1").read_bytes()).decode()
-    defs.append(f'#define UserCode "{user_code}"')
     if test_mode:
         defs.append("#define LifecycleTest")
     else:

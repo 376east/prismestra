@@ -154,7 +154,7 @@ begin
   end;
 end;
 
-procedure GuardPrepareDirectory(const Path: String);
+procedure GuardPrepareDirectory(const Path: String; AllowExisting: Boolean);
 var
   Descriptor: Cardinal;
   Security: TGuardSecurityAttributes;
@@ -171,7 +171,7 @@ begin
     Security.Inherit := 0;
     if GuardCreateDirectory('\\?\' + Path, Security) = 0 then begin
       Code := DLLGetLastError;
-      if Code <> GuardAlreadyExists then GuardFail('Cannot create protected installation directory', Path, Code);
+      if (Code <> GuardAlreadyExists) or not AllowExisting then GuardFail('Cannot create protected installation directory', Path, Code);
     end;
   finally
     if Descriptor <> 0 then GuardFreeLocal(Descriptor);
@@ -267,7 +267,7 @@ begin
         Result := True;
         Exit;
       end;
-      GuardPrepareDirectory(Path);
+      GuardPrepareDirectory(Path, True);
       if not GuardReadEntry(Path, Users, False, Attributes) then
         GuardFail('Protected installation directory was not created', Path, 0);
     end;
