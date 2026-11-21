@@ -366,6 +366,7 @@ fn proxy_loop(
             ..Snapshot::default()
         };
         if let Some(status) = status {
+            failure_detail.clear();
             let key = (
                 status.helper.created,
                 status.helper.pid,
