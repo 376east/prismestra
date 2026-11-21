@@ -63,21 +63,6 @@ fn effect_from_name(name: &str) -> ProfileResult<Effect> {
         _ => Err(fail("Unsupported scene effect class")),
     }
 }
-fn effect_name(effect: Effect) -> &'static str {
-    match effect {
-        Effect::NoiseMap => "NoiseMap",
-        Effect::Breathing => "Breathing",
-        Effect::RainbowWave => "RainbowWave",
-        Effect::GradientWave => "GradientWave",
-        Effect::CrossingBeams => "CrossingBeams",
-        Effect::TidalRings => "TidalRings",
-        Effect::HorizonSweep => "HorizonSweep",
-        Effect::EmberDrift => "EmberDrift",
-        Effect::PrismLattice => "PrismLattice",
-        Effect::CometTrail => "CometTrail",
-        Effect::Fireflies => "Fireflies",
-    }
-}
 /// Native indices: exactly one explicit main, legacy main, or sole eligible effect.
 pub fn indices(profile: &Value) -> ProfileResult<SceneIndices> {
     bounded(profile)?;
@@ -239,7 +224,7 @@ pub fn controls_from_json(controls: &Value) -> ProfileResult<Controls> {
     })
 }
 pub fn controls_to_json(controls: &Controls) -> Value {
-    json!({"effect_type":effect_name(controls.effect),"brightness":controls.brightness,"speed":controls.speed,"colors":controls.colors.iter().map(|c|c.rrggbb()).collect::<Vec<_>>(),"screen_brightness":controls.screen_brightness})
+    json!({"effect_type":controls.effect.class_name(),"brightness":controls.brightness,"speed":controls.speed,"colors":controls.colors.iter().map(|c|c.rrggbb()).collect::<Vec<_>>(),"screen_brightness":controls.screen_brightness})
 }
 pub fn read_controls(profile: &Value) -> ProfileResult<Controls> {
     let position = indices(profile)?;
@@ -309,7 +294,7 @@ pub fn compose_with_controls(
     controls: &Controls,
     noise_template: Option<&Value>,
 ) -> ProfileResult<Value> {
-    let class = effect_name(controls.effect);
+    let class = controls.effect.class_name();
     effect_from_name(class)?;
     let position = indices(profile)?;
     controls.validate().map_err(fail)?;

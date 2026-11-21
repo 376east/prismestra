@@ -58,6 +58,30 @@ fn attach(host: &mut Host, frames: Arc<Frames>) {
     host.attach("door", move |_| Ok(Box::new(Sink(frames))))
         .unwrap();
 }
+#[cfg(windows)]
+#[test]
+fn host_uses_audio_only_while_the_sample_is_fresh() {
+    use crate::{capture::audio_features::AudioFeatures, lighting::scene::Effect};
+    let scene = Scene {
+        effect: Effect::AudioLevel,
+        colors: vec![0xffffff],
+        ..scene::example()
+    };
+    let mut host = Host::new(setup(), scene).unwrap();
+    host.set_audio(Some((
+        1_000,
+        AudioFeatures {
+            rms: 0.6,
+            peak: 0.8,
+            ..Default::default()
+        },
+    )));
+    host.tick(1_000).unwrap();
+    assert!(host.preview().iter().all(|color| color.r > 0));
+    host.tick(301_000).unwrap();
+    assert!(host.preview().iter().all(|color| *color == Rgb::default()));
+}
+
 #[test]
 fn canvas_advances_without_ui_ticks_and_keeps_the_original_pixels_and_mute() {
     let setup = setup();
