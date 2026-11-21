@@ -12,6 +12,7 @@ const effects = {
 };
 const pages = {library:'Сцены',editor:'Редактор',devices:'Устройства',lcd:'LCD',ambient:'Экран',settings:'Настройки',temperatures:'Температуры',connections:'Подключения',sources:'Источники',schedule:'Расписание'};
 const settingsPages = ['temperatures','connections','sources','schedule'];
+let lcdThemePreview = '';
 const devicePresetField = 714;
 const glyphs = {
  library:'<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>',
@@ -108,6 +109,7 @@ function focusKey(node=document.activeElement) {
  if(node.id) return '#'+CSS.escape(node.id);
  if(node.dataset?.deviceId!==undefined)return deviceFocusKey(node.dataset.deviceId);
  for(const key of ['view','action','edit','apply','remove','field','param','color','target','group','effect','asset','remove-color','native-field','native-action']) if(node.dataset?.[key] !== undefined) return `[data-${key}="${CSS.escape(node.dataset[key])}"]`;
+ if(node.id==='lcd-theme-preview')return '#lcd-theme-preview';
  return null;
 }
 function restoreFocus(key, selection) {
@@ -180,13 +182,13 @@ function nativeControlDisabled(node) {
 function showError(message,fromCommand=false) {errorIsCommand=fromCommand;error=String(message);const box=$('#native-error');box.hidden=false;box.innerHTML=`<button class="icon-button" data-action="dismiss-error" aria-label="Закрыть сообщение">×</button><p>${esc(error)}</p>${stagedDirty()?'<button class="button" data-action="discard-fields">Отменить незавершённый ввод</button>':''}<button class="button" data-action="retry-document" data-mutation>Повторить</button>`;}
 function send(command, mutation=false) {
  if(closing)return false;
- if(outputPage(view)&&['apply_fields','set_field','asset'].includes(command.op)&&
+ if(outputPage(view)&&['apply_fields','set_field','asset','lcd_theme'].includes(command.op)&&
   (detachedOutputEdits() || fieldTarget(renderedOutputEditor)!==fieldTarget(state?.editor)))return false;
  const nativeCommand=['native_field','native_action'].includes(command.op);
  if(nativeCommand){const node={dataset:{[command.op==='native_field'?'nativeField':'nativeAction']:String(command.id)}};if(nativeControlDisabled(node))return false;const items=command.op==='native_field'?nativeFormForView().fields:nativeFormForView().actions;command.id=items.find(item=>String(item.id)===String(command.id)).id;}
  else if(mutation && busy() && !recoveryOperation(command.op)) return false;
  if(['open','save','export'].includes(command.op)&&stagedDirty()){showError('Примените или отмените незавершённый ввод перед сохранением профиля.');return false;}
- const stagedCommand=['apply_fields','set_field','asset','native_field','native_action'].includes(command.op);
+ const stagedCommand=['apply_fields','set_field','asset','lcd_theme','native_field','native_action'].includes(command.op);
  const discardNative=nativeCommand&&['408','1812','1819','1107','1141'].includes(String(command.id));
  if(stagedCommand&&!discardNative){if(nativeCommand){command.fields=currentNativeStages();command.editor_fields=state.pending?[]:currentGenericStages().filter(item=>state.editor.fields.find(field=>field.key===item.key)?.enabled!==false);}else command.fields=currentGenericStages();}
  if(['apply_scene','open','save','export'].includes(command.op))flushPreview(true);
@@ -408,6 +410,25 @@ function renderSettings() {
   </div>`;
 }
 
+function renderLcdThemes() {
+ const catalog=state.lcdThemes;
+ if(view!=='lcd'||state.editor?.page!=='lcd'||!catalog?.items?.length||!state.editor.deviceId)return '';
+ const item=catalog.items.find(theme=>theme.id===lcdThemePreview)
+  ||catalog.items.find(theme=>theme.id===catalog.current)||catalog.items[0];
+ const options=catalog.items.map(theme=>`<option value="${esc(theme.id)}" ${theme.id===item.id?'selected':''}>${esc(theme.label)}</option>`).join('');
+ const active=catalog.items.find(theme=>theme.id===catalog.current);
+ return `<section class="parameter-panel lcd-themes">
+   <img id="lcd-theme-art" src="/lcd-backgrounds/${encodeURIComponent(item.id)}.png" width="320" height="320" alt="">
+   <div class="native-field">
+     <label for="lcd-theme-preview">LCD-тема</label>
+     <select id="lcd-theme-preview" data-mutation ${disabled()}>${options}</select>
+     ${action('Выбрать тему','choose-lcd-theme')}
+     ${active?`<small>В профиле · ${esc(active.label)}</small>`:''}
+     <small>Чтобы вывести тему на LCD, нажмите «Применить».</small>
+   </div>
+ </section>`;
+}
+
 function renderProfilePage() {
  if (view==='settings') return renderSettings();
  if (outputPage(view)) {
@@ -419,7 +440,7 @@ function renderProfilePage() {
   const actions = (available ? pageButton('connections','Проверить подключение') : '')
    + (available && view==='lcd' ? pageButton('temperatures') : '') + pageButton('devices','К устройствам');
   return heading(pages[view],available?'Настройки локального профиля.':'В применённом профиле нет такого выхода.',actions)
-   + nativeProperties();
+   + renderLcdThemes() + nativeProperties();
  }
  return heading(pages[view],'Настройки локального профиля.',pageButton('settings','К настройкам'))
   + (advancedPage()?renderNativeForm():nativeProperties());
@@ -639,6 +660,11 @@ document.addEventListener('click',event=>{
   render();requestPreview();return;
  }
  if(b.dataset.asset)return void send({op:'asset',key:b.dataset.asset},true);
+ if(b.dataset.action==='choose-lcd-theme'){
+  const id=$('#lcd-theme-preview')?.value;
+  if(view==='lcd'&&id&&state.editor?.deviceId)send({op:'lcd_theme',device:state.editor.deviceId,id},true);
+  return;
+ }
  if(b.dataset.deviceId!==undefined){
   if(!pendingView && !renderQueued && view==='devices' && state?.editor?.page==='devices'){
    const id=b.dataset.deviceId;
@@ -685,6 +711,11 @@ document.addEventListener('change',event=>{
  if(input.id==='library-effect'){libraryEffect=input.value;libraryLimit=libraryPageSize;render();return;}
  if(input.dataset.nativeField!==undefined){if(['text','secret'].includes(input.dataset.nativeKind)){stageText(input);return;}if(nativeControlDisabled(input))return;send({op:'native_field',id:input.dataset.nativeField,value:input.dataset.nativeKind==='checkbox'?String(input.checked):input.value},true);return;}
  if(busy())return;
+ if(input.id==='lcd-theme-preview'){
+  lcdThemePreview=input.value;
+  $('#lcd-theme-art').src=`/lcd-backgrounds/${encodeURIComponent(input.value)}.png`;
+  return;
+ }
  if(input.dataset.group){send({op:'groups',...state.groups,[input.dataset.group]:input.checked},true);return;}
  if(input.hasAttribute('data-target')){
   if(input.value!=='' && selectTarget({op:'select_item',index:+input.value},input)){

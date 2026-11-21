@@ -76,6 +76,26 @@ html{scroll-padding-block:16px 100px}main :is(button,input,select,a){scroll-marg
 #native-error>[data-action="dismiss-error"]{order:1;flex:none;align-self:flex-start}
 /* Long native action rows wrap inside the available card width. */
 .native-properties,.native-form,.native-field,.native-field-file,.native-property-actions{min-width:0;max-width:100%}
+.lcd-themes {
+  display: grid;
+  grid-template-columns: minmax(0, 224px) minmax(0, 1fr);
+  align-items: center;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+.lcd-themes img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: #101019;
+}
+.lcd-themes button { justify-self: start; }
+@media (max-width: 520px) {
+  .lcd-themes { grid-template-columns: minmax(0, 1fr); }
+  .lcd-themes img { width: min(100%, 224px); }
+}
 .native-property-actions{flex-wrap:wrap;align-items:flex-start}
 .native-property-actions>.button{flex:0 1 auto;max-width:100%;height:auto;min-height:var(--command-height);padding-block:8px;white-space:normal;overflow-wrap:anywhere;text-align:left}
 .native-field>label,.native-field>small{min-width:0;overflow-wrap:anywhere}

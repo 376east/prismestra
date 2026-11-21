@@ -123,6 +123,12 @@ enum Command {
         #[serde(default)]
         fields: Vec<EditValue>,
     },
+    LcdTheme {
+        device: String,
+        id: String,
+        #[serde(default)]
+        fields: Vec<EditValue>,
+    },
     Classic {
         page: String,
     },
@@ -135,6 +141,7 @@ struct CloseRequest {
     started: Instant,
 }
 
+mod lcd_themes;
 mod scene_files;
 
 pub(super) struct Session {
@@ -276,6 +283,12 @@ fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
     json!({"id":entry.id,"name":entry.name,"scene":entry.scene,"preview":{"width":width,"height":height,"colors":colors}})
 }
 fn assets(path: &str) -> Option<(&'static str, &'static [u8])> {
+    if let Some(id) = path
+        .strip_prefix("/lcd-backgrounds/")
+        .and_then(|path| path.strip_suffix(".png"))
+    {
+        return lcd_themes::find(id).map(|theme| ("image/png", theme.bytes));
+    }
     Some(match path {
         "/" | "/index.html" => ("text/html; charset=utf-8", include_bytes!("web/index.html")),
         "/app.js" => (
@@ -597,6 +610,24 @@ fn snapshot(state: &State) -> Result<Value, String> {
     let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":library,"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
     value["state"]["draftMapRevision"] = json!(draft_map_revision);
     value["state"]["mapConnection"] = map_connection(app);
+    if let Some(entry) = app
+        .editor
+        .as_ref()
+        .filter(|e| e.page == Page::Lcd)
+        .and_then(|e| e.document.lcd.get(e.index))
+    {
+        let current = entry
+            .config
+            .media
+            .as_ref()
+            .and_then(lcd_themes::from_asset)
+            .map(|theme| theme.id);
+        value["state"]["lcdThemes"] = json!({
+            "current": current,
+            "items": lcd_themes::BACKGROUNDS.iter().map(|theme|
+                json!({"id": theme.id, "label": theme.label})).collect::<Vec<_>>(),
+        });
+    }
     let schedule = &app.runtime.project().schedule;
     value["state"]["schedule"] = json!({"enabled":schedule.enabled,"paused":schedule.paused});
     Ok(value)
@@ -912,6 +943,18 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                 return Err("Дождитесь завершения операции".into());
             }
             match other {
+                Command::LcdTheme { device, id, fields } => {
+                    if a.page != Page::Lcd
+                        || a.runtime.pending_configuration()
+                        || a.editor.as_ref().and_then(|e| e.selected_output_id())
+                            != Some(device.as_str())
+                    {
+                        return Err("Выбор LCD изменился. Повторите выбор темы.".into());
+                    }
+                    let theme = lcd_themes::find(&id).ok_or("Неизвестная LCD-тема")?;
+                    stage_fields(a, &fields)?;
+                    stage_lcd_asset(a, theme.bytes, "media", crate::lcd::media::MAX_SOURCE)?;
+                }
                 Command::NativeField {
                     id,
                     value,
@@ -1163,6 +1206,15 @@ pub(super) fn return_to_editor(state: &State) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lcd_theme_preview_routes_are_exact_and_use_the_registry_bytes() {
+        let theme = super::lcd_themes::find("contour-map").unwrap();
+        let (mime, bytes) = super::assets("/lcd-backgrounds/contour-map.png").unwrap();
+        assert_eq!(mime, "image/png");
+        assert!(std::ptr::eq(bytes, theme.bytes));
+        assert!(super::assets("/lcd-backgrounds/unknown.png").is_none());
+        assert!(super::assets("/lcd-backgrounds/../contour-map.png").is_none());
+    }
     use super::*;
     use crate::lighting::scene::Effect;
 

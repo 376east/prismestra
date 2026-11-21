@@ -33,6 +33,8 @@ pub struct Config {
     pub font: Option<AssetId>,
     pub rotation: i32,
     pub overlay_enabled: bool,
+    #[serde(default, skip_serializing_if = "overlay::GaugeStyle::is_default")]
+    pub gauge_style: overlay::GaugeStyle,
     pub interval_seconds: u8,
     pub sources: Vec<OverlaySource>,
 }
@@ -44,6 +46,7 @@ impl Default for Config {
             font: None,
             rotation: 0,
             overlay_enabled: false,
+            gauge_style: overlay::GaugeStyle::default(),
             interval_seconds: 5,
             sources: vec![],
         }
@@ -153,7 +156,8 @@ impl Controller {
                     config.font.as_ref().ok_or("Missing LCD overlay font")?,
                     FONT_LIMIT,
                 )?;
-                player::Player::new(prepared, overlay::Renderer::new(font)?)?
+                let renderer = overlay::Renderer::new(font)?.with_style(config.gauge_style);
+                player::Player::new(prepared, renderer)?
             } else {
                 // Optional unselected font references do not cause any read or parse.
                 player::Player::without_overlay(prepared)?

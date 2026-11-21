@@ -2404,19 +2404,26 @@ fn import_asset(app: &mut App, path: &Path, key: &str) -> Result<(), String> {
     file.take(limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    let id = crate::app::assets::Store::new(app.asset_root.clone())?.put(&bytes, limit)?;
+    stage_lcd_asset(app, &bytes, key, limit)
+}
+fn stage_lcd_asset(app: &mut App, bytes: &[u8], key: &str, limit: usize) -> Result<(), String> {
     let editor = app.editor.as_mut().ok_or("Нет редактора LCD")?;
+    if editor.page != Page::Lcd {
+        return Err("Откройте параметры LCD".into());
+    }
     let config = &mut editor
         .document
         .lcd
         .get_mut(editor.index)
         .ok_or("Выберите LCD")?
         .config;
-    match key {
-        "font" => config.font = Some(id),
-        "media" => config.media = Some(id),
+    let asset = match key {
+        "font" => &mut config.font,
+        "media" => &mut config.media,
         _ => return Err("Выберите анимацию или шрифт".into()),
     };
+    let id = crate::app::assets::Store::new(app.asset_root.clone())?.put(bytes, limit)?;
+    *asset = Some(id);
     app.editor_dirty = true;
     app.dirty = true;
     app.status = "Файл добавлен в профиль. Нажмите «Применить».".into();
