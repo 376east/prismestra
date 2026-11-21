@@ -1,4 +1,5 @@
 //! One shared animation state for all canvas points; native step math lives in lighting.
+mod procedural;
 use crate::{
     devices::Canvas,
     lighting::{
@@ -174,6 +175,7 @@ enum State {
     Noise(NoiseMap),
     Breathing(Breathing),
     Rainbow(RainbowWave),
+    Procedural(f64),
 }
 pub struct Renderer {
     scene: Scene,
@@ -194,6 +196,7 @@ impl Renderer {
             ),
             Effect::Breathing => State::Breathing(Breathing::default()),
             Effect::RainbowWave => State::Rainbow(RainbowWave::default()),
+            _ => State::Procedural(0.0),
         };
         Ok(Self { scene, state })
     }
@@ -265,6 +268,12 @@ impl Renderer {
                     .iter()
                     .map(|point| columns[point.x as usize])
                     .collect())
+            }
+            State::Procedural(phase) => {
+                let cycles_per_second = f64::from(self.scene.speed) / 160.0;
+                let step = cycles_per_second / f64::from(self.scene.fps);
+                *phase = (*phase + step * (skipped as f64 + 1.0)).rem_euclid(1.0);
+                procedural::frame(&self.scene, canvas, *phase)
             }
         }
     }

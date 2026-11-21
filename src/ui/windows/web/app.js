@@ -4,7 +4,12 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
 const clone = value => structuredClone(value);
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 const hex = color => '#' + (Number(color) >>> 0).toString(16).padStart(6,'0').slice(-6);
-const effects = {noise_map:'Карта шума',breathing:'Дыхание',rainbow_wave:'Радужная волна'};
+const effects = {
+ noise_map:'Карта шума', breathing:'Дыхание', rainbow_wave:'Радужная волна',
+ gradient_wave:'Градиентная волна', crossing_beams:'Встречные лучи', tidal_rings:'Кольца',
+ horizon_sweep:'Бегущая полоса', ember_drift:'Тлеющие островки', prism_lattice:'Световая решётка',
+ comet_trail:'Комета', fireflies:'Светлячки'
+};
 const pages = {library:'Сцены',editor:'Редактор',devices:'Устройства',lcd:'LCD',ambient:'Экран',settings:'Настройки',temperatures:'Температуры',connections:'Подключения',sources:'Источники',schedule:'Расписание'};
 const settingsPages = ['temperatures','connections','sources','schedule'];
 const devicePresetField = 714;
@@ -29,6 +34,8 @@ const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${glyphs[name]
 let state = null, draft = null, draftOrigin = null, draftName = 'Текущая сцена', selectedId = null, draftSwitchId = null;
 let view = 'library', search = '', previewTimer = null, frame = null, commandPending = false, error = '', dialogMode = 'new', dialogReturn = null, savedSceneRequest = null, previewQueued = false, closing = false, nativeAwaitingAck = false, pendingView = null, advancedOpen = false, submittedStages = [], pointerGesture = false, keyGesture = false, composing = false, renderQueued = false, awaitingCommandAck = false, errorIsCommand = false;
 const formStages = new Map();
+const libraryPageSize = 24;
+let libraryLimit = libraryPageSize, libraryEffect = '';
 let deviceInspection = null;
 let visibleCandidateIds = new Set();
 const outputRetries = new Map();
@@ -219,15 +226,42 @@ function heading(title,description,actions='') {
 }
 function action(label,code,primary=false,extra='') {return `<button class="button ${primary?'primary':''}" data-action="${code}" data-mutation ${disabled()} ${extra}>${label}</button>`;}
 function renderLibrary() {
- const list=state.library.filter(item=>item.name.toLocaleLowerCase('ru').includes(search.toLocaleLowerCase('ru')));
- return heading('Мои сцены','Сцены сохраняют параметры RGB. Устройства и LCD сохраняются в профиле.',action(icon('plus')+' Новая сцена','new',true))+`<div class="toolbar"><div class="filters"><span class="filter active">Все сцены · ${state.library.length}</span></div><label class="search"><input id="search" placeholder="Найти сцену" aria-label="Найти сцену" value="${esc(search)}"></label></div><div class="library-grid">${list.map(item=>`<article class="scene-card ${same(item.scene,state.scene)?'selected':''}"><div class="art-wrap"><button class="scene-preview" data-edit="${esc(item.id)}" aria-label="Открыть: ${esc(item.name)}" data-mutation ${disabled()}>${item.preview?`<canvas data-library-preview="${esc(item.id)}" aria-label="Предпросмотр: ${esc(item.name)}"></canvas>`:palette(item.scene)}</button></div><div class="scene-body"><div class="scene-title"><h2>${esc(item.name)}</h2>${item.builtIn?'<small class="muted">Шаблон</small>':''}</div><div class="card-actions"><button class="button" data-apply="${esc(item.id)}" aria-label="Применить: ${esc(item.name)}" title="Применить" data-mutation ${disabled()}>${icon('play')}</button><button class="button" data-edit="${esc(item.id)}" aria-label="Редактировать: ${esc(item.name)}" data-mutation ${disabled()}>${icon('edit')}</button>${item.builtIn?'':`<button class="icon-button" data-remove="${esc(item.id)}" aria-label="Удалить: ${esc(item.name)}" data-mutation ${disabled()}>${icon('trash')}</button>`}</div></div></article>`).join('')||'<div class="empty"><h2>Сцен не найдено</h2><p>Сохраните текущую сцену или измените запрос.</p></div>'}</div>`;
+ const query=search.trim().toLocaleLowerCase('ru');
+ const available=new Set(state.library.map(item=>item.scene.effect));
+ const list=state.library.filter(item=>(!libraryEffect||item.scene.effect===libraryEffect)
+  && item.name.toLocaleLowerCase('ru').includes(query));
+ const options=Object.entries(effects).filter(([key])=>available.has(key))
+  .map(([key,name])=>`<option value="${key}" ${libraryEffect===key?'selected':''}>${name}</option>`).join('');
+ const cards=list.slice(0,libraryLimit).map(item=>`<article class="scene-card ${same(item.scene,state.scene)?'selected':''}">
+   <div class="art-wrap"><button class="scene-preview" data-edit="${esc(item.id)}" aria-label="Открыть: ${esc(item.name)}" data-mutation ${disabled()}>
+    ${item.preview?`<canvas data-library-preview="${esc(item.id)}" aria-label="Предпросмотр: ${esc(item.name)}"></canvas>`:palette(item.scene)}
+   </button></div>
+   <div class="scene-body"><div class="scene-title"><h2>${esc(item.name)}</h2><small class="muted">${item.builtIn?'Шаблон · ':''}${effects[item.scene.effect]??''}</small></div>
+    <div class="card-actions"><button class="button" data-apply="${esc(item.id)}" aria-label="Применить: ${esc(item.name)}" title="Применить" data-mutation ${disabled()}>${icon('play')}</button>
+     <button class="button" data-edit="${esc(item.id)}" aria-label="Редактировать: ${esc(item.name)}" data-mutation ${disabled()}>${icon('edit')}</button>
+     ${item.builtIn?'':`<button class="icon-button" data-remove="${esc(item.id)}" aria-label="Удалить: ${esc(item.name)}" data-mutation ${disabled()}>${icon('trash')}</button>`}
+    </div>
+   </div>
+  </article>`).join('');
+ return heading('Сцены','Сцены сохраняют параметры RGB. Устройства и LCD сохраняются в профиле.',action(icon('plus')+' Новая сцена','new',true))+`
+  <div class="toolbar">
+   <select id="library-effect" aria-label="Тип эффекта"><option value="">Все эффекты</option>${options}</select>
+   <output class="muted" aria-live="polite">Показано ${Math.min(libraryLimit,list.length)} из ${list.length}</output>
+   <label class="search"><input id="search" placeholder="Найти сцену" aria-label="Найти сцену" value="${esc(search)}"></label>
+  </div>
+  <div class="library-grid">${cards||'<div class="empty"><h2>Сцен не найдено</h2><p>Измените запрос или выберите другой тип эффекта.</p></div>'}</div>
+  ${list.length>libraryLimit?'<button class="button" id="library-more">Показать ещё</button>':''}`;
 }
 function range(key,label,min,max,step=1,suffix='') {
  const value=key.startsWith('noise.')?draft.noise[key.slice(6)]:draft[key];
  return `<div class="control-block"><label class="control-label" for="param-${key}"><span>${label}</span><output id="value-${key}">${value}${suffix}</output></label><input id="param-${key}" type="range" data-param="${key}" data-suffix="${suffix}" min="${min}" max="${max}" step="${step}" value="${value}" data-mutation ${disabled()}></div>`;
 }
 function paletteHasOrder(scene) {
- return scene?.effect==='breathing'||(scene?.effect==='noise_map'&&scene.noise_palette==='custom');
+ return scene && scene.effect!=='rainbow_wave' && (scene.effect!=='noise_map'||scene.noise_palette==='custom');
+}
+function patternScale() {
+ if(draft.effect==='noise_map'||draft.effect==='breathing')return '';
+ return range('rainbow_width',draft.effect==='rainbow_wave'?'Ширина волны':'Масштаб рисунка',1,50);
 }
 let palettePosition=0;
 function paletteIndex() {return Math.min(palettePosition,draft.colors.length-1);}
@@ -272,7 +306,7 @@ function reorderPalette(actionCode) {
 }
 function renderScene() {
  const noise=draft.effect==='noise_map';
- return heading(draftName,'Изменения остаются в черновике до нажатия «Применить».',action('Сохранить сцену','save-scene')+action('Создать копию','clone')+(selectedId?action('Переименовать','rename'):'')+action('Применить','apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status"></p><div class="editor-layout"><section class="preview-panel" aria-label="Предпросмотр"><div class="stage"><canvas id="stage" aria-label="Предпросмотр сцены из движка Prismestra"></canvas><div class="stage-bar"><span class="stage-chip">Предпросмотр</span></div><div class="stage-caption">Кадр движка · черновик</div></div><p class="preview-description">Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.</p><div class="effect-strip-label">Эффект</div><div class="effect-strip">${Object.entries(effects).map(([key,name])=>`<button class="strip-item native-effect-choice ${draft.effect===key?'active':''}" data-effect="${key}" aria-pressed="${draft.effect===key}" data-mutation ${disabled()}><span>${name}</span></button>`).join('')}</div><div class="parameter-panel" style="margin-top:20px"><h2>Выходы</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> Основной свет · RGB и LCD</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> Дополнительный свет</label><button class="button" data-view="devices">Устройства и свойства</button></div></section><aside class="parameter-panel" aria-label="Параметры сцены"><div class="control-block"><div class="control-label">Палитра <small>${draft.colors.length} / 8</small></div><div class="native-palette">${draft.colors.map((c,i)=>`<div class="native-palette-item"><label class="color-control"><input type="color" id="palette-color-${i}" data-color="${i}" value="${hex(c)}" aria-label="Цвет ${i+1}" data-mutation ${disabled()}></label><button class="icon-button" data-remove-color="${i}" data-mutation aria-label="Удалить цвет ${i+1}" ${draft.colors.length===1?'disabled':disabled()}>×</button></div>`).join('')}<button class="icon-button" data-action="add-color" aria-label="Добавить цвет" data-mutation ${draft.colors.length>=8?'disabled':disabled()}>${icon('plus')}</button></div>${paletteOrderMarkup()}</div>${range('speed','Скорость',draft.effect==='breathing'?10:1,draft.effect==='breathing'?200:100)}${range('brightness','Яркость',0,100,1,'%')}<details id="advanced-scene" ${advancedOpen?'open':''}><summary>Дополнительно</summary>${range('fps','Частота кадров',1,144,1,' fps')}${range('temperature','Температура',-100,100)}${range('tint','Оттенок',-100,100)}${draft.effect==='rainbow_wave'?range('rainbow_width','Ширина волны',1,50):''}${noise?`<div class="native-field control-block"><label for="noise-palette">Палитра шума</label><select id="noise-palette" data-scene-select="noise_palette" data-mutation ${disabled()}>${Object.entries({custom:'Своя палитра',rainbow:'Радуга',inverse_rainbow:'Обратная радуга'}).map(([v,t])=>`<option value="${v}" ${draft.noise_palette===v?'selected':''}>${t}</option>`).join('')}</select></div>${range('noise.frequency','Частота шума',0.0001,0.5,0.0001)}${range('noise.amplitude','Амплитуда',0.0001,5,0.0001)}${range('noise.lacunarity','Лакунарность',0.0001,5,0.0001)}${range('noise.persistence','Затухание',0.0001,5,0.0001)}${range('noise.octaves','Октавы',1,20)}${range('noise.motion','Направление движения',0,3)}${range('noise.motion_speed','Скорость движения',0,99)}`:''}</details></aside></div>`;
+ return heading(draftName,'Изменения остаются в черновике до нажатия «Применить».',action('Сохранить сцену','save-scene')+action('Создать копию','clone')+(selectedId?action('Переименовать','rename'):'')+action('Применить','apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status"></p><div class="editor-layout"><section class="preview-panel" aria-label="Предпросмотр"><div class="stage"><canvas id="stage" aria-label="Предпросмотр сцены из движка Prismestra"></canvas><div class="stage-bar"><span class="stage-chip">Предпросмотр</span></div><div class="stage-caption">Кадр движка · черновик</div></div><p class="preview-description">Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.</p><div class="effect-strip-label">Эффект</div><div class="effect-strip">${Object.entries(effects).map(([key,name])=>`<button class="strip-item native-effect-choice ${draft.effect===key?'active':''}" data-effect="${key}" aria-pressed="${draft.effect===key}" data-mutation ${disabled()}><span>${name}</span></button>`).join('')}</div><div class="parameter-panel" style="margin-top:20px"><h2>Выходы</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> Основной свет · RGB и LCD</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> Дополнительный свет</label><button class="button" data-view="devices">Устройства и свойства</button></div></section><aside class="parameter-panel" aria-label="Параметры сцены"><div class="control-block"><div class="control-label">Палитра <small>${draft.colors.length} / 8</small></div><div class="native-palette">${draft.colors.map((c,i)=>`<div class="native-palette-item"><label class="color-control"><input type="color" id="palette-color-${i}" data-color="${i}" value="${hex(c)}" aria-label="Цвет ${i+1}" data-mutation ${disabled()}></label><button class="icon-button" data-remove-color="${i}" data-mutation aria-label="Удалить цвет ${i+1}" ${draft.colors.length===1?'disabled':disabled()}>×</button></div>`).join('')}<button class="icon-button" data-action="add-color" aria-label="Добавить цвет" data-mutation ${draft.colors.length>=8?'disabled':disabled()}>${icon('plus')}</button></div>${paletteOrderMarkup()}</div>${range('speed','Скорость',draft.effect==='breathing'?10:1,draft.effect==='breathing'?200:100)}${range('brightness','Яркость',0,100,1,'%')}<details id="advanced-scene" ${advancedOpen?'open':''}><summary>Дополнительно</summary>${range('fps','Частота кадров',1,144,1,' fps')}${range('temperature','Температура',-100,100)}${range('tint','Оттенок',-100,100)}${patternScale()}${noise?`<div class="native-field control-block"><label for="noise-palette">Палитра шума</label><select id="noise-palette" data-scene-select="noise_palette" data-mutation ${disabled()}>${Object.entries({custom:'Своя палитра',rainbow:'Радуга',inverse_rainbow:'Обратная радуга'}).map(([v,t])=>`<option value="${v}" ${draft.noise_palette===v?'selected':''}>${t}</option>`).join('')}</select></div>${range('noise.frequency','Частота шума',0.0001,0.5,0.0001)}${range('noise.amplitude','Амплитуда',0.0001,5,0.0001)}${range('noise.lacunarity','Лакунарность',0.0001,5,0.0001)}${range('noise.persistence','Затухание',0.0001,5,0.0001)}${range('noise.octaves','Октавы',1,20)}${range('noise.motion','Направление движения',0,3)}${range('noise.motion_speed','Скорость движения',0,99)}`:''}</details></aside></div>`;
 }
 function nativeProperties() {
  const editor=state.editor;
@@ -573,6 +607,13 @@ window.prismestraReceive = message => {
 };
 document.addEventListener('click',event=>{
  const b=event.target.closest('button');if(!b||b.disabled||(busy()&&b.hasAttribute('data-mutation')&&!recoveryAction(b.dataset.action)))return;
+ if(b.id==='library-more'){
+  const first=$('.library-grid').children.length;
+  libraryLimit+=libraryPageSize;
+  render();
+  $('.library-grid').children[first]?.querySelector('.scene-preview')?.focus();
+  return;
+ }
  if(b.dataset.outputRetry!==undefined){
   const id=b.dataset.outputRetry, ticket=outputRetryTicket(id);
   if(view!=='devices'||busy()||pendingView||!ticket||outputRetries.get(id)?.status==='pending')return;
@@ -628,7 +669,7 @@ document.addEventListener('click',event=>{
 });
 document.addEventListener('input',event=>{
  const input=event.target;if(stageText(input))return;if(busy()||!draft)return;
- if(input.id==='search'){search=input.value;render();return;}
+ if(input.id==='search'){search=input.value;libraryLimit=libraryPageSize;render();return;}
  if(input.dataset.param){const n=Number(input.value);if(!Number.isFinite(n))return;const key=input.dataset.param;if(key.startsWith('noise.'))draft.noise[key.slice(6)]=n;else draft[key]=n;document.getElementById('value-'+key).textContent=n+input.dataset.suffix;editDraft();}
  if(input.dataset.color!==undefined){
   const index=+input.dataset.color;
@@ -641,6 +682,7 @@ document.addEventListener('input',event=>{
 });
 document.addEventListener('change',event=>{
  const input=event.target;
+ if(input.id==='library-effect'){libraryEffect=input.value;libraryLimit=libraryPageSize;render();return;}
  if(input.dataset.nativeField!==undefined){if(['text','secret'].includes(input.dataset.nativeKind)){stageText(input);return;}if(nativeControlDisabled(input))return;send({op:'native_field',id:input.dataset.nativeField,value:input.dataset.nativeKind==='checkbox'?String(input.checked):input.value},true);return;}
  if(busy())return;
  if(input.dataset.group){send({op:'groups',...state.groups,[input.dataset.group]:input.checked},true);return;}
