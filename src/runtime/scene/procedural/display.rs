@@ -147,10 +147,7 @@ pub(super) fn sample(effect: Effect, x: f64, y: f64, scale: f64, phase: f64) -> 
             let exposure = left * (1.0 - side) + (1.0 - left) * side;
             (side, 0.11 + 0.89 * exposure.powi(3))
         }
-        Effect::ColorCycle => {
-            let exposure = (0.83 + 0.17 * wave(phase + 0.12 * y)).clamp(0.0, 1.0);
-            (wave(phase), exposure)
-        }
+        Effect::ColorCycle => (wave(phase), 1.0),
         _ => return None,
     })
 }

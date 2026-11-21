@@ -142,8 +142,9 @@ fn procedural_effects_have_distinct_geometry_and_follow_elapsed_time() {
     {
         let scene = Scene {
             effect,
-            // Gradient Wave expresses motion through its palette index alone.
-            colors: if effect == Effect::GradientWave {
+            // These two effects move through the same neutral ramp; all others
+            // must still animate with a single color.
+            colors: if matches!(effect, Effect::GradientWave | Effect::ColorCycle) {
                 vec![0x575757, 0x9b9b9b, 0xefefef]
             } else {
                 vec![0xdcdcdc]
@@ -155,10 +156,12 @@ fn procedural_effects_have_distinct_geometry_and_follow_elapsed_time() {
             .into_iter()
             .map(|phase| frame(&scene, &canvas, phase).unwrap())
             .collect();
-        assert!(
-            signature
-                .iter()
-                .any(|frame| frame.iter().any(|color| color != &frame[0])),
+        let has_spatial_variation = signature
+            .iter()
+            .any(|frame| frame.iter().any(|color| color != &frame[0]));
+        assert_eq!(
+            has_spatial_variation,
+            effect != Effect::ColorCycle,
             "{effect:?}"
         );
         assert!(
