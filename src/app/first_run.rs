@@ -614,7 +614,18 @@ fn assemble(
         let mut device = preset.device_with_leds(&id, points)?;
         device.enabled = true;
         device.rate_hz = 25;
-        device.label = format!("Surplife E1 · {points} LED");
+        let label = format!("Surplife E1 · {points} LED");
+        device.label = label.clone();
+        let mut number = 1;
+        while setup
+            .devices
+            .iter()
+            .chain(mapped.iter().map(|entry| &entry.device))
+            .any(|existing| existing.label == device.label)
+        {
+            number += 1;
+            device.label = format!("{label} · {number}");
+        }
         let binding = Binding::Ble { address };
         binding.validate(&device)?;
         remaining_points -= points;
@@ -2138,6 +2149,45 @@ mod tests {
         .unwrap();
         assert!(!rerun.changed);
         assert_eq!(rerun.document, document);
+    }
+
+    #[test]
+    fn e1_same_capacity_labels_are_distinct_and_saved_labels_stay_put() {
+        let (document, local) = empty();
+        let (left, right, third) = (0x1234_5678_9abc, 0x1234_5678_9abd, 0x1234_5678_9abe);
+        let plan = assemble(
+            document,
+            local,
+            endpoint(),
+            Discovery {
+                ble_pixels: vec![(right, 153), (left, 153)],
+                ..Default::default()
+            },
+            || unreachable!(),
+        )
+        .unwrap();
+        let devices = &plan.document.lighting.setup.devices;
+        assert_eq!(devices[0].label, "Surplife E1 · 153 LED");
+        assert_eq!(devices[1].label, "Surplife E1 · 153 LED · 2");
+        let previous = devices.clone();
+        let plan = assemble(
+            plan.document,
+            plan.local,
+            endpoint(),
+            Discovery {
+                ble_pixels: vec![(third, 153)],
+                ..Default::default()
+            },
+            || unreachable!(),
+        )
+        .unwrap();
+        let devices = &plan.document.lighting.setup.devices;
+        assert_eq!(&devices[..2], &previous);
+        assert_eq!(devices[2].label, "Surplife E1 · 153 LED · 3");
+        assert_eq!(plan.document.lighting.setup.canvas.points.len(), 3 * 153);
+        for (device, address) in devices.iter().zip([left, right, third]) {
+            assert_eq!(plan.local.devices[&device.id], Binding::Ble { address });
+        }
     }
 
     #[test]
