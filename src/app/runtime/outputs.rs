@@ -202,12 +202,21 @@ impl Runtime {
         document: Document,
         outputs: OutputPlan,
     ) -> Result<u64, String> {
+        self.request_output_plan(document, outputs, None)
+    }
+
+    pub(super) fn request_output_plan(
+        &mut self,
+        document: Document,
+        outputs: OutputPlan,
+        startup_managed_ids: Option<BTreeSet<String>>,
+    ) -> Result<u64, String> {
         outputs.validate(&document)?;
         let revision = self
             .output_revision
             .checked_add(1)
             .ok_or("Output revision exhausted")?;
-        self.request_document_to(document, None, Some(outputs))?;
+        self.request_document_to(document, None, Some(outputs), startup_managed_ids)?;
         Ok(revision)
     }
 }

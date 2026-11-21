@@ -7,7 +7,7 @@ use crate::{
     lighting::color::Rgb,
     runtime::{
         Host,
-        output::{Cancellation, RgbDriver},
+        output::{Cancellation, Phase, RgbDriver},
     },
     schedule::{self, Schedule, Target},
     storage,
@@ -558,7 +558,7 @@ impl Runtime {
     }
     /// Validate first, then stop only channels owned by this coordinator. No waiting here.
     pub fn request_document(&mut self, document: Document) -> Result<(), String> {
-        self.request_document_to(document, None, None)
+        self.request_document_to(document, None, None, None)
     }
     /// A candidate topology claims its own journal only after successful persistence.
     pub fn request_document_at(
@@ -567,7 +567,7 @@ impl Runtime {
         journal: PathBuf,
     ) -> Result<(), String> {
         Self::journal_path(&journal)?;
-        self.request_document_to(document, Some(journal), None)
+        self.request_document_to(document, Some(journal), None, None)
     }
     fn journal_path(path: &Path) -> Result<(), String> {
         if path.file_name().is_none()
@@ -584,6 +584,7 @@ impl Runtime {
         document: Document,
         journal_override: Option<PathBuf>,
         outputs: Option<OutputPlan>,
+        startup_managed_ids: Option<BTreeSet<String>>,
     ) -> Result<(), String> {
         document.validate()?;
         if self.stopped
@@ -609,7 +610,7 @@ impl Runtime {
         }
         let live_rgb = outputs
             .as_ref()
-            .and_then(|plan| self.live_rgb_plan(&document, plan));
+            .and_then(|plan| self.live_rgb_plan(&document, plan, startup_managed_ids.is_some()));
         if let Some(live) = &live_rgb {
             self.host.stop_rgb_outputs(&live.retiring);
         } else {
@@ -619,7 +620,7 @@ impl Runtime {
             outputs,
             live_rgb,
             #[cfg(windows)]
-            startup_managed_ids: None,
+            startup_managed_ids,
             document,
             phase: ConfigurationPhase::Draining,
             journal_override,
@@ -629,7 +630,12 @@ impl Runtime {
         Ok(())
     }
 
-    fn live_rgb_plan(&self, document: &Document, outputs: &OutputPlan) -> Option<LiveRgbPlan> {
+    fn live_rgb_plan(
+        &self,
+        document: &Document,
+        outputs: &OutputPlan,
+        startup: bool,
+    ) -> Option<LiveRgbPlan> {
         // RGB layout and route changes can leave the other owners running
         // when they require no rebuild.
         if self.power.error().is_some()
@@ -700,10 +706,11 @@ impl Runtime {
                     && new.role == Role::Canvas
                     && previous.keys == *keys
                     && Arc::ptr_eq(&previous.factory, factory)
-                    && self.host.status(id).is_some_and(|snapshot| {
-                        use crate::runtime::output::Phase;
-                        matches!(snapshot.phase, Phase::Connecting | Phase::Ready)
-                    }))
+                    && {
+                        let phase = self.host.status(id).map(|snapshot| snapshot.phase);
+                        matches!(phase, Some(Phase::Connecting | Phase::Ready))
+                            || (startup && old == new && self.can_keep_rgb_failure(id, phase))
+                    })
                 .then(|| id.clone())
             })
             .collect();
@@ -721,6 +728,12 @@ impl Runtime {
             retiring,
             added_lcd,
         })
+    }
+
+    fn can_keep_rgb_failure(&self, id: &str, phase: Option<Phase>) -> bool {
+        self.output_recovery
+            .get(id)
+            .is_some_and(|recovery| phase == Some(Phase::Failed) || recovery.start_error.is_some())
     }
 
     fn device_unchanged(&self, document: &Document, id: &str) -> bool {
