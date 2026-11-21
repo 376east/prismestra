@@ -1510,6 +1510,8 @@ impl Runtime {
         self.bump_view();
     }
     pub fn drained(&mut self) -> bool {
+        #[cfg(windows)]
+        self.sound.reap();
         let lighting = self.lighting_drained();
         let sensors = self.sensors.values_mut().all(|w| w.reap());
         let registry = self.registry_drained();
@@ -1521,10 +1523,6 @@ impl Runtime {
     }
     fn other_channels_drained(&mut self) -> bool {
         let mut drained = true;
-        #[cfg(windows)]
-        {
-            drained &= self.sound.drained();
-        }
         for w in self.lcd.values_mut() {
             drained = w.reap() && drained;
         }

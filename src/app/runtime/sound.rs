@@ -18,7 +18,7 @@ impl Input {
     pub(super) fn reconcile(&mut self, wanted: bool, now_us: u64) {
         if !wanted {
             self.stop();
-            self.drained();
+            self.reap();
             return;
         }
         if let Some(worker) = &self.worker {
@@ -62,11 +62,10 @@ impl Input {
         self.next_attempt = 0;
     }
 
-    pub(super) fn drained(&mut self) -> bool {
+    pub(super) fn reap(&mut self) {
         if self.worker.as_ref().is_some_and(Loopback::has_stopped) {
             self.worker = None;
             self.stopping = false;
         }
-        self.worker.is_none()
     }
 }
