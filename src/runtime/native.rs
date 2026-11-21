@@ -20,6 +20,7 @@ pub fn attach_bound(
 ) -> Result<(), String> {
     let (keys, factory) = bound_factory(host.setup(), id, bindings, door_brightness)?;
     host.attach_claimed(id, keys, move |cancel| factory(cancel))
+        .map_err(Into::into)
 }
 
 /// Build a repeatable deferred factory for Runtime retry/resume. Validation

@@ -311,13 +311,14 @@ impl Host {
         F: FnOnce(Cancellation) -> Result<Box<dyn RgbDriver>, String> + Send + 'static,
     {
         self.attach_claimed(id, Vec::new(), factory)
+            .map_err(Into::into)
     }
     pub(crate) fn attach_claimed<F>(
         &mut self,
         id: &str,
         keys: Vec<String>,
         factory: F,
-    ) -> Result<(), String>
+    ) -> Result<(), super::output::OutputStartError>
     where
         F: FnOnce(Cancellation) -> Result<Box<dyn RgbDriver>, String> + Send + 'static,
     {

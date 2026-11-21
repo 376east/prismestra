@@ -1,5 +1,6 @@
 //! Opt-in bounded recovery for explicitly bound outputs, including initial failures.
 use super::*;
+use crate::runtime::output::OutputStartError;
 
 const RETRY_DELAYS_US: [u64; 3] = [1_000_000, 5_000_000, 15_000_000];
 
@@ -26,7 +27,7 @@ pub(super) struct Recovery {
     manual_retry: Option<OpenRgbRetryTicket>,
     manual_attempt: u64,
     manual_started: Option<(OpenRgbRetryTicket, Option<u64>)>,
-    pub(super) start_error: Option<String>,
+    pub(super) start_error: Option<OutputStartError>,
 }
 impl Recovery {
     fn observe(&mut self, generation: u64, failed: bool, now: u64) -> bool {
@@ -147,7 +148,7 @@ impl Runtime {
             Some((started, None)) if started == ticket => recovery
                 .start_error
                 .as_ref()
-                .map_or(Cancelled, |error| Failed(error.clone())),
+                .map_or(Cancelled, |error| Failed(error.message().into())),
             Some((started, Some(generation))) if started == ticket => {
                 let Some(snapshot) = self.host.status(id).filter(|s| s.generation == generation)
                 else {
@@ -242,13 +243,13 @@ impl Runtime {
     pub(super) fn handle_output_start(
         &mut self,
         id: &str,
-        result: Result<(), String>,
+        result: Result<(), OutputStartError>,
     ) -> Result<(), String> {
         if let Some(state) = self.output_recovery.get_mut(id) {
             state.start_error = result.err();
             Ok(())
         } else {
-            result
+            result.map_err(Into::into)
         }
     }
 
@@ -410,7 +411,7 @@ impl Runtime {
         }
         for (id, keys, factory) in lcd {
             let result = self.start_registered_lcd(&id, keys, factory);
-            self.handle_output_start(&id, result)?;
+            self.handle_output_start(&id, result.map_err(Into::into))?;
             self.bump_view();
         }
         Ok(())

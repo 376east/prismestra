@@ -493,41 +493,49 @@ fn device_candidates(app: &App) -> Vec<first_run::DeviceCandidate<'_>> {
 }
 
 fn device_activity(app: &App) -> Value {
-    let (labels, tickets) = app.runtime.read(|runtime| {
-        let devices = &runtime.document().lighting.setup.devices;
-        let labels = devices
-            .iter()
-            .map(|device| {
-                let label = if app.native_lighting.is_none() && device.enabled {
-                    "Предпросмотр"
-                } else {
-                    output_activity_label(&runtime.output_activity(device))
-                };
-                (device.id.clone(), label)
-            })
-            .collect::<BTreeMap<_, _>>();
-        let tickets = if app.native_lighting.is_some() && !busy(app) {
-            devices
-                .iter()
-                .filter_map(|device| {
-                    runtime.openrgb_retry_ticket(&device.id).map(|ticket| {
-                        (
-                            device.id.clone(),
-                            retry_output::encode(app.context_revision, ticket),
-                        )
-                    })
-                })
-                .collect::<BTreeMap<_, _>>()
-        } else {
-            BTreeMap::new()
-        };
-        (labels, tickets)
+    let active = app.native_lighting.is_some();
+    let mut value = app.runtime.read(|runtime| {
+        device_activity_for(runtime, active, active && busy(app), app.context_revision)
     });
+    value["found"] = json!(
+        app.newly_found_devices()
+            .map(|d| &d.label)
+            .collect::<Vec<_>>()
+    );
+    value
+}
+
+pub(crate) fn device_activity_for(
+    runtime: &crate::app::runtime::Runtime,
+    active: bool,
+    busy: bool,
+    context: u64,
+) -> Value {
+    let mut labels = BTreeMap::new();
+    let mut reasons = BTreeMap::new();
+    let mut tickets = BTreeMap::new();
+    for device in &runtime.document().lighting.setup.devices {
+        let activity = runtime.output_activity(device);
+        let label = if !active && device.enabled {
+            "Предпросмотр"
+        } else {
+            output_activity_label(&activity)
+        };
+        labels.insert(&device.id, label);
+        if active {
+            if let Some(reason) = runtime.output_failure_reason(device, &activity) {
+                reasons.insert(&device.id, reason);
+            }
+            if !busy && let Some(ticket) = runtime.openrgb_retry_ticket(&device.id) {
+                tickets.insert(&device.id, retry_output::encode(context, ticket));
+            }
+        }
+    }
     json!({
         "labels": labels,
-        "retryScope": app.context_revision.to_string(),
+        "reasons": reasons,
+        "retryScope": context.to_string(),
         "retryTickets": tickets,
-        "found": app.newly_found_devices().map(|d| &d.label).collect::<Vec<_>>(),
     })
 }
 
