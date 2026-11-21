@@ -25,7 +25,7 @@ const IDENTITY_LABEL: i32 = 1807;
 const IDENTITY: i32 = 1808;
 const SERIAL_LABEL: i32 = 1809;
 const SERIAL: i32 = 1810;
-const SAVE_BINDING: i32 = 1811;
+pub(super) const SAVE_BINDING: i32 = 1811;
 const RESET_BINDING: i32 = 1812;
 const REMOVE: i32 = 1813;
 const PRUNE: i32 = 1814;
@@ -174,6 +174,13 @@ impl Editor {
     }
 }
 impl App {
+    pub(super) fn can_stage_connection_save(&self) -> bool {
+        self.page == Page::Connections
+            && self.connections.workspace.is_some()
+            && self.connections.pending.is_none()
+            && self.connections.current().is_some()
+    }
+
     pub(super) fn build_connections(&mut self, parent: HWND) -> Result<(), String> {
         self.control(parent, ACTIVE_STATUS, "STATIC", "", 0)?;
         self.control(

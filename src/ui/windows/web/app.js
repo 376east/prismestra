@@ -103,9 +103,13 @@ function selectTarget(command,input=null) {if(stagedDirty()){if(input)input.valu
 function deferRender() {if(pointerGesture||keyGesture||composing){renderQueued=true;return true;}return false;}
 function releaseGesture() {requestAnimationFrame(()=>{if(renderQueued&&!pointerGesture&&!keyGesture&&!composing){renderQueued=false;render();}});}
 function nativeControlDisabled(node) {
- const items=node.dataset.nativeAction!==undefined?nativeFormForView()?.actions:nativeFormForView()?.fields;
+ const form=nativeFormForView();
+ const items=node.dataset.nativeAction!==undefined?form?.actions:form?.fields;
  const id=node.dataset.nativeAction??node.dataset.nativeField;
- return closing || commandPending || !items?.some(item=>String(item.id)===id&&item.enabled);
+ const item=items?.find(item=>String(item.id)===id);
+ const staged=item?.accepts_staged_text && form.page===view && form.fields.some(field=>
+  field.enabled && field.kind==='text' && formStages.has(stageKey('native',field.id)));
+ return closing || commandPending || !(item?.enabled || staged);
 }
 function showError(message,fromCommand=false) {errorIsCommand=fromCommand;error=String(message);const box=$('#native-error');box.hidden=false;box.innerHTML=`<button class="icon-button" data-action="dismiss-error" aria-label="Закрыть сообщение">×</button><p>${esc(error)}</p>${stagedDirty()?'<button class="button" data-action="discard-fields">Отменить незавершённый ввод</button>':''}<button class="button" data-action="retry-document" data-mutation>Повторить</button>`;}
 function send(command, mutation=false) {
