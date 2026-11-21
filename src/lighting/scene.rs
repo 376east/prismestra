@@ -100,9 +100,79 @@ effects! {
     ThermalGauge => "Шкала температуры",
     DayNight => "День и ночь",
     CpuPulse => "Пульс нагрузки CPU",
+    ParticleNetwork => "Связи частиц",
+    ShoreBreak => "Прибой",
+    LavaMetaballs => "Лавовая лампа",
+    RadialDischarge => "Плазменные разряды",
+    ImpactFragments => "Капли и осколки",
+    MaintenanceDrones => "Рой ремонтников",
+    FallingStack => "Падающие блоки",
+    PaintSpatters => "Брызги краски",
+    MorphingRebound => "Фигура с отскоком",
+    MergingVortices => "Слияние вихрей",
+    DriftingIceSheets => "Льдины",
+    JellyfishPulse => "Пульс медуз",
+    DoublePendulum => "Двойной маятник",
+    KeyRipple => "Волны от клавиш",
+    KeyHeatmap => "Карта нажатий",
+    KeyLightning => "Разряд от клавиши",
+    KeyColumns => "Световые столбцы от клавиш",
+    CameraColor => "Цвет с камеры",
+    CameraMotion => "Движение с камеры",
+    GameResources => "Ресурсы в игре",
+    GameEvents => "Импульсы от событий игры",
+    GameRound => "Состояние раунда",
+    ExternalMetric => "Кольцевая шкала данных",
+    ExternalAlert => "Световое оповещение",
+    WeatherScene => "Свет по погоде",
+    MediaAmbience => "Цвет и ход воспроизведения",
+    BrowserPulse => "События браузера",
+    CollidingWavefronts => "Столкновение колец",
+    MarbleFlow => "Мраморные прожилки",
+    SpiralEmitter => "Спиральный выброс",
+    FoamRafts => "Пенные завихрения",
+    HexConduction => "Импульсы по сотам",
+    SerpentineChain => "Змеиный след",
+    SmokePlumes => "Дымовые клубы",
+    RiftEruption => "Выброс из трещины",
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReactiveSource {
+    Keys,
+    Camera,
+    Game,
+    External,
 }
 
 impl Effect {
+    pub(crate) fn reactive_source(self) -> Option<ReactiveSource> {
+        Some(match self {
+            Self::KeyRipple | Self::KeyHeatmap | Self::KeyLightning | Self::KeyColumns => {
+                ReactiveSource::Keys
+            }
+            Self::CameraColor | Self::CameraMotion => ReactiveSource::Camera,
+            Self::GameResources | Self::GameEvents | Self::GameRound => ReactiveSource::Game,
+            Self::ExternalMetric
+            | Self::ExternalAlert
+            | Self::WeatherScene
+            | Self::MediaAmbience
+            | Self::BrowserPulse => ReactiveSource::External,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn uses_reactive(self) -> bool {
+        self.reactive_source().is_some()
+    }
+    pub(crate) fn uses_keys(self) -> bool {
+        self.reactive_source() == Some(ReactiveSource::Keys)
+    }
+    pub(crate) fn uses_game(self) -> bool {
+        self.reactive_source() == Some(ReactiveSource::Game)
+    }
+
     pub(crate) fn uses_context(self) -> bool {
         matches!(
             self,

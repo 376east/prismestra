@@ -209,6 +209,41 @@ const MOTION_EXAMPLES: &[(Effect, Preset)] = &[
     (Effect::ThermalGauge, preset!("thermal-gauge", "Шкала температуры", [0x3c9b9f, 0xe4c459, 0xdd613e], 78, 50, 16)),
     (Effect::DayNight, preset!("day-night", "День и ночь", [0x324161, 0xba6957, 0xf9cf91], 68, 50, 17)),
     (Effect::CpuPulse, preset!("cpu-pulse", "Пульс нагрузки CPU", [0x375186, 0x7d80c6, 0xe78289], 76, 46, 19)),
+    (Effect::ParticleNetwork, preset!("particle-network", "Связи частиц", [0x344372, 0x76569f, 0xa9dbe5], 74, 43, 19)),
+    (Effect::ShoreBreak, preset!("shore-break", "Прибой", [0x16465b, 0x45adb0, 0xf0cd91], 74, 43, 19)),
+    (Effect::LavaMetaballs, preset!("lava-metaballs", "Лавовая лампа", [0x5d1b3e, 0xc7485e, 0xf99b5a], 74, 43, 19)),
+    (Effect::RadialDischarge, preset!("radial-discharge", "Плазменные разряды", [0x363158, 0x8150bb, 0xb8dcfc], 74, 43, 19)),
+    (Effect::ImpactFragments, preset!("impact-fragments", "Капли и осколки", [0x405a92, 0x6da9d1, 0xcaf2eb], 74, 43, 19)),
+    (Effect::MaintenanceDrones, preset!("maintenance-drones", "Рой ремонтников", [0x376b5a, 0x79c08b, 0xe7d287], 74, 43, 19)),
+    (Effect::FallingStack, preset!("falling-stack", "Падающие блоки", [0x443b81, 0xa879d4, 0xfcb283], 74, 43, 19)),
+    (Effect::PaintSpatters, preset!("paint-spatters", "Брызги краски", [0x3e3a79, 0xc95b99, 0xf3c884], 74, 43, 19)),
+    (Effect::MorphingRebound, preset!("morphing-rebound", "Фигура с отскоком", [0x4064a0, 0xa475c2, 0xfcae90], 74, 43, 19)),
+    (Effect::MergingVortices, preset!("merging-vortices", "Слияние вихрей", [0x3b3d76, 0x996c8d, 0xf4c66d], 74, 43, 19)),
+    (Effect::DriftingIceSheets, preset!("drifting-ice-sheets", "Льдины", [0x315576, 0x7bb7cf, 0xd7e6ef], 74, 43, 19)),
+    (Effect::JellyfishPulse, preset!("jellyfish-pulse", "Пульс медуз", [0x544780, 0xb566ad, 0xe6a9c5], 74, 43, 19)),
+    (Effect::DoublePendulum, preset!("double-pendulum", "Двойной маятник", [0x513a72, 0x8ca5d2, 0xffd9a7], 74, 43, 19)),
+    (Effect::KeyRipple, preset!("key-ripple", "Волны от клавиш", [0x4666b8, 0x798bdd, 0xe5add6], 77, 48, 19)),
+    (Effect::KeyHeatmap, preset!("key-heatmap", "Карта нажатий", [0x3c629e, 0xe87966, 0xffd285], 77, 48, 19)),
+    (Effect::KeyLightning, preset!("key-lightning", "Разряд от клавиши", [0x5652a1, 0x8eb4f3, 0xe1e7fc], 77, 48, 19)),
+    (Effect::KeyColumns, preset!("key-columns", "Световые столбцы от клавиш", [0x467c72, 0x95c1a0, 0xf7cb87], 77, 48, 19)),
+    (Effect::CameraColor, preset!("camera-color", "Цвет с камеры", [0x325379, 0x75b1c9, 0xc0e7eb], 77, 48, 19)),
+    (Effect::CameraMotion, preset!("camera-motion", "Движение с камеры", [0x314e63, 0x84b6d2, 0xbec5ec], 77, 48, 19)),
+    (Effect::GameResources, preset!("game-resources", "Ресурсы в игре", [0xe35b62, 0x76bd98, 0x94bdf7], 77, 48, 19)),
+    (Effect::GameEvents, preset!("game-events", "Импульсы от событий игры", [0xde6567, 0xddb06a, 0xa2dfaf], 77, 48, 19)),
+    (Effect::GameRound, preset!("game-round", "Состояние раунда", [0xd56b6b, 0x7b9bca, 0xa0eac0], 77, 48, 19)),
+    (Effect::ExternalMetric, preset!("external-metric", "Кольцевая шкала данных", [0x4267a4, 0xa983d9, 0xf6aa81], 77, 48, 19)),
+    (Effect::ExternalAlert, preset!("external-alert", "Световое оповещение", [0xd89a59, 0xde765f, 0xe6586e], 77, 48, 19)),
+    (Effect::WeatherScene, preset!("weather-scene", "Свет по погоде", [0x466181, 0x849bc4, 0xf3ce95], 77, 48, 19)),
+    (Effect::MediaAmbience, preset!("media-ambience", "Цвет и ход воспроизведения", [0x3d576d, 0x99a8cf, 0xdcd7eb], 77, 48, 19)),
+    (Effect::BrowserPulse, preset!("browser-pulse", "События браузера", [0xa584d0, 0x7bb4bf, 0xeac098], 77, 48, 19)),
+    (Effect::CollidingWavefronts, preset!("colliding-wavefronts", "Столкновение колец", [0x6a2a57, 0xcd615d, 0xffd591], 74, 44, 18)),
+    (Effect::MarbleFlow, preset!("marble-flow", "Мраморные прожилки", [0x2c224c, 0x64538a, 0xe9c5cc], 74, 44, 18)),
+    (Effect::SpiralEmitter, preset!("spiral-emitter", "Спиральный выброс", [0x373a78, 0x7286dd, 0xe2d6f1], 74, 44, 18)),
+    (Effect::FoamRafts, preset!("foam-rafts", "Пенные завихрения", [0x1e5268, 0x6eaeb4, 0xc3ebd5], 74, 44, 18)),
+    (Effect::HexConduction, preset!("hex-conduction", "Импульсы по сотам", [0x38547a, 0x719fce, 0xd3ead0], 74, 44, 18)),
+    (Effect::SerpentineChain, preset!("serpentine-chain", "Змеиный след", [0x3e5981, 0x65b89b, 0xefcf8f], 74, 44, 18)),
+    (Effect::SmokePlumes, preset!("smoke-plumes", "Дымовые клубы", [0x423e62, 0x8c839c, 0xd8c4c6], 74, 44, 18)),
+    (Effect::RiftEruption, preset!("rift-eruption", "Выброс из трещины", [0x683445, 0xc95a48, 0xf2cb78], 74, 44, 18)),
 ];
 
 pub(crate) fn built_in() -> Vec<Entry> {
@@ -296,7 +331,10 @@ fn built_in_library_contains_legacy_presets_and_one_scene_for_each_new_motion() 
         assert!(scenes.insert(json));
         let mut renderer = Renderer::new(scene).unwrap();
         let first = renderer.step(&canvas).unwrap();
-        if entry.scene.effect.uses_audio() || entry.scene.effect.uses_context() {
+        if entry.scene.effect.uses_audio()
+            || entry.scene.effect.uses_context()
+            || entry.scene.effect.uses_reactive()
+        {
             assert!(first.iter().all(|color| color.rrggbb() == 0));
             continue;
         }

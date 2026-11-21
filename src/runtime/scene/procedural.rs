@@ -6,6 +6,8 @@ mod dynamics;
 mod kinetic;
 mod nature;
 mod optics;
+mod premium;
+mod premium_extra;
 mod simulations;
 
 fn wave(turns: f64) -> f64 {
@@ -18,7 +20,7 @@ fn soft_disc(dx: f64, dy: f64, radius: f64) -> f64 {
         .powi(2)
 }
 
-fn sample(effect: Effect, x: f64, y: f64, scale: f64, phase: f64) -> (f64, f64) {
+pub(super) fn sample(effect: Effect, x: f64, y: f64, scale: f64, phase: f64) -> (f64, f64) {
     match effect {
         Effect::GradientWave => (wave((x + 0.26 * y) * scale - phase), 1.0),
         Effect::CrossingBeams => {
@@ -77,6 +79,8 @@ fn sample(effect: Effect, x: f64, y: f64, scale: f64, phase: f64) -> (f64, f64) 
             .or_else(|| simulations::sample(effect, x, y, scale, phase))
             .or_else(|| display::sample(effect, x, y, scale, phase))
             .or_else(|| dynamics::sample(effect, x, y, scale, phase))
+            .or_else(|| premium::sample(effect, x, y, scale, phase))
+            .or_else(|| premium_extra::sample(effect, x, y, scale, phase))
             .expect("every procedural effect belongs to a renderer family"),
     }
 }
@@ -123,11 +127,9 @@ fn procedural_effects_have_distinct_geometry_and_follow_elapsed_time() {
             .collect(),
     };
     let mut signatures = Vec::new();
-    for effect in Effect::ALL
-        .iter()
-        .copied()
-        .filter(|e| e.uses_normalized_canvas() && !e.uses_audio() && !e.uses_context())
-    {
+    for effect in Effect::ALL.iter().copied().filter(|e| {
+        e.uses_normalized_canvas() && !e.uses_audio() && !e.uses_context() && !e.uses_reactive()
+    }) {
         let scene = Scene {
             effect,
             // These two effects move through the same neutral ramp; all others

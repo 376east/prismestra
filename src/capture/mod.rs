@@ -4,7 +4,16 @@ pub mod ambient;
 pub mod audio_features;
 #[cfg(windows)]
 pub(crate) mod audio_loopback;
+#[cfg(windows)]
+pub(crate) mod camera;
+#[cfg(any(windows, test))]
+pub(crate) mod event_bridge;
+#[cfg(windows)]
+pub(crate) mod media_now;
 pub mod pixels;
+#[cfg(windows)]
+pub(crate) mod raw_keys;
+pub mod reactive;
 #[cfg(windows)]
 pub mod windows;
 

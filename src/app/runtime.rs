@@ -28,6 +28,8 @@ pub mod coordinator;
 #[cfg(windows)]
 mod managed_backend;
 mod outputs;
+#[cfg(windows)]
+mod reactive_sources;
 mod recovery;
 #[cfg(windows)]
 mod sound;
@@ -242,6 +244,8 @@ pub struct Runtime {
     #[cfg(windows)]
     native_inputs: bool,
     #[cfg(windows)]
+    reactive: reactive_sources::Sources,
+    #[cfg(windows)]
     cpu_load: system_load::Load,
     sensors: BTreeMap<String, sensor_worker::Worker>,
     sensor_specs: BTreeMap<String, SensorSpec>,
@@ -328,6 +332,8 @@ impl Runtime {
             sound: sound::Input::default(),
             #[cfg(windows)]
             native_inputs: false,
+            #[cfg(windows)]
+            reactive: reactive_sources::Sources::default(),
             #[cfg(windows)]
             cpu_load: system_load::Load::default(),
             sensors: BTreeMap::new(),
@@ -445,6 +451,28 @@ impl Runtime {
     #[cfg(windows)]
     pub(crate) fn enable_native_scene_inputs(&mut self) {
         self.native_inputs = true;
+    }
+    #[cfg(windows)]
+    pub(crate) fn reactive_input(&self) -> crate::capture::reactive::Snapshot {
+        self.reactive.snapshot()
+    }
+    #[cfg(windows)]
+    pub(crate) fn reactive_error(&self) -> Option<&str> {
+        self.reactive.error()
+    }
+    #[cfg(windows)]
+    pub(crate) fn export_event_source(
+        &self,
+        format: crate::capture::event_bridge::ExportFormat,
+    ) -> Result<String, String> {
+        if !self.native_inputs {
+            return Err("Event source export requires a connected Windows profile".into());
+        }
+        reactive_sources::export(self.store.path.as_deref(), format)
+    }
+    #[cfg(windows)]
+    pub(crate) fn allow_media_bridge(&self) -> Result<(), String> {
+        reactive_sources::allow_media_bridge(self.store.path.as_deref())
     }
     #[cfg(windows)]
     pub(crate) fn audio_input(
@@ -1475,6 +1503,9 @@ impl Runtime {
         {
             self.sound.stop();
             self.host.set_audio(None);
+            self.reactive.stop();
+            self.host
+                .set_reactive(Default::default(), crate::clock::monotonic_us());
             self.cpu_load = system_load::Load::default();
         }
         self.lcd_arrivals.clear();
@@ -1511,7 +1542,10 @@ impl Runtime {
     }
     pub fn drained(&mut self) -> bool {
         #[cfg(windows)]
-        self.sound.reap();
+        {
+            self.sound.reap();
+            self.reactive.reap();
+        }
         let lighting = self.lighting_drained();
         let sensors = self.sensors.values_mut().all(|w| w.reap());
         let registry = self.registry_drained();
@@ -1967,7 +2001,7 @@ impl Runtime {
                 }
                 let group_on = |group| self.group_on(group);
                 let rgb_wanted = self.native_inputs
-                    && effect.uses_audio()
+                    && (effect.uses_audio() || effect.uses_reactive())
                     && self.document.lighting.setup.devices.iter().any(|device| {
                         device.role == Role::Canvas
                             && device.enabled
@@ -1978,9 +2012,23 @@ impl Runtime {
                                     && self.document.lighting.groups.door.contains(&device.id)))
                     });
                 let had_worker = self.sound.has_worker();
-                self.sound.reconcile(rgb_wanted, now_us);
-                if rgb_wanted || had_worker {
+                let audio_wanted = rgb_wanted && effect.uses_audio();
+                self.sound.reconcile(audio_wanted, now_us);
+                if audio_wanted || had_worker {
                     self.host.set_audio(self.sound.latest(now_us));
+                }
+                let source = if rgb_wanted {
+                    effect.reactive_source()
+                } else {
+                    None
+                };
+                let had_reactive = self.reactive.wanted();
+                let media_mode =
+                    rgb_wanted && effect == crate::lighting::scene::Effect::MediaAmbience;
+                self.reactive
+                    .configure(source, self.store.path.as_deref(), media_mode, now_us);
+                if source.is_some() || had_reactive {
+                    self.host.set_reactive(self.reactive.snapshot(), now_us);
                 }
             }
             if effect.uses_context() {

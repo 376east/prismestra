@@ -294,6 +294,7 @@ impl Core {
             .skipped_before_due(now_us, self.renderer.scene().fps);
         let rendered = skipped.is_some();
         if let Some(skipped) = skipped {
+            self.renderer.set_reactive_time(now_us);
             #[cfg(windows)]
             self.renderer
                 .set_audio(crate::capture::recent_audio(self.audio, now_us));

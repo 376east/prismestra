@@ -2296,7 +2296,22 @@ fn file_dialog(
     filter: &str,
     extension: &str,
 ) -> Result<Option<PathBuf>, String> {
+    file_dialog_named(hwnd, save, filter, extension, "")
+}
+
+fn file_dialog_named(
+    hwnd: HWND,
+    save: bool,
+    filter: &str,
+    extension: &str,
+    initial_name: &str,
+) -> Result<Option<PathBuf>, String> {
     let mut file = [0u16; 32768];
+    let name = wide(initial_name);
+    if name.len() > file.len() {
+        return Err("File name is too long".into());
+    }
+    file[..name.len()].copy_from_slice(&name);
     let filter = wide(filter);
     let mut o = OPENFILENAMEW {
         lStructSize: size_of::<OPENFILENAMEW>() as u32,

@@ -91,6 +91,9 @@ enum Command {
     Open,
     Save,
     Export,
+    ExportEventSource {
+        format: crate::capture::event_bridge::ExportFormat,
+    },
     Page {
         page: String,
         device: Option<String>,
@@ -249,7 +252,10 @@ fn preview_canvas(width: u32, height: u32) -> crate::devices::Canvas {
 }
 
 fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
-    if entry.scene.effect.uses_audio() || entry.scene.effect.uses_context() {
+    if entry.scene.effect.uses_audio()
+        || entry.scene.effect.uses_context()
+        || entry.scene.effect.uses_reactive()
+    {
         return json!({"id":entry.id,"name":entry.name,"scene":entry.scene});
     }
     let (width, height) = if entry.scene.effect.uses_normalized_canvas() {
@@ -595,7 +601,11 @@ fn snapshot(state: &State) -> Result<Value, String> {
     let effects = Effect::ALL
         .iter()
         .copied()
-        .map(|effect| json!({"id":effect,"name":effect.label(),"audio":effect.uses_audio(),"context":effect.uses_context()}))
+        .map(|effect| json!({
+            "id":effect,"name":effect.label(),"audio":effect.uses_audio(),"context":effect.uses_context(),
+            "reactive":effect.reactive_source(),
+            "directColor":matches!(effect, Effect::CameraColor | Effect::CameraMotion | Effect::MediaAmbience)
+        }))
         .collect::<Vec<_>>();
     value["state"]["effects"] = json!(effects);
     value["state"]["draftMapRevision"] = json!(draft_map_revision);
@@ -847,6 +857,53 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                 _ => EXPORT,
             };
             modal_command(hwnd, state, id)?;
+        }
+        Command::ExportEventSource { format } => {
+            use crate::capture::event_bridge::ExportFormat;
+            let game = format != ExportFormat::Connection;
+            let (filter, extension, name) = if game {
+                (
+                    "Game State Integration (*.cfg)\0*.cfg\0\0",
+                    "cfg",
+                    "gamestate_integration_prismestra.cfg",
+                )
+            } else {
+                (
+                    "JSON (*.json)\0*.json\0\0",
+                    "json",
+                    "prismestra-local-input.json",
+                )
+            };
+            if let Some(path) = super::file_dialog_named(hwnd, true, filter, extension, name)? {
+                if game {
+                    let valid_name = path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|value| {
+                            value
+                                .to_ascii_lowercase()
+                                .starts_with("gamestate_integration_")
+                        });
+                    let valid_extension = path
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|value| value.eq_ignore_ascii_case("cfg"));
+                    if !valid_name || !valid_extension {
+                        return Err("Имя файла должно иметь вид gamestate_integration_*.cfg".into());
+                    }
+                }
+                let mut slot = state.app.try_borrow_mut().map_err(|_| "Редактор занят")?;
+                let app = slot.as_mut().ok_or("Нет сессии")?;
+                let content = app
+                    .runtime
+                    .read(|runtime| runtime.export_event_source(format))?;
+                crate::storage::atomic_write(&path, content.as_bytes(), 8192)
+                    .map_err(|e| e.to_string())?;
+                if format == ExportFormat::Connection {
+                    app.runtime.read(|runtime| runtime.allow_media_bridge())?;
+                }
+                app.status = "Настройки локального входа экспортированы.".into();
+            }
         }
         Command::PreviewScene { scene, origin } => {
             let result = state
@@ -1111,6 +1168,12 @@ pub(super) fn maintain(state: &State) {
             if renderer.scene().effect.uses_audio() {
                 renderer.set_audio(app.runtime.read(|runtime| runtime.audio_input()));
             }
+            if renderer.scene().effect.uses_reactive() {
+                renderer.set_reactive(
+                    app.runtime.read(|runtime| runtime.reactive_input()),
+                    crate::clock::monotonic_us(),
+                );
+            }
             if renderer.scene().effect.uses_context() {
                 let effect = renderer.scene().effect;
                 let input = app.runtime.read(|runtime| {
@@ -1130,6 +1193,11 @@ pub(super) fn maintain(state: &State) {
         if app.runtime.project().scene.effect.uses_audio() {
             value["state"]["audioError"] = app.runtime.read(|runtime| json!(runtime.audio_error()));
         }
+        value["state"]["reactiveError"] = if app.runtime.project().scene.effect.uses_reactive() {
+            app.runtime.read(|runtime| json!(runtime.reactive_error()))
+        } else {
+            Value::Null
+        };
         if session.last_native_send.elapsed() >= Duration::from_millis(250) {
             session.last_native_send = Instant::now();
             value["state"]["deviceCandidates"] = json!(device_candidates(app));
