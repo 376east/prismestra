@@ -17,6 +17,8 @@ use std::{
 };
 
 const IO_LIMIT: Duration = Duration::from_millis(100);
+// Both health and inventory use the managed SDK service's read budget.
+const SDK_READ_LIMIT: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(100);
 // Initial detector drain can exceed three seconds; give normal cleanup time
 // to finish before falling back to termination of the owned child only.
@@ -724,7 +726,7 @@ fn run(config: Config, installed: Option<&InstalledLaunch>, state: &Shared) {
             &mut owned,
             &mut retry,
             MonitorTiming::default(),
-            probe_owned_sdk,
+            |endpoint, pid| probe_owned_sdk(endpoint, pid, &|| state.cancel.load(Ordering::SeqCst)),
         );
         drop(owned);
         {
@@ -892,7 +894,7 @@ fn scan_inventory(
 ) -> Result<(usize, [u8; 32]), String> {
     // One shared deadline bounds connect+scan. Session checks cancellation every
     //10ms, so a slow large inventory never delays owner shutdown to this limit.
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + SDK_READ_LIMIT;
     let mut session =
         crate::transport::openrgb::OpenRgbSession::connect(endpoint, deadline, cancelled)?;
     session
@@ -944,20 +946,29 @@ fn check_owned_listener(endpoint: SocketAddr, pid: u32, stage: &str) -> Result<(
     }
 }
 
-fn probe_owned_sdk(endpoint: SocketAddr, pid: u32) -> Result<(), ProbeFailure> {
+fn probe_owned_sdk(
+    endpoint: SocketAddr,
+    pid: u32,
+    cancelled: &impl Fn() -> bool,
+) -> Result<(), ProbeFailure> {
+    if cancelled() {
+        return Err(ProbeFailure::Unknown("SDK probe cancelled".into()));
+    }
     check_owned_listener(endpoint, pid, "ownership before SDK probe")?;
-    probe_sdk(endpoint).map_err(|stage| ProbeFailure::Confirmed(format!("SDK {stage}")))?;
-    check_owned_listener(endpoint, pid, "ownership after SDK probe")
+    let result = probe_sdk(endpoint, cancelled);
+    if cancelled() {
+        return Err(ProbeFailure::Unknown("SDK probe cancelled".into()));
+    }
+    check_owned_listener(endpoint, pid, "ownership after SDK probe")?;
+    result.map_err(|stage| ProbeFailure::Confirmed(format!("SDK {stage}")))
 }
 
 // Same protocol6 negotiation as vendor/openrgb2/src/protocol/{mod,stream}.rs.
 // Its internal framing helpers are private; this probe sends only packet40 and
 // accepts exactly20bytes, without enumeration, client flags or device writes.
-fn probe_sdk(endpoint: SocketAddr) -> Result<(), &'static str> {
+fn probe_sdk(endpoint: SocketAddr, cancelled: &impl Fn() -> bool) -> Result<(), &'static str> {
     let mut stream = TcpStream::connect_timeout(&endpoint, IO_LIMIT).map_err(|_| "connect")?;
-    if stream.set_read_timeout(Some(IO_LIMIT)).is_err()
-        || stream.set_write_timeout(Some(IO_LIMIT)).is_err()
-    {
+    if stream.set_write_timeout(Some(IO_LIMIT)).is_err() {
         return Err("configure timeouts");
     }
     let mut request = [0u8; 20];
@@ -968,17 +979,27 @@ fn probe_sdk(endpoint: SocketAddr) -> Result<(), &'static str> {
     if stream.write_all(&request).is_err() {
         return Err("write request");
     }
+    // A timed-out blocking receive can leave a Winsock connection indeterminate.
+    // Poll a nonblocking socket so cancellation and partial replies share one deadline.
+    stream
+        .set_nonblocking(true)
+        .map_err(|_| "configure response socket")?;
     let mut response = [0u8; 20];
-    let deadline = Instant::now() + IO_LIMIT;
+    let deadline = Instant::now() + SDK_READ_LIMIT;
     let mut offset = 0;
     while offset < response.len() {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if cancelled() {
+            return Err("cancelled");
+        }
+        if remaining.is_zero() {
             return Err("read response");
-        };
-        if stream.set_read_timeout(Some(remaining)).is_err() {
-            return Err("configure read timeout");
         }
         match stream.read(&mut response[offset..]) {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(remaining.min(POLL));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Ok(0) | Err(_) => return Err("read response"),
             Ok(n) => offset += n,
         }
@@ -1310,7 +1331,7 @@ mod tests {
                 stream.write_all(&request).unwrap();
             });
             assert_eq!(
-                probe_sdk(address),
+                probe_sdk(address, &|| false),
                 if valid {
                     Ok(())
                 } else {
@@ -1319,6 +1340,112 @@ mod tests {
             );
             server.join().unwrap();
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn late_sdk_reply_keeps_ready_owner_until_responses_stop() {
+        let image = std::env::current_exe().unwrap();
+        let mut command = Command::new(&image);
+        command
+            .args([
+                "--exact",
+                "app::managed_backend::tests::fake_child_wait",
+                "--ignored",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut owned = spawn_owned(&mut command, regular_file(&image).unwrap()).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut config = fixture();
+        config.endpoint = listener.local_addr().unwrap();
+        let mut frame_client = TcpStream::connect(config.endpoint).unwrap();
+        let (mut frame_receiver, _) = listener.accept().unwrap();
+        let server_listener = listener.try_clone().unwrap();
+        let server = thread::spawn(move || {
+            let mut stalled = Vec::new();
+            for attempt in 0..7 {
+                let (mut stream, _) = server_listener.accept().unwrap();
+                let mut request = [0; 20];
+                stream.read_exact(&mut request).unwrap();
+                assert_eq!(&request[..4], b"ORGB");
+                match attempt {
+                    0 => {
+                        stream.write_all(&request).unwrap();
+                        // The first ready poll also opens an inventory connection.
+                        // This fixture does not enumerate controllers.
+                        let (mut inventory, _) = server_listener.accept().unwrap();
+                        inventory.read_exact(&mut request).unwrap();
+                        inventory.write_all(&request).unwrap();
+                    }
+                    1..=3 => {
+                        thread::sleep(IO_LIMIT + Duration::from_millis(50));
+                        // The independent stream is still receiving frames while
+                        // this client waits on its service response.
+                        let mut frame = [0; 26];
+                        frame[..4].copy_from_slice(b"ORGB");
+                        frame[8..12].copy_from_slice(&1050u32.to_le_bytes());
+                        frame[12..16].copy_from_slice(&10u32.to_le_bytes());
+                        frame[16..20].copy_from_slice(&10u32.to_le_bytes());
+                        frame[20..22].copy_from_slice(&1u16.to_le_bytes());
+                        frame[22] = attempt;
+                        frame_client.write_all(&frame).unwrap();
+                        let mut received = [0; 26];
+                        frame_receiver.read_exact(&mut received).unwrap();
+                        assert_eq!(received, frame);
+                        stream.write_all(&request).unwrap();
+                    }
+                    _ => stalled.push(stream), // Open, but sends no SDK response.
+                }
+            }
+            // Hold the final unanswered connection through its real read budget.
+            stalled
+                .last_mut()
+                .unwrap()
+                .set_read_timeout(Some(SDK_READ_LIMIT + IO_LIMIT))
+                .unwrap();
+            assert_eq!(stalled.last_mut().unwrap().read(&mut [0]).unwrap(), 0);
+        });
+
+        let state = Shared {
+            snapshot: Mutex::new(Snapshot::default()),
+            cancel: AtomicBool::new(false),
+            restarting: AtomicBool::new(true),
+            wake: Condvar::new(),
+            gate: Mutex::new(()),
+        };
+        let mut probes = 0;
+        // The socket fixture runs inside the test process. The managed child
+        // fixture lets the actual monitor observe process lifetime separately.
+        monitor_owned(
+            &config,
+            &state,
+            &mut owned,
+            &mut Retry::default(),
+            MonitorTiming {
+                health_interval: Duration::ZERO,
+                inventory_interval: Duration::from_secs(60),
+                ..MonitorTiming::default()
+            },
+            |endpoint, _| {
+                probes += 1;
+                assert!(probes <= 7, "the monitor did not restart a stalled SDK");
+                if (2..=5).contains(&probes) {
+                    let snapshot = state.snapshot.lock().unwrap();
+                    assert!(snapshot.ready);
+                    assert_eq!(snapshot.ready_generation, 1);
+                }
+                probe_owned_sdk(endpoint, std::process::id(), &|| false)
+            },
+        );
+        server.join().unwrap();
+        assert_eq!(probes, 7);
+        let snapshot = state.snapshot.lock().unwrap();
+        assert!(!snapshot.ready);
+        assert_eq!(snapshot.ready_generation, 1);
+        assert!(snapshot.detail.contains("restarting owned child"));
+        assert!(snapshot.detail.contains("stage=SDK read response"));
     }
 
     #[test]
