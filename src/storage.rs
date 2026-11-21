@@ -20,6 +20,37 @@ impl Drop for Temporary {
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8], max_bytes: usize) -> io::Result<()> {
+    atomic_write_with(path, bytes, max_bytes, replace)
+}
+
+/// Publish the recurring helper lease even while a reader permits delete sharing.
+/// Other configuration and elevated output files keep their normal replacement.
+pub(crate) fn atomic_write_heartbeat(
+    path: &Path,
+    bytes: &[u8],
+    max_bytes: usize,
+) -> io::Result<()> {
+    atomic_write_with(path, bytes, max_bytes, |source, destination| {
+        let result = replace(source, destination);
+        #[cfg(windows)]
+        if result.as_ref().is_err_and(|error| {
+            use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
+            error.raw_os_error().is_some_and(|code| {
+                code == ERROR_ACCESS_DENIED as i32 || code == ERROR_SHARING_VIOLATION as i32
+            })
+        }) {
+            return replace_shared_target(source, destination);
+        }
+        result
+    })
+}
+
+fn atomic_write_with(
+    path: &Path,
+    bytes: &[u8],
+    max_bytes: usize,
+    replace: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
     if bytes.len() > max_bytes {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -84,46 +115,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8], max_bytes: usize) -> io::Result<(
 
 #[cfg(windows)]
 fn replace(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn MoveFileExW(source: *const u16, destination: *const u16, flags: u32) -> i32;
-    }
-    fn wide(path: &Path) -> io::Result<Vec<u16>> {
-        use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::Prefix};
-        // Rust's file APIs support long paths, but the raw MoveFileExW call
-        // needs an explicit extended path without relying on machine policy.
-        // absolute resolves Win32 relative/dot syntax without following links.
-        let absolute = std::path::absolute(path)?;
-        let mut encoded = OsString::new();
-        match absolute.components().next() {
-            Some(std::path::Component::Prefix(prefix)) => match prefix.kind() {
-                Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(_, _) | Prefix::Verbatim(_) => {
-                    encoded.push(absolute.as_os_str());
-                }
-                Prefix::Disk(_) => {
-                    encoded.push(r"\\?\");
-                    encoded.push(absolute.as_os_str());
-                }
-                Prefix::UNC(_, _) => {
-                    encoded.push(r"\\?\UNC\");
-                    let wide: Vec<_> = absolute.as_os_str().encode_wide().skip(2).collect();
-                    encoded.push(OsString::from_wide(&wide));
-                }
-                _ => return Err(io::Error::other("Unsupported configuration path prefix")),
-            },
-            _ => {
-                return Err(io::Error::other(
-                    "Missing absolute configuration path prefix",
-                ));
-            }
-        }
-        let mut value: Vec<_> = encoded.encode_wide().collect();
-        if value.contains(&0) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"));
-        }
-        value.push(0);
-        Ok(value)
     }
     let source = wide(source)?;
     let destination = wide(destination)?;
@@ -135,6 +129,98 @@ fn replace(source: &Path, destination: &Path) -> io::Result<()> {
         Ok(())
     }
 }
+#[cfg(windows)]
+fn wide(path: &Path) -> io::Result<Vec<u16>> {
+    use std::{
+        ffi::OsString,
+        os::windows::ffi::{OsStrExt, OsStringExt},
+        path::Prefix,
+    };
+    // Rust's file APIs support long paths, but the raw MoveFileExW call
+    // needs an explicit extended path without relying on machine policy.
+    // absolute resolves Win32 relative/dot syntax without following links.
+    let absolute = std::path::absolute(path)?;
+    let mut encoded = OsString::new();
+    match absolute.components().next() {
+        Some(std::path::Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(_, _) | Prefix::Verbatim(_) => {
+                encoded.push(absolute.as_os_str());
+            }
+            Prefix::Disk(_) => {
+                encoded.push(r"\\?\");
+                encoded.push(absolute.as_os_str());
+            }
+            Prefix::UNC(_, _) => {
+                encoded.push(r"\\?\UNC\");
+                let wide: Vec<_> = absolute.as_os_str().encode_wide().skip(2).collect();
+                encoded.push(OsString::from_wide(&wide));
+            }
+            _ => return Err(io::Error::other("Unsupported configuration path prefix")),
+        },
+        _ => {
+            return Err(io::Error::other(
+                "Missing absolute configuration path prefix",
+            ));
+        }
+    }
+    let mut value: Vec<_> = encoded.encode_wide().collect();
+    if value.contains(&0) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"));
+    }
+    value.push(0);
+    Ok(value)
+}
+
+#[cfg(windows)]
+fn replace_shared_target(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::mem::{offset_of, size_of};
+    use std::os::windows::{
+        fs::{MetadataExt, OpenOptionsExt},
+        io::AsRawHandle,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_RENAME_INFO,
+        FileRenameInfoEx, SetFileInformationByHandle,
+    };
+
+    let file = OpenOptions::new()
+        .access_mode(DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(source)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::other(
+            "Heartbeat staging path must be a regular file",
+        ));
+    }
+    let name = wide(destination)?;
+    // FILE_RENAME_INFO ends in a flexible UTF-16 array. Keep the NUL in the
+    // buffer and exclude it from FileNameLength, which is measured in bytes.
+    let offset = offset_of!(FILE_RENAME_INFO, FileName);
+    let bytes = (offset + name.len() * size_of::<u16>()).max(size_of::<FILE_RENAME_INFO>());
+    let length = u32::try_from(bytes).map_err(io::Error::other)?;
+    let mut buffer = vec![0u64; bytes.div_ceil(size_of::<u64>())];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    const REPLACE_IF_EXISTS: u32 = 1;
+    const POSIX_SEMANTICS: u32 = 2;
+    // The aligned allocation includes the header and the full UTF-16 name.
+    // The zero RootDirectory selects the absolute path above.
+    unsafe {
+        (*info).Anonymous.Flags = REPLACE_IF_EXISTS | POSIX_SEMANTICS;
+        (*info).FileNameLength = ((name.len() - 1) * size_of::<u16>()) as u32;
+        buffer
+            .as_mut_ptr()
+            .cast::<u8>()
+            .add(offset)
+            .cast::<u16>()
+            .copy_from_nonoverlapping(name.as_ptr(), name.len());
+        (SetFileInformationByHandle(file.as_raw_handle(), FileRenameInfoEx, info.cast(), length)
+            != 0)
+            .then_some(())
+            .ok_or_else(io::Error::last_os_error)
+    }
+}
+
 #[cfg(not(windows))]
 fn replace(source: &Path, destination: &Path) -> io::Result<()> {
     fs::rename(source, destination)?;
