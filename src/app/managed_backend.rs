@@ -724,6 +724,7 @@ fn run(config: Config, installed: Option<&InstalledLaunch>, state: &Shared) {
             &mut owned,
             &mut retry,
             MonitorTiming::default(),
+            probe_owned_sdk,
         );
         drop(owned);
         {
@@ -763,6 +764,7 @@ fn monitor_owned(
     owned: &mut OwnedChild,
     retry: &mut Retry,
     timing: MonitorTiming,
+    mut probe: impl FnMut(SocketAddr, u32) -> Result<(), ProbeFailure>,
 ) {
     let began = Instant::now();
     let mut ready = false;
@@ -788,10 +790,32 @@ fn monitor_owned(
                 break;
             }
         }
-        if listener_owned(config.endpoint, owned.child.id())
-            && sdk_ready(config.endpoint)
-            && listener_owned(config.endpoint, owned.child.id())
-        {
+        if let Err(failure) = probe(config.endpoint, owned.child.id()) {
+            let (confirmed, reason) = match failure {
+                ProbeFailure::Unknown(reason) => {
+                    unhealthy = 0;
+                    (false, reason)
+                }
+                ProbeFailure::Confirmed(reason) => {
+                    unhealthy += 1;
+                    (true, reason)
+                }
+            };
+            {
+                let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
+                snapshot.ready = false;
+                snapshot.detail = format!("Managed OpenRGB SDK unavailable: {reason}");
+            }
+            ready = false;
+            if confirmed
+                && state.restarting.load(Ordering::SeqCst)
+                && ((ever_ready && unhealthy >= 3)
+                    || (!ever_ready && began.elapsed() >= timing.startup_limit))
+            {
+                state.lifecycle(owned.child.id(), format!("SDK unhealthy; restarting owned child (failures={unhealthy}, ready_before={ever_ready}, uptime_ms={}, stage={reason})", began.elapsed().as_millis()));
+                break;
+            }
+        } else {
             unhealthy = 0;
             if !ready {
                 ready = true;
@@ -818,24 +842,6 @@ fn monitor_owned(
             }
             if began.elapsed() >= Duration::from_secs(60) {
                 retry.failures = 0;
-            }
-        } else {
-            unhealthy += 1;
-            if ready {
-                state.detail("Managed OpenRGB SDK temporarily unavailable");
-            }
-            ready = false;
-            state
-                .snapshot
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .ready = false;
-            if state.restarting.load(Ordering::SeqCst)
-                && ((ever_ready && unhealthy >= 3)
-                    || (!ever_ready && began.elapsed() >= timing.startup_limit))
-            {
-                state.lifecycle(owned.child.id(), format!("SDK unhealthy; restarting owned child (failures={unhealthy}, ready_before={ever_ready}, uptime_ms={})", began.elapsed().as_millis()));
-                break;
             }
         }
         let next_health = Instant::now() + timing.health_interval;
@@ -919,17 +925,40 @@ impl InventoryWatch {
     }
 }
 
+#[derive(Debug)]
+enum ProbeFailure {
+    Unknown(String),
+    Confirmed(String),
+}
+
+fn check_owned_listener(endpoint: SocketAddr, pid: u32, stage: &str) -> Result<(), ProbeFailure> {
+    match listener_owner(endpoint) {
+        Ok(Some(owner)) if owner == pid => Ok(()),
+        Ok(Some(owner)) => Err(ProbeFailure::Confirmed(format!(
+            "{stage}: listener belongs to PID {owner}"
+        ))),
+        Ok(None) => Err(ProbeFailure::Confirmed(format!(
+            "{stage}: listener missing"
+        ))),
+        Err(error) => Err(ProbeFailure::Unknown(format!("{stage}: {error}"))),
+    }
+}
+
+fn probe_owned_sdk(endpoint: SocketAddr, pid: u32) -> Result<(), ProbeFailure> {
+    check_owned_listener(endpoint, pid, "ownership before SDK probe")?;
+    probe_sdk(endpoint).map_err(|stage| ProbeFailure::Confirmed(format!("SDK {stage}")))?;
+    check_owned_listener(endpoint, pid, "ownership after SDK probe")
+}
+
 // Same protocol6 negotiation as vendor/openrgb2/src/protocol/{mod,stream}.rs.
 // Its internal framing helpers are private; this probe sends only packet40 and
 // accepts exactly20bytes, without enumeration, client flags or device writes.
-fn sdk_ready(endpoint: SocketAddr) -> bool {
-    let Ok(mut stream) = TcpStream::connect_timeout(&endpoint, IO_LIMIT) else {
-        return false;
-    };
+fn probe_sdk(endpoint: SocketAddr) -> Result<(), &'static str> {
+    let mut stream = TcpStream::connect_timeout(&endpoint, IO_LIMIT).map_err(|_| "connect")?;
     if stream.set_read_timeout(Some(IO_LIMIT)).is_err()
         || stream.set_write_timeout(Some(IO_LIMIT)).is_err()
     {
-        return false;
+        return Err("configure timeouts");
     }
     let mut request = [0u8; 20];
     request[..4].copy_from_slice(b"ORGB");
@@ -937,24 +966,28 @@ fn sdk_ready(endpoint: SocketAddr) -> bool {
     request[12..16].copy_from_slice(&4u32.to_le_bytes());
     request[16..].copy_from_slice(&6u32.to_le_bytes());
     if stream.write_all(&request).is_err() {
-        return false;
+        return Err("write request");
     }
     let mut response = [0u8; 20];
     let deadline = Instant::now() + IO_LIMIT;
     let mut offset = 0;
     while offset < response.len() {
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            return false;
+            return Err("read response");
         };
         if stream.set_read_timeout(Some(remaining)).is_err() {
-            return false;
+            return Err("configure read timeout");
         }
         match stream.read(&mut response[offset..]) {
-            Ok(0) | Err(_) => return false,
+            Ok(0) | Err(_) => return Err("read response"),
             Ok(n) => offset += n,
         }
     }
-    response[..16] == request[..16] && u32::from_le_bytes(response[16..].try_into().unwrap()) >= 6
+    if response[..16] != request[..16] || u32::from_le_bytes(response[16..].try_into().unwrap()) < 6
+    {
+        return Err("validate response");
+    }
+    Ok(())
 }
 
 // Ownership must be established independently of the SDK response. This also
@@ -973,19 +1006,72 @@ pub fn listener_owner(endpoint: SocketAddr) -> Result<Option<u32>, String> {
         ) -> u32;
     }
     let family = if endpoint.is_ipv4() { 2 } else { 23 };
+    read_listener_owner(endpoint, |buffer, size| {
+        let table = if buffer.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            buffer.as_mut_ptr().cast()
+        };
+        // TCP_TABLE_OWNER_PID_LISTENER=3. Only local read-only socket metadata.
+        unsafe { GetExtendedTcpTable(table, size, 0, family, 3, 0) }
+    })
+}
+
+#[cfg(windows)]
+fn read_listener_owner(
+    endpoint: SocketAddr,
+    mut read_table: impl FnMut(&mut [u32], &mut u32) -> u32,
+) -> Result<Option<u32>, String> {
+    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
+
+    const MAX_TABLE_SIZE: u32 = 4 * 1024 * 1024;
+    const MAX_READS: usize = 3;
     let mut size = 0;
-    // TCP_TABLE_OWNER_PID_LISTENER=3. Only local read-only socket metadata.
-    if unsafe { GetExtendedTcpTable(std::ptr::null_mut(), &mut size, 0, family, 3, 0) } != 122
-        || size > 4 * 1024 * 1024
-    {
-        return Err("Unable to size OpenRGB listener ownership table".into());
+    let status = read_table(&mut [], &mut size);
+    if status != ERROR_INSUFFICIENT_BUFFER {
+        return Err(format!(
+            "OpenRGB listener table sizing failed (Win32 {status})"
+        ));
     }
-    let mut aligned = vec![0u32; (size as usize).div_ceil(4)];
-    if unsafe { GetExtendedTcpTable(aligned.as_mut_ptr().cast(), &mut size, 0, family, 3, 0) } != 0
-    {
-        return Err("Unable to read OpenRGB listener ownership table".into());
+    for _ in 0..MAX_READS {
+        if !(4..=MAX_TABLE_SIZE).contains(&size) {
+            return Err(format!(
+                "Invalid OpenRGB listener table size ({size} bytes)"
+            ));
+        }
+        let capacity = size;
+        let mut aligned = vec![0u32; (capacity as usize).div_ceil(4)];
+        match read_table(&mut aligned, &mut size) {
+            NO_ERROR => {
+                if !(4..=capacity).contains(&size) {
+                    return Err(format!(
+                        "Invalid OpenRGB listener table result size ({size} bytes)"
+                    ));
+                }
+                // Every byte is initialized and the returned length fits the allocation.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(aligned.as_ptr().cast::<u8>(), size as usize)
+                };
+                return parse_listener_owner(endpoint, bytes);
+            }
+            ERROR_INSUFFICIENT_BUFFER if size > capacity && size <= MAX_TABLE_SIZE => {}
+            ERROR_INSUFFICIENT_BUFFER => {
+                return Err(format!(
+                    "Invalid OpenRGB listener table resize ({capacity} to {size} bytes)"
+                ));
+            }
+            status => {
+                return Err(format!(
+                    "OpenRGB listener table read failed (Win32 {status})"
+                ));
+            }
+        }
     }
-    let bytes = unsafe { std::slice::from_raw_parts(aligned.as_ptr().cast::<u8>(), size as usize) };
+    Err("OpenRGB listener table kept growing during reads".into())
+}
+
+#[cfg(windows)]
+fn parse_listener_owner(endpoint: SocketAddr, bytes: &[u8]) -> Result<Option<u32>, String> {
     let Some(count) = bytes.get(..4) else {
         return Err("Invalid OpenRGB listener ownership table".into());
     };
@@ -1223,7 +1309,14 @@ mod tests {
                 }
                 stream.write_all(&request).unwrap();
             });
-            assert_eq!(sdk_ready(address), valid);
+            assert_eq!(
+                probe_sdk(address),
+                if valid {
+                    Ok(())
+                } else {
+                    Err("validate response")
+                }
+            );
             server.join().unwrap();
         }
     }
@@ -1237,6 +1330,137 @@ mod tests {
             assert!(listener_owned(address, std::process::id()));
             assert!(!listener_owned(address, std::process::id().wrapping_add(1)));
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn listener_table_retries_growth_and_checks_the_returned_size() {
+        use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
+
+        let endpoint = "127.0.0.1:6742".parse().unwrap();
+        let mut calls = 0;
+        let owner = read_listener_owner(endpoint, |buffer, size| {
+            calls += 1;
+            match calls {
+                1 => {
+                    assert!(buffer.is_empty());
+                    *size = 4;
+                    ERROR_INSUFFICIENT_BUFFER
+                }
+                2 => {
+                    assert_eq!((*size, buffer.len()), (4, 1));
+                    *size = 28;
+                    ERROR_INSUFFICIENT_BUFFER
+                }
+                3 => {
+                    assert_eq!((*size, buffer.len()), (28, 7));
+                    buffer[0] = 1;
+                    buffer[2] = u32::from_ne_bytes([127, 0, 0, 1]);
+                    let [port_hi, port_lo] = 6742u16.to_be_bytes();
+                    buffer[3] = u32::from_ne_bytes([port_hi, port_lo, 0, 0]);
+                    buffer[6] = 4321;
+                    NO_ERROR
+                }
+                _ => panic!("read continued after success"),
+            }
+        });
+        assert_eq!(owner, Ok(Some(4321)));
+
+        for (status, size) in [
+            (NO_ERROR, 3),
+            (NO_ERROR, 5),
+            (ERROR_INSUFFICIENT_BUFFER, 4),
+            (ERROR_INSUFFICIENT_BUFFER, 4 * 1024 * 1024 + 1),
+            (5, 4),
+        ] {
+            let mut reads = 0;
+            let result = read_listener_owner(endpoint, |buffer, returned| {
+                if buffer.is_empty() {
+                    *returned = 4;
+                    return ERROR_INSUFFICIENT_BUFFER;
+                }
+                reads += 1;
+                *returned = size;
+                status
+            });
+            assert!(result.is_err());
+            assert_eq!(reads, 1);
+        }
+
+        let mut reads = 0;
+        let result = read_listener_owner(endpoint, |buffer, size| {
+            reads += usize::from(!buffer.is_empty());
+            *size += 4;
+            ERROR_INSUFFICIENT_BUFFER
+        });
+        assert!(result.is_err());
+        assert_eq!(reads, 3);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn unknown_ownership_revokes_readiness_without_triggering_restart() {
+        let image = std::env::current_exe().unwrap();
+        let mut command = Command::new(&image);
+        command
+            .args([
+                "--exact",
+                "app::managed_backend::tests::fake_child_wait",
+                "--ignored",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut owned = spawn_owned(&mut command, regular_file(&image).unwrap()).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut config = fixture();
+        config.endpoint = listener.local_addr().unwrap();
+        let state = Shared {
+            snapshot: Mutex::new(Snapshot::default()),
+            cancel: AtomicBool::new(false),
+            restarting: AtomicBool::new(true),
+            wake: Condvar::new(),
+            gate: Mutex::new(()),
+        };
+        let mut probes = 0;
+        monitor_owned(
+            &config,
+            &state,
+            &mut owned,
+            &mut Retry::default(),
+            MonitorTiming {
+                startup_limit: Duration::ZERO,
+                health_interval: Duration::ZERO,
+                ..MonitorTiming::default()
+            },
+            |_, _| {
+                probes += 1;
+                let snapshot = state.snapshot.lock().unwrap();
+                match probes {
+                    1..=3 | 7 => Err(ProbeFailure::Unknown("ownership table unreadable".into())),
+                    4 => {
+                        assert!(!snapshot.ready);
+                        assert!(snapshot.detail.contains("ownership table unreadable"));
+                        Ok(())
+                    }
+                    5 => {
+                        assert!(snapshot.ready);
+                        Err(ProbeFailure::Confirmed("listener missing".into()))
+                    }
+                    6 | 8..=10 => {
+                        assert!(!snapshot.ready);
+                        Err(ProbeFailure::Confirmed("listener missing".into()))
+                    }
+                    _ => panic!("confirmed listener loss did not trigger a restart"),
+                }
+            },
+        );
+        assert_eq!(probes, 10);
+        let snapshot = state.snapshot.lock().unwrap();
+        assert!(!snapshot.ready);
+        assert_eq!(snapshot.ready_generation, 1);
+        assert!(snapshot.detail.contains("restarting owned child"));
+        assert!(snapshot.detail.contains("stage=listener missing"));
     }
 
     #[test]
