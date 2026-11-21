@@ -1450,12 +1450,14 @@ impl Runtime {
     }
     fn lighting_drained(&mut self) -> bool {
         let rgb_drained = self.host.drained();
-        self.other_channels_drained() && rgb_drained
+        self.other_channels_drained(false) && rgb_drained
     }
-    fn other_channels_drained(&mut self) -> bool {
+    fn other_channels_drained(&mut self, allow_recoverable_lcd: bool) -> bool {
         let mut drained = true;
-        for w in self.lcd.values_mut() {
-            drained = w.reap() && drained;
+        for (id, worker) in &mut self.lcd {
+            let reaped = worker.reap();
+            let can_recover = allow_recoverable_lcd && self.output_recovery.contains_key(id);
+            drained = (reaped || can_recover) && drained;
         }
         if let Some(w) = &mut self.capture {
             drained = w.reap() && drained;
@@ -1473,7 +1475,7 @@ impl Runtime {
             return self.lighting_drained();
         }
         self.host.clock_drained()
-            && self.other_channels_drained()
+            && self.other_channels_drained(true)
             && self.host.rgb_outputs_drained(
                 self.rgb_specs
                     .keys()
