@@ -8,7 +8,6 @@ window.sceneFile = (() => {
   const stage = byId('canvas').parentElement;
   const positions = ['x','y','width','height'];
   const edges = [...byId('edges').querySelectorAll('input')];
-  const effects = {noise_map:'Карта шума',breathing:'Дыхание',rainbow_wave:'Радужная волна'};
   const copy = value => structuredClone(value);
   let file = null;
   let baseline = null;

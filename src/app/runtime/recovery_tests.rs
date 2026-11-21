@@ -1107,6 +1107,11 @@ fn live_plan_keeps_unchanged_lcd_while_rgb_ownership_changes() {
     assert_plan_preserves_neighbor(PlanChange::MixedReplace);
 }
 
+#[test]
+fn live_plan_accepts_bound_lcd_rearrival_after_retry_budget_is_exhausted() {
+    assert_plan_preserves_neighbor(PlanChange::RecoverReturnedLcd);
+}
+
 #[derive(Debug)]
 enum PlanChange {
     Add,
@@ -1117,6 +1122,7 @@ enum PlanChange {
     Replace,
     RecoverNeighbor,
     RecoverLcd,
+    RecoverReturnedLcd,
     Cancel,
 }
 
@@ -1130,6 +1136,7 @@ impl PlanChange {
             | Self::MixedReplace
             | Self::RecoverNeighbor
             | Self::RecoverLcd
+            | Self::RecoverReturnedLcd
             | Self::Cancel => false,
         }
     }
@@ -1147,7 +1154,10 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
     let lcd_link = Arc::new(Link::default());
     let (mut runtime, lcd_assets) = if matches!(
         change,
-        PlanChange::MixedAdd | PlanChange::MixedReplace | PlanChange::RecoverLcd
+        PlanChange::MixedAdd
+            | PlanChange::MixedReplace
+            | PlanChange::RecoverLcd
+            | PlanChange::RecoverReturnedLcd
     ) {
         let (runtime, assets) =
             arrival_lcd_runtime(&format!("live-plan-{change:?}"), lcd_link.clone());
@@ -1356,7 +1366,8 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
         assert!(runtime.pending_configuration());
         assert_eq!(held.dropped.load(Ordering::SeqCst), 0);
     }
-    let recover_lcd = matches!(change, PlanChange::RecoverLcd);
+    let return_lcd = matches!(change, PlanChange::RecoverReturnedLcd);
+    let recover_lcd = return_lcd || matches!(change, PlanChange::RecoverLcd);
     if recover_lcd {
         let old = lcd_generation.unwrap();
         lcd_link.fail.store(true, Ordering::SeqCst);
@@ -1365,7 +1376,11 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
             runtime.lcd_status("lcd").unwrap().phase == lcd_worker::Phase::Failed
         });
         tick(&mut runtime, &mut now);
-        lcd_link.fail.store(false, Ordering::SeqCst);
+        if return_lcd {
+            exhaust_lcd_recovery_and_notify(&mut runtime, &lcd_link, &mut now);
+        } else {
+            lcd_link.fail.store(false, Ordering::SeqCst);
+        }
         now += 1_000_000;
         wait(|| {
             tick(&mut runtime, &mut now);
@@ -1401,7 +1416,7 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
         assert_eq!(runtime.lcd_status("lcd").unwrap().generation, generation);
         assert_eq!(
             lcd_link.calls.load(Ordering::SeqCst),
-            1 + usize::from(recover_lcd)
+            1 + usize::from(recover_lcd) + 3 * usize::from(return_lcd)
         );
     }
     held.release.store(true, Ordering::SeqCst);
@@ -1409,6 +1424,32 @@ fn assert_plan_preserves_neighbor(change: PlanChange) {
     if let Some(assets) = lcd_assets {
         remove_lcd_assets(runtime, assets);
     }
+}
+
+fn exhaust_lcd_recovery_and_notify(runtime: &mut Runtime, link: &Link, now: &mut u64) {
+    link.fail_open.store(true, Ordering::SeqCst);
+    for delay in [1_000_000, 5_000_000, 15_000_000] {
+        let old = runtime.lcd_status("lcd").unwrap().generation;
+        *now += delay;
+        wait(|| {
+            tick(runtime, now);
+            let status = runtime.lcd_status("lcd").unwrap();
+            status.generation != old && status.phase == lcd_worker::Phase::Failed
+        });
+        tick(runtime, now);
+    }
+    assert_eq!(link.calls.load(Ordering::SeqCst), 4);
+    runtime.lcd_interface_arrived("other-interface", true);
+    assert!(runtime.lcd_arrivals.is_empty());
+    assert!(runtime.pending_configuration());
+    link.fail_open.store(false, Ordering::SeqCst);
+    link.fail.store(false, Ordering::SeqCst);
+    runtime.lcd_interface_arrived("BOUND-INTERFACE", true);
+    assert!(
+        runtime.lcd_arrivals.contains("lcd"),
+        "live RGB plan lost the bound LCD arrival"
+    );
+    tick(runtime, now);
 }
 
 #[test]

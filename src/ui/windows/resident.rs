@@ -34,6 +34,8 @@ const OPEN: u32 = 1;
 const STOP: u32 = 2;
 const EXIT: u32 = 3;
 const CHECK_UPDATES: u32 = 4;
+const TOGGLE_UPDATES: u32 = 5;
+const VIEW_UPDATE: u32 = 6;
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 static INSTALLED_EXIT_MSG: AtomicU32 = AtomicU32::new(0);
 
@@ -1017,6 +1019,12 @@ fn finish_stop(app: &mut App) -> Result<(), String> {
 }
 fn maintain(state: &State) -> Result<(), String> {
     maintain_tray(state);
+    if state.session_action.get() != Action::Exit
+        && let Ok(mut schedule) = state.update_schedule.try_borrow_mut()
+        && let Some(schedule) = schedule.as_mut()
+    {
+        schedule.tick();
+    }
     flush_power(state)?;
     let mut slot = state.app.try_borrow_mut().map_err(|_| "Сессия занята")?;
     let app = slot.as_mut().ok_or("Нет сессии")?;
@@ -1089,18 +1097,37 @@ fn tray_command(w: WPARAM, l: LPARAM) -> Option<TrayCommand> {
     }
 }
 
-fn create_tray_menu() -> Option<HMENU> {
+fn create_tray_menu(
+    updates: Option<(bool, Option<crate::app::release_check::Version>)>,
+) -> Option<HMENU> {
     let menu = unsafe { CreatePopupMenu() };
     if menu.is_null() {
         return None;
     }
-    for (id, text) in [
-        (OPEN, "Открыть Prismestra"),
-        (CHECK_UPDATES, "Проверить обновления…"),
-        (STOP, "Остановить работу"),
-        (EXIT, "Выйти"),
-    ] {
-        if unsafe { AppendMenuW(menu, MF_STRING, id as usize, wide(text).as_ptr()) } == 0 {
+    let update_label = updates
+        .and_then(|(_, version)| version)
+        .map(|version| format!("Доступно обновление {}…", version.tag()));
+    let mut items = vec![
+        (OPEN, MF_STRING, "Открыть Prismestra"),
+        (CHECK_UPDATES, MF_STRING, "Проверить обновления…"),
+    ];
+    if let Some(label) = &update_label {
+        items.push((VIEW_UPDATE, MF_STRING, label));
+    }
+    if let Some((enabled, _)) = updates {
+        let flag = if enabled { MF_CHECKED } else { MF_UNCHECKED };
+        items.push((
+            TOGGLE_UPDATES,
+            MF_STRING | flag,
+            "Автоматически проверять обновления",
+        ));
+    }
+    items.extend([
+        (STOP, MF_STRING, "Остановить работу"),
+        (EXIT, MF_STRING, "Выйти"),
+    ]);
+    for (id, flags, text) in items {
+        if unsafe { AppendMenuW(menu, flags, id as usize, wide(text).as_ptr()) } == 0 {
             unsafe { DestroyMenu(menu) };
             return None;
         }
@@ -1136,7 +1163,12 @@ fn tray_menu_placement(
 }
 
 fn menu(state: &State, hwnd: HWND, anchor_to_icon: bool) {
-    let Some(menu) = create_tray_menu() else {
+    let updates = state
+        .update_schedule
+        .borrow()
+        .as_ref()
+        .map(|schedule| (schedule.enabled(), schedule.available()));
+    let Some(menu) = create_tray_menu(updates) else {
         return;
     };
     // In version 4, wParam is undefined for WM_CONTEXTMENU. Query the icon
@@ -1180,7 +1212,15 @@ fn menu(state: &State, hwnd: HWND, anchor_to_icon: bool) {
     }
     let result = match id as u32 {
         OPEN => open_editor(state),
-        CHECK_UPDATES => super::updates::start(),
+        CHECK_UPDATES => super::updates::start(None),
+        VIEW_UPDATE => updates
+            .and_then(|(_, version)| version)
+            .map_or(Ok(()), |version| super::updates::start(Some(version))),
+        TOGGLE_UPDATES => state
+            .update_schedule
+            .borrow_mut()
+            .as_mut()
+            .map_or(Ok(()), super::update_schedule::Schedule::toggle),
         STOP => request(state, Action::Stop, false),
         EXIT => request(state, Action::Exit, true),
         _ => Ok(()),
@@ -2156,7 +2196,7 @@ mod tests {
 
     #[test]
     fn native_tray_menu_marks_open_as_its_first_and_default_command() {
-        let menu = create_tray_menu().expect("native popup menu");
+        let menu = create_tray_menu(None).expect("native popup menu");
         let mut label = [0u16; 64];
         let (first, default, length, updates) = unsafe {
             let first = GetMenuItemID(menu, 0);
@@ -2178,6 +2218,27 @@ mod tests {
             String::from_utf16_lossy(&label[..length as usize]),
             "Открыть Prismestra"
         );
+    }
+
+    #[test]
+    fn installed_update_menu_keeps_manual_check_and_reflects_background_setting() {
+        use crate::app::release_check::Version;
+        let version = Version::from_setup("0.1.0.8").unwrap();
+        for enabled in [true, false] {
+            let menu = create_tray_menu(Some((enabled, enabled.then_some(version)))).unwrap();
+            unsafe {
+                assert_eq!(GetMenuItemID(menu, 1), CHECK_UPDATES);
+                assert_eq!(
+                    GetMenuState(menu, TOGGLE_UPDATES, MF_BYCOMMAND) & MF_CHECKED != 0,
+                    enabled
+                );
+                assert_eq!(
+                    GetMenuItemID(menu, 2),
+                    if enabled { VIEW_UPDATE } else { TOGGLE_UPDATES }
+                );
+                DestroyMenu(menu);
+            }
+        }
     }
     #[test]
     fn tray_backoff_is_capped_and_repeated_timer_ticks_do_not_add_icons() {

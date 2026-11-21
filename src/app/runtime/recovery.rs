@@ -57,9 +57,16 @@ impl Recovery {
 
 impl Runtime {
     fn output_recovery_paused(&self) -> bool {
+        self.pending.is_some() || self.automatic_recovery_paused()
+    }
+
+    fn automatic_recovery_paused(&self) -> bool {
         self.stopped
             || self.suspended
-            || self.pending.is_some()
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.live_rgb.is_none())
             || self.power.pending()
             || self.power.error().is_some()
             || self.refresh.is_some()
@@ -184,13 +191,8 @@ impl Runtime {
     /// A resident native listener reports a real bound-interface arrival. Opening
     /// still happens on the existing worker, with its descriptor/lease checks.
     pub(super) fn lcd_interface_arrived(&mut self, path: &str, reappeared: bool) {
-        if self.stopped
-            || self.suspended
-            || self.pending.is_some()
-            || self.power.pending()
-            || self.power.error().is_some()
-            || self.refresh.is_some()
-        {
+        // A live RGB transition retains every existing LCD binding.
+        if self.automatic_recovery_paused() {
             return;
         }
         let key = format!("hid:{}", path.to_ascii_lowercase());
@@ -314,19 +316,13 @@ impl Runtime {
                 state.manual_retry = None;
             }
         }
+        if self.automatic_recovery_paused() {
+            return Ok(());
+        }
         let live = self
             .pending
             .as_ref()
             .and_then(|pending| pending.live_rgb.as_ref());
-        if self.stopped
-            || self.suspended
-            || (self.pending.is_some() && live.is_none())
-            || self.power.pending()
-            || self.power.error().is_some()
-            || self.refresh.is_some()
-        {
-            return Ok(());
-        }
         let mut rgb = Vec::new();
         let mut lcd = Vec::new();
         let mut scheduled_retry = false;

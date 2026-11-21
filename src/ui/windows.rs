@@ -47,6 +47,7 @@ mod portable;
 mod resident;
 pub(crate) use resident::{Instance, shutdown_installed};
 mod runtime_client;
+mod update_schedule;
 mod updates;
 mod web_shell;
 const MODERN_RETURN: i32 = 109;
@@ -693,8 +694,8 @@ impl App {
             "",
             CBS_DROPDOWNLIST as u32 | WS_VSCROLL,
         )?;
-        for s in ["Мягкие угли / шум", "Дыхание", "Радуга"] {
-            self.add(EFFECT, s);
+        for effect in Effect::ALL {
+            self.add(EFFECT, effect.label());
         }
         self.control(
             parent,
@@ -860,11 +861,10 @@ impl App {
     }
     fn sync(&mut self) {
         let p = self.runtime.project();
-        let index = match p.scene.effect {
-            Effect::NoiseMap => 0,
-            Effect::Breathing => 1,
-            Effect::RainbowWave => 2,
-        };
+        let index = Effect::ALL
+            .iter()
+            .position(|&effect| effect == p.scene.effect)
+            .unwrap_or_default();
         unsafe {
             SendMessageW(self.h(EFFECT), CB_SETCURSEL, index, 0);
             SendMessageW(self.h(BRIGHT), TBM_SETRANGE, 0, 100 << 16);
@@ -1941,11 +1941,8 @@ impl App {
             }
             EFFECT if notice == CBN_SELCHANGE as u16 => {
                 let mut s = self.runtime.project().scene.clone();
-                s.effect = match unsafe { SendMessageW(self.h(EFFECT), CB_GETCURSEL, 0, 0) } {
-                    1 => Effect::Breathing,
-                    2 => Effect::RainbowWave,
-                    _ => Effect::NoiseMap,
-                };
+                let index = unsafe { SendMessageW(self.h(EFFECT), CB_GETCURSEL, 0, 0) };
+                s.effect = *Effect::ALL.get(index as usize).ok_or("Не выбран эффект")?;
                 let (lo, hi) = s.effect.limits();
                 s.speed = s.speed.clamp(lo, hi);
                 self.changed_scene(s)?;
@@ -2263,6 +2260,7 @@ struct State {
     session_action: Cell<resident::Action>,
     tray_enabled: Cell<bool>,
     tray_registration: Cell<resident::TrayRegistration>,
+    update_schedule: RefCell<Option<update_schedule::Schedule>>,
     pending_power: Cell<resident::PowerIntent>,
     final_stop_render: Cell<FinalStopRender>,
 }
@@ -3072,6 +3070,12 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
         session_action: Cell::new(resident::Action::None),
         tray_enabled: Cell::new(false),
         tray_registration: Cell::new(resident::TrayRegistration::default()),
+        update_schedule: RefCell::new(if resident_mode && o.snapshot.is_none() && !o.selftest {
+            crate::app::installed::release_version()
+                .map(|version| update_schedule::Schedule::load(&state_dir, version))
+        } else {
+            None
+        }),
         pending_power: Cell::new(resident::PowerIntent::default()),
         final_stop_render: Cell::new(FinalStopRender::default()),
     });
