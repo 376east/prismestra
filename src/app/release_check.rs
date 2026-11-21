@@ -56,7 +56,7 @@ impl Version {
         })
     }
 
-    fn from_tag(text: &str) -> Option<Self> {
+    pub(crate) fn from_tag(text: &str) -> Option<Self> {
         let tag = text.strip_prefix('v')?;
         let (base, preview) = if let Some((base, n)) = tag.split_once("-preview.") {
             let n = number(n)?;
@@ -91,6 +91,14 @@ impl Version {
         } else {
             "Stable"
         }
+    }
+
+    fn same_channel(self, other: Self) -> bool {
+        self.preview.is_some() == other.preview.is_some()
+    }
+
+    pub(crate) fn is_update_for(self, current: Self) -> bool {
+        self.same_channel(current) && self.order() > current.order()
     }
 
     fn setup_asset(self) -> String {
@@ -140,7 +148,7 @@ fn newest_on_channel(current: Version, releases: Vec<Release>) -> Option<Version
             let version = Version::from_tag(&release.tag_name)?;
             if release.draft
                 || release.prerelease != version.preview.is_some()
-                || version.preview.is_some() != current.preview.is_some()
+                || !version.same_channel(current)
                 || release.html_url != version.page()
             {
                 return None;
@@ -194,7 +202,7 @@ fn check_with(
         }
     }
     match newest {
-        Some(version) if version.order() > current.order() => ResultState::Available(version),
+        Some(version) if version.is_update_for(current) => ResultState::Available(version),
         Some(_) => ResultState::NoNewer,
         None => ResultState::Unavailable,
     }
