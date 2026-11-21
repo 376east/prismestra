@@ -277,7 +277,7 @@ impl Runtime {
             return Ok(false);
         }
         let result = self.start_registered_lcd(id, spec.keys.clone(), spec.factory.clone());
-        self.handle_output_start(id, result.clone())?;
+        self.handle_output_start(id, result.clone().map_err(Into::into))?;
         self.bump_view();
         result.map(|()| true)
     }
