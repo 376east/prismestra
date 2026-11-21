@@ -11,6 +11,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 from urllib.parse import urlsplit
 import zipfile
 
@@ -25,6 +26,10 @@ APP_ID = "9bb22971-3e88-434d-b212-ab8cf717799a"
 WEBVIEW_PROBE = "Prismestra-Setup-Probe.exe"
 WEBVIEW_PROBE_IMPORTS = {
     "advapi32.dll", "api-ms-win-core-synch-l1-2-0.dll", "kernel32.dll", "ntdll.dll",
+}
+POLICY_TOOL = "Prismestra-Setup-Policy.exe"
+POLICY_TOOL_IMPORTS = WEBVIEW_PROBE_IMPORTS | {
+    "combase.dll", "ole32.dll", "oleaut32.dll", "shell32.dll",
 }
 PREREQUISITES = {
     "vc_redist_x64": ("vc_redist.x64.exe", 10 << 20, "Microsoft Corporation", {"aka.ms", "download.visualstudio.microsoft.com"}),
@@ -261,6 +266,23 @@ def stage_webview_probe(destination):
     return sha256(probe)
 
 
+def stage_policy_tool(destination):
+    target = "x86_64-pc-windows-msvc"
+    with tempfile.TemporaryDirectory(prefix="prismestra-policy-build-") as build:
+        subprocess.run([
+            "cargo", "build", "--locked", "--release", "--target", target,
+            "--manifest-path", str(ROOT / "installer/policy-tool/Cargo.toml"),
+            "--target-dir", build,
+        ], check=True, env={**os.environ, "CARGO_ENCODED_RUSTFLAGS": "-C\x1ftarget-feature=+crt-static"})
+        source = Path(build) / target / "release/prismestra-setup-policy.exe"
+        imports = pe_imports(source.read_bytes())
+        if not imports["normal"] or imports["delay"] or set(imports["normal"]) - POLICY_TOOL_IMPORTS:
+            raise ValueError(f"Setup policy tool must use only inbox Windows libraries: {imports}")
+        tool = destination / POLICY_TOOL
+        shutil.copyfile(source, tool)
+    return sha256(tool)
+
+
 def package(args):
     if not re.fullmatch(r"[0-9a-f]{40}", args.expected_commit):
         raise ValueError("Use a full lowercase Git commit SHA")
@@ -301,6 +323,7 @@ def package(args):
     if not test_mode:
         stage_prerequisites(packages, args.prerequisite_dir, stage / "prerequisites")
         webview_probe_hash = stage_webview_probe(stage / "prerequisites")
+        policy_tool_hash = stage_policy_tool(payload)
         policy = ROOT / "installer_policy.ps1"
         if policy.is_symlink() or not policy.is_file():
             raise ValueError("Missing maintained installer policy provisioner")
@@ -336,6 +359,7 @@ def package(args):
         defs.append("#define LifecycleTest")
     else:
         defs.append(f'#define WebViewProbeSha256 "{webview_probe_hash}"')
+        defs.append(f'#define PolicyToolSha256 "{policy_tool_hash}"')
     if "pawnio" in packages:
         defs.append("#define IncludePawnIO")
     if runtime_floor is not None:

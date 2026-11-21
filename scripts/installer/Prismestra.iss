@@ -260,15 +260,27 @@ begin
     Result := RunOriginalInstalledCommand('--setup-check-user ' + SID);
 end;
 
-function Policy(const Action, SID: String): Boolean;
+function InstallManagedPolicy(const SID: String): Boolean;
 var
   Code: Integer;
 begin
   Result := ValidSID(SID) and GuardInstall('Check') and ExecAndLogOutput(PowerShell,
     '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + ProtectedModules +
-    '& ' + PSQuote(InstallPath + '\installer_policy.ps1') + ' -Action ' + PSQuote(Action) +
+    '& ' + PSQuote(InstallPath + '\installer_policy.ps1') + ' -Action Install' +
     ' -InstallRoot ' + PSQuote(InstallPath) + ' -UserSid ' + PSQuote(SID) + '; exit $LASTEXITCODE"',
     ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code, nil) and (Code = 0);
+end;
+
+function RemoveManagedPolicy(const SID: String): Boolean;
+var
+  Tool: String;
+  Code: Integer;
+begin
+  Tool := InstallPath + '\Prismestra-Setup-Policy.exe';
+  Result := ValidSID(SID) and FileExists(Tool) and
+    (GetSHA256OfFile(Tool) = '{#PolicyToolSha256}') and
+    ExecAndLogOutput(Tool, '--uninstall ' + SID, ExpandConstant('{sys}'),
+      SW_HIDE, ewWaitUntilTerminated, Code, nil) and (Code = 0);
 end;
 
 procedure InstallPolicy;
@@ -291,7 +303,7 @@ begin
     Log('Could not record managed PC policy ownership; no task provisioned.');
     Exit;
   end;
-  if not Policy('Install', SID) then
+  if not InstallManagedPolicy(SID) then
     Log('Managed PC task unavailable; retained ownership intent for safe cleanup.');
 end;
 
@@ -460,7 +472,7 @@ begin
       'Finish pending edits and exit it from the notification area before uninstalling.');
 #ifndef LifecycleTest
   if RegQueryStringValue(HKLM64, ProductKey, 'PolicySid', SID) then begin
-    if not Policy('Uninstall', SID) then
+    if not RemoveManagedPolicy(SID) then
       RaiseException('Could not remove the installer-owned managed PC policy.');
     RegDeleteValue(HKLM64, ProductKey, 'PolicySid');
     RegDeleteKeyIfEmpty(HKLM64, ProductKey);

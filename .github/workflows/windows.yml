@@ -38,6 +38,13 @@ jobs:
         run: python scripts/test_package_release.py
       - name: Check installer packaging boundaries
         run: python scripts/test_package_installer.py
+      - name: Test native installer policy checks
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo fmt --manifest-path scripts/installer/policy-tool/Cargo.toml -- --check
+          cargo test --locked --manifest-path scripts/installer/policy-tool/Cargo.toml --target x86_64-pc-windows-msvc
+          cargo clippy --locked --manifest-path scripts/installer/policy-tool/Cargo.toml --target x86_64-pc-windows-msvc --all-targets -- -D warnings
       - name: Check legacy startup retirement without system changes
         run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/installer/test_legacy_startup.ps1
       - name: Check portable launchers without hardware
