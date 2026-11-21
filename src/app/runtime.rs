@@ -31,9 +31,9 @@ mod outputs;
 mod recovery;
 pub use recovery::{OpenRgbRetryStatus, OpenRgbRetryTicket};
 mod registry_input;
-#[cfg(windows)]
-pub(crate) use outputs::OutputActivity;
 pub use outputs::{LcdOutput, OutputPlan, RgbOutput};
+#[cfg(windows)]
+pub(crate) use outputs::{OutputActivity, OutputFailureReason};
 mod temperature_stream;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

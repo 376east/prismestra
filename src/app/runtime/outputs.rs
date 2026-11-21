@@ -15,6 +15,7 @@ pub(crate) enum OutputActivity {
 #[serde(rename_all = "camelCase")]
 pub(crate) enum OutputFailureReason {
     EndpointLeaseBusy,
+    HomeAssistantAccessRequired,
 }
 
 pub type RgbOutput = (String, Vec<String>, RgbFactory);
@@ -149,9 +150,16 @@ impl Runtime {
         device: &crate::devices::Device,
         activity: &OutputActivity,
     ) -> Option<OutputFailureReason> {
-        use crate::runtime::output::OutputStartError;
+        use crate::{devices::Driver, runtime::output::OutputStartError};
 
-        (device.driver == crate::devices::Driver::OpenRgb
+        if device.driver == Driver::HomeAssistant
+            && matches!(activity, OutputActivity::Unavailable(_))
+            && self.rgb_requires_action(&device.id)
+        {
+            return Some(OutputFailureReason::HomeAssistantAccessRequired);
+        }
+
+        (device.driver == Driver::OpenRgb
             && !self.managed_backend_ids.contains(&device.id)
             && matches!(
                 activity,

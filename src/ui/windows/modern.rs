@@ -514,24 +514,35 @@ pub(crate) fn device_activity_for(
     busy: bool,
     context: u64,
 ) -> Value {
+    use crate::app::runtime::OutputFailureReason;
+
     let mut labels = BTreeMap::new();
     let mut reasons = BTreeMap::new();
     let mut tickets = BTreeMap::new();
     for device in &runtime.document().lighting.setup.devices {
         let activity = runtime.output_activity(device);
+        let reason = active
+            .then(|| runtime.output_failure_reason(device, &activity))
+            .flatten();
         let label = if !active && device.enabled {
             "Предпросмотр"
+        } else if matches!(
+            reason,
+            Some(OutputFailureReason::HomeAssistantAccessRequired)
+        ) {
+            "Проверьте доступ Home Assistant"
         } else {
             output_activity_label(&activity)
         };
         labels.insert(&device.id, label);
-        if active {
-            if let Some(reason) = runtime.output_failure_reason(device, &activity) {
-                reasons.insert(&device.id, reason);
-            }
-            if !busy && let Some(ticket) = runtime.openrgb_retry_ticket(&device.id) {
-                tickets.insert(&device.id, retry_output::encode(context, ticket));
-            }
+        if let Some(reason) = reason {
+            reasons.insert(&device.id, reason);
+        }
+        if active
+            && !busy
+            && let Some(ticket) = runtime.openrgb_retry_ticket(&device.id)
+        {
+            tickets.insert(&device.id, retry_output::encode(context, ticket));
         }
     }
     json!({

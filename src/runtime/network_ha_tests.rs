@@ -414,6 +414,31 @@ fn assert_ha_authorization_recovery(
         thread::sleep(Duration::from_millis(2));
     };
     assert!(failed.requires_action);
+    let activity =
+        |runtime: &Runtime| crate::ui::windows::device_activity_for(runtime, true, false, 1);
+    let label = |runtime: &Runtime| activity(runtime)["labels"]["ha"].clone();
+    let assert_access = |runtime: &mut Runtime| {
+        let target = schedule::Target::Pc;
+        let active = runtime.group_on(target);
+        if !active {
+            assert_eq!(label(runtime), "Выключено");
+            assert_eq!(activity(runtime)["reasons"], serde_json::json!({}));
+            runtime.set_group(target, true).unwrap();
+        }
+        assert_eq!(label(runtime), "Проверьте доступ Home Assistant");
+        assert_eq!(activity(runtime)["retryTickets"], serde_json::json!({}));
+        assert_eq!(
+            activity(runtime)["reasons"],
+            serde_json::json!({"ha": "homeAssistantAccessRequired"})
+        );
+        if !active {
+            runtime.set_group(target, false).unwrap();
+        }
+    };
+    assert_access(&mut runtime);
+    let preview = crate::ui::windows::device_activity_for(&runtime, false, false, 1);
+    assert_eq!(preview["labels"]["ha"], "Предпросмотр");
+    assert_eq!(preview["reasons"], serde_json::json!({}));
     assert_eq!(failed.submitted == 0, initial);
     assert_eq!(failed.error.as_deref(), Some(error));
     assert_eq!(runtime.outputs_ready(), Err(error.into()));
@@ -475,6 +500,7 @@ fn assert_ha_authorization_recovery(
         "document edit reopened HA"
     );
     assert_eq!(runtime.outputs_ready(), Err(error.into()));
+    assert_access(&mut runtime);
     if initial {
         let ha = &runtime.document().lighting.setup.devices[0];
         assert!(
@@ -550,6 +576,7 @@ fn assert_ha_authorization_recovery(
         "startup plan reopened HA"
     );
     assert_eq!(runtime.outputs_ready(), Err(error.into()));
+    assert_access(&mut runtime);
 
     key_saved.store(true, Ordering::SeqCst);
     match recovery {
@@ -580,6 +607,15 @@ fn assert_ha_authorization_recovery(
         );
         thread::sleep(Duration::from_millis(2));
     }
+    assert_eq!(
+        label(&runtime),
+        if initial {
+            "Кадры отправлены"
+        } else {
+            "Выключено"
+        }
+    );
+    assert_eq!(activity(&runtime)["reasons"], serde_json::json!({}));
     if matches!(recovery, RecoveryAction::Apply) {
         assert_eq!(
             runtime.host().status("neighbor").unwrap().generation,
