@@ -145,13 +145,23 @@ if ($identity.User.Value -ne $ExpectedSid -or $admin -or $local -cne $env:LOCALA
 $receiptPath = Join-Path $local ("Prismestra-CI-" + $Id + ".json")
 $result = [ordered]@{ sid = $identity.User.Value; standard_user = $true; startup_command = $null;
     empty_profile = $false; local_bindings = $false; backend_pin = $false; resident_shell = 'not_observed';
-    automatic_setup = $false; first_run = $null }
+    automatic_setup = $false; first_run = $null; native_identity_probe = $false }
 $app = $null
 $stop = $null
 try {
     $profile = Join-Path $local 'Prismestra'
     if (Test-Path -LiteralPath $profile) { throw 'The standard-user profile was not fresh.' }
     $ps = Join-Path $PSHOME powershell.exe
+    $image = Join-Path $Install 'Prismestra.exe'
+    foreach ($case in @(@{sid=$ExpectedSid; exit=0}, @{sid='S-1-5-18'; exit=1})) {
+        $probe = Start-Process -FilePath $image -ArgumentList '--setup-check-user', $case.sid -PassThru -WindowStyle Hidden
+        $null = $probe.Handle
+        try {
+            if (-not $probe.WaitForExit(20000)) { $probe.Kill(); throw 'Native identity probe timed out.' }
+            if ($probe.ExitCode -ne $case.exit) { throw 'Native identity probe returned an unexpected exit code.' }
+        } finally { $probe.Dispose() }
+    }
+    $result.native_identity_probe = $true
     $value = 'Prismestra'
     $command = '"' + (Join-Path $Install Prismestra.exe) + '" --installed --autostart'
     $helper = Start-Process -FilePath $ps -ArgumentList ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
@@ -164,7 +174,6 @@ try {
     $result.startup_command = $prior
     $manifest = Get-Content -LiteralPath (Join-Path $Install 'install-manifest.json') -Raw | ConvertFrom-Json
     if ($null -ne $manifest.data_namespace) { throw 'Expected the installed production manifest.' }
-    $image = Join-Path $Install 'Prismestra.exe'
     $app = Start-Process -FilePath $image -ArgumentList '--installed', '--autostart' -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $PSScriptRoot 'app.stderr.log') -RedirectStandardOutput (Join-Path $PSScriptRoot 'app.stdout.log')
     $null = $app.Handle
     $documentPath = Join-Path $profile 'profile.json'
@@ -367,7 +376,7 @@ try {
     $actual | Add-Member -NotePropertyName commit -NotePropertyValue $manifest.commit
     $actual | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $report 'standard-user.json') -Encoding UTF8
     Assert-Expected ($status -eq 0 -and $actual.sid -ceq $sid -and $actual.standard_user -and $actual.empty_profile -and
-        $actual.local_bindings -and $actual.backend_pin -and $actual.automatic_setup -and
+        $actual.local_bindings -and $actual.backend_pin -and $actual.automatic_setup -and $actual.native_identity_probe -and
         $actual.resident_shell -eq 'process_drained_by_shutdown' -and -not $actual.startup_error_file) 'Standard-user verification failed. See standard-user.json.'
     Assert-Expected ($actual.startup_command -ceq ('"' + (Join-Path $install 'Prismestra.exe') + '" --installed --autostart')) 'Standard-user HKCU Run verification failed.'
 } finally {

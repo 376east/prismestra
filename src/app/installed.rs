@@ -71,6 +71,7 @@ enum Command {
     Start(Session),
     Prepare,
     Shutdown,
+    CheckSetupUser(OsString),
 }
 
 fn command(args: &[OsString]) -> Result<Command, String> {
@@ -81,11 +82,13 @@ fn command(args: &[OsString]) -> Result<Command, String> {
         }
         [flag] if flag == "--shutdown-installed" => Ok(Command::Shutdown),
         [flag] if flag == "--prepare-installed" => Ok(Command::Prepare),
+        [flag, sid] if flag == "--setup-check-user" => Ok(Command::CheckSetupUser(sid.clone())),
         _ if args.iter().any(|a| {
             a == "--installed"
                 || a == "--autostart"
                 || a == "--shutdown-installed"
                 || a == "--prepare-installed"
+                || a == "--setup-check-user"
         }) =>
         {
             Err("Use --installed [--autostart], --prepare-installed or --shutdown-installed".into())
@@ -100,10 +103,16 @@ pub fn dispatch(args: Vec<OsString>) -> Result<Dispatch, String> {
     if command == Command::Legacy {
         return Ok(Dispatch::Ui(args));
     }
+    if let Command::CheckSetupUser(expected) = &command {
+        let actual = super::installed_policy::process_user_sid(unsafe { GetCurrentProcess() })?;
+        return Ok(Dispatch::Exit(i32::from(
+            expected.as_os_str() != actual.as_str(),
+        )));
+    }
     let executable = env::current_exe().map_err(|e| e.to_string())?;
     let executable = checked_local_path(&executable).map_err(|e| e.to_string())?;
     match command {
-        Command::Legacy => unreachable!(),
+        Command::Legacy | Command::CheckSetupUser(_) => unreachable!(),
         Command::Shutdown => {
             windows::shutdown_installed(&executable)?;
             Ok(Dispatch::Exit(0))
@@ -736,12 +745,18 @@ pub(crate) mod tests {
         );
         assert_eq!(parse(&["--shutdown-installed"]), Ok(Command::Shutdown));
         assert_eq!(parse(&["--prepare-installed"]), Ok(Command::Prepare));
+        assert_eq!(
+            parse(&["--setup-check-user", "S-1-5-18"]),
+            Ok(Command::CheckSetupUser("S-1-5-18".into()))
+        );
         for args in [
             &["--autostart"][..],
             &["--installed", "--project", "foreign.json"],
             &["--shutdown-installed", "--installed"],
             &["--installed", "--installed"],
             &["--prepare-installed", "--installed"],
+            &["--setup-check-user"],
+            &["--setup-check-user", "S-1-5-18", "--installed"],
         ] {
             assert!(parse(args).is_err());
         }
