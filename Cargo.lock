@@ -475,6 +475,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "fontdue",
+ "getrandom",
  "image",
  "jpeg-encoder",
  "mdns-sd",

@@ -350,18 +350,11 @@ impl Editor {
     pub fn add_device_with_leds(&mut self, preset: &str, leds: usize) -> Result<(), String> {
         self.document.validate()?;
         let p = device_setup::preset(preset)?;
-        let id = (1..=crate::devices::MAX_DEVICES + 1)
-            .map(|n| format!("device-{n}"))
-            .find(|id| {
-                !self
-                    .document
-                    .lighting
-                    .setup
-                    .devices
-                    .iter()
-                    .any(|d| d.id == *id)
-            })
-            .ok_or("Нет свободного ID")?;
+        // Local bindings outlive the editor and can keep IDs of removed devices.
+        // A newly added device must never adopt one of those assignments.
+        let mut identity = [0; 16];
+        getrandom::fill(&mut identity).map_err(|_| "Не удалось создать ID устройства")?;
+        let id = format!("device-{:032x}", u128::from_be_bytes(identity));
         let d = p.device_with_leds(&id, leds)?;
         let c = &self.document.lighting.setup.canvas;
         let layout = (d.role == crate::devices::Role::Canvas).then_some(Layout::Line {
@@ -1581,6 +1574,70 @@ mod tests {
         editor.set("enabled", "false").unwrap();
         editor.document.validate().unwrap();
     }
+    #[cfg(windows)]
+    #[test]
+    fn recreated_network_device_cannot_inherit_the_removed_devices_binding() {
+        use crate::app::{lighting_bindings::Draft, lighting_outputs::Local};
+        for (preset, draft) in [
+            (
+                "home-assistant-light",
+                Draft {
+                    endpoint: "http://127.0.0.1:8123".into(),
+                    identity: "light.selected_room".into(),
+                    serial: crate::devices::home_assistant::credential_id("http://127.0.0.1:8123")
+                        .unwrap(),
+                },
+            ),
+            (
+                "wled-ddp",
+                Draft {
+                    endpoint: "127.0.0.1:4048".into(),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let mut editor = Editor {
+                document: document(),
+                page: Page::Devices,
+                index: 0,
+            };
+            editor.document.ambient = Default::default();
+            editor.document.lighting.setup.canvas.width = 100;
+            editor.add_device(preset).unwrap();
+            let original = &editor.document.lighting.setup.devices[editor.index];
+            let original_id = original.id.clone();
+            let local = Local {
+                version: 1,
+                devices: [(original_id, draft.binding(original).unwrap())].into(),
+                monitors: Default::default(),
+                door_brightness: 15,
+            };
+            editor.set("enabled", "true").unwrap();
+            let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            local.prepare(&editor.document, assets).unwrap();
+
+            editor.remove_device().unwrap();
+            let mut reopened = Editor {
+                document: serde_json::from_slice(&serde_json::to_vec(&editor.document).unwrap())
+                    .unwrap(),
+                page: Page::Devices,
+                index: 0,
+            };
+            reopened.add_device(preset).unwrap();
+            reopened.set("enabled", "true").unwrap();
+            assert!(
+                local.prepare(&reopened.document, assets).is_err(),
+                "{preset} inherited an obsolete local binding"
+            );
+            let replacement = &reopened.document.lighting.setup.devices[reopened.index];
+            let reassigned = Local {
+                devices: [(replacement.id.clone(), draft.binding(replacement).unwrap())].into(),
+                ..local
+            };
+            reassigned.prepare(&reopened.document, assets).unwrap();
+        }
+    }
+
     #[test]
     fn device_commands_preserve_draft_and_geometry_and_rollback_invalid_edits() {
         let original = document();
