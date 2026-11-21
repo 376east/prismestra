@@ -47,6 +47,7 @@ mod portable;
 mod resident;
 pub(crate) use resident::{Instance, shutdown_installed};
 mod runtime_client;
+mod update_schedule;
 mod updates;
 mod web_shell;
 const MODERN_RETURN: i32 = 109;
@@ -2263,6 +2264,7 @@ struct State {
     session_action: Cell<resident::Action>,
     tray_enabled: Cell<bool>,
     tray_registration: Cell<resident::TrayRegistration>,
+    update_schedule: RefCell<Option<update_schedule::Schedule>>,
     pending_power: Cell<resident::PowerIntent>,
     final_stop_render: Cell<FinalStopRender>,
 }
@@ -3072,6 +3074,12 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
         session_action: Cell::new(resident::Action::None),
         tray_enabled: Cell::new(false),
         tray_registration: Cell::new(resident::TrayRegistration::default()),
+        update_schedule: RefCell::new(if resident_mode && o.snapshot.is_none() && !o.selftest {
+            crate::app::installed::release_version()
+                .map(|version| update_schedule::Schedule::load(&state_dir, version))
+        } else {
+            None
+        }),
         pending_power: Cell::new(resident::PowerIntent::default()),
         final_stop_render: Cell::new(FinalStopRender::default()),
     });

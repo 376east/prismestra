@@ -19,18 +19,29 @@ use windows_sys::Win32::UI::{
 };
 
 static CHECK: Mutex<()> = Mutex::new(());
+static MANUAL: Mutex<()> = Mutex::new(());
 
-pub(super) fn start() -> Result<(), String> {
+pub(super) fn try_check(current: Version) -> Option<ResultState> {
+    let _check = CHECK.try_lock().ok()?;
+    Some(release_check::check(current))
+}
+
+pub(super) fn start(available: Option<Version>) -> Result<(), String> {
     std::thread::Builder::new()
         .name("release-check".into())
-        .spawn(|| {
-            let Ok(_check) = CHECK.try_lock() else { return };
+        .spawn(move || {
+            let Ok(_manual) = MANUAL.try_lock() else { return };
             let Some(current) = installed::release_version() else {
                 show(&format!("Версия сборки: {}.\nПроверка обновлений доступна для выпуска с известной версией Setup.", env!("CARGO_PKG_VERSION")), MB_OK);
                 return;
             };
             let version = format!("Установлено: {} ({})", current.tag(), current.channel());
-            match release_check::check(current) {
+            let result = if let Some(available) = available {
+                ResultState::Available(available)
+            } else {
+                CHECK.lock().map_or(ResultState::Unavailable, |_check| release_check::check(current))
+            };
+            match result {
                 ResultState::Available(available) => {
                     if show(&format!("{version}\nДоступно: {}\n\nОткрыть официальный выпуск в браузере?", available.tag()),
                             MB_YESNO | MB_DEFBUTTON2) == IDYES
