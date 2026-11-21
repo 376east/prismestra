@@ -1831,6 +1831,221 @@ fn bound_lcd_arrival_renews_exhausted_recovery_without_restarting_other_outputs(
 }
 
 #[test]
+fn retry_lcd_after_frame_timeout_restores_the_gif_and_card_without_reopening_rgb() {
+    use crate::app::sensors;
+    use crate::lcd::{media, protocol::REPORT_BYTES};
+    use image::{Delay, Frame, Rgba, RgbaImage, codecs::gif::GifEncoder};
+    use std::sync::atomic::AtomicU64;
+
+    struct TimedReports {
+        clock: Arc<AtomicU64>,
+        stall: Arc<AtomicBool>,
+        reports: usize,
+    }
+    impl crate::lcd::protocol::ReportTransport for TimedReports {
+        fn now_ms(&self) -> u64 {
+            self.clock.load(Ordering::SeqCst) + if self.reports == 3 { 3001 } else { 0 }
+        }
+        fn write_report(&mut self, _: &[u8; REPORT_BYTES], _: u64) -> Result<usize, String> {
+            if self.stall.load(Ordering::SeqCst) {
+                self.reports += 1;
+            }
+            Ok(REPORT_BYTES)
+        }
+        fn read_ack(&mut self, bytes: &mut [u8; 17], _: u64) -> Result<usize, String> {
+            assert_eq!(self.reports, 0, "a partial LCD frame must not reach ACK");
+            bytes.fill(0);
+            Ok(bytes.len())
+        }
+    }
+
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("work")
+        .join(format!("lcd-manual-retry-{}", std::process::id()));
+    std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+    let assets = Assets::new(dir.clone()).unwrap();
+    let mut gif = Vec::new();
+    {
+        let mut encoder = GifEncoder::new(&mut gif);
+        for color in [[30, 70, 120, 255], [95, 40, 75, 255]] {
+            encoder
+                .encode_frame(Frame::from_parts(
+                    RgbaImage::from_pixel(32, 32, Rgba(color)),
+                    0,
+                    0,
+                    Delay::from_numer_denom_ms(200, 1),
+                ))
+                .unwrap();
+        }
+    }
+    let config = lcd::Config {
+        enabled: true,
+        media: Some(assets.put(&gif, media::MAX_SOURCE).unwrap()),
+        font: Some(
+            assets
+                .put(
+                    include_bytes!("../../ui/windows/web/assets/SourceSans3.ttf"),
+                    8 * 1024 * 1024,
+                )
+                .unwrap(),
+        ),
+        overlay_enabled: true,
+        sources: vec![lcd::OverlaySource {
+            key: "gpu".into(),
+            label: "GPU".into(),
+        }],
+        ..Default::default()
+    };
+    let bare_frames = media::prepare(gif.into(), 0, || false).unwrap().frames;
+    let mut document = runtime().document().clone();
+    document.temperatures.sources.push(sensors::Source {
+        key: "gpu".into(),
+        value: sensors::Value::Sensor {
+            input: "gpu-slot".into(),
+        },
+    });
+    document.lighting.setup.devices.push(Device {
+        id: "lcd".into(),
+        label: "LCD".into(),
+        role: Role::Lcd,
+        driver: Driver::TtLcd,
+        leds: 0,
+        rate_hz: 25,
+        enabled: true,
+    });
+    document.lighting.groups.pc.push("lcd".into());
+    document.lcd.push(Lcd {
+        device: "lcd".into(),
+        config,
+    });
+    let mut runtime = Runtime::new(document.clone(), None).unwrap();
+    let clock = Arc::new(AtomicU64::new(0));
+    let stall = Arc::new(AtomicBool::new(false));
+    let lcd_opens = Arc::new(Link::default());
+    runtime
+        .attach_lcd(
+            "lcd",
+            vec!["hid:lcd-manual-retry-fixture".into()],
+            Arc::new({
+                let (dir, clock, stall, opens) =
+                    (dir.clone(), clock.clone(), stall.clone(), lcd_opens.clone());
+                move |config, _| {
+                    opens.calls.fetch_add(1, Ordering::SeqCst);
+                    if opens.fail_open.load(Ordering::SeqCst) {
+                        return Err("Stand LCD unavailable".into());
+                    }
+                    Ok((
+                        lcd::Controller::new(config, &Assets::new(dir.clone())?)?,
+                        Box::new(TimedReports {
+                            clock: clock.clone(),
+                            stall: stall.clone(),
+                            reports: 0,
+                        }),
+                    ))
+                }
+            }),
+        )
+        .unwrap();
+    runtime.enable_output_recovery("lcd").unwrap();
+    let rgb = Arc::new(Link::default());
+    runtime.attach_rgb("b", vec![], factory(&rgb)).unwrap();
+
+    let step = |runtime: &mut Runtime, now| {
+        clock.store(now / 1000, Ordering::SeqCst);
+        runtime.tick(now, 1_800_000_000).unwrap();
+    };
+    let temperature = |runtime: &mut Runtime, now| {
+        runtime
+            .accept_temperatures(
+                &[lcd::Sample {
+                    key: "gpu-slot".into(),
+                    celsius: 51.0,
+                    observed_ms: now / 1000,
+                }],
+                now,
+            )
+            .unwrap();
+    };
+    let frame = |runtime: &mut Runtime, now, count| {
+        wait(|| {
+            step(runtime, now);
+            runtime.lcd_status("lcd").unwrap().frames_sent >= count
+        });
+        runtime.lcd_status("lcd").unwrap().preview
+    };
+    let mut now = 1_000_000;
+    temperature(&mut runtime, now);
+    let first = frame(&mut runtime, now, 1);
+    now += 200_000;
+    let second = frame(&mut runtime, now, 2);
+    assert_ne!(first, second);
+    assert_ne!(first, bare_frames[0].jpeg);
+    assert_ne!(second, bare_frames[1].jpeg);
+    let rgb_before = runtime.host.status("b").unwrap();
+    assert!(rgb_before.submitted > 0);
+
+    stall.store(true, Ordering::SeqCst);
+    lcd_opens.fail_open.store(true, Ordering::SeqCst);
+    now += 200_000;
+    wait(|| {
+        step(&mut runtime, now);
+        runtime.lcd_status("lcd").unwrap().phase == lcd_worker::Phase::Failed
+    });
+    let failed = runtime.lcd_status("lcd").unwrap();
+    assert_eq!(
+        failed.error.as_deref(),
+        Some("LCD frame exceeded 3 seconds; stream stopped")
+    );
+    assert_eq!(failed.preview, second);
+    assert!(!runtime.retry_lcd_output("lcd", failed.generation).unwrap());
+    for delay in [1_000_000, 5_000_000, 15_000_000] {
+        let prior = runtime.lcd_status("lcd").unwrap().generation;
+        wait(|| {
+            step(&mut runtime, now);
+            runtime.lcd["lcd"].is_reaped()
+        });
+        now += delay;
+        wait(|| {
+            step(&mut runtime, now);
+            let snapshot = runtime.lcd_status("lcd").unwrap();
+            snapshot.generation != prior && snapshot.phase == lcd_worker::Phase::Failed
+        });
+    }
+    now += 60_000_000;
+    wait(|| {
+        step(&mut runtime, now);
+        runtime.lcd["lcd"].is_reaped()
+    });
+    assert_eq!(lcd_opens.calls.load(Ordering::SeqCst), 4);
+    wait(|| runtime.host.status("b").unwrap().submitted > rgb_before.submitted);
+    let rgb_before_retry = runtime.host.status("b").unwrap().submitted;
+
+    stall.store(false, Ordering::SeqCst);
+    lcd_opens.fail_open.store(false, Ordering::SeqCst);
+    temperature(&mut runtime, now);
+    let exhausted = runtime.lcd_status("lcd").unwrap().generation;
+    assert!(!runtime.retry_lcd_output("lcd", failed.generation).unwrap());
+    assert!(
+        !runtime
+            .retry_lcd_output("b", rgb_before.generation)
+            .unwrap()
+    );
+    assert!(runtime.retry_lcd_output("lcd", exhausted).unwrap());
+    assert!(!runtime.retry_lcd_output("lcd", exhausted).unwrap());
+    assert_eq!(frame(&mut runtime, now, 1), first);
+    assert_eq!(frame(&mut runtime, now + 200_000, 2), second);
+    assert_eq!(lcd_opens.calls.load(Ordering::SeqCst), 5);
+    wait(|| runtime.host.status("b").unwrap().submitted > rgb_before_retry);
+    let rgb_after = runtime.host.status("b").unwrap();
+    assert_eq!(rgb_after.generation, rgb_before.generation);
+    assert!(rgb_after.submitted > rgb_before.submitted);
+    assert_eq!(rgb.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.document(), &document);
+    drain(&mut runtime);
+    remove_lcd_assets(runtime, dir);
+}
+
+#[test]
 fn genuine_lcd_rearrival_survives_ready_until_old_handle_reports_failure() {
     let link = Arc::new(Link::default());
     let (mut runtime, dir) = arrival_lcd_runtime("ready-race", link.clone());
