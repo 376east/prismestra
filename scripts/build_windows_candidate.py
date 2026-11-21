@@ -7,11 +7,14 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 import uuid
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
+from zlib import error as ZlibError
 
+import openrgb_cache
 from package_release import sha256
 from package_installer import WEBVIEW_PROBE, json_object
 
@@ -85,11 +88,13 @@ def checkout(lock, path):
     return path
 
 
-def build_component(root, tools, vsdevcmd):
+def build_component(root, vsdevcmd):
     from components.verify_openrgb_component import REQUIRED, MSVC_RUNTIME
 
     source_lock = COMPONENT / "source-lock.json"
     dependency_lock = COMPONENT / "dependency-lock.json"
+    tools = {name: fetch(root, name, *PINNED_INPUTS[name])
+             for name in ("Prismestra-Sources-0.1.0.5.zip", "jom.zip", "qtbase.7z")}
     lock = read(source_lock)
     source = checkout(lock, root / "openrgb-source")
     patch = COMPONENT / lock["patch"]
@@ -137,7 +142,7 @@ def build_component(root, tools, vsdevcmd):
     inventory = root / "openrgb-inventory.json"
     recipe("components/verify_openrgb_component.py", "--source-root", source, "--release-dir", runtime,
            "--source-lock", source_lock, "--dependency-lock", dependency_lock, "--output", inventory)
-    bundle = root / "Prismestra-OpenRGB-component.zip"
+    bundle = root / openrgb_cache.BUNDLE
     recipe("components/package_openrgb_component.py", "--runtime-dir", runtime, "--inventory", inventory,
            "--source-lock", source_lock, "--dependency-lock", dependency_lock, "--patch", patch,
            "--source-archives-dir", archives, "--licenses-dir", COMPONENT / "licenses",
@@ -145,6 +150,31 @@ def build_component(root, tools, vsdevcmd):
            "--verification-doc", REPO / "docs/openrgb-component-verification.md", "--output", bundle)
     recipe("components/test_parent_pipe.py", "--exe", runtime / "OpenRGB.exe",
            "--sha256", sha256(runtime / "OpenRGB.exe"), "--artifacts", root / "component-parent-smoke")
+    return bundle
+
+
+def load_or_build_component(root, vsdevcmd, cache, key):
+    started = time.monotonic()
+    existing = cache is not None and (cache.exists() or cache.is_symlink())
+    bundle = None
+    status = "disabled" if cache is None else "miss"
+    if existing:
+        try:
+            bundle = openrgb_cache.restore(cache, key, root)
+            status = "hit"
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, BadZipFile, ZlibError) as error:
+            print(f"OpenRGB cache rejected; rebuilding from pins: {error}", flush=True)
+            status = "rejected"
+    if bundle is None:
+        bundle = build_component(root, vsdevcmd)
+        if cache is not None and not existing:
+            try:
+                openrgb_cache.save(cache, key, bundle)
+                (root / openrgb_cache.READY).touch(exist_ok=False)
+            except (OSError, ValueError) as error:
+                print(f"OpenRGB component built; cache could not be staged: {error}", flush=True)
+    print(f"OpenRGB cache {status}; verified component ready in {time.monotonic() - started:.1f}s"
+          f" (SHA-256 {sha256(bundle)})", flush=True)
     return bundle
 
 
@@ -199,6 +229,8 @@ def main():
     parser.add_argument("--commit", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--vsdevcmd", type=Path, required=True)
+    parser.add_argument("--openrgb-cache", type=Path)
+    parser.add_argument("--openrgb-cache-key")
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{40}", args.commit):
         parser.error("expected a full checkout commit")
@@ -208,11 +240,17 @@ def main():
     root = args.output.resolve()
     if root.is_relative_to(REPO):
         parser.error("output must be outside the checkout")
+    cache = args.openrgb_cache
+    key = args.openrgb_cache_key
+    if (cache is None) != (key is None) or (key is not None and not re.fullmatch(r"openrgb-windows-x64-v1-[0-9a-f]{64}", key)):
+        parser.error("an OpenRGB cache directory and exact build key must be supplied together")
+    if cache is not None and (cache.resolve().is_relative_to(REPO) or cache.resolve().is_relative_to(root)):
+        parser.error("OpenRGB cache must be outside both the checkout and candidate output")
     from package_release import clean_commit
 
     clean_commit(REPO, args.commit)
     root.mkdir(parents=True)
-    tools = {name: fetch(root, name, *pin) for name, pin in PINNED_INPUTS.items()}
+    inno_bootstrap = fetch(root, "innosetup-6.7.4.exe", *PINNED_INPUTS["innosetup-6.7.4.exe"])
     prerequisites = root / "prerequisites"
     prerequisites.mkdir()
     for key, pin in read(INSTALLER / "prerequisites.lock.json")["packages"].items():
@@ -224,9 +262,9 @@ def main():
         "$env:PRISMESTRA_INNO_DIRECTORY + [char]34; "
         "$p = Start-Process -FilePath $env:PRISMESTRA_INNO_BOOTSTRAP "
         "-Wait -PassThru -WindowStyle Hidden -ArgumentList $params; exit $p.ExitCode",
-        env=dict(os.environ, PRISMESTRA_INNO_BOOTSTRAP=str(tools["innosetup-6.7.4.exe"]),
+        env=dict(os.environ, PRISMESTRA_INNO_BOOTSTRAP=str(inno_bootstrap),
                  PRISMESTRA_INNO_DIRECTORY=str(inno)))
-    component = build_component(root, tools, args.vsdevcmd.resolve(strict=True))
+    component = load_or_build_component(root, args.vsdevcmd.resolve(strict=True), cache, key)
     pawnio = checkout(read(INSTALLER / "pawnio-source.lock.json"), root / "pawnio-source")
     run("git", "-C", pawnio, "submodule", "update", "--init", "--recursive", "--depth=1")
     package_candidate(root, args.commit, args.version, component, prerequisites, inno / "ISCC.exe", pawnio)
