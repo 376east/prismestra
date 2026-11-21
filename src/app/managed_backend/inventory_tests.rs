@@ -91,6 +91,7 @@ fn fixture_manager(directory: &Path) -> (Manager, SocketAddr) {
                 inventory_interval: Duration::from_millis(15),
                 poll: Duration::from_millis(5),
             },
+            probe_owned_sdk,
         );
         drop(owned);
     });
