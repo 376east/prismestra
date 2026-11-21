@@ -16,8 +16,8 @@ use std::{
 use windows_sys::{
     Win32::{
         Foundation::{
-            ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE, LUID,
-            WAIT_TIMEOUT,
+            ERROR_BAD_IMPERSONATION_LEVEL, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, HANDLE,
+            INVALID_HANDLE_VALUE, LUID, WAIT_TIMEOUT,
         },
         Security::{
             CheckTokenMembership, CreateWellKnownSid, DuplicateTokenEx, GetTokenInformation,
@@ -45,7 +45,10 @@ use windows_sys::{
                 SetThreadToken, WaitForSingleObject,
             },
         },
-        UI::Shell::{FOLDERID_LocalAppData, FOLDERID_ProgramData, FOLDERID_ProgramFiles},
+        UI::{
+            Shell::{FOLDERID_LocalAppData, FOLDERID_ProgramData, FOLDERID_ProgramFiles},
+            WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId},
+        },
     },
     core::w,
 };
@@ -619,7 +622,7 @@ fn token_is_elevated(token: &Handle) -> Result<bool, String> {
 fn with_thread_token<T>(token: &Handle, action: impl FnOnce() -> T) -> Result<T, String> {
     if unsafe { SetThreadToken(null(), token.0) } == 0 {
         return Err(error(format_args!(
-            "SetThreadToken(linked limited token): {}",
+            "SetThreadToken(ordinary user): {}",
             io::Error::last_os_error()
         )));
     }
@@ -656,15 +659,94 @@ pub(super) fn with_setup_user<T>(
             "Start Setup from the ordinary Windows account to configure per-user startup.".into(),
         );
     }
-    let limited = linked_token(&token)?;
-    if elevation_type(&limited)? != TokenElevationTypeLimited || token_is_elevated(&limited)? {
+    let impersonation = setup_impersonation(&token, &sid)?;
+    with_thread_token(&impersonation, || action(&sid))?
+}
+
+fn setup_impersonation(elevated: &Handle, sid: &str) -> Result<Handle, String> {
+    let linked = linked_token(elevated)?;
+    if elevation_type(&linked)? != TokenElevationTypeLimited || token_is_elevated(&linked)? {
         return Err("Setup could not verify its linked limited token.".into());
     }
-    let impersonation = impersonation_token(&limited).map_err(error)?;
+    let impersonation = setup_impersonation_or_desktop(impersonation_token(&linked), || {
+        setup_desktop_impersonation(elevated, &linked, sid)
+    })?;
     if token_sid(&impersonation)? != sid || member(&impersonation, WinBuiltinAdministratorsSid)? {
         return Err("Setup refused an unexpected user or elevated impersonation token.".into());
     }
-    with_thread_token(&impersonation, || action(&sid))?
+    Ok(impersonation)
+}
+
+fn setup_impersonation_or_desktop<T>(
+    direct: Result<T, DuplicationError>,
+    desktop: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    match direct {
+        Ok(token) => Ok(token),
+        Err(failure)
+            if failure.failure.raw_os_error() == Some(ERROR_BAD_IMPERSONATION_LEVEL as i32) =>
+        {
+            desktop()
+        }
+        Err(failure) => Err(error(failure)),
+    }
+}
+
+fn setup_desktop_impersonation(
+    elevated: &Handle,
+    linked: &Handle,
+    sid: &str,
+) -> Result<Handle, String> {
+    let session_id = session(elevated)?;
+    if session_id == 0
+        || session(linked)? != session_id
+        || token_sid(linked)? != sid
+        || !is_medium_limited(linked)?
+    {
+        return Err("Setup could not verify its linked limited token.".into());
+    }
+    let logon = token_value::<TOKEN_STATISTICS>(linked, TokenStatistics)?.AuthenticationId;
+
+    // A linked token may only permit identification. The desktop shell can
+    // supply a primary token, but only from the same authenticated logon.
+    let window = unsafe { GetShellWindow() };
+    let mut pid = 0;
+    if window.is_null() || unsafe { GetWindowThreadProcessId(window, &mut pid) } == 0 || pid == 0 {
+        return Err("Setup could not find the ordinary Windows desktop.".into());
+    }
+    let shell = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
+    if shell.is_null() {
+        return Err(error(io::Error::last_os_error()));
+    }
+    let shell = Handle(shell);
+    let token = process_token(shell.0, TOKEN_QUERY | TOKEN_DUPLICATE)?;
+    validate_owner_token(
+        sid,
+        session_id,
+        logon,
+        &token_sid(&token)?,
+        session(&token)?,
+        &token_value::<TOKEN_STATISTICS>(&token, TokenStatistics)?,
+        is_medium_limited(&token)?,
+    )?;
+    let impersonation = impersonation_token(&token).map_err(error)?;
+    let mut current_pid = 0;
+    if !is_interactive_medium(&impersonation)?
+        || token_is_elevated(&impersonation)?
+        || unsafe { GetShellWindow() } != window
+        || unsafe { GetWindowThreadProcessId(window, &mut current_pid) } == 0
+        || current_pid != pid
+        || unsafe { WaitForSingleObject(shell.0, 0) } != WAIT_TIMEOUT
+    {
+        return Err("Setup could not verify the ordinary Windows desktop token.".into());
+    }
+    Ok(impersonation)
 }
 
 pub(super) fn current_process_has_admin_membership() -> Result<bool, String> {
@@ -927,6 +1009,71 @@ mod tests {
         stats.TokenType = TokenImpersonation;
         stats.ImpersonationLevel = SecurityIdentification;
         assert!(validate(sid, 7, &stats, true).is_err());
+    }
+
+    #[test]
+    fn setup_uses_the_desktop_only_after_an_impersonation_level_error() {
+        let failure = |code| DuplicationError {
+            failure: io::Error::from_raw_os_error(code),
+            token_type: None,
+            impersonation_level: None,
+        };
+        assert_eq!(
+            setup_impersonation_or_desktop(Ok(1), || panic!("direct token does not need a shell")),
+            Ok(1)
+        );
+        assert_eq!(
+            setup_impersonation_or_desktop(
+                Err(failure(ERROR_BAD_IMPERSONATION_LEVEL as i32)),
+                || Ok(2),
+            ),
+            Ok(2)
+        );
+        let denied = setup_impersonation_or_desktop::<()>(Err(failure(5)), || {
+            panic!("access denied must not trigger the desktop fallback")
+        });
+        assert!(denied.unwrap_err().contains("DuplicateTokenEx"));
+    }
+
+    #[test]
+    #[ignore = "read-only check for the interactive limited administrator and its desktop shell"]
+    fn setup_recovers_the_ordinary_desktop_from_an_identification_link() {
+        let current = process_token(
+            unsafe { GetCurrentProcess() },
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+        )
+        .unwrap();
+        assert_eq!(elevation_type(&current).unwrap(), TokenElevationTypeLimited);
+        assert!(!token_is_elevated(&current).unwrap());
+        let elevated = linked_token(&current).unwrap();
+        assert_eq!(elevation_type(&elevated).unwrap(), TokenElevationTypeFull);
+        let linked = linked_token(&elevated).unwrap();
+        let expected = token_value::<TOKEN_STATISTICS>(&linked, TokenStatistics).unwrap();
+        assert_eq!(expected.TokenType, TokenImpersonation);
+        assert_eq!(expected.ImpersonationLevel, SecurityIdentification);
+        assert_eq!(
+            impersonation_token(&linked)
+                .err()
+                .unwrap()
+                .failure
+                .raw_os_error(),
+            Some(ERROR_BAD_IMPERSONATION_LEVEL as i32),
+        );
+
+        let sid = token_sid(&current).unwrap();
+        let ordinary = setup_impersonation(&elevated, &sid).unwrap();
+        let actual = token_value::<TOKEN_STATISTICS>(&ordinary, TokenStatistics).unwrap();
+        assert_eq!(
+            actual.AuthenticationId.HighPart,
+            expected.AuthenticationId.HighPart
+        );
+        assert_eq!(
+            actual.AuthenticationId.LowPart,
+            expected.AuthenticationId.LowPart
+        );
+        assert_eq!(token_sid(&ordinary).unwrap(), sid);
+        assert!(!member(&ordinary, WinBuiltinAdministratorsSid).unwrap());
+        assert!(setup_impersonation(&elevated, "S-1-5-18").is_err());
     }
 
     #[test]
