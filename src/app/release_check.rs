@@ -1,17 +1,20 @@
 //! Read-only update discovery for the published Windows Setup channels.
-use crate::transport::winhttp_get::{self, Request};
+use crate::transport::winhttp_get::{self, Proxy, Request};
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 
 const REPO: &str = "https://github.com/376east/prismestra";
 const BODY_LIMIT: usize = 512 * 1024;
 const DEADLINE: Duration = Duration::from_secs(8);
+const PAGE_SIZE: usize = 10;
+const MAX_PAGES: usize = 4;
 const REQUEST: Request<'static> = Request {
     agent: "Prismestra/release-check",
     host: "api.github.com",
     port: 443,
-    path: "/repos/376east/prismestra/releases?per_page=10",
+    path: "/repos/376east/prismestra/releases",
     secure: true,
+    proxy: Proxy::Automatic,
     headers: "Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n",
     max_body: BODY_LIMIT,
     io_timeout_ms: 2_000,
@@ -130,14 +133,8 @@ pub(crate) enum ResultState {
     Unavailable,
 }
 
-fn select(current: Version, body: &[u8]) -> ResultState {
-    if body.len() > BODY_LIMIT {
-        return ResultState::Unavailable;
-    }
-    let Ok(releases) = serde_json::from_slice::<Vec<Release>>(body) else {
-        return ResultState::Unavailable;
-    };
-    let newest = releases
+fn newest_on_channel(current: Version, releases: Vec<Release>) -> Option<Version> {
+    releases
         .into_iter()
         .filter_map(|release| {
             let version = Version::from_tag(&release.tag_name)?;
@@ -157,22 +154,49 @@ fn select(current: Version, body: &[u8]) -> ResultState {
             let digest = asset.digest.as_deref()?.strip_prefix("sha256:")?;
             (digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit())).then_some(version)
         })
-        .max_by_key(|version| version.order());
-    match newest {
-        Some(version) if version.order() > current.order() => ResultState::Available(version),
-        Some(_) => ResultState::NoNewer,
-        None => ResultState::Unavailable,
-    }
+        .max_by_key(|version| version.order())
 }
 
 fn check_with(
     current: Version,
-    fetch: impl FnOnce(&Request<'_>, Instant) -> Result<Vec<u8>, winhttp_get::Error>,
+    mut fetch: impl FnMut(&Request<'_>, Instant) -> Result<Vec<u8>, winhttp_get::Error>,
 ) -> ResultState {
     let deadline = Instant::now() + DEADLINE;
-    match fetch(&REQUEST, deadline) {
-        Ok(body) if Instant::now() < deadline => select(current, &body),
-        _ => ResultState::Unavailable,
+    let mut newest = None;
+    for page in 1..=MAX_PAGES {
+        if Instant::now() >= deadline {
+            return ResultState::Unavailable;
+        }
+        let path = format!("{}?per_page={PAGE_SIZE}&page={page}", REQUEST.path);
+        let request = Request {
+            path: &path,
+            ..REQUEST
+        };
+        let Ok(body) = fetch(&request, deadline) else {
+            return ResultState::Unavailable;
+        };
+        if Instant::now() >= deadline || body.len() > BODY_LIMIT {
+            return ResultState::Unavailable;
+        }
+        let Ok(releases) = serde_json::from_slice::<Vec<Release>>(&body) else {
+            return ResultState::Unavailable;
+        };
+        if releases.len() > PAGE_SIZE {
+            return ResultState::Unavailable;
+        }
+        let last_page = releases.len() < PAGE_SIZE;
+        newest = newest
+            .into_iter()
+            .chain(newest_on_channel(current, releases))
+            .max_by_key(|version| version.order());
+        if last_page {
+            break;
+        }
+    }
+    match newest {
+        Some(version) if version.order() > current.order() => ResultState::Available(version),
+        Some(_) => ResultState::NoNewer,
+        None => ResultState::Unavailable,
     }
 }
 
@@ -209,9 +233,10 @@ mod tests {
             |request, deadline| {
                 assert_eq!(request.host, "api.github.com");
                 assert!(request.secure && request.port == 443);
+                assert_eq!(request.proxy, Proxy::Automatic);
                 assert_eq!(
                     request.path,
-                    "/repos/376east/prismestra/releases?per_page=10"
+                    "/repos/376east/prismestra/releases?per_page=10&page=1"
                 );
                 assert!(deadline > Instant::now());
                 Ok(serde_json::to_vec(&values).unwrap())
@@ -267,6 +292,56 @@ mod tests {
                 vec![release("v2.0.0-preview.3"), release("v1.0.0")]
             ),
             ResultState::NoNewer
+        );
+    }
+
+    #[test]
+    fn finds_stable_on_the_next_page_after_ten_previews() {
+        let preview_page: Vec<_> = (1..=10)
+            .map(|n| release(&format!("v3.0.0-preview.{n}")))
+            .collect();
+        let mut calls = Vec::new();
+        let result = check_with(
+            Version::from_setup("1.0.0.0").unwrap(),
+            |request, deadline| {
+                assert_eq!(request.host, "api.github.com");
+                assert!(request.secure && request.port == 443);
+                assert_eq!(request.proxy, Proxy::Automatic);
+                calls.push((request.path.to_owned(), deadline));
+                let page = match request.path {
+                    "/repos/376east/prismestra/releases?per_page=10&page=1" => preview_page.clone(),
+                    "/repos/376east/prismestra/releases?per_page=10&page=2" => {
+                        vec![release("v1.0.0"), release("v2.0.0")]
+                    }
+                    _ => panic!("unexpected page {}", request.path),
+                };
+                Ok(serde_json::to_vec(&page).unwrap())
+            },
+        );
+        assert_eq!(
+            result,
+            ResultState::Available(Version::from_tag("v2.0.0").unwrap())
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].1, calls[1].1);
+    }
+
+    #[test]
+    fn caps_the_number_of_requests_when_every_page_is_full() {
+        let full_page: Vec<_> = (1..=10)
+            .map(|n| release(&format!("v3.0.0-preview.{n}")))
+            .collect();
+        let body = serde_json::to_vec(&full_page).unwrap();
+        let mut paths = Vec::new();
+        let result = check_with(Version::from_setup("2.0.0.0").unwrap(), |request, _| {
+            paths.push(request.path.to_owned());
+            Ok(body.clone())
+        });
+        assert_eq!(result, ResultState::Unavailable);
+        assert_eq!(
+            paths,
+            [1, 2, 3, 4]
+                .map(|n| format!("/repos/376east/prismestra/releases?per_page=10&page={n}"))
         );
     }
 

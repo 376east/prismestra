@@ -14,12 +14,19 @@ pub(crate) enum Error {
     WinHttp(u32),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Proxy {
+    Direct,
+    Automatic,
+}
+
 pub(crate) struct Request<'a> {
     pub agent: &'a str,
     pub host: &'a str,
     pub port: u16,
     pub path: &'a str,
     pub secure: bool,
+    pub proxy: Proxy,
     pub headers: &'a str,
     pub max_body: usize,
     pub io_timeout_ms: u32,
@@ -32,15 +39,12 @@ pub(crate) fn get(
 ) -> Result<Vec<u8>, Error> {
     check(deadline, cancelled)?;
     let agent = wide(spec.agent);
-    let session = Handle::new(unsafe {
-        WinHttpOpen(
-            agent.as_ptr(),
-            WINHTTP_ACCESS_TYPE_NO_PROXY,
-            null(),
-            null(),
-            0,
-        )
-    })?;
+    let access_type = match spec.proxy {
+        Proxy::Direct => WINHTTP_ACCESS_TYPE_NO_PROXY,
+        Proxy::Automatic => WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+    };
+    let session =
+        Handle::new(unsafe { WinHttpOpen(agent.as_ptr(), access_type, null(), null(), 0) })?;
     timeouts(&session, deadline, cancelled, spec.io_timeout_ms)?;
     let host = wide(spec.host);
     let connection =

@@ -412,13 +412,14 @@ impl Endpoint {
         deadline: std::time::Instant,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Info, Error> {
-        use super::winhttp_get::{self, Request};
+        use super::winhttp_get::{self, Proxy, Request};
         let spec = Request {
             agent: "Prismestra/WLED-info",
             host: &self.host,
             port: self.port,
             path: "/json/info",
             secure: false,
+            proxy: Proxy::Direct,
             headers: "",
             max_body: MAX_RESPONSE_BYTES,
             io_timeout_ms: 500,
