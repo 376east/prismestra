@@ -769,11 +769,27 @@ pub(super) fn close_editor(state: &State) -> Result<(), String> {
         Ok(())
     }
 }
-fn activate_editor_window(hwnd: HWND) {
+pub(super) fn activate_editor_window(hwnd: HWND) -> Result<(), String> {
     unsafe {
         if IsIconic(hwnd) != 0 {
             ShowWindow(hwnd, SW_RESTORE);
         }
+        // The first ShowWindow can inherit SW_HIDE from the resident's
+        // STARTUPINFO. An explicit editor request must make the window visible.
+        if IsWindowVisible(hwnd) == 0
+            && SetWindowPos(
+                hwnd,
+                null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            ) == 0
+        {
+            return Err(last("Show editor"));
+        }
+        UpdateWindow(hwnd);
         if SetForegroundWindow(hwnd) == 0 && IsWindowVisible(hwnd) != 0 {
             FlashWindowEx(&FLASHWINFO {
                 cbSize: size_of::<FLASHWINFO>() as u32,
@@ -784,6 +800,7 @@ fn activate_editor_window(hwnd: HWND) {
             });
         }
     }
+    Ok(())
 }
 
 pub(super) fn open_requested_editor(state: &State) -> Result<(), String> {
@@ -801,7 +818,7 @@ pub(super) fn open_editor(state: &State) -> Result<(), String> {
     let existing = state.editor_window.get();
     if !existing.is_null() {
         if !state.snapshot {
-            activate_editor_window(existing);
+            activate_editor_window(existing)?;
         }
         return Ok(());
     }
@@ -905,8 +922,8 @@ pub(super) fn open_editor(state: &State) -> Result<(), String> {
         app.status = format!("Новый интерфейс недоступен: {error}");
         app.show_page();
     }
-    unsafe {
-        if state.snapshot {
+    if state.snapshot {
+        unsafe {
             SetWindowPos(
                 hwnd,
                 null_mut(),
@@ -916,13 +933,9 @@ pub(super) fn open_editor(state: &State) -> Result<(), String> {
                 0,
                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE | SWP_SHOWWINDOW,
             );
-        } else {
-            ShowWindow(hwnd, SW_SHOWNORMAL);
-            UpdateWindow(hwnd);
         }
-    }
-    if !state.snapshot {
-        activate_editor_window(hwnd);
+    } else {
+        activate_editor_window(hwnd)?;
     }
     Ok(())
 }
@@ -2310,5 +2323,105 @@ mod tests {
         assert!(Instance::acquire(&dir).is_ok());
         // The filename may remain; only the OS handle determines ownership.
         assert!(Instance::acquire(&dir).is_ok());
+    }
+    // The test child has no app state, tray, or installer profile.
+    #[test]
+    fn editor_activation_after_sw_hide_startup() {
+        use windows_sys::Win32::System::Threading::{
+            CREATE_NO_WINDOW, CreateProcessW, GetExitCodeProcess, PROCESS_INFORMATION,
+            STARTF_USESHOWWINDOW, STARTUPINFOW, TerminateProcess,
+        };
+        let exe = std::env::current_exe().unwrap();
+        let image: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let mut command = wide(&format!(
+            "\"{}\" --ignored --exact {module}::editor_activation_hidden_child",
+            exe.display()
+        ));
+        let startup = STARTUPINFOW {
+            cb: size_of::<STARTUPINFOW>() as u32,
+            dwFlags: STARTF_USESHOWWINDOW,
+            wShowWindow: SW_HIDE as u16,
+            ..Default::default()
+        };
+        let mut process = PROCESS_INFORMATION::default();
+        assert_ne!(
+            unsafe {
+                CreateProcessW(
+                    image.as_ptr(),
+                    command.as_mut_ptr(),
+                    null(),
+                    null(),
+                    0,
+                    CREATE_NO_WINDOW,
+                    null(),
+                    null(),
+                    &startup,
+                    &mut process,
+                )
+            },
+            0,
+            "{}",
+            last("Start isolated editor visibility test")
+        );
+        unsafe { CloseHandle(process.hThread) };
+        let _child = Process(process.hProcess);
+        let wait = unsafe { WaitForSingleObject(process.hProcess, 10_000) };
+        if wait == WAIT_TIMEOUT {
+            unsafe {
+                TerminateProcess(process.hProcess, 1);
+                WaitForSingleObject(process.hProcess, 2_000);
+            }
+        }
+        assert_eq!(wait, WAIT_OBJECT_0, "Editor visibility child did not exit");
+        let mut code = 0;
+        assert_ne!(
+            unsafe { GetExitCodeProcess(process.hProcess, &mut code) },
+            0
+        );
+        assert_eq!(
+            code, 91,
+            "Expected the child to confirm both visibility checks (90 means first open stayed hidden)"
+        );
+    }
+
+    #[test]
+    #[ignore = "spawned only by the STARTUPINFO SW_HIDE test"]
+    fn editor_activation_hidden_child() {
+        use windows_sys::Win32::System::Threading::{
+            GetStartupInfoW, STARTF_USESHOWWINDOW, STARTUPINFOW,
+        };
+        let mut startup = STARTUPINFOW::default();
+        unsafe { GetStartupInfoW(&mut startup) };
+        assert_ne!(startup.dwFlags & STARTF_USESHOWWINDOW, 0);
+        assert_eq!(startup.wShowWindow, SW_HIDE as u16);
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                -32000,
+                -32000,
+                320,
+                200,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null(),
+            )
+        };
+        assert!(!hwnd.is_null());
+        assert_eq!(unsafe { IsWindowVisible(hwnd) }, 0);
+        activate_editor_window(hwnd).unwrap();
+        if unsafe { IsWindowVisible(hwnd) } == 0 {
+            std::process::exit(90);
+        }
+        unsafe { ShowWindow(hwnd, SW_HIDE) };
+        assert_eq!(unsafe { IsWindowVisible(hwnd) }, 0);
+        activate_editor_window(hwnd).unwrap();
+        assert_ne!(unsafe { IsWindowVisible(hwnd) }, 0);
+        unsafe { DestroyWindow(hwnd) };
+        std::process::exit(91);
     }
 }

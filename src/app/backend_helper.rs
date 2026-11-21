@@ -62,6 +62,8 @@ struct Request {
     nonce: String,
     parent: Identity,
     timestamp_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_timestamp_ms: Option<u64>,
     restarting: bool,
 }
 #[derive(Serialize, Deserialize)]
@@ -240,6 +242,7 @@ impl Proxy {
             nonce: nonce.clone(),
             parent,
             timestamp_ms: now_ms()?,
+            previous_timestamp_ms: None,
             restarting: true,
         };
         write_json(&state_dir.join("owner-request.json"), &request)?;
@@ -363,6 +366,7 @@ fn proxy_loop(
             ..Snapshot::default()
         };
         if let Some(status) = status {
+            failure_detail.clear();
             let key = (
                 status.helper.created,
                 status.helper.pid,
@@ -501,20 +505,33 @@ fn refresh_heartbeat_with_clock(
         Err(_) => return Heartbeat::Lost,
     };
     let path = directory.join("owner-request.json");
-    match read_json_typed::<Request>(&path) {
+    let previous = match read_json_typed::<Request>(&path) {
         Ok(current)
             if current.version == clock::PROTOCOL
                 && current.clock_domain == clock::DOMAIN
                 && current.timestamp_ms <= now
                 && current.nonce == request.nonce
-                && current.parent == request.parent => {}
+                && current.parent == request.parent =>
+        {
+            current.timestamp_ms
+        }
         Ok(_) | Err(ControlRead::Invalid(_)) => return Heartbeat::Lost,
         Err(ControlRead::Io(error)) => return Heartbeat::Retry(error.to_string()),
-    }
+    };
     let mut current = request.clone();
     current.timestamp_ms = now;
+    current.previous_timestamp_ms = now
+        .checked_sub(previous)
+        .filter(|gap| (1..clock::LEASE_MS).contains(gap))
+        .map(|_| previous);
     current.restarting = restarting;
-    match write_json(&path, &current) {
+    let result = serde_json::to_vec(&current)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| {
+            crate::storage::atomic_write_heartbeat(&path, &bytes, LIMIT)
+                .map_err(|error| error.to_string())
+        });
+    match result {
         Ok(()) => Heartbeat::Published,
         Err(error) => Heartbeat::Retry(error),
     }
@@ -807,6 +824,7 @@ fn supervise_channels(
         );
     }
     let mut lease_deadline = clock::deadline(request.timestamp_ms, now)?;
+    let mut last_valid_poll_ms = now;
     let mut status_write_failed = false;
     let mut owner_read_failed = false;
     let mut last_backend_state = None;
@@ -852,24 +870,39 @@ fn supervise_channels(
             .is_ok()
             .then(|| channels.read::<Cancel>("owner-cancel.json"));
         let now = clock.now_ms()?;
-        // A late poll can observe a heartbeat issued before the cached lease
-        // expired. Without that evidence, never revive an expired lease.
+        // A late poll needs a fresh heartbeat with a timely publication.
+        // The current heartbeat may have already replaced that publication.
         if now >= lease_deadline
-            && (!current.as_ref().is_ok_and(|current| {
-                current.timestamp_ms < lease_deadline
-                    && clock::deadline(current.timestamp_ms, now).is_ok_and(|next| now < next)
-            }) || cancellation.as_ref().is_some_and(|result| match result {
-                Ok(_) => false,
-                Err(ControlRead::Io(error)) => error.kind() != std::io::ErrorKind::NotFound,
-                Err(ControlRead::Invalid(_)) => true,
-            }))
+            && (!current
+                .as_ref()
+                .is_ok_and(|current| covers_lease_deadline(current, lease_deadline, now))
+                || cancellation.as_ref().is_some_and(|result| match result {
+                    Ok(_) => false,
+                    Err(ControlRead::Io(error)) => error.kind() != std::io::ErrorKind::NotFound,
+                    Err(ControlRead::Invalid(_)) => true,
+                }))
         {
+            let owner = match &current {
+                Ok(current) => now
+                    .checked_sub(current.timestamp_ms)
+                    .map_or_else(|| "future".into(), |age| format!("age:{age}")),
+                Err(error) => error.diagnostic_code(),
+            };
+            let cancel = match &cancellation {
+                None => "not-read".into(),
+                Some(Ok(_)) => "read".into(),
+                Some(Err(error)) => error.diagnostic_code(),
+            };
             helper_note(
                 output,
                 request,
                 "helper_stop",
                 None,
-                "Managed helper stopping: parent heartbeat lease expired",
+                &format!(
+                    "Managed helper stopping: parent heartbeat lease expired late_ms={} poll_ms={} owner={owner} cancel={cancel}",
+                    now.saturating_sub(lease_deadline),
+                    now.saturating_sub(last_valid_poll_ms),
+                ),
             );
             break;
         }
@@ -931,6 +964,7 @@ fn supervise_channels(
                     break;
                 }
                 lease_deadline = clock::deadline(current.timestamp_ms, now)?;
+                last_valid_poll_ms = now;
                 if !current.restarting {
                     stop_restarting();
                 }
@@ -1009,6 +1043,17 @@ enum ControlRead {
     Io(std::io::Error),
     Invalid(String),
 }
+impl ControlRead {
+    fn diagnostic_code(&self) -> String {
+        match self {
+            Self::Invalid(_) => "invalid".into(),
+            Self::Io(error) if error.kind() == std::io::ErrorKind::NotFound => "missing".into(),
+            Self::Io(error) => error
+                .raw_os_error()
+                .map_or_else(|| "io".into(), |code| format!("io:{code}")),
+        }
+    }
+}
 fn read_json_typed<T: DeserializeOwned>(path: &Path) -> Result<T, ControlRead> {
     let metadata = fs::symlink_metadata(path).map_err(ControlRead::Io)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > LIMIT as u64 {
@@ -1074,6 +1119,21 @@ fn live_request(request: &Request, now: u64) -> bool {
         && request.clock_domain == clock::DOMAIN
         && clock::fresh(request.timestamp_ms, now, clock::LEASE_MS)
 }
+fn covers_lease_deadline(request: &Request, deadline: u64, now: u64) -> bool {
+    clock::deadline(request.timestamp_ms, now).is_ok_and(|next| now < next)
+        && (request.timestamp_ms < deadline
+            || request.previous_timestamp_ms.is_some_and(|previous| {
+                // Require a bridge from the last observed lease, with no gap
+                // between the two publications large enough to have expired it.
+                previous >= deadline.saturating_sub(clock::LEASE_MS)
+                    && previous < deadline
+                    && request
+                        .timestamp_ms
+                        .checked_sub(previous)
+                        .is_some_and(|gap| (1..clock::LEASE_MS).contains(&gap))
+            }))
+}
+
 fn matches_control(control: &Cancel, request: &Request) -> bool {
     control.version == clock::PROTOCOL
         && control.clock_domain == clock::DOMAIN
@@ -1415,6 +1475,11 @@ mod tests {
 
         for (case, issued_ms, wake_ms, expected_publications) in [
             ("renewed", 14_800, 15_100, 2),
+            ("overwritten renewal", 14_800, 15_650, 2),
+            ("overwritten gap", 15_000, 15_650, 1),
+            ("overwritten cancelled", 14_800, 15_650, 1),
+            ("overwritten cancel locked", 14_800, 15_650, 1),
+            ("overwritten clock gap", 10_400, 15_650, 1),
             ("stale", 10_000, 15_100, 1),
             ("stale successor", 14_800, 19_800, 1),
             ("at deadline", 15_000, 15_100, 1),
@@ -1464,12 +1529,28 @@ mod tests {
                             renewed.parent.created ^= 1;
                         }
                         write_json(&path, &renewed).unwrap();
-                        if matches!(case, "cancelled" | "cancel locked") {
+                        if case.starts_with("overwritten ") {
+                            clock.active_ms.set(15_400);
+                            assert!(matches!(
+                                refresh_heartbeat_with_clock(&directory, &request, true, &clock),
+                                Heartbeat::Published
+                            ));
+                        }
+                        if matches!(
+                            case,
+                            "cancelled"
+                                | "cancel locked"
+                                | "overwritten cancelled"
+                                | "overwritten cancel locked"
+                        ) {
                             cancel(request.nonce.clone());
                         } else if case == "old cancel" {
                             cancel("old-nonce".into());
                         }
-                        if matches!(case, "owner locked" | "cancel locked") {
+                        if matches!(
+                            case,
+                            "owner locked" | "cancel locked" | "overwritten cancel locked"
+                        ) {
                             let locked = if case == "owner locked" {
                                 &path
                             } else {
@@ -1494,6 +1575,16 @@ mod tests {
             )
             .unwrap();
             drop(blocked_file.into_inner());
+            let expected_detail = match case {
+                "stale" => Some("late_ms=300 poll_ms=5300 owner=age:5300 cancel=missing"),
+                "after deadline" => Some("late_ms=300 poll_ms=5300 owner=age:299 cancel=missing"),
+                "cancel locked" => Some("late_ms=300 poll_ms=5300 owner=age:500 cancel=io:32"),
+                _ => None,
+            };
+            if let Some(expected) = expected_detail {
+                let history = fs::read_to_string(directory.join("backend-events.json")).unwrap();
+                assert!(history.contains(expected), "{case}: {history}");
+            }
             for name in [
                 "owner-request.json",
                 "owner-cancel.json",
@@ -1597,6 +1688,7 @@ mod tests {
             nonce: label.into(),
             parent: helper.clone(),
             timestamp_ms: now_ms().unwrap(),
+            previous_timestamp_ms: None,
             restarting: true,
         };
         write_json(&directory.join("owner-request.json"), &request).unwrap();
@@ -1762,6 +1854,11 @@ mod tests {
         .unwrap();
         assert_eq!(clock.active_ms.get(), 10_600);
         assert_eq!(clock.polls.get(), 3);
+        let history = fs::read_to_string(directory.join("backend-events.json")).unwrap();
+        assert!(
+            history.contains("late_ms=100 poll_ms=600 owner=io:32 cancel=not-read"),
+            "{history}"
+        );
         drop(reader);
         fs::remove_file(directory.join("owner-request.json")).unwrap();
         let _ = fs::remove_file(directory.join("backend-events.json"));
@@ -1798,6 +1895,23 @@ mod tests {
         assert_eq!(current.nonce, request.nonce);
         assert!(!current.restarting);
         assert!(current.timestamp_ms > request.timestamp_ms);
+
+        // A concurrent helper reader uses the full default sharing mode.
+        let mut reader = fs::OpenOptions::new().read(true).open(&path).unwrap();
+        assert!(matches!(
+            refresh_heartbeat(&directory, &request, true),
+            Heartbeat::Published
+        ));
+        let latest = read_json::<Request>(&path).unwrap();
+        assert!(latest.restarting);
+        assert_eq!(latest.nonce, request.nonce);
+        let mut previous_bytes = Vec::new();
+        reader.read_to_end(&mut previous_bytes).unwrap();
+        let previous: Request = serde_json::from_slice(&previous_bytes).unwrap();
+        assert!(!previous.restarting);
+        assert_eq!(previous.timestamp_ms, current.timestamp_ms);
+        drop(reader);
+
         let reader = fs::OpenOptions::new()
             .read(true)
             .share_mode(0)
@@ -1832,6 +1946,7 @@ mod tests {
             nonce: "new-session".into(),
             parent: parent.clone(),
             timestamp_ms: 10_000,
+            previous_timestamp_ms: None,
             restarting: true,
         };
         let status = Status {
@@ -2010,6 +2125,7 @@ mod tests {
             nonce: "cancelled-owner".into(),
             parent: identity(std::process::id()).unwrap(),
             timestamp_ms: now_ms().unwrap(),
+            previous_timestamp_ms: None,
             restarting: true,
         };
         let path = directory.join("owner-request.json");
