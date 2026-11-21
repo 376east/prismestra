@@ -68,6 +68,14 @@ fn effect_name(effect: Effect) -> &'static str {
         Effect::NoiseMap => "NoiseMap",
         Effect::Breathing => "Breathing",
         Effect::RainbowWave => "RainbowWave",
+        Effect::GradientWave => "GradientWave",
+        Effect::CrossingBeams => "CrossingBeams",
+        Effect::TidalRings => "TidalRings",
+        Effect::HorizonSweep => "HorizonSweep",
+        Effect::EmberDrift => "EmberDrift",
+        Effect::PrismLattice => "PrismLattice",
+        Effect::CometTrail => "CometTrail",
+        Effect::Fireflies => "Fireflies",
     }
 }
 /// Native indices: exactly one explicit main, legacy main, or sole eligible effect.
@@ -301,6 +309,8 @@ pub fn compose_with_controls(
     controls: &Controls,
     noise_template: Option<&Value>,
 ) -> ProfileResult<Value> {
+    let class = effect_name(controls.effect);
+    effect_from_name(class)?;
     let position = indices(profile)?;
     controls.validate().map_err(fail)?;
     let mut result = profile.clone();
@@ -314,7 +324,7 @@ pub fn compose_with_controls(
     if !main.get("CustomSettings").is_some_and(Value::is_object) {
         main["CustomSettings"] = json!({});
     }
-    main["EffectClassName"] = json!(effect_name(controls.effect));
+    main["EffectClassName"] = json!(class);
     main["Brightness"] = json!(controls.brightness);
     main["Speed"] = json!(
         controls

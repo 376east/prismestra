@@ -143,7 +143,7 @@ pub(super) struct Session {
     close_ready: bool,
     catalog: Catalog,
     catalog_view: BTreeMap<String, Value>,
-    built_in_card: Value,
+    built_in_cards: Vec<Value>,
     catalog_path: PathBuf,
     draft: Option<Draft>,
     draft_path: PathBuf,
@@ -151,6 +151,7 @@ pub(super) struct Session {
     lcd_layout_preview: Option<scene_files::Layout>,
     preview: Option<crate::runtime::scene::Renderer>,
     canvas: crate::devices::Canvas,
+    detailed_canvas: crate::devices::Canvas,
     last_send: Instant,
     last_native_send: Instant,
     context: u64,
@@ -166,30 +167,22 @@ impl Session {
         let catalog = Catalog::load(&catalog_path, &app.runtime.project().scene)?;
         let draft_path = app.state_dir.join("editor-scene-draft.json");
         let draft = Draft::load(&draft_path)?;
-        let canvas = crate::devices::Canvas {
-            width: 36,
-            height: 18,
-            points: (0..18)
-                .flat_map(|y| {
-                    (0..36).map(move |x| crate::devices::Point {
-                        device: "editor-preview".into(),
-                        led: (y * 36 + x) as usize,
-                        x,
-                        y,
-                    })
-                })
-                .collect(),
-        };
         let catalog_view = catalog
             .entries
             .iter()
             .map(|entry| (entry.id.clone(), scene_card(entry)))
             .collect();
-        let mut built_in_card = scene_card(&crate::ui::catalog::plum_dawn());
-        built_in_card["builtIn"] = json!(true);
+        let built_in_cards = crate::ui::catalog::built_in()
+            .into_iter()
+            .map(|entry| {
+                let mut card = scene_card(&entry);
+                card["builtIn"] = json!(true);
+                card
+            })
+            .collect();
         let mut result = Self {
             catalog_view,
-            built_in_card,
+            built_in_cards,
             close_request: None,
             close_id: 0,
             close_ready: false,
@@ -200,7 +193,8 @@ impl Session {
             portable_preview: None,
             lcd_layout_preview: None,
             preview: None,
-            canvas,
+            canvas: preview_canvas(36, 18),
+            detailed_canvas: preview_canvas(96, 48),
             last_send: Instant::now(),
             last_native_send: Instant::now(),
             context: u64::MAX,
@@ -237,21 +231,30 @@ impl Session {
         Ok(())
     }
 }
-fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
-    let canvas = crate::devices::Canvas {
-        width: 24,
-        height: 12,
-        points: (0..12)
+fn preview_canvas(width: u32, height: u32) -> crate::devices::Canvas {
+    crate::devices::Canvas {
+        width,
+        height,
+        points: (0..height)
             .flat_map(|y| {
-                (0..24).map(move |x| crate::devices::Point {
-                    device: "thumbnail".into(),
-                    led: (y * 24 + x) as usize,
+                (0..width).map(move |x| crate::devices::Point {
+                    device: "preview".into(),
+                    led: (y * width + x) as usize,
                     x,
                     y,
                 })
             })
             .collect(),
+    }
+}
+
+fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
+    let (width, height) = if entry.scene.effect.uses_normalized_canvas() {
+        (48, 24)
+    } else {
+        (24, 12)
     };
+    let canvas = preview_canvas(width, height);
     let mut colors = Vec::new();
     let mut thumbnail_scene = entry.scene.clone();
     let steps = if thumbnail_scene.effect == crate::lighting::scene::Effect::Breathing {
@@ -270,7 +273,7 @@ fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
             }
         }
     }
-    json!({"id":entry.id,"name":entry.name,"scene":entry.scene,"preview":{"width":24,"height":12,"colors":colors}})
+    json!({"id":entry.id,"name":entry.name,"scene":entry.scene,"preview":{"width":width,"height":height,"colors":colors}})
 }
 fn assets(path: &str) -> Option<(&'static str, &'static [u8])> {
     Some(match path {
@@ -573,14 +576,12 @@ fn snapshot(state: &State) -> Result<Value, String> {
     let session = session.as_mut().ok_or("Нет интерфейса")?;
     let draft_map_revision = session.draft_map.observe(draft_map_input(app));
     let editor=app.editor.as_ref().map(|e|json!({"page":page_name(e.page),"index":e.index,"deviceId":e.selected_connection_device(),"targets":super::super::editor::Editor::targets(&e.document,e.page),"fields":e.fields().iter().map(|f|json!({"key":f.key,"label":f.label,"value":f.value,"hint":f.hint,"file":f.file,"choices":f.choices.iter().map(|(label,value)|json!({"label":if f.key=="group"{match value.as_str(){"pc"=>"Основной свет","door"=>"Дополнительный свет",_=>label.as_str()}}else{label.as_str()},"value":value})).collect::<Vec<_>>()})).collect::<Vec<_>>(),"dirty":app.editor_dirty}));
-    let library = std::iter::once(&session.built_in_card)
-        .chain(
-            session
-                .catalog
-                .entries
-                .iter()
-                .filter_map(|entry| session.catalog_view.get(&entry.id)),
-        )
+    let library = session
+        .catalog
+        .entries
+        .iter()
+        .filter_map(|entry| session.catalog_view.get(&entry.id))
+        .chain(&session.built_in_cards)
         .collect::<Vec<_>>();
     let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":library,"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
     value["state"]["draftMapRevision"] = json!(draft_map_revision);
@@ -1091,13 +1092,17 @@ pub(super) fn maintain(state: &State) {
         let frames = (session.last_send.elapsed().as_millis() / 50).min(1000) as u32;
         session.last_send += Duration::from_millis(u64::from(frames) * 50);
         let mut pixels = Vec::new();
+        let mut canvas = &session.canvas;
         if let Some(renderer) = session.preview.as_mut() {
+            if renderer.scene().effect.uses_normalized_canvas() {
+                canvas = &session.detailed_canvas;
+            }
             for _ in 0..frames.clamp(1, 8) {
-                pixels = renderer.step(&session.canvas)?;
+                pixels = renderer.step(canvas)?;
             }
         }
         let colors = pixels.iter().map(|c| c.rrggbb()).collect::<Vec<_>>();
-        let mut value = json!({"kind":"status","state":{"scene":app.runtime.project().scene,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"preview":{"width":36,"height":18,"colors":colors}}});
+        let mut value = json!({"kind":"status","state":{"scene":app.runtime.project().scene,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"preview":{"width":canvas.width,"height":canvas.height,"colors":colors}}});
         if session.last_native_send.elapsed() >= Duration::from_millis(250) {
             session.last_native_send = Instant::now();
             value["state"]["deviceCandidates"] = json!(device_candidates(app));
@@ -1149,6 +1154,17 @@ pub(super) fn return_to_editor(state: &State) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::lighting::scene::Effect;
+
+    #[test]
+    fn procedural_card_uses_a_dense_canvas_and_preserves_scene_settings() {
+        let mut entry = crate::ui::catalog::plum_dawn();
+        entry.scene.effect = Effect::PrismLattice;
+        let card = scene_card(&entry);
+        assert_eq!(card["preview"]["width"], 48);
+        assert_eq!(card["preview"]["height"], 24);
+        assert_eq!(card["preview"]["colors"].as_array().unwrap().len(), 48 * 24);
+        assert_eq!(card["scene"], serde_json::to_value(&entry.scene).unwrap());
+    }
 
     #[test]
     fn slow_breathing_card_shows_its_lit_phase_without_changing_scene_settings() {
