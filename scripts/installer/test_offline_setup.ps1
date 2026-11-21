@@ -189,6 +189,60 @@ function Get-RegisteredUninstaller {
     $uninstaller
 }
 
+function Test-ManagedUninstall([string]$CurrentHash, [string]$PreviousHash) {
+    Assert-Expected ($CurrentHash -cne $PreviousHash) 'Managed uninstall requires two distinct application pins.'
+    $sid = $identity.User.Value
+    $scheduler = New-Object -ComObject 'Schedule.Service'
+    $scheduler.Connect()
+    $folder = $scheduler.GetFolder('\')
+    $policies = Split-Path -Parent $policyDirectory
+    $data = Split-Path -Parent $policies
+    foreach ($path in @($data, $policies, $policyDirectory)) {
+        $reader = if ($path -eq $policyDirectory) { $sid } else { 'BU' }
+        $acl = [Security.AccessControl.DirectorySecurity]::new()
+        $acl.SetSecurityDescriptorSddlForm("O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FRFX;;;$reader)")
+        $null = [IO.FileSystemAclExtensions]::Create([IO.DirectoryInfo]::new($path), $acl)
+    }
+    $record = @{ version = 1; executable = $image; sid = $sid; app_sha256 = $CurrentHash; previous_app_sha256 = $PreviousHash }
+    $policy = @{ version = 1; sid = $sid; endpoint = '127.0.0.1:17422'; app_sha256 = $PreviousHash; runtime_sha256 = @{} }
+    $pins = @{}
+    foreach ($file in @('installation', 'policy')) {
+        $value = if ($file -eq 'installation') { $record } else { $policy }
+        $path = Join-Path $policyDirectory "$file.json"
+        [IO.File]::WriteAllText($path, ($value | ConvertTo-Json -Compress))
+        $acl = [Security.AccessControl.FileSecurity]::new()
+        $acl.SetSecurityDescriptorSddlForm("O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FRFX;;;$sid)")
+        [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($path), $acl)
+        $pins[$path] = Get-Sha256 $path
+    }
+    $null = New-Item -Path $policyKey -Force
+    $null = New-ItemProperty -LiteralPath $policyKey -Name PolicySid -PropertyType String -Value $sid
+    $definition = $scheduler.NewTask(0)
+    $definition.Principal.UserId = $sid
+    $definition.Principal.LogonType = 3
+    $definition.Principal.RunLevel = 1
+    $definition.Settings.Enabled = $false
+    $action = $definition.Actions.Create(0)
+    $action.Path = $image
+    $action.WorkingDirectory = $install
+    $action.Arguments = '--foreign-fixture'
+    $taskAcl = "O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGX;;;$sid)"
+    $foreign = $folder.RegisterTaskDefinition($taskName, $definition, 0x32, $sid, $null, 3, $taskAcl)
+    $foreignXml = [string]$foreign.Xml
+
+    $uninstaller = Get-RegisteredUninstaller
+    $refusal = Invoke-Installer $uninstaller '' (Join-Path $report 'uninstall-foreign-task.log')
+    Assert-Expected ($refusal -ne 0 -and (Test-Path -LiteralPath $image) -and
+        (Get-ItemPropertyValue -LiteralPath $policyKey -Name PolicySid) -eq $sid -and
+        $folder.GetTask($taskName).Xml -ceq $foreignXml) (
+            'Uninstall altered a task whose name matched but whose action was foreign, or altered protected product state after refusal.')
+    foreach ($path in $pins.Keys) {
+        Assert-Expected ((Get-Sha256 $path) -ceq $pins[$path]) "Uninstall altered a protected ownership file after refusing the foreign task: $path"
+    }
+    $action.Arguments = '--installed-backend-helper'
+    $null = $folder.RegisterTaskDefinition($taskName, $definition, 0x34, $sid, $null, 3, $taskAcl)
+}
+
 function Copy-PrerequisiteLogs([DateTime]$Since, [string]$Destination) {
     $files = @(Get-ChildItem -LiteralPath $env:TEMP -File -ErrorAction SilentlyContinue | Where-Object {
         $_.LastWriteTimeUtc -ge $Since -and $_.Name -match '^(dd_vcredist.*|dd_vcRuntime.*|msedge_installer.*|MicrosoftEdgeUpdate.*)\.log$'
@@ -229,6 +283,7 @@ $receipt = [ordered]@{
     reboot_required = $false
     install_verified = $false
     uninstall_verified = $false
+    managed_uninstall_verified = $false
     runtimes_before = $null
     runtimes_installed = $null
     runtimes_after = $null
@@ -349,6 +404,9 @@ try {
         try {
             if (Test-Path -LiteralPath $arpKey) {
                 Assert-ProtectedInstall
+                if ($receipt.upgrade_verified) {
+                    Test-ManagedUninstall $receipt.app_sha256 $receipt.previous.app_sha256
+                }
                 $receipt.uninstall_exit_code = Invoke-Installer (Get-RegisteredUninstaller) '' $uninstallLog
                 Assert-Expected ($receipt.uninstall_exit_code -eq 0) "Uninstaller returned $($receipt.uninstall_exit_code)."
                 Assert-Expected (Test-Path -LiteralPath $uninstallLog -PathType Leaf) 'Uninstaller did not write its log.'
@@ -357,6 +415,7 @@ try {
                     Assert-Expected ((Get-Sha256 (Join-Path $userRoot $name)) -ceq $savedData[$name]) "Uninstall changed synthetic data: $name"
                 }
                 $receipt.uninstall_verified = $true
+                $receipt.managed_uninstall_verified = $receipt.upgrade_verified
             } else {
                 Assert-ProductAbsent
             }
