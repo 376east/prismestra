@@ -18,8 +18,10 @@ In each measured desktop, record visible console shows and windows already visib
 
 Normalize one JSON file per scenario with `scenario`, `revision`, `artifact_sha256`, and `controls`. The `controls` keys are `process_start_stop`, `visible_console`, and `full_scenario`. Include `product_roots` and `harness_roots` as process identity lists. Each `processes` entry has `id`, `parent` (identity or null), and `image`. Each `windows` entry has `process` (identity or null), `class`, and boolean `visible`. Retain only the process and window data needed for the test. Harness shells are recognized by ancestry, including when a shell launches a product root. A shell under a product root still counts against the product.
 
+Every non-null parent must be present in the trace and refer to the current process instance at the child's start. If a parent cannot be resolved and the missing process affects coverage, set `process_start_stop` to false.
+
 ```powershell
-python scripts/shell_acceptance.py evidence.json --revision <commit> --artifact-sha256 <sha256>
+python scripts/shell_acceptance.py evidence.json --scenario uninstall --revision <commit> --artifact-sha256 <sha256>
 ```
 
 Exit code `0` confirms the scenario on the expected artifact with complete controls. Exit code `1` reports a shell started by the product or a visible product console. Exit code `2` means evidence is invalid or incomplete, including an unattributed shell or visible console. Apply the same checker to the control release and to the combined Setup, runtime and portable candidate. Preserve the three component heads and the final candidate tree in the evidence.
