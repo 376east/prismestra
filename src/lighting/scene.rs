@@ -166,6 +166,13 @@ impl Effect {
     pub(crate) fn uses_reactive(self) -> bool {
         self.reactive_source().is_some()
     }
+    #[cfg(windows)]
+    pub(crate) fn needs_explicit_capture(self) -> bool {
+        matches!(
+            self.reactive_source(),
+            Some(ReactiveSource::Keys | ReactiveSource::Camera)
+        )
+    }
     pub(crate) fn uses_keys(self) -> bool {
         self.reactive_source() == Some(ReactiveSource::Keys)
     }

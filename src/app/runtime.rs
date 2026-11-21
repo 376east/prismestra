@@ -244,6 +244,8 @@ pub struct Runtime {
     #[cfg(windows)]
     native_inputs: bool,
     #[cfg(windows)]
+    authorized_capture: Option<crate::lighting::scene::Effect>,
+    #[cfg(windows)]
     reactive: reactive_sources::Sources,
     #[cfg(windows)]
     cpu_load: system_load::Load,
@@ -332,6 +334,8 @@ impl Runtime {
             sound: sound::Input::default(),
             #[cfg(windows)]
             native_inputs: false,
+            #[cfg(windows)]
+            authorized_capture: None,
             #[cfg(windows)]
             reactive: reactive_sources::Sources::default(),
             #[cfg(windows)]
@@ -451,6 +455,28 @@ impl Runtime {
     #[cfg(windows)]
     pub(crate) fn enable_native_scene_inputs(&mut self) {
         self.native_inputs = true;
+    }
+    #[cfg(windows)]
+    pub(crate) fn capture_authorized(&self) -> bool {
+        self.authorized_capture == Some(self.document.lighting.scene.effect)
+    }
+    #[cfg(windows)]
+    fn revoke_capture_on_effect_change(&mut self, next: crate::lighting::scene::Effect) {
+        if self.authorized_capture.is_some_and(|effect| effect != next) {
+            self.authorized_capture = None;
+            self.reactive.stop();
+            self.host
+                .set_reactive(Default::default(), crate::clock::monotonic_us());
+        }
+    }
+    #[cfg(windows)]
+    fn wanted_reactive(&self, rgb_wanted: bool) -> Option<crate::lighting::scene::ReactiveSource> {
+        let effect = self.document.lighting.scene.effect;
+        if rgb_wanted && (!effect.needs_explicit_capture() || self.capture_authorized()) {
+            effect.reactive_source()
+        } else {
+            None
+        }
     }
     #[cfg(windows)]
     pub(crate) fn reactive_input(&self) -> crate::capture::reactive::Snapshot {
@@ -1082,6 +1108,8 @@ impl Runtime {
                 self.managed_backend_ids = ids;
                 self.enable_registered_output_recovery();
             }
+            #[cfg(windows)]
+            self.revoke_capture_on_effect_change(proposal.lighting.scene.effect);
             self.document = proposal;
             self.document_revision = self.document_revision.wrapping_add(1);
             if let Some(host) = host {
@@ -1209,9 +1237,26 @@ impl Runtime {
             );
         }
         self.host.configure_scene(scene.clone())?;
+        #[cfg(windows)]
+        self.revoke_capture_on_effect_change(scene.effect);
         self.document.lighting.scene = scene;
         self.document_revision = self.document_revision.wrapping_add(1);
         self.bump_view();
+        Ok(())
+    }
+    #[cfg(windows)]
+    pub(crate) fn apply_native_scene(
+        &mut self,
+        scene: crate::runtime::scene::Scene,
+    ) -> Result<(), String> {
+        let effect = scene.effect;
+        if effect.needs_explicit_capture() {
+            self.usable()?;
+        }
+        self.set_scene(scene)?;
+        // The installed restore path can attach RGB without using the manual connect command.
+        self.enable_native_scene_inputs();
+        self.authorized_capture = effect.needs_explicit_capture().then_some(effect);
         Ok(())
     }
     pub fn configure_schedule(&mut self, config: schedule::Config) -> Result<(), String> {
@@ -1514,6 +1559,7 @@ impl Runtime {
     fn stop_channels(&mut self) {
         #[cfg(windows)]
         {
+            self.authorized_capture = None;
             self.sound.stop();
             self.host.set_audio(None);
             self.reactive.stop();
@@ -2032,11 +2078,7 @@ impl Runtime {
                 if audio_wanted || had_worker {
                     self.host.set_audio(self.sound.latest(now_us));
                 }
-                let source = if rgb_wanted {
-                    effect.reactive_source()
-                } else {
-                    None
-                };
+                let source = self.wanted_reactive(rgb_wanted);
                 let had_reactive = self.reactive.wanted();
                 let media_mode =
                     rgb_wanted && effect == crate::lighting::scene::Effect::MediaAmbience;

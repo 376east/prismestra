@@ -105,6 +105,7 @@ const COLOR_INDEX: i32 = 205;
 const COLOR_EDIT: i32 = 206;
 const PC_ON: i32 = 207;
 const DOOR_ON: i32 = 208;
+const APPLY_CAPTURE: i32 = 209;
 const SCHED_ON: i32 = 401;
 const SCHED_PAUSE: i32 = 402;
 const TIME_PC: i32 = 403;
@@ -699,6 +700,13 @@ impl App {
         }
         self.control(
             parent,
+            APPLY_CAPTURE,
+            "BUTTON",
+            "Применить источник",
+            BS_PUSHBUTTON as u32,
+        )?;
+        self.control(
+            parent,
             BRIGHT,
             "msctls_trackbar32",
             "",
@@ -894,6 +902,14 @@ impl App {
         self.set_text(FIRST_LABEL + 2, &label);
         unsafe {
             EnableWindow(self.h(SPEED), i32::from(clock_label.is_none()));
+            EnableWindow(
+                self.h(APPLY_CAPTURE),
+                i32::from(
+                    self.native_lighting.is_some()
+                        && p.scene.effect.needs_explicit_capture()
+                        && !self.runtime.read(Runtime::capture_authorized),
+                ),
+            );
         }
         let rates = rates(p.scene.fps);
         let color_index = unsafe { SendMessageW(self.h(COLOR_INDEX), CB_GETCURSEL, 0, 0) }.max(0);
@@ -995,6 +1011,7 @@ impl App {
         self.pos(SPEED, r, 318, 280, 28);
         self.pos(PC_ON, r, 522, 280, 28);
         self.pos(DOOR_ON, r, 554, 280, 28);
+        self.pos(APPLY_CAPTURE, r, 589, 280, 30);
         for (i, y) in [142, 220, 294, 368, 440].into_iter().enumerate() {
             self.pos(FIRST_LABEL + i as i32, r, y, 280, 22);
         }
@@ -1870,12 +1887,20 @@ impl App {
             },
         );
     }
-    fn changed_scene(&mut self, scene: Scene) -> Result<(), String> {
-        self.runtime.set_scene(scene)?;
+    fn update_scene(&mut self, scene: Scene, applied: bool) -> Result<(), String> {
+        if applied && self.native_lighting.is_some() {
+            self.runtime
+                .with(|runtime, _| runtime.apply_native_scene(scene))?;
+        } else {
+            self.runtime.set_scene(scene)?;
+        }
         self.dirty = true;
         self.status = "Сцена изменена и ещё не сохранена.".into();
         self.sync();
         Ok(())
+    }
+    fn changed_scene(&mut self, scene: Scene) -> Result<(), String> {
+        self.update_scene(scene, false)
     }
     fn command(&mut self, id: i32, notice: u16) -> Result<(), String> {
         if matches!(
@@ -1959,6 +1984,12 @@ impl App {
                 let (lo, hi) = s.effect.limits();
                 s.speed = s.speed.clamp(lo, hi);
                 self.changed_scene(s)?;
+            }
+            APPLY_CAPTURE
+                if self.page == Page::Scene
+                    && self.runtime.project().scene.effect.needs_explicit_capture() =>
+            {
+                self.update_scene(self.runtime.project().scene.clone(), true)?;
             }
             FPS if notice == CBN_SELCHANGE as u16 => {
                 let index = unsafe { SendMessageW(self.h(FPS), CB_GETCURSEL, 0, 0) };

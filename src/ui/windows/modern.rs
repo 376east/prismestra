@@ -620,6 +620,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
         .collect::<Vec<_>>();
     value["state"]["effects"] = json!(effects);
     value["state"]["draftMapRevision"] = json!(draft_map_revision);
+    value["state"]["captureAuthorized"] = json!(app.runtime.read(Runtime::capture_authorized));
     value["state"]["mapConnection"] = map_connection(app);
     let schedule = &app.runtime.project().schedule;
     value["state"]["schedule"] = json!({"enabled":schedule.enabled,"paused":schedule.paused});
@@ -997,7 +998,7 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                     if a.editor_dirty {
                         return Err("Примените или сбросьте параметры устройств".into());
                     }
-                    a.changed_scene(scene)?;
+                    a.update_scene(scene, true)?;
                 }
                 Command::Groups { pc, door } => {
                     a.runtime.set_group(Target::Pc, pc)?;
@@ -1209,6 +1210,7 @@ pub(super) fn maintain(state: &State) {
         } else {
             Value::Null
         };
+        value["state"]["captureAuthorized"] = json!(app.runtime.read(Runtime::capture_authorized));
         if session.last_native_send.elapsed() >= Duration::from_millis(250) {
             session.last_native_send = Instant::now();
             value["state"]["deviceCandidates"] = json!(device_candidates(app));

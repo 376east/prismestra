@@ -8,6 +8,11 @@ Keyboard effects use Windows Raw Input. The approximate full-size ANSI map inclu
 
 Camera effects use the first video device enumerated by Windows. They estimate either the image color or the position, strength and color of recent movement. Prismestra discards full frames after local analysis. Camera access is controlled by Windows. [Camera settings](https://learn.microsoft.com/en-us/windows/apps/develop/camera/camera-privacy-setting)
 
+Apply the keyboard or camera effect explicitly in the current connected
+session. Opening, restoring or automatically starting a saved profile leaves
+these inputs off. The permission is held in memory for the active effect and
+cleared when Windows suspends the session.
+
 ## Counter-Strike 2 and Dota 2
 
 1. Select an effect in the game group, such as Game resources, and choose **Save CS2 configuration** or **Save Dota 2 configuration** in the editor.

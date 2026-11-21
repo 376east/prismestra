@@ -760,3 +760,19 @@ console.log('PASS: Settings return focus waits for acknowledgement and respects 
  assert.equal(vm.runInContext('state.scene.effect',context),'extra_77');
 }
 console.log('PASS: 80 effect choices in provider order, shared escaped labels and filtering, focused draft-only effect preview');
+
+{
+ const camera={...scene,effect:'camera_color'};
+ const effects=[{id:'camera_color',name:'Цвет камеры',reactive:'camera',directColor:true}];
+ vm.runInContext('view="editor";draft=null',context);
+ const before=commands.filter(command=>command.op==='apply_scene').length;
+ receiveDeviceState('snapshot',{...initial,scene:camera,draftScene:null,effects,native:true,captureAuthorized:false});
+ assert.equal(find('#footer-apply').disabled,false,'a restored effect can be applied without editing it');
+ assert.equal(commands.filter(command=>command.op==='apply_scene').length,before,'restore cannot apply the input');
+ find('#footer-apply').onclick();
+ assert.equal(commands.at(-1).op,'apply_scene');
+ assert.equal(commands.at(-1).scene.effect,'camera_color');
+ receiveDeviceState('snapshot',{...initial,scene:camera,draftScene:null,effects,native:true,captureAuthorized:true});
+ assert.equal(find('#footer-apply').disabled,true,'an applied unchanged scene needs no second click');
+}
+console.log('PASS: restored capture is inert and can be explicitly applied without editing the effect');

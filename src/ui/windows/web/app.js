@@ -103,6 +103,10 @@ let settingsOpener = null, settingsFocusReturn = null;
 const busy = () => closing || !state || !!state.pending || commandPending || savedSceneRequest !== null;
 const disabled = () => busy() ? 'disabled' : '';
 const changed = () => !!draft && !!state && !same(draft,state.scene);
+const sourceNeedsApply = () => !!state?.native && !!draft
+ && ['camera','keys'].includes(reactiveEffects.get(draft.effect))
+ && (draft.effect!==state.scene.effect || !state.captureAuthorized);
+const applyNeeded = () => changed() || sourceNeedsApply();
 const unsavedDraft = () => !!draft && (!draftOrigin || !same(draft,draftOrigin.scene));
 const deviceFocusKey = id => `[data-device-id="${CSS.escape(id)}"]`;
 function focusKey(node=document.activeElement) {
@@ -131,7 +135,7 @@ function controlDisabled(node) {
   if(code==='insert-palette-color')return draft.colors.length>=8;
   return code==='move-palette-earlier'?paletteIndex()===0:paletteIndex()===draft.colors.length-1;
  }
- return busy() || (node.dataset.needsChange==='scene'&&!changed()) || (node.dataset.needsChange==='document'&&!(state?.editor?.dirty||currentGenericStages().length)) || (code==='add-color'&&draft?.colors.length>=8) || (node.dataset.removeColor!==undefined&&draft?.colors.length<=1);
+ return busy() || (node.dataset.needsChange==='scene'&&!applyNeeded()) || (node.dataset.needsChange==='document'&&!(state?.editor?.dirty||currentGenericStages().length)) || (code==='add-color'&&draft?.colors.length>=8) || (node.dataset.removeColor!==undefined&&draft?.colors.length<=1);
 }
 const advancedPage = () => ['connections','sources','schedule'].includes(view);
 function nativeFormForView() {return advancedPage()?state?.nativeForm:state?.nativeAux;}
@@ -205,7 +209,7 @@ function syncControls(keepRetryFocus) {
  document.querySelectorAll('[data-native-control]').forEach(node=>node.disabled=nativeControlDisabled(node));
  document.querySelectorAll('[data-local-discard]').forEach(node=>{node.hidden=!currentPageStaged();node.disabled=closing||commandPending;});
  $('#master-brightness').disabled=busy()||!draft;
- $('#footer-apply').disabled=busy()||!changed();
+ $('#footer-apply').disabled=busy()||!applyNeeded();
  $('#play').disabled=busy();
  const light=!!(state?.groups?.pc||state?.groups?.door);$('#play').textContent=light?'Выключить свет':'Включить свет';
  $('#player-name').textContent=state?effectLabel(state.scene.effect):'Prismestra';
@@ -235,8 +239,8 @@ function syncControls(keepRetryFocus) {
  syncOutputRetries(keepRetryFocus);
  $('#save-status').textContent=busy()&&state?'Выполняется…':state?.dirty?'Профиль изменён':'Локальный профиль';
  if(draft){$('#master-brightness').value=draft.brightness;$('#master-value').textContent=draft.brightness+'%';}
- const status=$('.scene-status');if(status)status.textContent=changed()?'Изменения ещё не применены':'Эта версия применена';
- const apply=$('[data-action="apply-scene"]');if(apply)apply.textContent=changed()?'Применить':'Применено';
+ const status=$('.scene-status');if(status)status.textContent=changed()?'Изменения ещё не применены':sourceNeedsApply()?'Для источника нужно применить сцену':'Эта версия применена';
+ const apply=$('[data-action="apply-scene"]');if(apply)apply.textContent=applyNeeded()?'Применить':'Применено';
  if(state){const art=$('#player-art'),ctx=art.getContext('2d');art.setAttribute('aria-label','Палитра применённой сцены');state.scene.colors.forEach((c,i)=>{ctx.fillStyle=hex(c);ctx.fillRect(i*art.width/state.scene.colors.length,0,Math.ceil(art.width/state.scene.colors.length),art.height);});}
  if(state?.error)showError(state.error,true);
 }
