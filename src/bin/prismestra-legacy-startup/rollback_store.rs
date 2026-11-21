@@ -31,10 +31,10 @@ use windows_sys::{
             FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_DISPOSITION_INFO,
             FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
             FILE_READ_ATTRIBUTES, FILE_RENAME_INFO_0, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA,
-            FileDispositionInfo, FileRenameInfo, GetDriveTypeW, GetFileInformationByHandle,
-            GetFinalPathNameByHandleW, OPEN_EXISTING, READ_CONTROL, SetFileInformationByHandle,
-            VOLUME_NAME_GUID, WRITE_DAC, WRITE_OWNER,
+            FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, FileDispositionInfo,
+            FileRenameInfo, GetDriveTypeW, GetFileInformationByHandle, GetFinalPathNameByHandleW,
+            OPEN_EXISTING, READ_CONTROL, SetFileInformationByHandle, VOLUME_NAME_GUID, WRITE_DAC,
+            WRITE_OWNER,
         },
         System::{Com::CoTaskMemFree, WindowsProgramming::DRIVE_FIXED},
         UI::Shell::{FOLDERID_ProgramData, KF_FLAG_DONT_VERIFY, SHGetKnownFolderPath},
@@ -71,13 +71,13 @@ pub(super) fn save(original_sid: &str, bytes: &[u8]) -> Result<PathBuf, String> 
     }
 
     // Keep every ancestor open without delete sharing until the receipt is published.
-    let root = protected_directory(&drive, true, FILE_APPEND_DATA, 0)?;
+    let root = protected_directory(&drive, true, FILE_APPEND_DATA)?;
     let volume_name = final_path(&root)?;
     let volume_root = volume_root(&volume_name)?;
     let base_path = volume_root.join("ProgramData");
-    let base = protected_directory(&base_path, true, PROGRAM_DATA_EXCEPTION, 0)?;
+    let base = protected_directory(&base_path, true, PROGRAM_DATA_EXCEPTION)?;
     let microsoft_path = base_path.join("Microsoft");
-    let microsoft = protected_directory(&microsoft_path, false, 0, 0)?;
+    let microsoft = protected_directory(&microsoft_path, false, 0)?;
     // A real, protected Microsoft child keeps ProgramData nonempty, including on
     // stock Windows where Users can write attributes on ProgramData itself.
     if !final_path(&microsoft)?
@@ -90,16 +90,16 @@ pub(super) fn save(original_sid: &str, bytes: &[u8]) -> Result<PathBuf, String> 
 
     let store_path = base_path.join(STORE);
     let descriptor = security_descriptor(DIRECTORY_SDDL)?;
-    let _store = create_protected_directory(&store_path, &descriptor, 0)?;
+    let _store = create_protected_directory(&store_path, &descriptor)?;
     let owner_path = store_path.join(original_sid);
-    let owner = create_protected_directory(&owner_path, &descriptor, FILE_TRAVERSE)?;
+    let _owner = create_protected_directory(&owner_path, &descriptor)?;
 
     let mut random = [0; 16];
     getrandom::fill(&mut random).map_err(|e| format!("rollback receipt ID: {e}"))?;
     let id = format!("{:032x}", u128::from_le_bytes(random));
     let name = format!("{id}.json");
     let stage = owner_path.join(format!("{id}.tmp"));
-    write_receipt(&owner, &stage, &name, bytes)?;
+    write_receipt(&stage, &owner_path.join(&name), bytes)?;
     Ok(program_data.join(STORE).join(original_sid).join(name))
 }
 
@@ -163,7 +163,7 @@ fn program_data_drive(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn final_path(handle: &OwnedHandle) -> Result<PathBuf, String> {
-    let mut buffer = [0; 128];
+    let mut buffer = [0; 512];
     let len = unsafe {
         GetFinalPathNameByHandleW(
             handle.as_raw_handle(),
@@ -205,7 +205,6 @@ fn volume_root(path: &Path) -> Result<PathBuf, String> {
 fn create_protected_directory(
     path: &Path,
     descriptor: &LocalAllocation,
-    access: u32,
 ) -> Result<OwnedHandle, String> {
     let attributes = security_attributes(descriptor);
     if unsafe { CreateDirectoryW(wide(path).as_ptr(), &attributes) } == 0 {
@@ -217,19 +216,18 @@ fn create_protected_directory(
             ));
         }
     }
-    protected_directory(path, false, 0, access)
+    protected_directory(path, false, 0)
 }
 
 fn protected_directory(
     path: &Path,
     system_path: bool,
     exception: u32,
-    access: u32,
 ) -> Result<OwnedHandle, String> {
     let handle = unsafe {
         CreateFileW(
             wide(path).as_ptr(),
-            READ_CONTROL | FILE_READ_ATTRIBUTES | access,
+            READ_CONTROL | FILE_READ_ATTRIBUTES,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             null(),
             OPEN_EXISTING,
@@ -355,12 +353,7 @@ fn security_attributes(descriptor: &LocalAllocation) -> SECURITY_ATTRIBUTES {
     }
 }
 
-fn write_receipt(
-    owner: &OwnedHandle,
-    stage: &Path,
-    name: &str,
-    bytes: &[u8],
-) -> Result<(), String> {
+fn write_receipt(stage: &Path, target: &Path, bytes: &[u8]) -> Result<(), String> {
     let descriptor = security_descriptor(RECEIPT_SDDL)?;
     let attributes = security_attributes(&descriptor);
     let handle = unsafe {
@@ -382,19 +375,7 @@ fn write_receipt(
         file.write_all(bytes)
             .and_then(|()| file.sync_all())
             .map_err(|e| format!("write rollback receipt: {e}"))?;
-        // Rename the open file inside the held SID directory, without replacement.
-        let rename = ReceiptRename::new(owner.as_raw_handle(), name);
-        if unsafe {
-            SetFileInformationByHandle(
-                file.as_raw_handle(),
-                FileRenameInfo,
-                addr_of!(rename).cast(),
-                size_of::<ReceiptRename>() as u32,
-            )
-        } == 0
-        {
-            return Err(win_error("publish rollback receipt"));
-        }
+        publish_receipt(&file, target)?;
         file.sync_all()
             .map_err(|e| format!("flush published rollback receipt: {e}"))
     })();
@@ -417,27 +398,51 @@ fn write_receipt(
     result
 }
 
+fn publish_receipt(file: &File, target: &Path) -> Result<(), String> {
+    let rename = ReceiptRename::new(target)?;
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileRenameInfo,
+            addr_of!(rename).cast(),
+            size_of::<ReceiptRename>() as u32,
+        )
+    } == 0
+    {
+        return Err(win_error("publish rollback receipt"));
+    }
+    Ok(())
+}
+
 #[repr(C)]
 struct ReceiptRename {
     flags: FILE_RENAME_INFO_0,
     root: HANDLE,
     name_len: u32,
-    name: [u16; 40], // 32 hex characters, .json, a terminator, and ABI padding
+    // The absolute volume GUID path contains a fixed directory, a bounded SID,
+    // and a fixed-length random filename.
+    name: [u16; 512],
 }
 
 impl ReceiptRename {
-    fn new(root: HANDLE, name: &str) -> Self {
+    fn new(path: &Path) -> Result<Self, String> {
+        if !path.is_absolute() {
+            return Err("rollback receipt target must be absolute".into());
+        }
         let mut rename = Self {
             flags: FILE_RENAME_INFO_0 { Flags: 0 },
-            root,
+            root: null_mut(),
             name_len: 0,
-            name: [0; 40],
+            name: [0; 512],
         };
-        for (index, ch) in name.encode_utf16().enumerate() {
+        for (index, ch) in path.as_os_str().encode_wide().enumerate() {
+            if ch == 0 || index >= rename.name.len() - 1 {
+                return Err("invalid rollback receipt target".into());
+            }
             rename.name[index] = ch;
             rename.name_len += size_of::<u16>() as u32;
         }
-        rename
+        Ok(rename)
     }
 }
 
@@ -535,9 +540,10 @@ mod tests {
             offset_of!(ReceiptRename, name),
             offset_of!(FILE_RENAME_INFO, FileName)
         );
-        let name = "0123456789abcdef0123456789abcdef.json";
-        let rename = ReceiptRename::new(null_mut(), name);
+        let name = r"C:\rollback\0123456789abcdef0123456789abcdef.json";
+        let rename = ReceiptRename::new(Path::new(name)).unwrap();
         assert!(size_of::<ReceiptRename>() >= size_of::<FILE_RENAME_INFO>() + name.len() * 2);
+        assert!(rename.root.is_null());
         assert!(!unsafe { rename.flags.ReplaceIfExists });
         assert_eq!(rename.name_len, (name.len() * 2) as u32);
         assert_eq!(
@@ -545,5 +551,63 @@ mod tests {
             name
         );
         assert_eq!(rename.name[name.len()], 0);
+    }
+
+    #[test]
+    fn win32_publishes_to_the_held_local_directory_without_replacing_files() {
+        let mut random = [0; 16];
+        getrandom::fill(&mut random).unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "prismestra-rollback-{:032x}",
+            u128::from_le_bytes(random)
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        struct Remove(std::path::PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Remove(directory.clone());
+        let target = directory.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json");
+        let stage = directory.join("owned.tmp");
+        let parent = unsafe {
+            CreateFileW(
+                wide(&directory).as_ptr(),
+                READ_CONTROL | FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        let parent = owned(parent, "fixture parent").unwrap();
+        let absolute_target = final_path(&parent)
+            .unwrap()
+            .join(target.file_name().unwrap());
+        let file = unsafe {
+            CreateFileW(
+                wide(&stage).as_ptr(),
+                GENERIC_WRITE | READ_CONTROL | FILE_READ_ATTRIBUTES | DELETE,
+                0,
+                null(),
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
+                null_mut(),
+            )
+        };
+        let mut file = File::from(owned(file, "fixture file").unwrap());
+        file.write_all(b"owned fixture").unwrap();
+        file.sync_all().unwrap();
+        std::fs::write(&target, b"existing").unwrap();
+        assert!(publish_receipt(&file, &absolute_target).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"existing");
+        std::fs::remove_file(&target).unwrap();
+        publish_receipt(&file, &absolute_target).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        assert!(!stage.exists());
+        assert_eq!(std::fs::read(&target).unwrap(), b"owned fixture");
     }
 }
