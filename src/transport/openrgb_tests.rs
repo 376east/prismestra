@@ -79,6 +79,17 @@ fn controller_matrices(
     matrices: &[Option<&[u32]>],
     effects_only: bool,
 ) -> Vec<u8> {
+    controller_layout(serial, future, matrices, effects_only, None, "Direct")
+}
+
+fn controller_layout(
+    serial: &str,
+    future: bool,
+    matrices: &[Option<&[u32]>],
+    effects_only: bool,
+    zone_layout: Option<&[(&str, u32)]>,
+    mode: &str,
+) -> Vec<u8> {
     let mut b = vec![0; 4];
     u32v(&mut b, if future { 99 } else { 14 });
     for value in [
@@ -93,7 +104,7 @@ fn controller_matrices(
     }
     u16v(&mut b, 1);
     u32v(&mut b, u32::MAX); // no valid active mode must not panic
-    string(&mut b, "Direct");
+    string(&mut b, mode);
     for value in [
         0x30 | if future { 1 << 30 } else { 0 },
         0,
@@ -111,8 +122,11 @@ fn controller_matrices(
     }
     u16v(&mut b, 0); // mode colors
     u16v(&mut b, matrices.len() as u16);
+    let mut outputs = 0;
     for (zone, matrix) in matrices.iter().enumerate() {
-        string(&mut b, "Zone");
+        let (name, count) = zone_layout.map_or(("Zone", 2), |layout| layout[zone]);
+        outputs += count;
+        string(&mut b, name);
         for value in [
             if future {
                 99
@@ -121,9 +135,9 @@ fn controller_matrices(
             } else {
                 1
             },
-            2,
-            2,
-            2,
+            count,
+            count,
+            count,
         ] {
             u32v(&mut b, value);
         }
@@ -145,9 +159,9 @@ fn controller_matrices(
         );
         u32v(&mut b, u32::MAX);
         u16v(&mut b, 0);
-        string(&mut b, "Zone");
+        string(&mut b, name);
     }
-    let outputs = matrices.len() * 2 - usize::from(effects_only);
+    let outputs = outputs as usize - usize::from(effects_only);
     u16v(&mut b, outputs as u16);
     for index in 0..outputs {
         string(&mut b, &format!("LED{index}"));
@@ -160,6 +174,107 @@ fn controller_matrices(
     let n = b.len() as u32;
     b[..4].copy_from_slice(&n.to_le_bytes());
     b
+}
+
+#[test]
+fn b650_restored_zones_enable_whole_frame_and_missing_zones_fail_closed() {
+    use crate::{
+        devices::openrgb::{identity, topology},
+        lighting::color::Rgb,
+        runtime::{
+            network::OpenRgb,
+            output::{Cancellation, RgbDriver},
+        },
+    };
+    let payload = |zones: [u32; 2], mode| {
+        controller_layout(
+            "B650-FIXTURE",
+            false,
+            &[None, None, None],
+            false,
+            Some(&[
+                ("ARGB_V2_1/ARGB_V2_3", zones[0]),
+                ("ARGB_V2_2", zones[1]),
+                ("LED_C", 1),
+            ]),
+            mode,
+        )
+    };
+    let saved = payload([27, 27], "Direct");
+    let (endpoint, _, server) = matrix_server(vec![saved.clone()]);
+    let mut session = OpenRgbSession::connect(endpoint, deadline(), &|| false).unwrap();
+    let expected = session.scan(deadline(), &|| false).unwrap().remove(0);
+    assert_eq!(expected.leds, 55);
+    assert!(expected.supports_direct);
+    assert_eq!(
+        expected
+            .zones
+            .iter()
+            .map(|zone| zone.led_offset)
+            .collect::<Vec<_>>(),
+        [0, 27, 54]
+    );
+    drop(session);
+    server.join().unwrap();
+
+    for (descriptor, reason) in [
+        (
+            payload([0, 0], "Direct"),
+            "expects 55 LEDs; the controller reports 1. Zones: ARGB_V2_1/ARGB_V2_3: 0, ARGB_V2_2: 0, LED_C: 1.",
+        ),
+        (
+            payload([26, 28], "Direct"),
+            "controller reports 55. Zones: ARGB_V2_1/ARGB_V2_3: 26, ARGB_V2_2: 28, LED_C: 1.",
+        ),
+        (
+            payload([27, 27], "Static"),
+            "no longer advertises a compatible Direct mode",
+        ),
+        (saved, ""),
+    ] {
+        let (endpoint, calls, server) = matrix_server(vec![descriptor.clone(), descriptor]);
+        let cancel = Cancellation::default();
+        let result = OpenRgb::connect(
+            endpoint,
+            &identity(&expected),
+            &topology(&expected),
+            55,
+            &cancel,
+        );
+        match result {
+            Ok(mut driver) => {
+                assert!(reason.is_empty());
+                let colors = (0..55).map(|r| Rgb { r, g: 0, b: 0 }).collect::<Vec<_>>();
+                driver.write(&colors, &cancel).unwrap();
+                let denied =
+                    cancel.with_guard(Arc::new(|| Err("listener ownership changed".into())));
+                assert!(driver.write(&colors, &denied).is_err());
+            }
+            Err(error) => {
+                assert!(!reason.is_empty() && error.contains(reason), "{error}");
+            }
+        }
+        server.join().unwrap();
+        let calls = calls.lock().unwrap();
+        let writes = calls
+            .iter()
+            .filter(|(_, id, _)| matches!(id, 1101 | 1050))
+            .collect::<Vec<_>>();
+        if reason.is_empty() {
+            assert_eq!(
+                writes.iter().map(|(_, id, _)| *id).collect::<Vec<_>>(),
+                [1101, 1050]
+            );
+            let frame = &writes[1].2;
+            assert_eq!(u16::from_le_bytes(frame[4..6].try_into().unwrap()), 55);
+            assert_eq!(
+                [frame[6], frame[6 + 27 * 4], frame[6 + 54 * 4]],
+                [0, 27, 54]
+            );
+        } else {
+            assert!(writes.is_empty());
+        }
+    }
 }
 
 type Captured = Arc<Mutex<Vec<(u32, u32, Vec<u8>)>>>;

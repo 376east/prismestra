@@ -78,7 +78,7 @@ impl Runtime {
         use crate::devices::Driver;
 
         #[cfg(windows)]
-        if self.managed_backend_ids.contains(id) {
+        if self.managed_backend_ids.contains(id) && !self.managed_openrgb_retry_available(id) {
             return false;
         }
         self.document
@@ -89,7 +89,7 @@ impl Runtime {
             .any(|device| device.id == id && device.enabled && device.driver == Driver::OpenRgb)
     }
 
-    /// One explicit retry for a saved external OpenRGB output after its automatic budget.
+    /// One explicit retry for a saved OpenRGB output after its automatic budget.
     pub fn openrgb_retry_ticket(&self, id: &str) -> Option<OpenRgbRetryTicket> {
         use crate::runtime::output::Phase;
 

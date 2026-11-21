@@ -211,10 +211,45 @@ impl OpenRgb {
         if controller.kind.eq_ignore_ascii_case("virtual") {
             return Err("OpenRGB virtual controllers cannot own physical lighting outputs".into());
         }
+        if !controller.supports_direct {
+            return Err(
+                "OpenRGB controller no longer advertises a compatible Direct mode. Restore Direct support for this controller before retrying."
+                    .into(),
+            );
+        }
         if controller.leds != leds || metadata::topology(controller) != topology {
+            let mut zones = controller
+                .zones
+                .iter()
+                .take(6)
+                .map(|zone| {
+                    let name: String = zone
+                        .name
+                        .chars()
+                        .filter(|ch| !ch.is_control())
+                        .take(48)
+                        .collect();
+                    if zone.leds == zone.reported_leds {
+                        format!("{name}: {}", zone.leds)
+                    } else {
+                        format!(
+                            "{name}: {} addressable ({} reported)",
+                            zone.leds, zone.reported_leds
+                        )
+                    }
+                })
+                .collect::<Vec<_>>();
+            if controller.zones.len() > zones.len() {
+                zones.push("…".into());
+            }
+            let geometry = if zones.is_empty() {
+                String::new()
+            } else {
+                format!(" Zones: {}.", zones.join(", "))
+            };
             return Err(format!(
-                "OpenRGB topology changed ({} LEDs); update device/map and rediscover before Apply",
-                controller.leds
+                "OpenRGB topology changed. The saved binding expects {leds} LEDs; the controller reports {}.{geometry} Restore the saved OpenRGB zone layout, then retry this output.",
+                controller.leds,
             ));
         }
         session.open_output(controller, deadline(), &cancelled)?;

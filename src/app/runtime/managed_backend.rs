@@ -65,6 +65,18 @@ impl OpenRgbPolicies {
 }
 
 impl Runtime {
+    pub(super) fn managed_openrgb_retry_available(&self, id: &str) -> bool {
+        let Some((backend, spec)) = self.managed_backend.as_ref().zip(self.rgb_specs.get(id))
+        else {
+            return false;
+        };
+        backend.snapshot().ready
+            && matches!(
+                self.openrgb_policies.policy(&spec.factory),
+                Some(OpenRgbPolicy::Managed(owner)) if Arc::ptr_eq(owner, &backend.ownership())
+            )
+    }
+
     /// Explicit read-only discovery can start the configured backend before binding IDs exist.
     pub fn managed_discovery_guard(
         &mut self,
