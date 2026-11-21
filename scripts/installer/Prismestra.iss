@@ -201,6 +201,27 @@ begin
   if not Result then Result := OriginalUserWebViewReady;
 end;
 
+procedure AppendReadySection(var Memo: String; const Section, NewLine: String);
+begin
+  if Section = '' then Exit;
+  if Memo <> '' then Memo := Memo + NewLine + NewLine;
+  Memo := Memo + Section;
+end;
+
+function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo,
+  MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
+begin
+  Result := '';
+  AppendReadySection(Result, MemoUserInfoInfo, NewLine);
+  AppendReadySection(Result, MemoDirInfo, NewLine);
+  AppendReadySection(Result, MemoTypeInfo, NewLine);
+  AppendReadySection(Result, MemoComponentsInfo, NewLine);
+  AppendReadySection(Result, MemoGroupInfo, NewLine);
+  AppendReadySection(Result, MemoTasksInfo, NewLine);
+  AppendReadySection(Result, 'Microsoft WebView2 Runtime:' + NewLine + Space +
+    'Setup installs the bundled runtime offline if it is needed.', NewLine);
+end;
+
 function PawnIOPresent: Boolean;
 begin
   Result := RegKeyExists(HKLM64, 'SYSTEM\CurrentControlSet\Services\PawnIO');
