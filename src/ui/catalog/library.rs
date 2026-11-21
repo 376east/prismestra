@@ -200,6 +200,15 @@ const MOTION_EXAMPLES: &[(Effect, Preset)] = &[
     (Effect::Aquarium, preset!("aquarium", "Рыбки", [0x79aab3, 0xe9a475, 0xf1df9d], 75, 50, 18)),
     (Effect::AlternatingZones, preset!("alternating-zones", "Чередование зон", [0x5c86c9, 0xb889ca, 0xe5868d], 70, 36, 19)),
     (Effect::ColorCycle, preset!("color-cycle", "Плавная смена цвета", [0x5d75c1, 0xc487b5, 0xf7ba82], 62, 35, 16)),
+    (Effect::AudioLevel, preset!("audio-level", "Уровень звука", [0x4e6f99, 0x85e2d9, 0xadc4ef], 72, 50, 16)),
+    (Effect::AudioSpectrum, preset!("audio-spectrum", "Спектр звука", [0x4c468a, 0x9a8bd1, 0xf5a873], 72, 50, 19)),
+    (Effect::AudioWaveform, preset!("audio-waveform", "Звуковая волна", [0x4599aa, 0x6bbccc, 0x9adbba], 77, 50, 16)),
+    (Effect::AudioBeatZones, preset!("audio-beat-zones", "Удар в звуковых зонах", [0x658db8, 0xbb8bcb, 0xffc177], 77, 50, 18)),
+    (Effect::AudioSpectrogram, preset!("audio-spectrogram", "Спектрограмма", [0x264765, 0xba6a8f, 0xf8b663], 78, 50, 14)),
+    (Effect::ThermalTint, preset!("thermal-tint", "Температура и цвет", [0x328cce, 0xe9a163, 0xff5f46], 74, 50, 16)),
+    (Effect::ThermalGauge, preset!("thermal-gauge", "Шкала температуры", [0x3c9b9f, 0xe4c459, 0xdd613e], 78, 50, 16)),
+    (Effect::DayNight, preset!("day-night", "День и ночь", [0x324161, 0xba6957, 0xf9cf91], 68, 50, 17)),
+    (Effect::CpuPulse, preset!("cpu-pulse", "Пульс нагрузки CPU", [0x375186, 0x7d80c6, 0xe78289], 76, 46, 19)),
 ];
 
 pub(crate) fn built_in() -> Vec<Entry> {
@@ -287,6 +296,10 @@ fn built_in_library_contains_legacy_presets_and_one_scene_for_each_new_motion() 
         assert!(scenes.insert(json));
         let mut renderer = Renderer::new(scene).unwrap();
         let first = renderer.step(&canvas).unwrap();
+        if entry.scene.effect.uses_audio() || entry.scene.effect.uses_context() {
+            assert!(first.iter().all(|color| color.rrggbb() == 0));
+            continue;
+        }
         let frames: Vec<_> = (0..50).map(|_| renderer.step(&canvas).unwrap()).collect();
         assert!(
             frames.iter().any(|frame| *frame != first),

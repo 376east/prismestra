@@ -122,6 +122,14 @@ fn instant(now: i64) -> Result<DateTime<Utc>, String> {
 }
 
 impl Schedule {
+    pub(crate) fn local_minute(&self, unix_seconds: i64) -> Result<u16, &'static str> {
+        use chrono::Timelike;
+        let time = chrono::DateTime::<chrono::Utc>::from_timestamp(unix_seconds, 0)
+            .ok_or("Invalid clock time")?
+            .with_timezone(&self.zone);
+        Ok((time.hour() * 60 + time.minute()) as u16)
+    }
+
     pub fn new(config: Config) -> Result<Self, String> {
         let zone = config.zone()?;
         Ok(Self {

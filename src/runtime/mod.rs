@@ -52,6 +52,8 @@ struct FrameView {
 struct Core {
     setup: std::sync::Arc<Setup>,
     renderer: Renderer,
+    #[cfg(windows)]
+    audio: Option<(u64, crate::capture::audio_features::AudioFeatures)>,
     outputs: BTreeMap<String, Output>,
     endpoint_leases: BTreeMap<String, Vec<String>>,
     cadences: BTreeMap<String, Cadence>,
@@ -72,6 +74,8 @@ impl Core {
         Ok(Self {
             setup: std::sync::Arc::new(setup),
             renderer,
+            #[cfg(windows)]
+            audio: None,
             outputs: BTreeMap::new(),
             endpoint_leases: BTreeMap::new(),
             cadences: BTreeMap::new(),
@@ -290,6 +294,9 @@ impl Core {
             .skipped_before_due(now_us, self.renderer.scene().fps);
         let rendered = skipped.is_some();
         if let Some(skipped) = skipped {
+            #[cfg(windows)]
+            self.renderer
+                .set_audio(crate::capture::recent_audio(self.audio, now_us));
             let preview = self
                 .renderer
                 .step_after_skips(&self.setup.canvas, skipped)?;

@@ -1,9 +1,30 @@
 //! Screen capture has no hardware-output capabilities. Native sources are opt-in;
 //! tests feed owned synthetic pixels or software D3D textures, never the desktop.
 pub mod ambient;
+pub mod audio_features;
+#[cfg(windows)]
+pub(crate) mod audio_loopback;
 pub mod pixels;
 #[cfg(windows)]
 pub mod windows;
+
+#[cfg(any(windows, test))]
+pub(crate) fn recent_audio(
+    input: Option<(u64, audio_features::AudioFeatures)>,
+    now_us: u64,
+) -> Option<(u64, audio_features::AudioFeatures)> {
+    input.filter(|(stamp, _)| {
+        now_us.saturating_sub(*stamp) <= 250_000 && *stamp <= now_us.saturating_add(50_000)
+    })
+}
+
+#[test]
+fn expired_audio_is_not_replayed() {
+    let input = Some((1_000_000, audio_features::AudioFeatures::default()));
+    assert_eq!(recent_audio(input, 1_090_000), input);
+    assert_eq!(recent_audio(input, 1_250_001), None);
+    assert_eq!(recent_audio(input, 900_000), None);
+}
 
 use crate::lighting::ambient::{Image, Rect};
 use std::sync::Arc;

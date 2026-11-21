@@ -249,6 +249,9 @@ fn preview_canvas(width: u32, height: u32) -> crate::devices::Canvas {
 }
 
 fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
+    if entry.scene.effect.uses_audio() || entry.scene.effect.uses_context() {
+        return json!({"id":entry.id,"name":entry.name,"scene":entry.scene});
+    }
     let (width, height) = if entry.scene.effect.uses_normalized_canvas() {
         (48, 24)
     } else {
@@ -592,7 +595,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
     let effects = Effect::ALL
         .iter()
         .copied()
-        .map(|effect| json!({"id":effect,"name":effect.label()}))
+        .map(|effect| json!({"id":effect,"name":effect.label(),"audio":effect.uses_audio(),"context":effect.uses_context()}))
         .collect::<Vec<_>>();
     value["state"]["effects"] = json!(effects);
     value["state"]["draftMapRevision"] = json!(draft_map_revision);
@@ -1105,6 +1108,16 @@ pub(super) fn maintain(state: &State) {
         let mut pixels = Vec::new();
         let mut canvas = &session.canvas;
         if let Some(renderer) = session.preview.as_mut() {
+            if renderer.scene().effect.uses_audio() {
+                renderer.set_audio(app.runtime.read(|runtime| runtime.audio_input()));
+            }
+            if renderer.scene().effect.uses_context() {
+                let effect = renderer.scene().effect;
+                let input = app.runtime.read(|runtime| {
+                    runtime.scene_context(effect, crate::clock::monotonic_us(), super::wall())
+                });
+                renderer.set_context(input);
+            }
             if renderer.scene().effect.uses_normalized_canvas() {
                 canvas = &session.detailed_canvas;
             }
@@ -1114,6 +1127,9 @@ pub(super) fn maintain(state: &State) {
         }
         let colors = pixels.iter().map(|c| c.rrggbb()).collect::<Vec<_>>();
         let mut value = json!({"kind":"status","state":{"scene":app.runtime.project().scene,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"preview":{"width":canvas.width,"height":canvas.height,"colors":colors}}});
+        if app.runtime.project().scene.effect.uses_audio() {
+            value["state"]["audioError"] = app.runtime.read(|runtime| json!(runtime.audio_error()));
+        }
         if session.last_native_send.elapsed() >= Duration::from_millis(250) {
             session.last_native_send = Instant::now();
             value["state"]["deviceCandidates"] = json!(device_candidates(app));

@@ -1,4 +1,4 @@
-use super::{Canvas, Effect, Rgb, Scene};
+use super::{Canvas, Effect, Rgb, Scene, shade};
 use std::f64::consts::TAU;
 
 mod display;
@@ -86,7 +86,7 @@ pub(super) fn frame(scene: &Scene, canvas: &Canvas, phase: f64) -> Result<Vec<Rg
     let width = f64::from(canvas.width.saturating_sub(1).max(1));
     let height = f64::from(canvas.height.saturating_sub(1).max(1));
     let scale = 0.6 + f64::from(scene.rainbow_width) / 20.0;
-    let brightness = f32::from(scene.brightness) / 100.0;
+    let playback = scene.playback();
     canvas
         .points
         .iter()
@@ -98,19 +98,7 @@ pub(super) fn frame(scene: &Scene, canvas: &Canvas, phase: f64) -> Result<Vec<Rg
                 scale,
                 phase,
             );
-            let index = position.clamp(0.0, 1.0) * (palette.len() - 1) as f64;
-            let left = palette[index.floor() as usize];
-            let right = palette[index.ceil() as usize];
-            let mix = |a: u8, b: u8| {
-                (f64::from(a) + (f64::from(b) - f64::from(a)) * index.fract()).round() as u8
-            };
-            Rgb::new(
-                mix(left.r, right.r),
-                mix(left.g, right.g),
-                mix(left.b, right.b),
-            )
-            .adjusted(brightness * intensity as f32, scene.temperature, scene.tint)
-            .map_err(str::to_owned)
+            shade(&palette, playback, position, intensity)
         })
         .collect()
 }
@@ -138,7 +126,7 @@ fn procedural_effects_have_distinct_geometry_and_follow_elapsed_time() {
     for effect in Effect::ALL
         .iter()
         .copied()
-        .filter(|e| e.uses_normalized_canvas())
+        .filter(|e| e.uses_normalized_canvas() && !e.uses_audio() && !e.uses_context())
     {
         let scene = Scene {
             effect,

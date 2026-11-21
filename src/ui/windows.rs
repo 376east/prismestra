@@ -881,7 +881,20 @@ impl App {
             FIRST_LABEL + 1,
             &format!("Яркость · {}%", p.scene.brightness),
         );
-        self.set_text(FIRST_LABEL + 2, &format!("Скорость · {}", p.scene.speed));
+        let clock_label = match p.scene.effect {
+            effect if effect.uses_audio() => Some("Системный звук"),
+            Effect::DayNight => Some("Местное время"),
+            Effect::ThermalTint | Effect::ThermalGauge => Some("Источники температуры"),
+            _ => None,
+        };
+        let label = clock_label.map_or_else(
+            || format!("Скорость · {}", p.scene.speed),
+            |name| format!("Источник · {name}"),
+        );
+        self.set_text(FIRST_LABEL + 2, &label);
+        unsafe {
+            EnableWindow(self.h(SPEED), i32::from(clock_label.is_none()));
+        }
         let rates = rates(p.scene.fps);
         let color_index = unsafe { SendMessageW(self.h(COLOR_INDEX), CB_GETCURSEL, 0, 0) }.max(0);
         unsafe {

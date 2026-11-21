@@ -29,6 +29,10 @@ pub mod coordinator;
 mod managed_backend;
 mod outputs;
 mod recovery;
+#[cfg(windows)]
+mod sound;
+#[cfg(windows)]
+mod system_load;
 pub use recovery::{OpenRgbRetryStatus, OpenRgbRetryTicket};
 mod registry_input;
 #[cfg(windows)]
@@ -233,6 +237,12 @@ pub struct Runtime {
     desired: Desired,
     lcd: BTreeMap<String, lcd_worker::Worker>,
     capture: Option<capture_worker::Worker>,
+    #[cfg(windows)]
+    sound: sound::Input,
+    #[cfg(windows)]
+    native_inputs: bool,
+    #[cfg(windows)]
+    cpu_load: system_load::Load,
     sensors: BTreeMap<String, sensor_worker::Worker>,
     sensor_specs: BTreeMap<String, SensorSpec>,
     sensor_stamps: BTreeMap<String, (u64, u64)>,
@@ -314,6 +324,12 @@ impl Runtime {
             desired,
             lcd: BTreeMap::new(),
             capture: None,
+            #[cfg(windows)]
+            sound: sound::Input::default(),
+            #[cfg(windows)]
+            native_inputs: false,
+            #[cfg(windows)]
+            cpu_load: system_load::Load::default(),
             sensors: BTreeMap::new(),
             sensor_specs: BTreeMap::new(),
             sensor_stamps: BTreeMap::new(),
@@ -425,6 +441,51 @@ impl Runtime {
     }
     pub fn capture_status(&self) -> Option<capture_worker::Snapshot> {
         self.capture.as_ref().map(capture_worker::Worker::snapshot)
+    }
+    #[cfg(windows)]
+    pub(crate) fn enable_native_scene_inputs(&mut self) {
+        self.native_inputs = true;
+    }
+    #[cfg(windows)]
+    pub(crate) fn audio_input(
+        &self,
+    ) -> Option<(u64, crate::capture::audio_features::AudioFeatures)> {
+        self.sound.latest(crate::clock::monotonic_us())
+    }
+    #[cfg(windows)]
+    pub(crate) fn audio_error(&self) -> Option<&str> {
+        self.sound.error.as_deref()
+    }
+
+    pub(crate) fn scene_context(
+        &self,
+        effect: crate::lighting::scene::Effect,
+        now_us: u64,
+        unix_seconds: i64,
+    ) -> crate::runtime::scene::ContextInput {
+        use crate::lighting::scene::Effect;
+        let mut input = crate::runtime::scene::ContextInput::default();
+        match effect {
+            Effect::ThermalTint | Effect::ThermalGauge => {
+                let now_ms = now_us / 1000;
+                input.temperature = self
+                    .samples
+                    .iter()
+                    .filter(|sample| {
+                        now_ms
+                            .checked_sub(sample.observed_ms)
+                            .is_some_and(|age| age <= 5000)
+                    })
+                    .map(|sample| sample.celsius)
+                    .filter(|t| t.is_finite())
+                    .max_by(f64::total_cmp);
+            }
+            Effect::DayNight => input.local_minute = self.schedule.local_minute(unix_seconds).ok(),
+            #[cfg(windows)]
+            Effect::CpuPulse => input.load = self.cpu_load.cached(now_us),
+            _ => {}
+        }
+        input
     }
     fn bump(&mut self) -> Result<(), String> {
         self.revision = self
@@ -1410,6 +1471,12 @@ impl Runtime {
         Ok(())
     }
     fn stop_channels(&mut self) {
+        #[cfg(windows)]
+        {
+            self.sound.stop();
+            self.host.set_audio(None);
+            self.cpu_load = system_load::Load::default();
+        }
         self.lcd_arrivals.clear();
         for recovery in self.output_recovery.values_mut() {
             *recovery = recovery::Recovery::default();
@@ -1454,6 +1521,10 @@ impl Runtime {
     }
     fn other_channels_drained(&mut self) -> bool {
         let mut drained = true;
+        #[cfg(windows)]
+        {
+            drained &= self.sound.drained();
+        }
         for w in self.lcd.values_mut() {
             drained = w.reap() && drained;
         }
@@ -1888,6 +1959,36 @@ impl Runtime {
                 self.last_wall = Some(unix_seconds);
             }
             self.recover_failed_outputs(now_us)?;
+            let effect = self.document.lighting.scene.effect;
+            #[cfg(windows)]
+            {
+                if effect == crate::lighting::scene::Effect::CpuPulse && self.native_inputs {
+                    self.cpu_load.poll(now_us);
+                } else {
+                    self.cpu_load = system_load::Load::default();
+                }
+                let group_on = |group| self.group_on(group);
+                let rgb_wanted = self.native_inputs
+                    && effect.uses_audio()
+                    && self.document.lighting.setup.devices.iter().any(|device| {
+                        device.role == Role::Canvas
+                            && device.enabled
+                            && self.rgb_specs.contains_key(&device.id)
+                            && ((group_on(Target::Pc)
+                                && self.document.lighting.groups.pc.contains(&device.id))
+                                || (group_on(Target::Door)
+                                    && self.document.lighting.groups.door.contains(&device.id)))
+                    });
+                let had_worker = self.sound.has_worker();
+                self.sound.reconcile(rgb_wanted, now_us);
+                if rgb_wanted || had_worker {
+                    self.host.set_audio(self.sound.latest(now_us));
+                }
+            }
+            if effect.uses_context() {
+                self.host
+                    .set_context(self.scene_context(effect, now_us, unix_seconds));
+            }
             self.publish()?;
             self.host.tick(now_us)?;
             Ok(())

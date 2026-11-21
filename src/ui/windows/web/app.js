@@ -6,6 +6,8 @@ const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 const hex = color => '#' + (Number(color) >>> 0).toString(16).padStart(6,'0').slice(-6);
 // Also read by the portable scene layer dialog.
 let effects = Object.create(null);
+let audioEffects = new Set();
+let contextEffects = new Set();
 const effectLabel = id => effects[id] ?? id;
 const effectOption = (id, selected) => `<option value="${esc(id)}" ${id===selected?'selected':''}>${esc(effectLabel(id))}</option>`;
 const pages = {library:'Сцены',editor:'Редактор',devices:'Устройства',lcd:'LCD',ambient:'Экран',settings:'Настройки',temperatures:'Температуры',connections:'Подключения',sources:'Источники',schedule:'Расписание'};
@@ -207,6 +209,11 @@ function syncControls(keepRetryFocus) {
  $('#player-name').textContent=state?effectLabel(state.scene.effect):'Prismestra';
  $('#player-status').textContent=state?.status||'Подключение к приложению…';
  const runtimeDetail=$('#native-runtime-detail');if(runtimeDetail)runtimeDetail.textContent=state?.detail||'';
+ const audioSource=$('#scene-audio-source');
+ if(audioSource)audioSource.textContent=state?.native
+  ? state.audioError&&audioEffects.has(state.scene.effect)?'Системный звук недоступен. Повторяю подключение.'
+   : 'Источник — звук, который воспроизводит Windows. Данные появляются после применения при включённом RGB.'
+  : 'Системный звук доступен в профиле с локальным RGB-подключением.';
  syncOutputStatuses();
  syncOutputRetries(keepRetryFocus);
  $('#save-status').textContent=busy()&&state?'Выполняется…':state?.dirty?'Профиль изменён':'Локальный профиль';
@@ -258,8 +265,16 @@ function paletteHasOrder(scene) {
  return scene && scene.effect!=='rainbow_wave' && (scene.effect!=='noise_map'||scene.noise_palette==='custom');
 }
 function patternScale() {
+ if(audioEffects.has(draft.effect)||contextEffects.has(draft.effect))return '';
  if(draft.effect==='noise_map'||draft.effect==='breathing')return '';
  return range('rainbow_width',draft.effect==='rainbow_wave'?'Ширина волны':'Масштаб рисунка',1,50);
+}
+function sceneSourceControls() {
+ if(audioEffects.has(draft.effect))return '<p class="muted" id="scene-audio-source"></p>';
+ if(draft.effect==='day_night')return '<p class="muted">Источник — местное время с часовым поясом из расписания.</p>';
+ if(draft.effect==='thermal_tint'||draft.effect==='thermal_gauge')return '<p class="muted">Источник — самая высокая свежая температура из настроенных источников.</p>';
+ const speed=range('speed','Скорость',draft.effect==='breathing'?10:1,draft.effect==='breathing'?200:100);
+ return draft.effect==='cpu_pulse'?'<p class="muted">Источник — загрузка CPU в подключённом профиле.</p>'+speed:speed;
 }
 let palettePosition=0;
 function paletteIndex() {return Math.min(palettePosition,draft.colors.length-1);}
@@ -309,7 +324,7 @@ function renderScene() {
 }
 function sceneParameters() {
  const noise=draft.effect==='noise_map';
- return `<div class="control-block"><div class="control-label">Палитра <small>${draft.colors.length} / 8</small></div><div class="native-palette">${draft.colors.map((c,i)=>`<div class="native-palette-item"><label class="color-control"><input type="color" id="palette-color-${i}" data-color="${i}" value="${hex(c)}" aria-label="Цвет ${i+1}" data-mutation ${disabled()}></label><button class="icon-button" data-remove-color="${i}" data-mutation aria-label="Удалить цвет ${i+1}" ${draft.colors.length===1?'disabled':disabled()}>×</button></div>`).join('')}<button class="icon-button" data-action="add-color" aria-label="Добавить цвет" data-mutation ${draft.colors.length>=8?'disabled':disabled()}>${icon('plus')}</button></div>${paletteOrderMarkup()}</div>${range('speed','Скорость',draft.effect==='breathing'?10:1,draft.effect==='breathing'?200:100)}${range('brightness','Яркость',0,100,1,'%')}<details id="advanced-scene" ${advancedOpen?'open':''}><summary>Дополнительно</summary>${range('fps','Частота кадров',1,144,1,' fps')}${range('temperature','Температура',-100,100)}${range('tint','Оттенок',-100,100)}${patternScale()}${noise?`<div class="native-field control-block"><label for="noise-palette">Палитра шума</label><select id="noise-palette" data-scene-select="noise_palette" data-mutation ${disabled()}>${Object.entries({custom:'Своя палитра',rainbow:'Радуга',inverse_rainbow:'Обратная радуга'}).map(([v,t])=>`<option value="${v}" ${draft.noise_palette===v?'selected':''}>${t}</option>`).join('')}</select></div>${range('noise.frequency','Частота шума',0.0001,0.5,0.0001)}${range('noise.amplitude','Амплитуда',0.0001,5,0.0001)}${range('noise.lacunarity','Лакунарность',0.0001,5,0.0001)}${range('noise.persistence','Затухание',0.0001,5,0.0001)}${range('noise.octaves','Октавы',1,20)}${range('noise.motion','Направление движения',0,3)}${range('noise.motion_speed','Скорость движения',0,99)}`:''}</details>`;
+ return `<div class="control-block"><div class="control-label">Палитра <small>${draft.colors.length} / 8</small></div><div class="native-palette">${draft.colors.map((c,i)=>`<div class="native-palette-item"><label class="color-control"><input type="color" id="palette-color-${i}" data-color="${i}" value="${hex(c)}" aria-label="Цвет ${i+1}" data-mutation ${disabled()}></label><button class="icon-button" data-remove-color="${i}" data-mutation aria-label="Удалить цвет ${i+1}" ${draft.colors.length===1?'disabled':disabled()}>×</button></div>`).join('')}<button class="icon-button" data-action="add-color" aria-label="Добавить цвет" data-mutation ${draft.colors.length>=8?'disabled':disabled()}>${icon('plus')}</button></div>${paletteOrderMarkup()}</div>${sceneSourceControls()}${range('brightness','Яркость',0,100,1,'%')}<details id="advanced-scene" ${advancedOpen?'open':''}><summary>Дополнительно</summary>${range('fps','Частота кадров',1,144,1,' fps')}${range('temperature','Температура',-100,100)}${range('tint','Оттенок',-100,100)}${patternScale()}${noise?`<div class="native-field control-block"><label for="noise-palette">Палитра шума</label><select id="noise-palette" data-scene-select="noise_palette" data-mutation ${disabled()}>${Object.entries({custom:'Своя палитра',rainbow:'Радуга',inverse_rainbow:'Обратная радуга'}).map(([v,t])=>`<option value="${v}" ${draft.noise_palette===v?'selected':''}>${t}</option>`).join('')}</select></div>${range('noise.frequency','Частота шума',0.0001,0.5,0.0001)}${range('noise.amplitude','Амплитуда',0.0001,5,0.0001)}${range('noise.lacunarity','Лакунарность',0.0001,5,0.0001)}${range('noise.persistence','Затухание',0.0001,5,0.0001)}${range('noise.octaves','Октавы',1,20)}${range('noise.motion','Направление движения',0,3)}${range('noise.motion_speed','Скорость движения',0,99)}`:''}</details>`;
 }
 function nativeProperties() {
  const editor=state.editor;
@@ -570,6 +585,8 @@ window.prismestraReceive = message => {
    state=message.state;
    if(Array.isArray(state.effects)){
     effects=Object.create(null);
+    audioEffects=new Set(state.effects.filter(effect=>effect.audio).map(effect=>effect.id));
+    contextEffects=new Set(state.effects.filter(effect=>effect.context).map(effect=>effect.id));
     for(const {id,name} of state.effects)effects[id]=name;
    }
    reconcileRetryActivity(message.state.deviceActivity);

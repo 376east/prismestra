@@ -91,9 +91,36 @@ effects! {
     Aquarium => "Рыбки",
     AlternatingZones => "Чередование зон",
     ColorCycle => "Плавная смена цвета",
+    AudioLevel => "Уровень звука",
+    AudioSpectrum => "Спектр звука",
+    AudioWaveform => "Звуковая волна",
+    AudioBeatZones => "Удар в звуковых зонах",
+    AudioSpectrogram => "Спектрограмма",
+    ThermalTint => "Температура и цвет",
+    ThermalGauge => "Шкала температуры",
+    DayNight => "День и ночь",
+    CpuPulse => "Пульс нагрузки CPU",
 }
 
 impl Effect {
+    pub(crate) fn uses_context(self) -> bool {
+        matches!(
+            self,
+            Self::ThermalTint | Self::ThermalGauge | Self::DayNight | Self::CpuPulse
+        )
+    }
+
+    pub(crate) fn uses_audio(self) -> bool {
+        matches!(
+            self,
+            Self::AudioLevel
+                | Self::AudioSpectrum
+                | Self::AudioWaveform
+                | Self::AudioBeatZones
+                | Self::AudioSpectrogram
+        )
+    }
+
     #[cfg(any(windows, test))]
     pub(crate) fn uses_normalized_canvas(self) -> bool {
         !matches!(self, Self::NoiseMap | Self::Breathing | Self::RainbowWave)
