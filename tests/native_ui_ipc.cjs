@@ -285,26 +285,29 @@ console.log('PASS: device cards select by logical identity and the draft dropdow
 
 // A retry belongs to one saved row, request and profile scope.
 {
- const button=new Node(), status=new Node(), disabled=new Map();
+ const button=new Node(), status=new Node(), help=new Node(), disabled=new Map();
  button.dataset.outputRetry='rgb';
- button.parentElement={querySelector:()=>status};
+ button.parentElement={querySelector:selector=>selector==='[data-retry-help]'?help:status};
  button.setAttribute=(name,value)=>disabled.set(name,value);
  nodes.set('openrgb-retry-test',button);
  const device={id:'rgb',label:'OpenRGB',role:'canvas',leds:2,rate_hz:25,enabled:true};
  const stateForScope=(scope,ticket,index=0)=>({
   ...initial,devices:[device],draftDevices:[device],
   editor:{page:'devices',index,targets:[device.label],fields:[],dirty:false},
-  deviceActivity:{retryScope:scope,retryTickets:{rgb:ticket}},
+  deviceActivity:{retryScope:scope,retryTickets:{rgb:ticket},reasons:{rgb:'endpointLeaseBusy'}},
  });
  const receive=message=>{context.payload=message;vm.runInContext('window.prismestraReceive(payload)',context);};
  const click=()=>events.click({target:{closest:()=>button}});
  receive({kind:'snapshot',state:stateForScope('before','first',1)});
  assert(button.hidden);
+ assert(help.hidden);
  const beforeSelection=commands.length;
  click();
  assert.equal(commands.length,beforeSelection);
  receive({kind:'snapshot',state:stateForScope('before','first')});
  assert(!button.hidden);
+ assert.equal(help.hidden,false);
+ assert.match(help.textContent,/другим выходом Prismestra/);
  button.focus();
  const start=commands.length;
  click();click();
@@ -312,6 +315,7 @@ console.log('PASS: device cards select by logical identity and the draft dropdow
  assert.deepEqual(first,{op:'retry_output',id:'rgb',ticket:'first',request:first.request});
  assert.equal(commands.length,start+1);
  assert.equal(status.textContent,'Подключаемся…');
+ assert(help.hidden);
  assert.equal(disabled.get('aria-disabled'),'true');
  const reply=(id,request,scope,message)=>receive({kind:'output_retry',id,request,scope,status:'failed',message});
  reply('wled',first.request,'before','wrong row');
@@ -319,6 +323,8 @@ console.log('PASS: device cards select by logical identity and the draft dropdow
  assert.equal(status.textContent,'Подключаемся…');
  reply('rgb',first.request,'before','Identity changed');
  assert.equal(status.textContent,'Identity changed');
+ receive({kind:'status',state:{deviceActivity:{retryScope:'before',retryTickets:{},reasons:{}}}});
+ assert(help.hidden);
  receive({kind:'snapshot',state:stateForScope('after','next')});
  click();
  assert.equal(status.textContent,'Подключаемся…');

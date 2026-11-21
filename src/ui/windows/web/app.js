@@ -60,12 +60,20 @@ function syncOutputRetries(keepFocus) {
  document.querySelectorAll('[data-output-retry]').forEach(button=>{
   const id=button.dataset.outputRetry, retry=outputRetries.get(id), ticket=outputRetryTicket(id);
   const status=button.parentElement.querySelector('[data-retry-status]');
+  const help=button.parentElement.querySelector('[data-retry-help]');
+  const selected=selectedRetryOutput()===id;
+  const leaseBusy=selected && state.deviceActivity?.reasons?.[id]==='endpointLeaseBusy' && retry?.status!=='pending';
+  const instruction=leaseBusy
+   ? 'Подключение было занято другим выходом Prismestra. Дождитесь его отключения. Когда кнопка доступна, нажмите «Повторить подключение».'
+   : '';
+  if(help.textContent!==instruction)help.textContent=instruction;
+  help.hidden=!instruction;
   const preserveFocus=button===document.activeElement||id===keepFocus;
   const message=retry?.status==='pending'?'Подключаемся…':retry?.status==='submitted'&&!preserveFocus?'':retry?.message||'';
   if(status.textContent!==message)status.textContent=message;
   button.setAttribute('aria-disabled',String(busy()||!!pendingView||!ticket||retry?.status==='pending'));
-  button.hidden=selectedRetryOutput()!==id||(!ticket&&retry?.status!=='pending'&&!preserveFocus);
-  button.parentElement.hidden=button.hidden&&!message;
+  button.hidden=!selected||(!ticket&&retry?.status!=='pending'&&!preserveFocus);
+  button.parentElement.hidden=button.hidden&&!message&&!instruction;
  });
 }
 function receiveOutputRetry({id,request,scope,status,message}) {
@@ -328,7 +336,7 @@ function renderDevices(candidates) {
   <div class="device-info"><h2>${esc(d.label)}</h2><p>${esc(d.driver?.type)} · ${esc(d.role)}</p></div>
   <div class="device-meta"><span>${esc(d.leds)} LED · ${esc(d.rate_hz)} Гц</span><small id="${statusId}" data-output-status="${esc(d.id)}">${esc(deviceStatus(d))}</small></div>
   <button class="icon-button" data-device-id="${esc(d.id)}" data-mutation aria-disabled="${busy()}" aria-label="Свойства: ${esc(d.label)}" aria-describedby="${statusId}">${icon('edit')}</button>
-  <div class="device-retry" hidden><button class="button" id="${statusId}-retry" data-output-retry="${esc(d.id)}" aria-describedby="${statusId}-retry-status" aria-disabled="true" hidden>Повторить подключение</button><span id="${statusId}-retry-status" data-retry-status role="status"></span></div>
+  <div class="device-retry" hidden><span id="${statusId}-retry-help" data-retry-help hidden></span><button class="button" id="${statusId}-retry" data-output-retry="${esc(d.id)}" aria-describedby="${statusId}-retry-help ${statusId}-retry-status" aria-disabled="true" hidden>Повторить подключение</button><span id="${statusId}-retry-status" data-retry-status role="status"></span></div>
  </article>`;
  });
  const found=candidates.map(candidate=>`<article class="device" data-candidate-id="${esc(candidate.id)}">
