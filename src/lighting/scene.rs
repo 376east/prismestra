@@ -1,57 +1,102 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Typed control math from effects-source/SceneEffects.cpp; no JSON profile mutation.
 use super::color::Rgb;
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Effect {
-    NoiseMap,
-    Breathing,
-    RainbowWave,
-    GradientWave,
-    CrossingBeams,
-    TidalRings,
-    HorizonSweep,
-    EmberDrift,
-    PrismLattice,
-    CometTrail,
-    Fireflies,
+// Keep serde IDs, the editor list and legacy class names tied to the same enum.
+macro_rules! effects {
+    ($( $kind:ident => $label:literal ),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum Effect { $( $kind ),+ }
+
+        impl Effect {
+            #[cfg(any(windows, test))]
+            pub(crate) const ALL: &'static [Self] = &[$( Self::$kind ),+];
+
+            #[cfg(any(windows, test))]
+            pub(crate) fn label(self) -> &'static str {
+                match self { $( Self::$kind => $label ),+ }
+            }
+
+            pub(crate) fn class_name(self) -> &'static str {
+                match self { $( Self::$kind => stringify!($kind) ),+ }
+            }
+        }
+    };
 }
+
+effects! {
+    NoiseMap => "Карта шума",
+    Breathing => "Дыхание",
+    RainbowWave => "Радужная волна",
+    GradientWave => "Градиентная волна",
+    CrossingBeams => "Встречные лучи",
+    TidalRings => "Кольца",
+    HorizonSweep => "Бегущая полоса",
+    EmberDrift => "Тлеющие островки",
+    PrismLattice => "Световая решётка",
+    CometTrail => "Комета",
+    Fireflies => "Светлячки",
+    DigitalRain => "Цифровой дождь",
+    Flame => "Пламя",
+    Snowfall => "Снегопад",
+    Lightning => "Молния",
+    OceanCaustics => "Блики под водой",
+    Waterfall => "Водопад",
+    CloudBank => "Облачный фронт",
+    Pollen => "Пыльца",
+    RainSplash => "Капли дождя",
+    PolarCurtain => "Полярное сияние",
+    Pinwheel => "Ветряное колесо",
+    Orbit => "Орбиты",
+    Pendulum => "Маятник",
+    SlidingBlocks => "Сдвиг блоков",
+    TileFlip => "Переворот плиток",
+    StarTunnel => "Звёздный тоннель",
+    InkDiffusion => "Чернила в воде",
+    BouncingBalls => "Прыгающие шары",
+    CellularGarden => "Клеточный сад",
+    MovingCells => "Подвижные ячейки",
+    Kaleidoscope => "Калейдоскоп",
+    BraidedRibbons => "Плетение лент",
+    FillDrain => "Наполнение",
+    Plasma => "Плазма",
+    Fireworks => "Фейерверк",
+    Shutter => "Диафрагма",
+    Seismogram => "Сейсмограмма",
+    SparkCircuit => "Импульс по цепи",
+    OrbitalEclipse => "Затмение",
+    Lissajous => "Световой осциллограф",
+    GrowingBranches => "Рост ветвей",
+    SpiralDrain => "Спиральный сток",
+    GlassDrops => "Капли на стекле",
+    MagneticFlux => "Магнитные линии",
+    SandCascade => "Песчаный каскад",
+    TectonicFault => "Разлом",
+    LensDistortion => "Движущаяся линза",
+    FlowerBloom => "Раскрытие бутонов",
+    Gyroscope => "Гироскоп",
+    DiffractionGrating => "Дифракция",
+    Zipper => "Застёжка",
+    FractalZoom => "Приближение фрактала",
+    ReactionDiffusion => "Реакция и диффузия",
+    RotatingPrism => "Вращающийся куб",
+    Counter => "Обратный отсчёт",
+    ParticleFlock => "Движение стаи",
+    Radar => "Радар",
+    Bubbles => "Подъём пузырьков",
+    DigitalInterference => "Помехи сигнала",
+    Sunrise => "Восход солнца",
+    Helix => "Двойная спираль",
+    PixelPacking => "Заполнение мозаики",
+    Aquarium => "Рыбки",
+    AlternatingZones => "Чередование зон",
+    ColorCycle => "Плавная смена цвета",
+}
+
 impl Effect {
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     pub(crate) fn uses_normalized_canvas(self) -> bool {
         !matches!(self, Self::NoiseMap | Self::Breathing | Self::RainbowWave)
-    }
-
-    #[cfg(windows)]
-    pub(crate) const ALL: [Self; 11] = [
-        Self::NoiseMap,
-        Self::Breathing,
-        Self::RainbowWave,
-        Self::GradientWave,
-        Self::CrossingBeams,
-        Self::TidalRings,
-        Self::HorizonSweep,
-        Self::EmberDrift,
-        Self::PrismLattice,
-        Self::CometTrail,
-        Self::Fireflies,
-    ];
-
-    #[cfg(windows)]
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::NoiseMap => "Карта шума",
-            Self::Breathing => "Дыхание",
-            Self::RainbowWave => "Радужная волна",
-            Self::GradientWave => "Градиентная волна",
-            Self::CrossingBeams => "Встречные лучи",
-            Self::TidalRings => "Кольца",
-            Self::HorizonSweep => "Бегущая полоса",
-            Self::EmberDrift => "Тлеющие островки",
-            Self::PrismLattice => "Световая решётка",
-            Self::CometTrail => "Комета",
-            Self::Fireflies => "Светлячки",
-        }
     }
 
     pub fn limits(self) -> (i32, i32) {

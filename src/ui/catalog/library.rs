@@ -142,9 +142,81 @@ const GROUPS: &[(Effect, &[Preset; 10])] = &[
     ]),
 ];
 
+// One discoverable example for each mechanism added to the renderer.
+#[rustfmt::skip]
+const MOTION_EXAMPLES: &[(Effect, Preset)] = &[
+    (Effect::DigitalRain, preset!("digital-rain", "Цифровой дождь", [0xb382c, 0x33be72, 0xc0ffcb], 67, 84, 20)),
+    (Effect::Flame, preset!("flame", "Пламя", [0x781a11, 0xdf5c21, 0xffd164], 72, 65, 21)),
+    (Effect::Snowfall, preset!("snowfall", "Снегопад", [0x334174, 0x76a8cd, 0xe6faff], 68, 34, 14)),
+    (Effect::Lightning, preset!("lightning", "Молния", [0x5266ae, 0xaac6ff, 0xdedafa], 53, 24, 16)),
+    (Effect::OceanCaustics, preset!("ocean-caustics", "Блики под водой", [0x63b51, 0x167b8c, 0x9fe5cd], 71, 45, 19)),
+    (Effect::Waterfall, preset!("waterfall", "Водопад", [0x154567, 0x418ec8, 0xccf5f4], 67, 63, 18)),
+    (Effect::CloudBank, preset!("cloud-bank", "Облачный фронт", [0x272d59, 0x647cad, 0xc4d1e4], 59, 25, 11)),
+    (Effect::Pollen, preset!("pollen", "Пыльца", [0xaa526b, 0xf5bd77, 0xe4ee96], 71, 39, 19)),
+    (Effect::RainSplash, preset!("rain-splash", "Капли дождя", [0x196262, 0x54aebf, 0xbbf0d7], 72, 51, 14)),
+    (Effect::PolarCurtain, preset!("polar-curtain", "Полярное сияние", [0x2d2965, 0x18b07c, 0x9febad], 68, 30, 18)),
+    (Effect::Pinwheel, preset!("pinwheel", "Ветряное колесо", [0x6a247c, 0xcb4f7f, 0xfbd318], 75, 42, 19)),
+    (Effect::Orbit, preset!("orbit", "Орбиты", [0xfe9b67, 0x83a9e3, 0xbaabd6], 77, 52, 15)),
+    (Effect::Pendulum, preset!("pendulum", "Маятник", [0x404276, 0x80a5b1, 0xfde397], 72, 49, 12)),
+    (Effect::SlidingBlocks, preset!("sliding-blocks", "Сдвиг блоков", [0x2b4d87, 0x8c55aa, 0xf89170], 80, 54, 23)),
+    (Effect::TileFlip, preset!("tile-flip", "Переворот плиток", [0x85506a, 0xd79991, 0xf5dea9], 72, 56, 22)),
+    (Effect::StarTunnel, preset!("star-tunnel", "Звёздный тоннель", [0x344383, 0x847dc3, 0xc0f4e7], 79, 71, 18)),
+    (Effect::InkDiffusion, preset!("ink-diffusion", "Чернила в воде", [0x242a77, 0x803fac, 0xc188d3], 71, 34, 14)),
+    (Effect::BouncingBalls, preset!("bouncing-balls", "Прыгающие шары", [0x3474a1, 0xc8557c, 0xeab864], 80, 66, 21)),
+    (Effect::CellularGarden, preset!("cellular-garden", "Клеточный сад", [0x2f705c, 0x86c899, 0xd8db73], 74, 45, 19)),
+    (Effect::MovingCells, preset!("moving-cells", "Подвижные ячейки", [0x425999, 0x7d89d4, 0xf7a4af], 76, 45, 20)),
+    (Effect::Kaleidoscope, preset!("kaleidoscope", "Калейдоскоп", [0x482372, 0xc26c8d, 0xf1ad68], 78, 38, 19)),
+    (Effect::BraidedRibbons, preset!("braided-ribbons", "Плетение лент", [0x5167ac, 0x85cac7, 0xf2a17a], 76, 58, 18)),
+    (Effect::FillDrain, preset!("fill-drain", "Наполнение", [0x28586a, 0x33a9ad, 0x9fe5d4], 70, 42, 18)),
+    (Effect::Plasma, preset!("plasma", "Плазма", [0x503375, 0x9a5099, 0xf3a478], 80, 40, 18)),
+    (Effect::Fireworks, preset!("fireworks", "Фейерверк", [0x2ca7a7, 0xf69278, 0xffe189], 74, 37, 18)),
+    (Effect::Shutter, preset!("shutter", "Диафрагма", [0x3f3d9d, 0x8687d6, 0xcad3ec], 70, 47, 19)),
+    (Effect::Seismogram, preset!("seismogram", "Сейсмограмма", [0x41665c, 0x6fbb8d, 0xd2ed8f], 78, 48, 17)),
+    (Effect::SparkCircuit, preset!("spark-circuit", "Импульс по цепи", [0x5a406e, 0x7790ce, 0xbdeded], 78, 54, 15)),
+    (Effect::OrbitalEclipse, preset!("orbital-eclipse", "Затмение", [0x362b73, 0x9264a8, 0xf0af6d], 76, 31, 20)),
+    (Effect::Lissajous, preset!("lissajous", "Световой осциллограф", [0x454796, 0x9b6fb3, 0xe5ccdd], 84, 44, 18)),
+    (Effect::GrowingBranches, preset!("growing-branches", "Рост ветвей", [0x315747, 0x6ab278, 0xbfdf91], 68, 31, 18)),
+    (Effect::SpiralDrain, preset!("spiral-drain", "Спиральный сток", [0x18366e, 0x5577c8, 0x81daca], 76, 53, 22)),
+    (Effect::GlassDrops, preset!("glass-drops", "Капли на стекле", [0x254972, 0x73abc4, 0xbde3f0], 76, 42, 18)),
+    (Effect::MagneticFlux, preset!("magnetic-flux", "Магнитные линии", [0x4c4278, 0xbf6470, 0xead6a1], 77, 49, 20)),
+    (Effect::SandCascade, preset!("sand-cascade", "Песчаный каскад", [0x875538, 0xc8873a, 0xf0cd75], 75, 47, 19)),
+    (Effect::TectonicFault, preset!("tectonic-fault", "Разлом", [0x5c3762, 0xa65a59, 0xfbc2a5], 77, 32, 14)),
+    (Effect::LensDistortion, preset!("lens-distortion", "Движущаяся линза", [0x325282, 0x47b0b4, 0xbbdee5], 70, 43, 20)),
+    (Effect::FlowerBloom, preset!("flower-bloom", "Раскрытие бутонов", [0x884868, 0xc87b97, 0xf4cbab], 76, 35, 18)),
+    (Effect::Gyroscope, preset!("gyroscope", "Гироскоп", [0x7d7acb, 0x85a4e7, 0xa9dfe8], 72, 48, 20)),
+    (Effect::DiffractionGrating, preset!("diffraction-grating", "Дифракция", [0x774875, 0xae789f, 0xf0ce8b], 80, 40, 22)),
+    (Effect::Zipper, preset!("zipper", "Застёжка", [0x656698, 0xa682bc, 0xeac6d5], 75, 44, 21)),
+    (Effect::FractalZoom, preset!("fractal-zoom", "Приближение фрактала", [0x3c517c, 0x8560b1, 0x8febc5], 68, 29, 17)),
+    (Effect::ReactionDiffusion, preset!("reaction-diffusion", "Реакция и диффузия", [0x375261, 0x459377, 0xc0e694], 70, 41, 20)),
+    (Effect::RotatingPrism, preset!("rotating-prism", "Вращающийся куб", [0x355d7a, 0x668eb2, 0xcbe4f3], 84, 48, 18)),
+    (Effect::Counter, preset!("counter", "Обратный отсчёт", [0x436a9b, 0xa4a3da, 0xe4dafa], 68, 40, 17)),
+    (Effect::ParticleFlock, preset!("particle-flock", "Движение стаи", [0x4e54aa, 0x789dd4, 0xcff1d8], 79, 49, 17)),
+    (Effect::Radar, preset!("radar", "Радар", [0x345751, 0x61ae85, 0xd1e8a7], 74, 47, 15)),
+    (Effect::Bubbles, preset!("bubbles", "Подъём пузырьков", [0x44638d, 0x789bbd, 0xb7e6ea], 72, 44, 20)),
+    (Effect::DigitalInterference, preset!("digital-interference", "Помехи сигнала", [0x7d6a80, 0xa575ac, 0xe4c3a9], 57, 38, 19)),
+    (Effect::Sunrise, preset!("sunrise", "Восход солнца", [0x473d66, 0xe67660, 0xfadb88], 75, 33, 19)),
+    (Effect::Helix, preset!("helix", "Двойная спираль", [0x294674, 0xae7ad0, 0xd1ead8], 75, 41, 19)),
+    (Effect::PixelPacking, preset!("pixel-packing", "Заполнение мозаики", [0x3d6599, 0x9775aa, 0xffdb9f], 72, 50, 19)),
+    (Effect::Aquarium, preset!("aquarium", "Рыбки", [0x79aab3, 0xe9a475, 0xf1df9d], 75, 50, 18)),
+    (Effect::AlternatingZones, preset!("alternating-zones", "Чередование зон", [0x5c86c9, 0xb889ca, 0xe5868d], 70, 36, 19)),
+    (Effect::ColorCycle, preset!("color-cycle", "Плавная смена цвета", [0x5d75c1, 0xc487b5, 0xf7ba82], 62, 35, 16)),
+];
+
 pub(crate) fn built_in() -> Vec<Entry> {
     let plum = plum_dawn();
     let mut entries = vec![plum.clone()];
+    entries.extend(MOTION_EXAMPLES.iter().map(|(effect, preset)| Entry {
+        id: format!("builtin:{}", preset.id),
+        name: preset.name.into(),
+        scene: super::Scene {
+            effect: *effect,
+            colors: preset.colors.to_vec(),
+            speed: preset.speed,
+            brightness: preset.brightness,
+            rainbow_width: preset.scale,
+            ..plum.scene.clone()
+        },
+    }));
     for index in 0..10 {
         for (effect, group) in GROUPS {
             let preset = &group[index];
@@ -170,7 +242,7 @@ pub(crate) fn built_in() -> Vec<Entry> {
 }
 
 #[test]
-fn built_in_library_has_101_distinct_renderable_round_trip_scenes() {
+fn built_in_library_contains_legacy_presets_and_one_scene_for_each_new_motion() {
     use crate::{
         devices::{Canvas, Point},
         runtime::scene::Renderer,
@@ -178,15 +250,25 @@ fn built_in_library_has_101_distinct_renderable_round_trip_scenes() {
     use std::collections::BTreeSet;
 
     let entries = built_in();
-    assert_eq!(entries.len(), 101);
+    assert_eq!(entries.len(), 101 + MOTION_EXAMPLES.len());
+    for (effect, preset) in MOTION_EXAMPLES {
+        assert_eq!(effect.label(), preset.name);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.scene.effect == *effect)
+                .count(),
+            1
+        );
+    }
     let canvas = Canvas {
-        width: 7,
-        height: 5,
-        points: (0..5)
+        width: 17,
+        height: 11,
+        points: (0..11)
             .flat_map(|y| {
-                (0..7).map(move |x| Point {
+                (0..17).map(move |x| Point {
                     device: "catalog".into(),
-                    led: (7 * y + x) as usize,
+                    led: (17 * y + x) as usize,
                     x,
                     y,
                 })

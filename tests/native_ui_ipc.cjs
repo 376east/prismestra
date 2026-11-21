@@ -721,3 +721,42 @@ document.activeElement=appearanceButton;
 receiveDeviceState('snapshot',settingsState);
 assert.equal(document.activeElement,appearanceButton,'An asynchronous return does not steal focus moved by the user');
 console.log('PASS: Settings return focus waits for acknowledgement and respects user focus');
+
+// The provider catalog drives all scene labels and remains practical for a large effect list.
+{
+ const metadata=[{id:'noise_map',name:'Карта шума'},{id:'breathing',name:'Дыхание'},
+  ...Array.from({length:78},(_,i)=>({id:'extra_'+i,name:'Движение '+i}))];
+ metadata.at(-1).name='Край <света>';
+ const extraScene={...scene,effect:metadata.at(-1).id};
+ vm.runInContext('view="library";draft=null;search="";libraryEffect=""',context);
+ receiveDeviceState('snapshot',{...initial,scene:extraScene,effects:metadata,
+  library:[{id:'extra',name:'Край',scene:extraScene},{id:'noise',name:'Шум',scene}]});
+ assert.equal(find('#player-name').textContent,'Край <света>');
+ assert.equal(vm.runInContext('effects.extra_77',context),'Край <света>','the portable scene dialog reads the same labels');
+ assert.match(mainMarkup,/<option value="extra_77"[^>]*>Край &lt;света&gt;<\/option>/);
+ assert.doesNotMatch(mainMarkup,/<option value="breathing"/,'library filter only lists effects present in its scenes');
+ events.change({target:{id:'library-effect',value:'extra_77'}});
+ assert.match(mainMarkup,/data-edit="extra"/);
+ assert.doesNotMatch(mainMarkup,/data-edit="noise"/);
+
+ vm.runInContext('view="editor";draft.speed=1;render()',context);
+ assert.match(mainMarkup,/<label for="scene-effect">Эффект<\/label>/);
+ const effectOptions=Array.from(mainMarkup.matchAll(/<option value="((?:noise_map|breathing|extra_\d+))"/g),match=>match[1]);
+ assert.deepEqual(effectOptions,metadata.map(effect=>effect.id));
+ const select=find('#scene-effect'),advanced=find('#advanced-scene');
+ select.id='scene-effect';select.value='breathing';select.focus();advanced.open=true;
+ const previousMarkup=mainMarkup,beforeChoice=commands.length;
+ events.change({target:select});
+ assert.equal(mainMarkup,previousMarkup,'selection leaves the native picker and stage mounted');
+ assert.equal(document.activeElement,select);
+ assert.equal(commands.length,beforeChoice,'changing the effect is a draft edit');
+ assert.equal(vm.runInContext('draft.speed',context),10,'the effect-specific speed limit applies');
+ const parameters=find('#scene-parameters').innerHTML;
+ assert.match(parameters,/<details id="advanced-scene" open>/);
+ assert.doesNotMatch(parameters,/data-param="noise.frequency"/);
+ vm.runInContext('flushPreview()',context);
+ assert.equal(commands.at(-1).op,'preview_scene');
+ assert.equal(commands.at(-1).scene.effect,'breathing');
+ assert.equal(vm.runInContext('state.scene.effect',context),'extra_77');
+}
+console.log('PASS: 80 effect choices in provider order, shared escaped labels and filtering, focused draft-only effect preview');

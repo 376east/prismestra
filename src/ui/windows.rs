@@ -694,7 +694,7 @@ impl App {
             "",
             CBS_DROPDOWNLIST as u32 | WS_VSCROLL,
         )?;
-        for effect in Effect::ALL {
+        for &effect in Effect::ALL {
             self.add(EFFECT, effect.label());
         }
         self.control(

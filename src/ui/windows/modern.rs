@@ -257,7 +257,12 @@ fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
     let canvas = preview_canvas(width, height);
     let mut colors = Vec::new();
     let mut thumbnail_scene = entry.scene.clone();
-    let steps = if thumbnail_scene.effect == crate::lighting::scene::Effect::Breathing {
+    let steps = if thumbnail_scene.effect.uses_normalized_canvas() {
+        // Sample a representative phase with one render, including brief effects like Lightning.
+        thumbnail_scene.speed = 22;
+        thumbnail_scene.fps = 1;
+        1
+    } else if thumbnail_scene.effect == crate::lighting::scene::Effect::Breathing {
         // A 1.57 radian step samples the first breath near its peak.
         // Only the thumbnail clock changes; the card still stores the original scene.
         thumbnail_scene.speed = 157;
@@ -584,6 +589,12 @@ fn snapshot(state: &State) -> Result<Value, String> {
         .chain(&session.built_in_cards)
         .collect::<Vec<_>>();
     let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":library,"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
+    let effects = Effect::ALL
+        .iter()
+        .copied()
+        .map(|effect| json!({"id":effect,"name":effect.label()}))
+        .collect::<Vec<_>>();
+    value["state"]["effects"] = json!(effects);
     value["state"]["draftMapRevision"] = json!(draft_map_revision);
     value["state"]["mapConnection"] = map_connection(app);
     let schedule = &app.runtime.project().schedule;
