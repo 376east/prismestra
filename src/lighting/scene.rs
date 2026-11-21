@@ -7,8 +7,48 @@ pub enum Effect {
     NoiseMap,
     Breathing,
     RainbowWave,
+    GradientWave,
+    CrossingBeams,
+    TidalRings,
+    HorizonSweep,
+    EmberDrift,
+    PrismLattice,
+    CometTrail,
+    Fireflies,
 }
 impl Effect {
+    #[cfg(windows)]
+    pub(crate) const ALL: [Self; 11] = [
+        Self::NoiseMap,
+        Self::Breathing,
+        Self::RainbowWave,
+        Self::GradientWave,
+        Self::CrossingBeams,
+        Self::TidalRings,
+        Self::HorizonSweep,
+        Self::EmberDrift,
+        Self::PrismLattice,
+        Self::CometTrail,
+        Self::Fireflies,
+    ];
+
+    #[cfg(windows)]
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::NoiseMap => "Карта шума",
+            Self::Breathing => "Дыхание",
+            Self::RainbowWave => "Радужная волна",
+            Self::GradientWave => "Градиентная волна",
+            Self::CrossingBeams => "Встречные лучи",
+            Self::TidalRings => "Кольца",
+            Self::HorizonSweep => "Бегущая полоса",
+            Self::EmberDrift => "Тлеющие островки",
+            Self::PrismLattice => "Световая решётка",
+            Self::CometTrail => "Комета",
+            Self::Fireflies => "Светлячки",
+        }
+    }
+
     pub fn limits(self) -> (i32, i32) {
         match self {
             Self::Breathing => (10, 200),

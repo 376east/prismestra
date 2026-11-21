@@ -693,8 +693,8 @@ impl App {
             "",
             CBS_DROPDOWNLIST as u32 | WS_VSCROLL,
         )?;
-        for s in ["Мягкие угли / шум", "Дыхание", "Радуга"] {
-            self.add(EFFECT, s);
+        for effect in Effect::ALL {
+            self.add(EFFECT, effect.label());
         }
         self.control(
             parent,
@@ -860,11 +860,10 @@ impl App {
     }
     fn sync(&mut self) {
         let p = self.runtime.project();
-        let index = match p.scene.effect {
-            Effect::NoiseMap => 0,
-            Effect::Breathing => 1,
-            Effect::RainbowWave => 2,
-        };
+        let index = Effect::ALL
+            .iter()
+            .position(|&effect| effect == p.scene.effect)
+            .unwrap_or_default();
         unsafe {
             SendMessageW(self.h(EFFECT), CB_SETCURSEL, index, 0);
             SendMessageW(self.h(BRIGHT), TBM_SETRANGE, 0, 100 << 16);
@@ -1941,11 +1940,8 @@ impl App {
             }
             EFFECT if notice == CBN_SELCHANGE as u16 => {
                 let mut s = self.runtime.project().scene.clone();
-                s.effect = match unsafe { SendMessageW(self.h(EFFECT), CB_GETCURSEL, 0, 0) } {
-                    1 => Effect::Breathing,
-                    2 => Effect::RainbowWave,
-                    _ => Effect::NoiseMap,
-                };
+                let index = unsafe { SendMessageW(self.h(EFFECT), CB_GETCURSEL, 0, 0) };
+                s.effect = *Effect::ALL.get(index as usize).ok_or("Не выбран эффект")?;
                 let (lo, hi) = s.effect.limits();
                 s.speed = s.speed.clamp(lo, hi);
                 self.changed_scene(s)?;

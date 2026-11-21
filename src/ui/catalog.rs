@@ -1,5 +1,9 @@
 //! Named native scenes. This catalog never contains bindings or credentials.
 pub(crate) mod draft;
+#[cfg(any(windows, test))]
+mod library;
+#[cfg(windows)]
+pub(crate) use library::built_in;
 
 use crate::{
     lighting::scene::Effect,
