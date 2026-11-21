@@ -6,7 +6,10 @@ compile_error!("Compile the Setup policy tool with a static Windows CRT.");
 #[path = "../../../../src/app/windows_protected_path.rs"]
 mod windows_protected_path;
 
-use serde::Deserialize;
+mod identity;
+mod install;
+
+use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
     fs::{self, File},
@@ -55,7 +58,7 @@ const OWNERSHIP_LIMIT: usize = 4096;
 const POLICY_LIMIT: usize = 131072;
 const MAX_PRIVILEGED_ENTRIES: usize = 10000;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Ownership {
     version: u32,
     executable: String,
@@ -285,7 +288,11 @@ fn protected_tree(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn uninstall(sid: &str, install: &Path, policy_home: &Path) -> Result<(), String> {
+fn read_policy_state(
+    sid: &str,
+    install: &Path,
+    policy_home: &Path,
+) -> Result<(Option<Ownership>, Option<Policy>), String> {
     if !private_entry(policy_home)? {
         return Err("Expected a protected policy directory.".into());
     }
@@ -318,6 +325,12 @@ fn uninstall(sid: &str, install: &Path, policy_home: &Path) -> Result<(), String
                 .into(),
         );
     }
+
+    Ok((record, policy))
+}
+
+fn uninstall(sid: &str, install: &Path, policy_home: &Path) -> Result<(), String> {
+    let (record, _) = read_policy_state(sid, install, policy_home)?;
 
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED)
@@ -395,9 +408,9 @@ fn uninstall(sid: &str, install: &Path, policy_home: &Path) -> Result<(), String
 fn run() -> Result<(), String> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let [operation, sid] = args.as_slice() else {
-        return Err("Expected --uninstall followed by an account SID.".into());
+        return Err("Expected --install or --uninstall followed by an account SID.".into());
     };
-    if operation != "--uninstall" {
+    if operation != "--uninstall" && operation != "--install" {
         return Err("Unknown Setup policy operation.".into());
     }
     let mut admin_sid = [0u32; SECURITY_MAX_SID_SIZE as usize / 4];
@@ -415,7 +428,7 @@ fn run() -> Result<(), String> {
         || unsafe { CheckTokenMembership(null_mut(), admin_sid, &mut admin) } == 0
         || admin == 0
     {
-        return Err("Policy removal requires elevation.".into());
+        return Err("Setup policy operations require elevation.".into());
     }
     let sid = sid.to_str().ok_or("Expected a Unicode SID.")?;
     if !(sid.starts_with("S-1-5-21-") || sid.starts_with("S-1-12-1-")) || canonical_sid(sid)? != sid
@@ -438,6 +451,10 @@ fn run() -> Result<(), String> {
     let policy_home: PathBuf = program_data.join("Prismestra").join("Policies").join(sid);
     if !protected_chain(&program_data, &program_data, false)? {
         return Err("Expected the protected Windows ProgramData folder.".into());
+    }
+    if operation == "--install" {
+        identity::require_split_session(sid)?;
+        return install::provision(sid, &install, &program_data, &policy_home);
     }
     if !protected_chain(&policy_home, &program_data, true)? {
         return Ok(());

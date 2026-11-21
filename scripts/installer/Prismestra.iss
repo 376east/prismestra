@@ -260,18 +260,7 @@ begin
     Result := RunOriginalInstalledCommand('--setup-check-user ' + SID);
 end;
 
-function InstallManagedPolicy(const SID: String): Boolean;
-var
-  Code: Integer;
-begin
-  Result := ValidSID(SID) and GuardInstall('Check') and ExecAndLogOutput(PowerShell,
-    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + ProtectedModules +
-    '& ' + PSQuote(InstallPath + '\installer_policy.ps1') + ' -Action Install' +
-    ' -InstallRoot ' + PSQuote(InstallPath) + ' -UserSid ' + PSQuote(SID) + '; exit $LASTEXITCODE"',
-    ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code, nil) and (Code = 0);
-end;
-
-function RemoveManagedPolicy(const SID: String): Boolean;
+function RunManagedPolicy(const Operation, SID: String): Boolean;
 var
   Tool: String;
   Code: Integer;
@@ -279,7 +268,7 @@ begin
   Tool := InstallPath + '\Prismestra-Setup-Policy.exe';
   Result := ValidSID(SID) and FileExists(Tool) and
     (GetSHA256OfFile(Tool) = '{#PolicyToolSha256}') and
-    ExecAndLogOutput(Tool, '--uninstall ' + SID, ExpandConstant('{sys}'),
+    ExecAndLogOutput(Tool, Operation + ' ' + SID, ExpandConstant('{sys}'),
       SW_HIDE, ewWaitUntilTerminated, Code, nil) and (Code = 0);
 end;
 
@@ -303,7 +292,7 @@ begin
     Log('Could not record managed PC policy ownership; no task provisioned.');
     Exit;
   end;
-  if not InstallManagedPolicy(SID) then
+  if not (GuardInstall('Check') and RunManagedPolicy('--install', SID)) then
     Log('Managed PC task unavailable; retained ownership intent for safe cleanup.');
 end;
 
@@ -472,7 +461,7 @@ begin
       'Finish pending edits and exit it from the notification area before uninstalling.');
 #ifndef LifecycleTest
   if RegQueryStringValue(HKLM64, ProductKey, 'PolicySid', SID) then begin
-    if not RemoveManagedPolicy(SID) then
+    if not RunManagedPolicy('--uninstall', SID) then
       RaiseException('Could not remove the installer-owned managed PC policy.');
     RegDeleteValue(HKLM64, ProductKey, 'PolicySid');
     RegDeleteKeyIfEmpty(HKLM64, ProductKey);
