@@ -1,6 +1,10 @@
 //! One shared animation state for all canvas points; native step math lives in lighting.
 mod procedural;
+mod reactive_audio;
+mod reactive_context;
+mod reactive_events;
 use crate::{
+    capture::audio_features::AudioFeatures,
     devices::Canvas,
     lighting::{
         color::Rgb,
@@ -9,6 +13,7 @@ use crate::{
         simplex::Fractal,
     },
 };
+pub use reactive_context::Input as ContextInput;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -169,6 +174,30 @@ impl Scene {
         }
     }
 }
+
+fn shade(
+    palette: &[Rgb],
+    playback: Playback,
+    position: f64,
+    intensity: f64,
+) -> Result<Rgb, String> {
+    let index = position.clamp(0.0, 1.0) * (palette.len() - 1) as f64;
+    let left = palette[index.floor() as usize];
+    let right = palette[index.ceil() as usize];
+    let mix =
+        |a: u8, b: u8| (f64::from(a) + (f64::from(b) - f64::from(a)) * index.fract()).round() as u8;
+    Rgb::new(
+        mix(left.r, right.r),
+        mix(left.g, right.g),
+        mix(left.b, right.b),
+    )
+    .adjusted(
+        playback.brightness * intensity.clamp(0.0, 1.0) as f32,
+        playback.temperature,
+        playback.tint,
+    )
+    .map_err(str::to_owned)
+}
 // One state per host, not per LED: retain its inline palette LUT without another allocation.
 #[allow(clippy::large_enum_variant)]
 enum State {
@@ -176,6 +205,13 @@ enum State {
     Breathing(Breathing),
     Rainbow(RainbowWave),
     Procedural(f64),
+    Audio(Box<reactive_audio::State>),
+    Context(f64, ContextInput),
+    Events {
+        phase: f64,
+        input: crate::capture::reactive::Snapshot,
+        now: u64,
+    },
 }
 pub struct Renderer {
     scene: Scene,
@@ -196,12 +232,41 @@ impl Renderer {
             ),
             Effect::Breathing => State::Breathing(Breathing::default()),
             Effect::RainbowWave => State::Rainbow(RainbowWave::default()),
+            effect if effect.uses_audio() => State::Audio(Box::default()),
+            effect if effect.uses_context() => State::Context(0.0, ContextInput::default()),
+            effect if effect.uses_reactive() => State::Events {
+                phase: 0.0,
+                input: Default::default(),
+                now: 0,
+            },
             _ => State::Procedural(0.0),
         };
         Ok(Self { scene, state })
     }
     pub fn scene(&self) -> &Scene {
         &self.scene
+    }
+    pub fn set_audio(&mut self, frame: Option<(u64, AudioFeatures)>) {
+        if let State::Audio(audio) = &mut self.state {
+            audio.set_frame(frame);
+        }
+    }
+    pub fn set_context(&mut self, input: ContextInput) {
+        if let State::Context(_, current) = &mut self.state {
+            *current = input;
+        }
+    }
+    pub fn set_reactive(&mut self, sample: crate::capture::reactive::Snapshot, now_us: u64) {
+        if let State::Events { input, now, .. } = &mut self.state {
+            *input = sample;
+            *now = now_us;
+        }
+    }
+
+    pub(super) fn set_reactive_time(&mut self, now_us: u64) {
+        if let State::Events { now, .. } = &mut self.state {
+            *now = now_us;
+        }
     }
     /// Palette/speed/brightness edits retain progress; structural noise/effect changes restart it.
     pub fn configure(&mut self, scene: Scene) -> Result<(), String> {
@@ -274,6 +339,17 @@ impl Renderer {
                 let step = cycles_per_second / f64::from(self.scene.fps);
                 *phase = (*phase + step * (skipped as f64 + 1.0)).rem_euclid(1.0);
                 procedural::frame(&self.scene, canvas, *phase)
+            }
+            State::Audio(audio) => audio.render(&self.scene, canvas),
+            State::Context(phase, input) => {
+                let step = f64::from(self.scene.speed) / (160.0 * f64::from(self.scene.fps));
+                *phase = (*phase + step * (skipped as f64 + 1.0)).rem_euclid(1.0);
+                reactive_context::render(&self.scene, canvas, *phase, *input)
+            }
+            State::Events { phase, input, now } => {
+                let step = f64::from(self.scene.speed) / (160.0 * f64::from(self.scene.fps));
+                *phase = (*phase + step * (skipped as f64 + 1.0)).rem_euclid(1.0);
+                reactive_events::render(&self.scene, canvas, input, *now, *phase)
             }
         }
     }
