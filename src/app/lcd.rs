@@ -33,6 +33,8 @@ pub struct Config {
     pub font: Option<AssetId>,
     pub rotation: i32,
     pub overlay_enabled: bool,
+    #[serde(default, skip_serializing_if = "overlay::GaugeStyle::is_default")]
+    pub gauge_style: overlay::GaugeStyle,
     pub interval_seconds: u8,
     pub sources: Vec<OverlaySource>,
 }
@@ -44,6 +46,7 @@ impl Default for Config {
             font: None,
             rotation: 0,
             overlay_enabled: false,
+            gauge_style: overlay::GaugeStyle::default(),
             interval_seconds: 5,
             sources: vec![],
         }
@@ -153,7 +156,8 @@ impl Controller {
                     config.font.as_ref().ok_or("Missing LCD overlay font")?,
                     FONT_LIMIT,
                 )?;
-                player::Player::new(prepared, overlay::Renderer::new(font)?)?
+                let renderer = overlay::Renderer::new(font)?.with_style(config.gauge_style);
+                player::Player::new(prepared, renderer)?
             } else {
                 // Optional unselected font references do not cause any read or parse.
                 player::Player::without_overlay(prepared)?
@@ -629,6 +633,49 @@ mod tests {
         json["media"] = serde_json::json!("A".repeat(64));
         assert!(serde_json::from_value::<Config>(json).is_err());
     }
+    #[cfg(windows)]
+    #[test]
+    fn live_gauge_composes_over_the_licensed_builtin_gif() {
+        let stand = Stand::new();
+        let mut cfg = stand.config();
+        cfg.media = Some(
+            stand
+                .store
+                .put(media::BUILTIN_KALEIDOSCOPE_GIF, media::MAX_SOURCE)
+                .unwrap(),
+        );
+        cfg.font = Some(
+            stand
+                .store
+                .put(
+                    include_bytes!("../ui/windows/web/assets/SourceSans3.ttf"),
+                    FONT_LIMIT,
+                )
+                .unwrap(),
+        );
+        cfg.overlay_enabled = true;
+        cfg.gauge_style = overlay::GaugeStyle::Arc;
+        cfg.sources = vec![OverlaySource {
+            key: "cpu".into(),
+            label: "CPU".into(),
+        }];
+        let mut controller = Controller::new(cfg, &stand.store).unwrap();
+        let mut transport = Fake::default();
+        let reading = Sample {
+            key: "cpu".into(),
+            celsius: 58.,
+            observed_ms: transport.now,
+        };
+        assert!(
+            controller
+                .poll(&mut transport, true, &[reading])
+                .unwrap()
+                .unwrap()
+                .overlay_applied
+        );
+        assert!(transport.writes > 0);
+    }
+
     #[cfg(windows)]
     #[test]
     fn real_overlay_uses_only_fresh_selected_samples_and_missing_data_has_no_card() {
