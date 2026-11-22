@@ -21,7 +21,9 @@ In **Devices and properties**, enable the route you want and disable the other o
 
 ## Alice pilot
 
-The WebView2 editor has a foreground Alice pilot under **Settings**. It uses the Prismestra Desktop Pilot OAuth registration with `iot:view`, `iot:control` and the redirect `http://127.0.0.1:45183/alice/callback`. Select **Sign in with Yandex ID** and confirm access in the system browser. Return to Prismestra, select one lamp from the room named «Кабинет», and explicitly apply one brightness value. The sign-in and selection never send a command. The session keeps the grant in memory and consumes it on the apply attempt. The pilot has no scene or scheduler integration. [Yandex OAuth](https://yandex.ru/dev/id/doc/ru/codes/code-url) · [Yandex Smart Home API](https://yandex.ru/dev/dialogs/smart-home/doc/ru/concepts/platform-protocol)
+The WebView2 editor has a foreground Alice pilot under **Settings**. Select **Sign in with Yandex ID** and confirm catalog and lamp access in the system browser. The optional **Remember sign-in on this PC** stores the access token and expiry in Windows Credential Manager. **Load lamps** uses that saved access until it expires. Sign in again to renew expired or revoked access. **Sign out of Alice** clears the local grant. [Yandex OAuth](https://yandex.ru/dev/id/doc/ru/codes/code-url) · [Token revocation](https://yandex.ru/dev/id/doc/ru/tokens/token-invalidate)
+
+Select one lamp from the room named «Кабинет». Then choose **Turn on lamp** or set a brightness for an already lit lamp. Opening the catalog and selecting a lamp only read data. Each command consumes the current selection and is sent once. A lost response requires checking the lamp before issuing another command. [Yandex Smart Home API](https://yandex.ru/dev/dialogs/smart-home/doc/ru/concepts/platform-protocol)
 
 ## Discovery boundaries
 

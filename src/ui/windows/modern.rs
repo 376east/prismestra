@@ -826,7 +826,9 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             | Command::PreviewScene { .. }
             | Command::CloseReady { .. }
             | Command::Alice {
-                request: super::alice::Action::Status | super::alice::Action::Cancel
+                request: super::alice::Action::Status
+                    | super::alice::Action::Open
+                    | super::alice::Action::Cancel
             }
     ) {
         let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;

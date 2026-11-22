@@ -1,4 +1,5 @@
-//! Foreground Alice pilot. No startup hook, scheduler, persistent grant, or output worker.
+//! Foreground Alice control. Only explicit commands can write to a lamp.
+use crate::credentials_windows as credentials;
 use crate::transport::winhttp_get::{self, Proxy, Request};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -12,7 +13,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const HOST: &str = "127.0.0.1:45183";
@@ -23,18 +24,43 @@ const CLIENT_ID: &str = "8ac66ba305434d54a6a27cf357cc4d92";
 const SCOPES: &str = "iot:view iot:control";
 const RANGE: &str = "devices.capabilities.range";
 const ON: &str = "devices.capabilities.on_off";
+const SIGN_IN_AGAIN: &str = "Доступ к Алисе истёк или отозван. Войдите через Яндекс ID заново.";
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Action {
     Status,
-    SignIn,
+    Open,
+    SignIn {
+        remember: bool,
+    },
+    Resume,
+    SignOut,
     Apply {
         ticket: String,
         lamp: usize,
         brightness: u8,
     },
+    TurnOn {
+        ticket: String,
+        lamp: usize,
+    },
     Cancel,
+}
+
+#[derive(Clone, Copy)]
+enum Change {
+    Brightness(u8),
+    TurnOn,
+}
+
+impl Change {
+    fn capability(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Brightness(_) => (RANGE, "brightness"),
+            Self::TurnOn => (ON, "on"),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -49,12 +75,14 @@ struct Grant {
     token: String,
     ticket: String,
     expires: Instant,
+    valid_until: Option<u64>,
     lamps: Vec<Lamp>,
 }
 
 struct Job {
     cancel: Arc<AtomicBool>,
     reply: mpsc::Receiver<Result<Option<Grant>, String>>,
+    success: &'static str,
 }
 
 impl Drop for Job {
@@ -68,19 +96,62 @@ pub(super) struct Session {
     job: Option<Job>,
     grant: Option<Grant>,
     message: String,
+    remember_pending: bool,
+    saved: bool,
 }
 
 impl Session {
     pub(super) fn handle(&mut self, action: Action) -> Result<Value, String> {
-        self.poll();
+        if !matches!(&action, Action::Cancel) {
+            self.poll();
+        }
         match action {
             Action::Status => {}
+            Action::Open => {
+                let saved = credentials::read_alice()
+                    .map_err(|_| "Не удалось прочитать сохранённый вход Алисы.")?;
+                self.saved = saved.is_some();
+                if let Some(saved) = saved
+                    && parse_saved(&saved, unix_now()?).is_err()
+                {
+                    self.message = SIGN_IN_AGAIN.into();
+                }
+            }
             Action::Cancel => {
                 self.job = None;
                 self.grant = None;
                 self.message.clear();
+                self.remember_pending = false;
             }
-            Action::SignIn => {
+            Action::SignOut => {
+                if self.job.is_some() {
+                    return Err("Дождитесь завершения операции Алисы.".into());
+                }
+                self.grant = None;
+                credentials::delete_alice()
+                    .map_err(|_| "Не удалось удалить сохранённый вход Алисы.")?;
+                self.saved = false;
+                self.message = "Вы вышли из Алисы в Prismestra.".into();
+            }
+            Action::Resume => {
+                if self.job.is_some() {
+                    return Err("Дождитесь завершения операции Алисы.".into());
+                }
+                self.grant = None;
+                let saved = credentials::read_alice()
+                    .map_err(|_| "Не удалось прочитать сохранённый вход Алисы.")?;
+                self.saved = saved.is_some();
+                let saved = saved.ok_or("Войдите через Яндекс ID.")?;
+                let (until, token) = parse_saved(&saved, unix_now()?)?;
+                let token = token.to_owned();
+                let ticket = nonce()?;
+                self.start(
+                    "Загружаем лампы кабинета.",
+                    "",
+                    move |cancel| load_grant(token, ticket, Some(until), cancel).map(Some),
+                )?;
+            }
+            Action::SignIn { remember } => {
                 if self.job.is_some() {
                     return Err("Дождитесь завершения операции Алисы.".into());
                 }
@@ -94,41 +165,27 @@ impl Session {
                 super::updates::open_url(&attempt.url())?;
                 self.start(
                     "Подтвердите вход в браузере.",
+                    "",
                     move |cancel| {
                         let code = attempt.receive(&listener, cancel)?;
                         drop(listener);
                         attempt.exchange(&code, cancel).map(Some)
                     },
                 )?;
+                self.remember_pending = remember;
             }
             Action::Apply {
                 ticket,
                 lamp,
                 brightness,
             } => {
-                if self.job.is_some() || !(1..=100).contains(&brightness) {
-                    return Err(
-                        "Укажите яркость от 1 до 100% и дождитесь завершения операции.".into(),
-                    );
+                if !(1..=100).contains(&brightness) {
+                    return Err("Укажите яркость от 1 до 100%.".into());
                 }
-                let grant = self
-                    .grant
-                    .as_ref()
-                    .filter(|grant| grant.ticket == ticket)
-                    .ok_or("Сначала войдите и выберите лампу заново.")?;
-                let selected = grant
-                    .lamps
-                    .get(lamp)
-                    .cloned()
-                    .ok_or("Выберите конкретную лампу.")?;
-                let grant = self.grant.take().expect("checked grant");
-                self.start(
-                    "Проверяем лампу и отправляем разовую команду.",
-                    move |cancel| {
-                        apply(&grant.token, &selected, brightness, cancel)?;
-                        Ok(None)
-                    },
-                )?;
+                self.apply_selection(&ticket, lamp, Change::Brightness(brightness))?;
+            }
+            Action::TurnOn { ticket, lamp } => {
+                self.apply_selection(&ticket, lamp, Change::TurnOn)?
             }
         }
         let lamps = self
@@ -143,14 +200,46 @@ impl Session {
             })
             .unwrap_or_default();
         Ok(json!({
-            "busy": self.job.is_some(), "message": self.message,
+            "busy": self.job.is_some(), "message": self.message, "saved": self.saved,
             "ticket": self.grant.as_ref().map(|grant| &grant.ticket), "lamps": lamps
         }))
+    }
+
+    fn apply_selection(&mut self, ticket: &str, lamp: usize, change: Change) -> Result<(), String> {
+        if self.job.is_some() {
+            return Err("Дождитесь завершения операции Алисы.".into());
+        }
+        let grant = self
+            .grant
+            .as_ref()
+            .filter(|grant| grant.ticket == ticket)
+            .ok_or("Сначала войдите и выберите лампу заново.")?;
+        let selected = grant
+            .lamps
+            .get(lamp)
+            .cloned()
+            .ok_or("Выберите конкретную лампу.")?;
+        let grant = self.grant.take().expect("checked grant");
+        let success = match change {
+            Change::Brightness(_) => "Яндекс подтвердил изменение яркости.",
+            Change::TurnOn => "Яндекс подтвердил включение лампы.",
+        };
+        self.start(
+            "Проверяем лампу и отправляем разовую команду.",
+            success,
+            move |cancel| {
+                apply_with(&selected, change, |path, data| {
+                    api(path, &grant.token, data, cancel)
+                })?;
+                Ok(None)
+            },
+        )
     }
 
     fn start(
         &mut self,
         message: &str,
+        success: &'static str,
         work: impl FnOnce(&AtomicBool) -> Result<Option<Grant>, String> + Send + 'static,
     ) -> Result<(), String> {
         let (sender, reply) = mpsc::channel();
@@ -162,7 +251,11 @@ impl Session {
                 let _ = sender.send(work(&flag));
             })
             .map_err(|_| "Не удалось запустить проверку Алисы.")?;
-        self.job = Some(Job { cancel, reply });
+        self.job = Some(Job {
+            cancel,
+            reply,
+            success,
+        });
         self.message = message.into();
         Ok(())
     }
@@ -182,7 +275,9 @@ impl Session {
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => Err("Операция Алисы прервалась.".into()),
         };
+        let success = job.success;
         self.job = None;
+        let remember = std::mem::take(&mut self.remember_pending);
         match result {
             Ok(Some(grant)) => {
                 self.message = if grant.lamps.is_empty() {
@@ -191,12 +286,74 @@ impl Session {
                     "Выберите лампу кабинета."
                 }
                 .into();
+                if remember {
+                    if let Some(until) = grant.valid_until
+                        && credentials::save_alice(&format!("{until}:{}", grant.token)).is_ok()
+                    {
+                        self.saved = true;
+                    } else {
+                        self.message
+                            .push_str(" Вход доступен на один раз. Сохранить его не удалось.");
+                    }
+                }
                 self.grant = Some(grant);
             }
-            Ok(None) => self.message = "Яндекс подтвердил изменение яркости.".into(),
+            Ok(None) => self.message = success.into(),
             Err(error) => self.message = error,
         }
     }
+}
+
+fn unix_now() -> Result<u64, String> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|time| time.as_secs())
+        .map_err(|_| "Проверьте системное время для входа в Алису.".into())
+}
+
+fn valid_access_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= 4096
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~+/=".contains(&b))
+}
+
+fn parse_saved(saved: &str, now: u64) -> Result<(u64, &str), String> {
+    let (until, token) = saved.split_once(':').ok_or(SIGN_IN_AGAIN)?;
+    let until = until
+        .parse::<u64>()
+        .ok()
+        .filter(|until| *until > now)
+        .ok_or(SIGN_IN_AGAIN)?;
+    if !valid_access_token(token) {
+        return Err(SIGN_IN_AGAIN.into());
+    }
+    Ok((until, token))
+}
+
+fn load_grant(
+    token: String,
+    ticket: String,
+    valid_until: Option<u64>,
+    cancel: &AtomicBool,
+) -> Result<Grant, String> {
+    let lamps = lamps(&catalog(&token, cancel)?)?;
+    let ttl = match valid_until {
+        Some(until) => until
+            .checked_sub(unix_now()?)
+            .filter(|ttl| *ttl > 0)
+            .ok_or(SIGN_IN_AGAIN)?
+            .min(300),
+        None => 300,
+    };
+    Ok(Grant {
+        token,
+        ticket,
+        lamps,
+        valid_until,
+        expires: Instant::now() + Duration::from_secs(ttl),
+    })
 }
 
 fn nonce() -> Result<String, String> {
@@ -296,13 +453,7 @@ impl Attempt {
         )?;
         let token = value["access_token"]
             .as_str()
-            .filter(|token| {
-                !token.is_empty()
-                    && token.len() <= 4096
-                    && token
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"-._~+/=".contains(&b))
-            })
+            .filter(|token| valid_access_token(token))
             .ok_or("Яндекс не выдал токен входа.")?;
         if let Some(scope) = value["scope"].as_str() {
             let mut scopes = scope.split_whitespace().collect::<Vec<_>>();
@@ -311,13 +462,11 @@ impl Attempt {
                 return Err("Яндекс выдал права, отличные от запрошенных.".into());
             }
         }
-        let ttl = value["expires_in"].as_u64().unwrap_or(300).min(300);
-        Ok(Grant {
-            lamps: lamps(&catalog(token, cancel)?)?,
-            ticket: self.state.clone(),
-            token: token.into(),
-            expires: Instant::now() + Duration::from_secs(ttl),
-        })
+        let now = unix_now()?;
+        let valid_until = value["expires_in"]
+            .as_u64()
+            .and_then(|ttl| now.checked_add(ttl));
+        load_grant(token.into(), self.state.clone(), valid_until, cancel)
     }
 }
 
@@ -434,6 +583,10 @@ fn request(
         },
     }
     .map_err(|error| match error {
+        winhttp_get::Error::Http(401) if host == "api.iot.yandex.net" => SIGN_IN_AGAIN.into(),
+        winhttp_get::Error::Http(403) if host == "api.iot.yandex.net" => {
+            "Яндекс отклонил доступ. Войдите заново и проверьте права на лампу.".into()
+        }
         winhttp_get::Error::Http(status) => format!("Яндекс вернул HTTP {status}."),
         _ => "Связь с Яндексом прервалась.".into(),
     })?;
@@ -532,7 +685,12 @@ fn lamps(catalog: &Value) -> Result<Vec<Lamp>, String> {
     Ok(listed)
 }
 
-fn command(lamp: &Lamp, data: &Value, catalog_caps: &[Value], value: u8) -> Result<Value, String> {
+fn command(
+    lamp: &Lamp,
+    data: &Value,
+    catalog_caps: &[Value],
+    change: Change,
+) -> Result<Value, String> {
     if data["status"] != "ok"
         || data["id"] != lamp.id
         || data["room"] != lamp.room
@@ -543,11 +701,20 @@ fn command(lamp: &Lamp, data: &Value, catalog_caps: &[Value], value: u8) -> Resu
     let caps = data["capabilities"]
         .as_array()
         .ok_or("Яндекс не вернул умения лампы.")?;
-    if !caps
+    let on = caps
         .iter()
-        .any(|cap| cap["type"] == ON && cap["state"]["value"] == true)
-    {
-        return Err("Включите выбранную лампу через Алису перед применением.".into());
+        .find(|cap| cap["type"] == ON)
+        .and_then(|cap| cap["state"]["value"].as_bool())
+        .ok_or("Яндекс не вернул состояние питания лампы.")?;
+    let Change::Brightness(value) = change else {
+        if on {
+            return Err("Лампа уже включена.".into());
+        }
+        return Ok(json!({"devices":[{"id":lamp.id,"actions":[{"type":ON,
+            "state":{"instance":"on","value":true}}]}]}));
+    };
+    if !on {
+        return Err("Сначала включите выбранную лампу.".into());
     }
     let mut ranges = caps.iter().filter(|value| brightness(value));
     let range = ranges
@@ -578,13 +745,9 @@ fn command(lamp: &Lamp, data: &Value, catalog_caps: &[Value], value: u8) -> Resu
         "state":{"instance":"brightness","value":value,"relative":false}}]}]}))
 }
 
-fn apply(token: &str, selected: &Lamp, value: u8, cancel: &AtomicBool) -> Result<(), String> {
-    apply_with(selected, value, |path, data| api(path, token, data, cancel))
-}
-
 fn apply_with(
     selected: &Lamp,
-    value: u8,
+    change: Change,
     mut request: impl FnMut(&str, Option<&[u8]>) -> Result<Value, String>,
 ) -> Result<(), String> {
     let catalog = request("/v1.0/user/info", None)?;
@@ -597,22 +760,23 @@ fn apply_with(
         .and_then(|device| device["capabilities"].as_array())
         .ok_or("Яндекс не вернул умения выбранной лампы.")?;
     let data = request(&format!("/v1.0/devices/{}", encode(&selected.id)), None)?;
-    let body = serde_json::to_vec(&command(selected, &data, caps, value)?)
+    let body = serde_json::to_vec(&command(selected, &data, caps, change)?)
         .map_err(|_| "Некорректная команда Алисы.")?;
     let result = request("/v1.0/devices/actions", Some(&body)).map_err(|error| {
         format!("{error} Результат команды не подтверждён. Автоматического повтора не будет.")
     })?;
+    let (kind, instance) = change.capability();
     if result["status"] == "ok"
         && result["devices"].as_array().is_some_and(|devices| {
             matches!(devices.as_slice(), [device] if device["id"] == selected.id
             && device["capabilities"].as_array().is_some_and(|caps| matches!(caps.as_slice(),
-                [cap] if cap["type"] == RANGE && cap["state"]["instance"] == "brightness"
+                [cap] if cap["type"] == kind && cap["state"]["instance"] == instance
                     && cap["state"]["action_result"]["status"] == "DONE")))
         })
     {
         Ok(())
     } else {
-        Err("Яндекс не подтвердил изменение яркости. Автоматического повтора не будет.".into())
+        Err("Яндекс не подтвердил команду. Автоматического повтора не будет.".into())
     }
 }
 
@@ -671,7 +835,7 @@ mod tests {
             ["a", "b"]
         );
         let mut paths = Vec::new();
-        let result = apply_with(&choices[1], 40, |path, body| {
+        let result = apply_with(&choices[1], Change::Brightness(40), |path, body| {
             paths.push(path.to_owned());
             match path {
                 "/v1.0/user/info" => Ok(catalog.clone()),
@@ -702,12 +866,44 @@ mod tests {
         let mut moved = fixture();
         moved["devices"][1]["room"] = json!("neighbor");
         assert!(
-            apply_with(&choices[1], 40, |path, _| {
+            apply_with(&choices[1], Change::Brightness(40), |path, _| {
                 assert_eq!(path, "/v1.0/user/info");
                 Ok(moved.clone())
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn turn_on_targets_one_off_lamp_and_never_replays_an_uncertain_post() {
+        let catalog = fixture();
+        let lamp = &lamps(&catalog).unwrap()[1];
+        for (on, confirmed, writes) in [(false, true, 1), (false, false, 1), (true, false, 0)] {
+            let mut posts = 0;
+            let result = apply_with(lamp, Change::TurnOn, |path, body| match path {
+                "/v1.0/user/info" => Ok(catalog.clone()),
+                "/v1.0/devices/b" => Ok(json!({"status":"ok","id":"b","room":"r","state":"online",
+                    "capabilities":[{"type":ON,"state":{"value":on}}]})),
+                "/v1.0/devices/actions" => {
+                    posts += 1;
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(body.unwrap()).unwrap(),
+                        json!({"devices":[{"id":"b","actions":[{"type":ON,"state":{"instance":"on","value":true}}]}]})
+                    );
+                    if confirmed {
+                        Ok(
+                            json!({"status":"ok","devices":[{"id":"b","capabilities":[{"type":ON,
+                            "state":{"instance":"on","action_result":{"status":"DONE"}}}]}]}),
+                        )
+                    } else {
+                        Err("timeout".into())
+                    }
+                }
+                _ => panic!("a different lamp was accessed"),
+            });
+            assert_eq!(result.is_ok(), confirmed);
+            assert_eq!(posts, writes);
+        }
     }
 
     #[test]
@@ -717,6 +913,7 @@ mod tests {
                 token: "secret".into(),
                 ticket: "current".into(),
                 expires: Instant::now() + Duration::from_secs(30),
+                valid_until: None,
                 lamps: lamps(&fixture()).unwrap(),
             }),
             ..Default::default()
@@ -752,5 +949,23 @@ mod tests {
             Value::Null
         );
         assert!(session.grant.is_none());
+    }
+
+    #[test]
+    fn saved_access_requires_unexpired_header_safe_credentials() {
+        assert_eq!(
+            parse_saved("200:access.token-1", 199),
+            Ok((200, "access.token-1"))
+        );
+        for invalid in [
+            "200:access",
+            "200:header\r\n",
+            "200:",
+            "not-time:access",
+            "access",
+        ] {
+            assert!(parse_saved(invalid, 200).is_err());
+        }
+        assert!(parse_saved("201:header\r\n", 200).is_err());
     }
 }

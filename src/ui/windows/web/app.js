@@ -460,7 +460,7 @@ function renderSettings() {
  return heading('Настройки','Настройки локального профиля.')
   + `<div class="settings-sections">
     <section class="parameter-panel"><h2>Диагностика</h2><div class="settings-links">${pageButton('temperatures')}${pageButton('connections')}${pageButton('sources','Источники температур')}</div></section>
-    <section class="parameter-panel"><h2>Алиса</h2><button class="button" data-action="alice-open">Подключить лампу кабинета</button></section>
+    <section class="parameter-panel"><h2>Алиса</h2><div class="settings-links"><button class="button" data-action="alice-open">Подключить лампу кабинета</button></div></section>
     <section class="parameter-panel"><h2>Расписание</h2><p class="parameter-note">${schedule}</p><div class="settings-links">${pageButton('schedule','Управлять расписанием')}</div></section>
   </div>`;
 }
@@ -721,23 +721,31 @@ function aliceWait() {
 }
 function aliceSelection() {
  const level=$('#alice-brightness');
- $('#alice-apply').disabled=!aliceTicket || $('#alice-lamp').value==='' || !level.value || !level.checkValidity();
+ const chosen=Boolean(aliceTicket) && $('#alice-lamp').value!=='';
+ $('#alice-turn-on').disabled=!chosen;
+ $('#alice-apply').disabled=!chosen || !level.value || !level.checkValidity();
 }
 function receiveAlice(message) {
  const dialog=$('#alice-dialog');
  if(!dialog?.open)return;
  clearTimeout(aliceTimer);
  const signIn=dialog.querySelector('[data-action="alice-sign-in"]');
+ const resume=dialog.querySelector('[data-action="alice-resume"]');
+ const signOut=dialog.querySelector('[data-action="alice-sign-out"]');
  const status=$('#alice-status');
  if(message.error){
   status.textContent=message.error;
   signIn.disabled=false;
+  resume.disabled=false;
+  signOut.disabled=false;
   aliceSelection();
   return;
  }
  const state=message.state;
  status.textContent=state.message;
  signIn.disabled=state.busy;
+ resume.hidden=signOut.hidden=!state.saved;
+ resume.disabled=signOut.disabled=state.busy;
  if(aliceTicket!==state.ticket){
   aliceTicket=state.ticket;
   const picker=$('#alice-lamp');
@@ -761,6 +769,7 @@ $('#alice-dialog')?.addEventListener('close',()=>{
  clearTimeout(aliceTimer);
  aliceTicket=undefined;
  $('#alice-choice').hidden=true;
+ $('#alice-remember').checked=false;
  aliceRequest('cancel');
 });
 $('#alice-lamp')?.addEventListener('change',aliceSelection);
@@ -810,20 +819,27 @@ document.addEventListener('click',event=>{
   return;
  }
  switch(b.dataset.action){
- case 'alice-open':$('#alice-dialog').showModal();aliceRequest('status');break;
+ case 'alice-open':$('#alice-dialog').showModal();aliceRequest('open');break;
  case 'alice-close':$('#alice-dialog').close();break;
  case 'alice-sign-in':
-  b.disabled=true;
+ case 'alice-resume':
+ case 'alice-sign-out':
+  document.querySelectorAll('#alice-dialog [data-action="alice-sign-in"],#alice-dialog [data-action="alice-resume"],#alice-dialog [data-action="alice-sign-out"]').forEach(button=>button.disabled=true);
   $('#alice-choice').hidden=true;
   aliceTicket=undefined;
-  aliceRequest('sign_in');
+  aliceSelection();
+  if(b.dataset.action==='alice-sign-in')aliceRequest('sign_in',{remember:$('#alice-remember').checked});
+  else aliceRequest(b.dataset.action==='alice-resume'?'resume':'sign_out');
   break;
+ case 'alice-turn-on':
  case 'alice-apply':{
   const ticket=aliceTicket;
   if(!ticket||$('#alice-lamp').value==='')break;
+  const lamp=Number($('#alice-lamp').value);
   aliceTicket=undefined;
   aliceSelection();
-  aliceRequest('apply',{ticket,lamp:Number($('#alice-lamp').value),brightness:Number($('#alice-brightness').value)});
+  if(b.dataset.action==='alice-turn-on')aliceRequest('turn_on',{ticket,lamp});
+  else aliceRequest('apply',{ticket,lamp,brightness:Number($('#alice-brightness').value)});
   break;
  }
  case 'open-argb': {

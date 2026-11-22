@@ -99,3 +99,8 @@ html{scroll-padding-block:16px 100px}main :is(button,input,select,a){scroll-marg
 .settings-sections{display:grid;gap:12px;max-width:840px}
 .settings-sections h2{font-size:16px}
 .settings-links{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.settings-sections{grid-template-columns:minmax(0,1fr)}
+.settings-links .button,#alice-dialog .button{height:auto;min-height:var(--command-height);max-width:100%;padding-block:6px;white-space:normal}
+#alice-dialog :is(p,label,.native-target){margin-block:8px}
+#alice-dialog p:empty{display:none}
+.alice-actions{display:flex;flex-wrap:wrap;gap:8px}
