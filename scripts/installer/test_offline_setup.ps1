@@ -153,8 +153,10 @@ function Read-Startup {
     finally { $key.Dispose() }
 }
 
-function Assert-ProductAbsent {
-    foreach ($path in @($install, $arpKey, $shortcut, $policyKey, $policyDirectory)) {
+function Assert-ProductAbsent([switch]$AllowFixturePolicyDirectory) {
+    $paths = @($install, $arpKey, $shortcut, $policyKey)
+    if (!$AllowFixturePolicyDirectory) { $paths += $policyDirectory }
+    foreach ($path in $paths) {
         Assert-Expected (-not (Test-Path -LiteralPath $path)) "Unexpected product artifact: $path"
     }
     Assert-Expected ($null -eq (Read-Startup)) 'Unexpected Prismestra sign-in registration.'
@@ -246,6 +248,51 @@ function Read-ConfigurationEvidence {
         sha256 = Get-Sha256 $configurationPath
         acl_sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($sddl)).ToLowerInvariant()
     }
+}
+
+function Remove-PinnedFixture([string]$Root, [System.Collections.IDictionary]$Pins, [string[]]$Directories) {
+    # This runs only after uninstall and only on a fixture root this test created.
+    # Validate the exact tree before removing any entry. Never recurse on removal.
+    $actual = @(
+        foreach ($relative in (@('') + $Directories)) {
+            $path = if ($relative) { Join-Path $Root $relative } else { $Root }
+            $directory = Get-Item -LiteralPath $path -Force
+            Assert-Expected ($directory.PSIsContainer -and -not ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) (
+                'Unexpected directory in the fixture cleanup tree.')
+            foreach ($entry in Get-ChildItem -LiteralPath $path -Force) {
+                Assert-Expected (-not ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) (
+                    'Refusing to remove a fixture tree containing a reparse point.')
+                if ($relative) { "$relative/$($entry.Name)" } else { $entry.Name }
+            }
+        }
+    )
+    $expected = $Directories + @($Pins.Keys)
+    Assert-Expected ($actual.Count -eq $expected.Count -and
+        -not (Compare-Object -ReferenceObject $expected -DifferenceObject $actual -CaseSensitive)) (
+        'Refusing to remove a fixture tree with missing or unexpected entries.')
+    foreach ($relative in $Pins.Keys) {
+        $path = Join-Path $Root $relative
+        Assert-Expected ((Test-Path -LiteralPath $path -PathType Leaf) -and (Get-Sha256 $path) -ceq $Pins[$relative]) (
+            "Refusing to remove changed fixture file: $relative")
+    }
+    foreach ($relative in $Pins.Keys) {
+        [IO.File]::Delete((Join-Path $Root $relative))
+    }
+    for ($i = $Directories.Count - 1; $i -ge 0; $i--) {
+        [IO.Directory]::Delete((Join-Path $Root $Directories[$i]))
+    }
+    [IO.Directory]::Delete($Root)
+}
+
+function Remove-UnprovisionedConfigurationFixture {
+    if (!$ownedPolicyFixture -or $receipt.upgrade_verified -or !$configurationEvidence.before -or
+        !(Test-Path -LiteralPath $policyDirectory)) { return }
+    Assert-ProductAbsent -AllowFixturePolicyDirectory
+    $current = Read-ConfigurationEvidence
+    Assert-Expected ($current.sha256 -ceq $configurationEvidence.before.sha256 -and
+        $current.acl_sha256 -ceq $configurationEvidence.before.acl_sha256) (
+        'Refusing to remove the changed configuration fixture.')
+    Remove-PinnedFixture $policyDirectory @{'config/Configuration.json' = $current.sha256} @('config')
 }
 
 function Invoke-UpgradeRouteProbe([string]$Operation) {
@@ -354,6 +401,7 @@ $receipt = [ordered]@{
     network_isolation_exercised = $false
 }
 $setupAttempted = $false
+$ownedPolicyFixture = $false
 $savedData = [ordered]@{}
 $receiptName = 'offline-setup.json'
 if ($PreviousInstaller) {
@@ -425,6 +473,7 @@ try {
             $savedData[$name] = Get-Sha256 (Join-Path $userRoot $name)
         }
         $receipt.saved_data_sha256 = $savedData
+        $ownedPolicyFixture = !(Test-Path -LiteralPath $policyDirectory)
         Initialize-ConfigurationFixture
         $configurationEvidence.before = Read-ConfigurationEvidence
     }
@@ -491,7 +540,8 @@ try {
 } finally {
     if ($setupAttempted) {
         try {
-            if (Test-Path -LiteralPath $arpKey) {
+            $hadInstaller = Test-Path -LiteralPath $arpKey
+            if ($hadInstaller) {
                 Assert-ProtectedInstall
                 if ($receipt.upgrade_verified) {
                     Test-ManagedUninstall $receipt.app_sha256 $receipt.previous.app_sha256
@@ -499,14 +549,18 @@ try {
                 $receipt.uninstall_exit_code = Invoke-Installer (Get-RegisteredUninstaller) '' $uninstallLog
                 Assert-Expected ($receipt.uninstall_exit_code -eq 0) "Uninstaller returned $($receipt.uninstall_exit_code)."
                 Assert-Expected (Test-Path -LiteralPath $uninstallLog -PathType Leaf) 'Uninstaller did not write its log.'
-                Assert-ProductAbsent
+            }
+            Remove-UnprovisionedConfigurationFixture
+            Assert-ProductAbsent
+            if ($hadInstaller) {
                 foreach ($name in $savedData.Keys) {
                     Assert-Expected ((Get-Sha256 (Join-Path $userRoot $name)) -ceq $savedData[$name]) "Uninstall changed synthetic data: $name"
                 }
                 $receipt.uninstall_verified = $true
                 $receipt.managed_uninstall_verified = $receipt.upgrade_verified
-            } else {
-                Assert-ProductAbsent
+            }
+            if ($savedData.Count) {
+                Remove-PinnedFixture $userRoot $savedData @('state', 'state/assets')
             }
         } catch { $failures.Add($_.Exception.Message) }
         try {
