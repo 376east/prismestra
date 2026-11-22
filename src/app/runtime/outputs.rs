@@ -71,13 +71,19 @@ impl OutputPlan {
 impl Runtime {
     #[cfg(windows)]
     pub(crate) fn output_activity(&self, device: &crate::devices::Device) -> OutputActivity {
-        use crate::runtime::output::Phase;
+        use crate::{devices::Driver, runtime::output::Phase};
 
         let id = &device.id;
         let is_lcd = device.role == Role::Lcd;
+        let group_off = !self.desired.on(self.target(id));
+        // A registered network output still has to deliver Off. Keep its failure visible.
+        let show_network_status_while_off = group_off
+            && matches!(device.driver, Driver::HomeAssistant | Driver::WledDdp)
+            && self.rgb_specs.contains_key(id)
+            && !self.rgb_requires_action(id);
         if !device.enabled
             || self.stopped
-            || !self.desired.on(self.target(id))
+            || (group_off && !show_network_status_while_off)
             || (is_lcd
                 && self
                     .document
@@ -136,6 +142,7 @@ impl Runtime {
             (status.phase, status.submitted, status.error)
         };
         match phase {
+            Phase::Ready if group_off && frames > 0 => OutputActivity::Off,
             Phase::Ready if frames > 0 => OutputActivity::Sent(frames),
             Phase::Connecting => error.map_or(OutputActivity::Connecting, OutputActivity::Retrying),
             Phase::Ready => OutputActivity::Connecting,
