@@ -14,11 +14,19 @@ pub struct OpenRgbRetryTicket {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum OpenRgbRetryStatus {
+pub enum OutputRetryStatus {
     Pending,
     Submitted,
     Failed(String),
     Cancelled,
+}
+pub type OpenRgbRetryStatus = OutputRetryStatus;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LcdRetryTicket {
+    pub document_revision: u64,
+    pub generation: u64,
+    pub attempt: u64,
 }
 
 #[derive(Default)]
@@ -164,7 +172,7 @@ impl Runtime {
 
     pub fn openrgb_retry_status(&self, id: &str, ticket: OpenRgbRetryTicket) -> OpenRgbRetryStatus {
         use crate::runtime::output::Phase;
-        use OpenRgbRetryStatus::*;
+        use OutputRetryStatus::*;
 
         if self.output_recovery_paused() || ticket.document_revision != self.document_revision {
             return Cancelled;
@@ -329,33 +337,75 @@ impl Runtime {
         }
     }
 
+    pub(crate) fn lcd_retry_ticket(&self, id: &str) -> Option<LcdRetryTicket> {
+        if self.output_recovery_paused()
+            || self.lcd_arrivals.contains(id)
+            || !self.desired.on(self.target(id))
+        {
+            return None;
+        }
+        let worker = self.lcd.get(id)?;
+        self.lcd_specs.get(id)?;
+        let recovery = self.output_recovery.get(id)?;
+        let snapshot = worker.snapshot();
+        (snapshot.phase == lcd_worker::Phase::Failed
+            && recovery.failed_generation == Some(snapshot.generation)
+            && recovery.attempts == RETRY_DELAYS_US.len()
+            && !recovery.retry_scheduled()
+            && recovery.manual_attempt < u64::MAX
+            && worker.is_reaped())
+        .then_some(LcdRetryTicket {
+            document_revision: self.document_revision,
+            generation: snapshot.generation,
+            attempt: recovery.manual_attempt,
+        })
+    }
+
     /// Retry the selected failed LCD once after its automatic attempts are exhausted.
     /// A stale generation, an active recovery or a draining worker returns `Ok(false)`.
     pub fn retry_lcd_output(&mut self, id: &str, failed_generation: u64) -> Result<bool, String> {
-        if self.output_recovery_paused() || self.lcd_arrivals.contains(id) {
-            return Ok(false);
-        }
-        let (Some(worker), Some(spec), Some(recovery)) = (
-            self.lcd.get(id),
-            self.lcd_specs.get(id),
-            self.output_recovery.get(id),
-        ) else {
+        let Some(ticket) = self
+            .lcd_retry_ticket(id)
+            .filter(|ticket| ticket.generation == failed_generation)
+        else {
             return Ok(false);
         };
-        let snapshot = worker.snapshot();
-        if snapshot.phase != lcd_worker::Phase::Failed
-            || snapshot.generation != failed_generation
-            || recovery.failed_generation != Some(failed_generation)
-            || recovery.attempts != RETRY_DELAYS_US.len()
-            || recovery.retry_scheduled()
-            || !worker.is_reaped()
-        {
-            return Ok(false);
-        }
+        self.output_recovery.get_mut(id).unwrap().manual_attempt = ticket.attempt + 1;
+        let spec = &self.lcd_specs[id];
         let result = self.start_registered_lcd(id, spec.keys.clone(), spec.factory.clone());
         self.handle_output_start(id, result.clone().map_err(Into::into))?;
         self.bump_view();
         result.map(|()| true)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn lcd_retry_status(
+        &self,
+        id: &str,
+        document_revision: u64,
+        generation: u64,
+    ) -> OutputRetryStatus {
+        use OutputRetryStatus::*;
+        if self.output_recovery_paused()
+            || document_revision != self.document_revision
+            || !self.desired.on(self.target(id))
+        {
+            return Cancelled;
+        }
+        let Some(snapshot) = self
+            .lcd_status(id)
+            .filter(|status| status.generation == generation)
+        else {
+            return Cancelled;
+        };
+        match snapshot.phase {
+            lcd_worker::Phase::Failed => {
+                Failed(snapshot.error.unwrap_or_else(|| "LCD недоступен".into()))
+            }
+            lcd_worker::Phase::Ready if snapshot.frames_sent > 0 => Submitted,
+            lcd_worker::Phase::Connecting | lcd_worker::Phase::Ready => Pending,
+            _ => Cancelled,
+        }
     }
 
     pub(super) fn start_registered_lcd(

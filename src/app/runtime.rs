@@ -35,6 +35,8 @@ mod recovery;
 mod sound;
 #[cfg(windows)]
 mod system_load;
+#[cfg(windows)]
+pub(crate) use recovery::{LcdRetryTicket, OutputRetryStatus};
 pub use recovery::{OpenRgbRetryStatus, OpenRgbRetryTicket};
 mod registry_input;
 pub use outputs::{LcdOutput, OutputPlan, RgbOutput};
