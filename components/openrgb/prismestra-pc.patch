@@ -713,7 +713,7 @@ index e20d9f4a141332ea84d7e8c6061dcd2b29b21876..718ee9cd45ac4a62f65d7b8e5e69eb7d
  message("VERSION_NUM: "$$VERSION_NUM)
  message("VERSION_STR: "$$VERSION_STR)
 diff --git a/ProfileManager.cpp b/ProfileManager.cpp
-index 8158a73a6dcb25663302e97ebedfa0ae4941a875..16c46005abf375508e783e640959c97f15462e09 100644
+index 8158a73a6dcb25663302e97ebedfa0ae4941a875..cb9f399d8fedaecc7c861ffaedc99ae253075bba 100644
 --- a/ProfileManager.cpp
 +++ b/ProfileManager.cpp
 @@ -12,6 +12,8 @@
@@ -725,7 +725,7 @@ index 8158a73a6dcb25663302e97ebedfa0ae4941a875..16c46005abf375508e783e640959c97f
  #include "filesystem.h"
  #include "JsonUtils.h"
  #include "LogManager.h"
-@@ -1303,6 +1305,45 @@ bool ProfileManager::LoadAutoProfile(std::string setting_name)
+@@ -1303,6 +1305,58 @@ bool ProfileManager::LoadAutoProfile(std::string setting_name)
      }
  }
  
@@ -749,7 +749,9 @@ index 8158a73a6dcb25663302e97ebedfa0ae4941a875..16c46005abf375508e783e640959c97f
 +        const unsigned int size = saved->GetZoneLEDsCount(zone);
 +        const unsigned int min_size = live->GetZoneLEDsMin(zone);
 +        const unsigned int max_size = live->GetZoneLEDsMax(zone);
-+        if(!(live->GetZoneFlags(zone) & (ZONE_FLAG_MANUALLY_CONFIGURABLE_SIZE | ZONE_FLAG_MANUALLY_CONFIGURABLE_SIZE_EFFECTS_ONLY))
++        const auto flags = live->GetZoneFlags(zone);
++        if(!(flags & ZONE_FLAG_MANUALLY_CONFIGURABLE_SIZE)
++        || (flags & ZONE_FLAG_MANUALLY_CONFIGURABLE_SIZE_EFFECTS_ONLY)
 +        || saved->GetZoneName(zone) != live->GetZoneName(zone)
 +        || saved->GetZoneType(zone) != live->GetZoneType(zone)
 +        || saved->GetZoneLEDsMin(zone) != min_size
@@ -758,6 +760,17 @@ index 8158a73a6dcb25663302e97ebedfa0ae4941a875..16c46005abf375508e783e640959c97f
 +        {
 +            return false;
 +        }
++
++        const unsigned int current_size = live->GetZoneLEDsCount(zone);
++        if(current_size == size)
++        {
++            continue;
++        }
++        if(current_size != 0)
++        {
++            return false;
++        }
++
 +        sizes.emplace_back(static_cast<int>(zone), static_cast<int>(size));
 +    }
 +
@@ -771,7 +784,7 @@ index 8158a73a6dcb25663302e97ebedfa0ae4941a875..16c46005abf375508e783e640959c97f
  bool ProfileManager::LoadControllerFromListWithOptions
      (
      std::vector<RGBController*>&    profile_controllers,
-@@ -1314,17 +1355,28 @@ bool ProfileManager::LoadControllerFromListWithOptions
+@@ -1314,17 +1368,28 @@ bool ProfileManager::LoadControllerFromListWithOptions
      for(std::size_t temp_index = 0; temp_index < profile_controllers.size(); temp_index++)
      {
          RGBController *profile_controller = profile_controllers[temp_index];
@@ -806,7 +819,7 @@ index 8158a73a6dcb25663302e97ebedfa0ae4941a875..16c46005abf375508e783e640959c97f
          {
              location_check = true;
          }
-@@ -1352,8 +1404,9 @@ bool ProfileManager::LoadControllerFromListWithOptions
+@@ -1352,8 +1417,9 @@ bool ProfileManager::LoadControllerFromListWithOptions
          \*-------------------------------------------------*/
          bool    check_device_name   = true;
  
@@ -818,7 +831,7 @@ index 8158a73a6dcb25663302e97ebedfa0ae4941a875..16c46005abf375508e783e640959c97f
          {
              check_device_name = false;
          }
-@@ -1369,6 +1422,12 @@ bool ProfileManager::LoadControllerFromListWithOptions
+@@ -1369,6 +1435,12 @@ bool ProfileManager::LoadControllerFromListWithOptions
           &&                       (profile_controller->GetSerial()        == load_controller->GetSerial()     )
           &&                       (location_check                         == true                             ))
          {
@@ -831,7 +844,7 @@ index 8158a73a6dcb25663302e97ebedfa0ae4941a875..16c46005abf375508e783e640959c97f
              /*---------------------------------------------*\
              | Update device configuration if requested      |
              \*---------------------------------------------*/
-@@ -1377,9 +1436,6 @@ bool ProfileManager::LoadControllerFromListWithOptions
+@@ -1377,9 +1449,6 @@ bool ProfileManager::LoadControllerFromListWithOptions
                  /*-----------------------------------------*\
                  | Load device-specific configuration        |
                  \*-----------------------------------------*/
