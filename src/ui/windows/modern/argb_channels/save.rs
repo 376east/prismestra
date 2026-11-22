@@ -261,6 +261,7 @@ mod tests {
                 mode,
                 min: 1,
                 max: 32,
+                empty_manual: id == 0,
             })
             .collect(),
         }
@@ -284,7 +285,6 @@ mod tests {
                     zone: 0,
                     min: 1,
                     max: 32,
-                    empty_manual: id == 0,
                 }
             );
             Ok(ConfirmedZoneSize {
