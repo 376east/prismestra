@@ -181,6 +181,88 @@ pub struct OpenRgb {
     rgb: Vec<[u8; 3]>,
     next: Option<Instant>,
 }
+
+#[derive(Debug, serde::Serialize)]
+pub struct OpenRgbZoneDiagnostics {
+    pub expected_leds: usize,
+    pub observed_leds: usize,
+    pub topology_matches: bool,
+    pub supports_direct: bool,
+    pub zones: Vec<OpenRgbZoneSize>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct OpenRgbZoneSize {
+    pub id: usize,
+    pub name: String,
+    pub kind: String,
+    pub reported_leds: usize,
+    pub addressable_leds: usize,
+    pub led_offset: usize,
+}
+
+fn bound_openrgb_controller(
+    session: &mut crate::transport::openrgb::OpenRgbSession,
+    identity: &str,
+    deadline: Instant,
+    cancelled: &impl Fn() -> bool,
+) -> Result<crate::transport::openrgb::ControllerInfo, String> {
+    use crate::devices::openrgb as metadata;
+    let inventory = session.scan_inventory(deadline, cancelled)?;
+    let mut matching = inventory.into_iter().filter(|entry| {
+        metadata::identity_from_fields(entry.identity_fields.each_ref().map(String::as_str))
+            == identity
+    });
+    let entry = matching
+        .next()
+        .ok_or("OpenRGB controller identity is no longer available; rediscover before Apply")?;
+    if matching.next().is_some() {
+        return Err("OpenRGB controller identity is ambiguous; no output activated".into());
+    }
+    let controller = entry
+        .description
+        .map_err(|error| format!("OpenRGB: {error}"))?;
+    if controller.kind.eq_ignore_ascii_case("virtual") {
+        return Err("OpenRGB virtual controllers cannot own physical lighting outputs".into());
+    }
+    Ok(controller)
+}
+
+pub(crate) fn read_openrgb_zone_diagnostics(
+    endpoint: SocketAddr,
+    identity: &str,
+    topology: &str,
+    leds: usize,
+    cancel: &Cancellation,
+) -> Result<OpenRgbZoneDiagnostics, String> {
+    use crate::{devices::openrgb as metadata, transport::openrgb::OpenRgbSession};
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let cancelled = || cancel.cancelled();
+    let mut session = OpenRgbSession::connect(endpoint, deadline, &cancelled)?;
+    let controller = bound_openrgb_controller(&mut session, identity, deadline, &cancelled)?;
+    if cancelled() {
+        return Err("OpenRGB zone read cancelled or backend ownership changed".into());
+    }
+    Ok(OpenRgbZoneDiagnostics {
+        expected_leds: leds,
+        observed_leds: controller.leds,
+        topology_matches: controller.leds == leds && metadata::topology(&controller) == topology,
+        supports_direct: controller.supports_direct,
+        zones: controller
+            .zones
+            .into_iter()
+            .map(|zone| OpenRgbZoneSize {
+                id: zone.id,
+                name: zone.name,
+                kind: zone.kind,
+                reported_leds: zone.reported_leds,
+                addressable_leds: zone.leds,
+                led_offset: zone.led_offset,
+            })
+            .collect(),
+    })
+}
+
 impl OpenRgb {
     pub fn connect(
         endpoint: SocketAddr,
@@ -193,31 +275,14 @@ impl OpenRgb {
         let deadline = || Instant::now() + Duration::from_secs(3);
         let cancelled = || cancel.cancelled();
         let mut session = OpenRgbSession::connect(endpoint, deadline(), &cancelled)?;
-        let inventory = session.scan_inventory(deadline(), &cancelled)?;
-        let mut matching = inventory.iter().filter(|entry| {
-            metadata::identity_from_fields(entry.identity_fields.each_ref().map(String::as_str))
-                == identity
-        });
-        let controller = matching
-            .next()
-            .ok_or("OpenRGB controller identity is no longer available; rediscover before Apply")?;
-        if matching.next().is_some() {
-            return Err("OpenRGB controller identity is ambiguous; no output activated".into());
-        }
-        let controller = controller
-            .description
-            .as_ref()
-            .map_err(|error| format!("OpenRGB: {error}"))?;
-        if controller.kind.eq_ignore_ascii_case("virtual") {
-            return Err("OpenRGB virtual controllers cannot own physical lighting outputs".into());
-        }
+        let controller = bound_openrgb_controller(&mut session, identity, deadline(), &cancelled)?;
         if !controller.supports_direct {
             return Err(
                 "OpenRGB controller no longer advertises a compatible Direct mode. Restore Direct support for this controller before retrying."
                     .into(),
             );
         }
-        if controller.leds != leds || metadata::topology(controller) != topology {
+        if controller.leds != leds || metadata::topology(&controller) != topology {
             let mut zones = controller
                 .zones
                 .iter()
@@ -252,7 +317,7 @@ impl OpenRgb {
                 controller.leds,
             ));
         }
-        session.open_output(controller, deadline(), &cancelled)?;
+        session.open_output(&controller, deadline(), &cancelled)?;
         Ok(Self {
             session,
             leds,

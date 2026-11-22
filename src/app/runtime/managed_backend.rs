@@ -65,6 +65,71 @@ impl OpenRgbPolicies {
 }
 
 impl Runtime {
+    /// Prepare a read on an already-owned backend for a saved output. Run the
+    /// returned operation on a diagnostic worker, outside the coordinator.
+    pub fn prepare_managed_openrgb_zone_diagnostics(
+        &self,
+        id: &str,
+        local: &Local,
+    ) -> Result<
+        impl FnOnce(
+            &crate::runtime::output::Cancellation,
+        ) -> Result<crate::runtime::network::OpenRgbZoneDiagnostics, String>
+        + Send
+        + 'static,
+        String,
+    > {
+        let Some(
+            binding @ Binding::OpenRgb {
+                endpoint,
+                identity,
+                topology,
+            },
+        ) = local.devices.get(id)
+        else {
+            return Err("OpenRGB output has no saved binding".into());
+        };
+        let backend = self
+            .managed_backend
+            .as_ref()
+            .filter(|backend| {
+                backend.endpoint() == *endpoint
+                    && self.managed_backend_ids.contains(id)
+                    && self.managed_openrgb_retry_available(id)
+                    && self
+                        .rgb_specs
+                        .get(id)
+                        .is_some_and(|spec| spec.keys == binding.endpoint_keys())
+            })
+            .ok_or("OpenRGB binding is not attached to the ready owned backend")?;
+        let device = self
+            .document
+            .lighting
+            .setup
+            .devices
+            .iter()
+            .find(|device| {
+                device.id == id
+                    && device.enabled
+                    && device.driver == crate::devices::Driver::OpenRgb
+            })
+            .ok_or("OpenRGB device is not enabled in the applied document")?;
+        binding.validate(device)?;
+        let (endpoint, identity, topology, leds) =
+            (*endpoint, identity.clone(), topology.clone(), device.leds);
+        let guard = backend.guard();
+        Ok(move |cancel: &crate::runtime::output::Cancellation| {
+            guard()?;
+            crate::runtime::network::read_openrgb_zone_diagnostics(
+                endpoint,
+                &identity,
+                &topology,
+                leds,
+                &cancel.with_guard(guard),
+            )
+        })
+    }
+
     pub(super) fn managed_openrgb_retry_available(&self, id: &str) -> bool {
         let Some((backend, spec)) = self.managed_backend.as_ref().zip(self.rgb_specs.get(id))
         else {

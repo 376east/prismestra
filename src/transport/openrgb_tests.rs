@@ -277,6 +277,78 @@ fn b650_restored_zones_enable_whole_frame_and_missing_zones_fail_closed() {
     }
 }
 
+#[test]
+fn bound_zone_diagnostics_reads_sizes_and_direct_without_device_commands() {
+    use crate::{
+        devices::openrgb::{identity, topology},
+        runtime::{network::read_openrgb_zone_diagnostics, output::Cancellation},
+    };
+    let restored = controller_layout(
+        "zone-fixture",
+        false,
+        &[None, None, None],
+        false,
+        Some(&[("ARGB A", 27), ("ARGB B", 27), ("Fixed", 1)]),
+        "Direct",
+    );
+    let (endpoint, _, server) = matrix_server(vec![restored.clone()]);
+    let mut session = OpenRgbSession::connect(endpoint, deadline(), &|| false).unwrap();
+    let expected = session.scan(deadline(), &|| false).unwrap().remove(0);
+    drop(session);
+    server.join().unwrap();
+    let missing = controller_layout(
+        "zone-fixture",
+        false,
+        &[None, None, None],
+        false,
+        Some(&[("ARGB A", 0), ("ARGB B", 0), ("Fixed", 1)]),
+        "Static",
+    );
+    for (descriptor, matches) in [(restored, true), (missing, false)] {
+        let (endpoint, calls, server) = matrix_server(vec![descriptor]);
+        let diagnostic = read_openrgb_zone_diagnostics(
+            endpoint,
+            &identity(&expected),
+            &topology(&expected),
+            55,
+            &Cancellation::default(),
+        )
+        .unwrap();
+        assert_eq!(diagnostic.expected_leds, 55);
+        assert_eq!(diagnostic.observed_leds, if matches { 55 } else { 1 });
+        assert_eq!(diagnostic.topology_matches, matches);
+        assert_eq!(diagnostic.supports_direct, matches);
+        assert_eq!(
+            diagnostic
+                .zones
+                .iter()
+                .map(|z| (z.name.as_str(), z.reported_leds, z.addressable_leds))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "ARGB A",
+                    if matches { 27 } else { 0 },
+                    if matches { 27 } else { 0 }
+                ),
+                (
+                    "ARGB B",
+                    if matches { 27 } else { 0 },
+                    if matches { 27 } else { 0 }
+                ),
+                ("Fixed", 1, 1)
+            ]
+        );
+        server.join().unwrap();
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(_, id, _)| matches!(id, 0 | 1 | 40 | 52))
+        );
+    }
+}
+
 type Captured = Arc<Mutex<Vec<(u32, u32, Vec<u8>)>>>;
 fn server(reorder_after: usize, future: bool) -> (SocketAddr, Captured, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
