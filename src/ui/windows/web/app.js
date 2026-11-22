@@ -584,8 +584,9 @@ function previewLibraryEntry(entry) {
  $('#library-preview-dialog').showModal();
 }
 function activateLibraryEntry(entry) {
+ if(busy())return;
  const request=++sceneActivationRequest;
- if(!send({op:'apply_scene',scene:clone(entry.scene),request},true))return;
+ if(!send({op:'apply_scene',scene:clone(entry.scene),request}))return;
  if(sceneActivation)syncSceneActivation(sceneActivation.id,null);
  sceneActivation={request,id:entry.id,name:entry.name,pending:true,message:`Включаем «${entry.name}»…`};
  syncControls();
@@ -644,7 +645,7 @@ window.prismestraReceive = message => {
   }
   if(message.kind==='close_cancelled'){closing=false;syncControls();return;}
   if(message.kind==='draft_error'){showError(message.message,true);syncControls();return;}
-  if(message.kind==='error'){awaitingCommandAck=false;closing=false;submittedStages=[];savedSceneRequest=null;commandPending=false;nativeAwaitingAck=false;if(pendingView){view=pendingView.previous;pendingView=null;render();focusHeading();}if(sceneActivation?.pending)receiveSceneActivation({request:sceneActivation.request,status:'failed',message:message.message});else showError(message.message,true);syncControls();return;}
+  if(message.kind==='error'){awaitingCommandAck=false;closing=false;submittedStages=[];savedSceneRequest=null;commandPending=false;nativeAwaitingAck=false;if(pendingView){view=pendingView.previous;pendingView=null;render();focusHeading();}showError(message.message,true);syncControls();return;}
   if(['scene_file','scene_file_frame','scene_file_lcd_frame'].includes(message.kind)){window.sceneFile?.receive(message);return;}
   if(message.kind==='snapshot') {
    const acknowledged=awaitingCommandAck;awaitingCommandAck=false;completeStageAck();
@@ -698,9 +699,7 @@ window.prismestraReceive = message => {
   }
  }catch(e){
   awaitingCommandAck=false;closing=false;commandPending=false;
-  const message='Ошибка ответа приложения: '+e.message;
-  if(sceneActivation?.pending)receiveSceneActivation({request:sceneActivation.request,status:'failed',message});
-  else showError(message);
+  showError('Ошибка ответа приложения: '+e.message);
   syncControls();
  }
 };

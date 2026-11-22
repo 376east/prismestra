@@ -828,14 +828,21 @@ console.log('PASS: restored capture is inert and can be explicitly applied witho
  click('apply');
  const second=commands.at(-1);
  assert.notEqual(second.request,apply.request);
+ vm.runInContext('window.prismestraReceive({kind:"error",message:"Ошибка другой команды"})',context);
+ assert.equal(find('#native-error').hidden,false);
+ assert.match(find('#native-error').innerHTML,/Ошибка другой команды/);
+ assert.match(status.textContent,/Включаем/,'an unrelated error cannot settle the activation');
+ click('apply');
+ assert.equal(commands.at(-1),second,'an unrelated error cannot unlock another activation');
  reply(apply.request,'applied');
  assert.match(status.textContent,/Включаем/);
  reply(second.request,'applied');
  assert.equal(status.textContent,'Сцена «Ночная» применена.');
+ assert.equal(find('#native-error').hidden,false,'the scene result does not dismiss the unrelated error');
  assert.equal(devices.hidden,false);
  receiveDeviceState('status',{native:false});
  assert.equal(devices.hidden,true,'hardware status is not offered in preview');
  assert.equal(viewNow(),'library');
  assert.equal(vm.runInContext('draft.brightness',context),65,'activation does not replace the editor draft');
 }
-console.log('PASS: separate library preview/edit, one correlated scene activation, stale messages, rejection and confirmed result');
+console.log('PASS: scene activation survives an unrelated error, ignores stale replies, and settles only on matching rejection or success');
