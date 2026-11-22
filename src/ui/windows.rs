@@ -1881,14 +1881,7 @@ impl App {
                     return "Предпросмотр".into();
                 }
                 self.runtime.read(|runtime| {
-                    let activity = runtime.output_activity(applied);
-                    use crate::app::runtime::OutputActivity;
-                    match activity {
-                        OutputActivity::Sent(frames) => format!("Кадры отправлены: {frames}"),
-                        OutputActivity::Retrying(error) => format!("Ожидает повтора ({error})"),
-                        OutputActivity::Unavailable(Some(error)) => format!("Недоступно: {error}"),
-                        _ => output_activity_label(&activity).into(),
-                    }
+                    device_activity_detail(&applied.driver, runtime.output_activity(applied))
                 })
             },
         );
@@ -2997,6 +2990,24 @@ fn run_with_instance(
     }
     result
 }
+fn device_activity_detail(
+    driver: &crate::devices::Driver,
+    activity: crate::app::runtime::OutputActivity,
+) -> String {
+    use crate::{app::runtime::OutputActivity, lcd::hid_policy::TARGET_UNAVAILABLE};
+    match activity {
+        OutputActivity::Retrying(ref error) | OutputActivity::Unavailable(Some(ref error))
+            if matches!(driver, crate::devices::Driver::TtLcd) && error == TARGET_UNAVAILABLE =>
+        {
+            "Windows не находит LCD по сохранённому подключению. Проверьте питание и USB-кабель экрана. Если экран подключён, откройте его подключение и проверьте привязку.".into()
+        }
+        OutputActivity::Sent(frames) => format!("Кадры отправлены: {frames}"),
+        OutputActivity::Retrying(error) => format!("Ожидает повтора ({error})"),
+        OutputActivity::Unavailable(Some(error)) => format!("Недоступно: {error}"),
+        _ => output_activity_label(&activity).into(),
+    }
+}
+
 fn output_activity_label(activity: &crate::app::runtime::OutputActivity) -> &'static str {
     use crate::app::runtime::OutputActivity;
     match activity {
@@ -4249,6 +4260,37 @@ mod webview_recovery_stand;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn missing_bound_lcd_explains_how_to_check_its_connection() {
+        use crate::{app::runtime::OutputActivity, devices::Driver, lcd::hid_policy};
+
+        let path =
+            r"\\?\hid#vid_264a&pid_233c&mi_01#fixture#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        let missing =
+            hid_policy::select(hid_policy::Kind::Display, &[], Some(path), false).unwrap_err();
+        let unavailable = |error| OutputActivity::Unavailable(Some(error));
+        let detail = device_activity_detail(&Driver::TtLcd, unavailable(missing.clone()));
+        assert!(detail.starts_with("Windows не находит LCD по сохранённому подключению."));
+        assert!(detail.contains("питание и USB-кабель"));
+        assert!(detail.contains("проверьте привязку"));
+        assert_eq!(
+            device_activity_detail(&Driver::TtLcd, OutputActivity::Retrying(missing.clone())),
+            detail
+        );
+        assert_eq!(
+            device_activity_detail(&Driver::OpenRgb, unavailable(missing.clone())),
+            format!("Недоступно: {missing}")
+        );
+        assert_eq!(
+            device_activity_detail(&Driver::TtLcd, unavailable("Other failure".into())),
+            "Недоступно: Other failure"
+        );
+        assert_eq!(
+            device_activity_detail(&Driver::TtLcd, OutputActivity::Sent(3)),
+            "Кадры отправлены: 3"
+        );
+    }
+
     #[test]
     fn connected_startup_requires_a_profile_and_excludes_diagnostics_and_legacy_mode() {
         assert!(!options(vec![]).unwrap().start_connected);
