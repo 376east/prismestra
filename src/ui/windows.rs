@@ -3001,6 +3001,7 @@ fn output_activity_label(activity: &crate::app::runtime::OutputActivity) -> &'st
     use crate::app::runtime::OutputActivity;
     match activity {
         OutputActivity::Off => "Выключено",
+        OutputActivity::TurningOff => "Выключается",
         OutputActivity::Connecting => "Подключается",
         OutputActivity::Retrying(_) => "Ожидает повтора",
         OutputActivity::Sent(_) => "Кадры отправлены",

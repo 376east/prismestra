@@ -4,6 +4,7 @@ use super::*;
 #[cfg(windows)]
 pub(crate) enum OutputActivity {
     Off,
+    TurningOff,
     Connecting,
     Retrying(String),
     Sent(u64),
@@ -139,10 +140,16 @@ impl Runtime {
             if status.requires_action {
                 return OutputActivity::Unavailable(status.error);
             }
+            if group_off && status.phase == Phase::Ready {
+                return if self.host.mute_submitted(id, &status) {
+                    OutputActivity::Off
+                } else {
+                    OutputActivity::TurningOff
+                };
+            }
             (status.phase, status.submitted, status.error)
         };
         match phase {
-            Phase::Ready if group_off && frames > 0 => OutputActivity::Off,
             Phase::Ready if frames > 0 => OutputActivity::Sent(frames),
             Phase::Connecting => error.map_or(OutputActivity::Connecting, OutputActivity::Retrying),
             Phase::Ready => OutputActivity::Connecting,

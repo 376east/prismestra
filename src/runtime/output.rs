@@ -139,6 +139,8 @@ pub trait RgbDriver {
     fn prepare(&mut self, _: &Cancellation) -> Result<(), PrepareError> {
         Ok(())
     }
+    /// Begin a new explicit mute so cached color cannot stand in for delivery.
+    fn begin_mute(&mut self) {}
     /// Submitted is a transport completion, never a physical LED acknowledgement.
     fn write(&mut self, colors: &[Rgb], cancel: &Cancellation) -> Result<WriteResult, String>;
 }
@@ -165,6 +167,7 @@ pub struct Snapshot {
 struct Frame {
     ticket: Ticket,
     colors: Vec<Rgb>,
+    muted_since: Option<u64>,
 }
 struct State {
     pending: Option<Frame>,
@@ -280,6 +283,15 @@ impl Output {
         })
     }
     pub fn submit(&self, ticket: Ticket, colors: &[Rgb]) -> Result<bool, String> {
+        self.submit_frame(ticket, colors, None)
+    }
+
+    pub(super) fn submit_frame(
+        &self,
+        ticket: Ticket,
+        colors: &[Rgb],
+        muted_since: Option<u64>,
+    ) -> Result<bool, String> {
         if colors.len() != self.leds || ticket.sequence == 0 {
             return Err("RGB frame dimensions/ticket mismatch".into());
         }
@@ -304,6 +316,7 @@ impl Output {
             .replace(Frame {
                 ticket,
                 colors: colors.to_vec(),
+                muted_since,
             })
             .is_some()
         {
@@ -390,6 +403,7 @@ where
         state.snapshot.phase = Phase::Ready;
     }
     let mut retry = Instant::now();
+    let mut muted_since = None;
     loop {
         let frame = {
             let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -418,6 +432,10 @@ where
         if shared.cancel.cancelled() {
             return Ok(Stop::Cancelled);
         }
+        if frame.muted_since.is_some() && frame.muted_since != muted_since {
+            driver.begin_mute();
+        }
+        muted_since = frame.muted_since;
         let result = driver.write(&frame.colors, &shared.cancel)?;
         match result {
             WriteResult::Submitted => {
