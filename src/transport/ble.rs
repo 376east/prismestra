@@ -49,7 +49,10 @@ pub(crate) fn parse_pixel_capacity(packet: &[u8]) -> Result<Option<usize>, Strin
         return Err("Truncated EA81 status".into());
     }
     if raw[4] != 170 || raw[5] != 11 {
-        return Err("Unsupported Surplife product or LED protocol version".into());
+        return Err(
+            "Контроллер ответил. Prismestra не поддерживает его модель или версию протокола подсветки."
+                .into(),
+        );
     }
     if raw[16] != 1 {
         return Err("Surplife pixel output requires exactly one segment".into());
@@ -496,7 +499,15 @@ mod tests {
         for length in 2..19 {
             assert!(parse_pixel_capacity(&status_packet(&fixture[..length])).is_err());
         }
-        for (index, value) in [(4, 169), (5, 10), (16, 0), (16, 2)] {
+        for (index, value) in [(4, 169), (5, 10)] {
+            let mut raw = fixture.clone();
+            raw[index] = value;
+            assert_eq!(
+                parse_pixel_capacity(&status_packet(&raw)).unwrap_err(),
+                "Контроллер ответил. Prismestra не поддерживает его модель или версию протокола подсветки."
+            );
+        }
+        for (index, value) in [(16, 0), (16, 2)] {
             let mut raw = fixture.clone();
             raw[index] = value;
             assert!(parse_pixel_capacity(&status_packet(&raw)).is_err());
