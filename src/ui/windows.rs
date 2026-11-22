@@ -2674,7 +2674,7 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     if msg == WM_CLOSE {
         if state.resident.get() {
             if state.session_action.get() == resident::Action::None
-                && let Err(error) = resident::close_editor(state)
+                && let Err(error) = resident::close_editor(state, true)
             {
                 modern::close_failed(state, &error);
                 resident::report(state, error);
@@ -3445,7 +3445,7 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
         return Ok(());
     }
     if crate::app::installed::session() == Some(crate::app::installed::Session::Autostart)
-        && let Err(error) = resident::close_editor(&state)
+        && let Err(error) = resident::close_editor(&state, false)
     {
         resident::report(&state, error);
     }

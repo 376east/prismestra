@@ -727,7 +727,7 @@ pub(super) fn report(state: &State, error: String) {
         }
     }
 }
-pub(super) fn close_editor(state: &State) -> Result<(), String> {
+pub(super) fn close_editor(state: &State, interactive: bool) -> Result<(), String> {
     let hwnd = state.editor_window.get();
     if hwnd.is_null() {
         return Ok(());
@@ -747,7 +747,7 @@ pub(super) fn close_editor(state: &State) -> Result<(), String> {
             );
         }
     }
-    if !super::modern::prepare_close(state, false, false)? {
+    if !super::modern::prepare_close(state, false, interactive)? {
         return Ok(());
     }
     // Native teardown can reenter the window procedure; do not retain a RefCell borrow.
@@ -1614,7 +1614,7 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     if poll_tray(&state.tray_registration, 0, |_| true) != Some(true) {
         return Err("Injected tray registration did not succeed".into());
     }
-    close_editor(state)?;
+    close_editor(state, false)?;
     if !state.editor_window.get().is_null() {
         return Err("Registered tray did not permit editor close".into());
     }
@@ -1785,7 +1785,7 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
         a.was_pending = true;
         revision
     };
-    close_editor(state)?;
+    close_editor(state, false)?;
     settle(state, "closed-editor-transaction", |a| {
         !a.runtime.pending_configuration()
             && !a.was_pending
@@ -1975,7 +1975,7 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     settle(state, "restart-before-failed-stop", |a| {
         !a.runtime.pending_configuration() && a.runtime.outputs_ready() == Ok(true)
     })?;
-    close_editor(state)?;
+    close_editor(state, false)?;
     let (original_state_dir, blocker) = {
         let mut slot = state.app.borrow_mut();
         let a = slot.as_mut().unwrap();

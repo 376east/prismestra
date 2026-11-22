@@ -64,6 +64,8 @@ enum Command {
         origin: Option<Origin>,
         #[serde(default)]
         form_dirty: bool,
+        #[serde(default)]
+        blocked: bool,
     },
     ApplyScene {
         scene: Scene,
@@ -143,7 +145,8 @@ mod scene_files;
 pub(super) struct Session {
     close_request: Option<CloseRequest>,
     close_id: u32,
-    close_ready: bool,
+    close_ready: Option<(bool, bool)>,
+    close_deciding: bool,
     catalog: Catalog,
     catalog_view: BTreeMap<String, Value>,
     built_in_cards: Vec<Value>,
@@ -188,7 +191,8 @@ impl Session {
             built_in_cards,
             close_request: None,
             close_id: 0,
-            close_ready: false,
+            close_ready: None,
+            close_deciding: false,
             catalog,
             catalog_path,
             draft,
@@ -216,7 +220,7 @@ impl Session {
         Ok(result)
     }
     fn persist_draft(&mut self, scene: Scene, origin: Option<Origin>) -> Result<(), String> {
-        self.close_ready = false;
+        self.close_ready = None;
         let draft = Draft::new(scene, origin)?;
         draft.save(&self.draft_path)?;
         self.configure_preview(draft.scene.clone())?;
@@ -379,13 +383,15 @@ pub(super) fn prepare_close(state: &State, exit: bool, confirm: bool) -> Result<
         let Some(session) = slot.as_mut() else {
             return Ok(true);
         };
-        if session.close_ready {
-            return Ok(true);
+        if session.close_deciding {
+            return Ok(false);
+        }
+        if let Some(intent) = session.close_ready {
+            return Ok(intent == (exit, confirm));
         }
         if let Some(request) = session.close_request.as_mut() {
-            if exit {
+            if exit && request.confirm == confirm {
                 request.exit = true;
-                request.confirm = confirm;
             }
             if request.started.elapsed() > Duration::from_secs(2) {
                 session.close_request = None;
@@ -413,10 +419,100 @@ pub(super) fn prepare_close(state: &State, exit: bool, confirm: bool) -> Result<
 }
 pub(super) fn close_failed(state: &State, message: &str) {
     if let Some(session) = state.modern_session.borrow_mut().as_mut() {
-        session.close_ready = false;
+        session.close_ready = None;
         session.close_request = None;
     }
     let _ = send(state, &json!({"kind":"error","message":message}));
+}
+
+fn confirm_unapplied_close(hwnd: HWND, exit: bool) -> Result<bool, String> {
+    use windows_sys::Win32::UI::Controls::{
+        TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TDF_ALLOW_DIALOG_CANCELLATION,
+    };
+    use windows_sys::Win32::{
+        Foundation::FreeLibrary,
+        System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW},
+    };
+    const DISCARD: i32 = 100;
+    let title = wide(if exit {
+        "Выход из Prismestra"
+    } else {
+        "Закрытие редактора"
+    });
+    let content = wide("Неприменённые значения настроек будут потеряны.");
+    let keep = wide("Вернуться к правкам");
+    let discard = wide(if exit {
+        "Выйти без применения"
+    } else {
+        "Закрыть без применения"
+    });
+    let buttons = [
+        TASKDIALOG_BUTTON {
+            nButtonID: IDCANCEL,
+            pszButtonText: keep.as_ptr(),
+        },
+        TASKDIALOG_BUTTON {
+            nButtonID: DISCARD,
+            pszButtonText: discard.as_ptr(),
+        },
+    ];
+    let dialog = TASKDIALOGCONFIG {
+        cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
+        hwndParent: hwnd,
+        dwFlags: TDF_ALLOW_DIALOG_CANCELLATION,
+        pszWindowTitle: title.as_ptr(),
+        pszContent: content.as_ptr(),
+        cButtons: buttons.len() as u32,
+        pButtons: buttons.as_ptr(),
+        nDefaultButton: IDCANCEL,
+        ..Default::default()
+    };
+    let mut button = IDCANCEL;
+    // Only the GUI executable has the v6 Common Controls manifest. An eager
+    // import would prevent the ordinary Rust test executable from starting.
+    let status = unsafe {
+        let module = LoadLibraryExW(
+            wide("comctl32.dll").as_ptr(),
+            null_mut(),
+            LOAD_LIBRARY_SEARCH_SYSTEM32,
+        );
+        if module.is_null() {
+            None
+        } else {
+            let result =
+                GetProcAddress(module, c"TaskDialogIndirect".as_ptr().cast()).map(|entry| {
+                    let task_dialog: unsafe extern "system" fn(
+                        *const TASKDIALOGCONFIG,
+                        *mut i32,
+                        *mut i32,
+                        *mut i32,
+                    ) -> i32 = std::mem::transmute(entry);
+                    task_dialog(&dialog, &mut button, null_mut(), null_mut())
+                });
+            FreeLibrary(module);
+            result
+        }
+    };
+    if status.is_none_or(|status| status < 0) {
+        return Err("Не удалось показать подтверждение. Правки сохранены в редакторе.".into());
+    }
+    Ok(button == DISCARD)
+}
+
+fn needs_discard_confirmation(
+    blocked: bool,
+    form_dirty: bool,
+    interactive: bool,
+) -> Result<bool, String> {
+    if blocked {
+        return Err("Сначала завершите действие в открытом диалоге сцены.".into());
+    }
+    if form_dirty && !interactive {
+        return Err(
+            "Завершите ввод или отмените незавершённые значения перед закрытием редактора".into(),
+        );
+    }
+    Ok(form_dirty)
 }
 pub(super) fn close(state: &State) {
     // Drop outside all RefCell borrows: controller.Close may reenter the HWND.
@@ -722,8 +818,9 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             scene,
             origin,
             form_dirty,
+            blocked,
         } => {
-            let request = {
+            let (request, ask) = {
                 let mut slot = state.modern_session.borrow_mut();
                 let session = slot.as_mut().ok_or("Нет интерфейса")?;
                 if session
@@ -733,31 +830,47 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                 {
                     return Err("Устаревшее подтверждение закрытия".into());
                 }
-                if let Some(scene) = scene
-                    && let Err(error) = session.persist_draft(scene, origin)
-                {
-                    session.close_request = None;
-                    return Err(error);
+                let request = session.close_request.take().ok_or("Закрытие отменено")?;
+                if let Some(scene) = scene {
+                    session.persist_draft(scene, origin)?;
                 }
-                if form_dirty {
-                    session.close_request = None;
-                    return Err("Завершите ввод или отмените незавершённые значения перед закрытием редактора".into());
-                }
-                session.close_ready = true;
-                session.close_request.take().ok_or("Закрытие отменено")?
+                let ask = needs_discard_confirmation(blocked, form_dirty, request.confirm)?;
+                session.close_deciding = ask;
+                (request, ask)
             };
+            if ask {
+                let discard = confirm_unapplied_close(hwnd, request.exit);
+                let mut sessions = state.modern_session.borrow_mut();
+                let Some(session) = sessions
+                    .as_mut()
+                    .filter(|session| session.close_deciding && session.close_id == id)
+                else {
+                    return Ok(false);
+                };
+                session.close_deciding = false;
+                drop(sessions);
+                if !discard? {
+                    send(state, &json!({"kind":"close_cancelled"}))?;
+                    return Ok(false);
+                }
+            }
+            if let Some(session) = state.modern_session.borrow_mut().as_mut() {
+                session.close_ready = Some((request.exit, request.confirm));
+            }
             if request.exit {
                 let result = resident::request(state, resident::Action::Exit, request.confirm);
                 if result.is_err() || state.session_action.get() == resident::Action::None {
                     if let Some(session) = state.modern_session.borrow_mut().as_mut() {
-                        session.close_ready = false;
+                        session.close_ready = None;
                     }
                     let _ = send(state, &json!({"kind":"close_cancelled"}));
                 }
                 result?;
             } else {
                 unsafe {
-                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    if PostMessageW(hwnd, WM_CLOSE, 0, 0) == 0 {
+                        close_failed(state, "Не удалось закрыть редактор. Повторите попытку.");
+                    }
                 }
             }
             return Ok(false);
@@ -1096,7 +1209,7 @@ pub(super) fn maintain(state: &State) {
                 .is_some_and(|request| request.started.elapsed() > Duration::from_secs(2))
             {
                 session.close_request = None;
-                session.close_ready = false;
+                session.close_ready = None;
                 true
             } else {
                 false
@@ -1262,6 +1375,15 @@ pub(super) fn return_to_editor(state: &State) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::lighting::scene::Effect;
+
+    #[test]
+    fn only_interactive_close_can_offer_to_discard_fields() {
+        assert_eq!(needs_discard_confirmation(false, false, false), Ok(false));
+        assert_eq!(needs_discard_confirmation(false, false, true), Ok(false));
+        assert_eq!(needs_discard_confirmation(false, true, true), Ok(true));
+        assert!(needs_discard_confirmation(false, true, false).is_err());
+        assert!(needs_discard_confirmation(true, false, true).is_err());
+    }
 
     #[test]
     fn procedural_card_uses_a_dense_canvas_and_preserves_scene_settings() {

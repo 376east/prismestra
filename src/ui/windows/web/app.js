@@ -601,7 +601,7 @@ window.prismestraReceive = message => {
   if(message.kind==='flush'){
    if(!Number.isSafeInteger(message.id)||message.id<0)throw Error('Некорректный запрос закрытия');
    if(window.sceneFile?.blockClose()){
-    window.ipc.postMessage(JSON.stringify({op:'close_ready',id:message.id,scene:null,form_dirty:true}));return;
+    window.ipc.postMessage(JSON.stringify({op:'close_ready',id:message.id,scene:null,blocked:true}));return;
    }
    stageText(document.activeElement);closing=true;clearTimeout(previewTimer);previewTimer=null;previewQueued=false;syncControls();
    window.ipc.postMessage(JSON.stringify({op:'close_ready',id:message.id,scene:draft,origin:draftOrigin,form_dirty:stagedDirty()}));return;
