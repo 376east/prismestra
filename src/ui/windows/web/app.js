@@ -531,6 +531,7 @@ function render() {
  else if(hiddenNavFocused)$('nav [data-view="devices"]')?.focus({preventScroll:true});
  else restoreFocus(key,selection);
  syncCardMotion();
+ syncEditorPreview();
  announceDeviceDiscovery(candidates);
  syncDeviceAnnouncement();
 }
@@ -549,6 +550,15 @@ function paintPixels(canvas,pixelsFrame) {
  pixelsFrame.colors.forEach((c,i)=>{pixels.data[i*4]=(c>>>16)&255;pixels.data[i*4+1]=(c>>>8)&255;pixels.data[i*4+2]=c&255;pixels.data[i*4+3]=255;});ctx.putImageData(pixels,0,0);
 }
 function paintPreview() {paintPixels($('#stage'),frame);}
+let editorPreviewVisible=false;
+function syncEditorPreview() {
+ const visible=!!state&&view==='editor'&&!document.hidden;
+ if(visible===editorPreviewVisible)return;
+ if(send({op:'editor_preview_visible',visible})){
+  editorPreviewVisible=visible;
+  if(!visible)frame=null;
+ }
+}
 function paintLibraryPreviews() {
  document.querySelectorAll('[data-library-preview]').forEach(canvas=>paintPixels(canvas,state?.library.find(item=>String(item.id)===canvas.dataset.libraryPreview)?.preview));
 }
@@ -774,7 +784,7 @@ window.prismestraReceive = message => {
    if(state.pending||Object.hasOwn(message.state,'mapConnection'))window.outputMap?.update(state);
    followActiveScene();
    if(!state.pending&&!nativeAwaitingAck&&!savedSceneRequest)commandPending=false;
-   if(message.state.preview)frame=message.state.preview;
+   if(editorPreviewVisible&&message.state.preview)frame=message.state.preview;
    if(nativeFormChanged||foundChanged||searchChanged||firstSetupPendingChanged||(!busy()&&!outputPageAvailable(view)))render();else {syncControls();syncDeviceAnnouncement();paintPreview();}if(!busy())flushPreview();
   }
  }catch(e){
@@ -1013,7 +1023,10 @@ document.addEventListener('pointerup',()=>{pointerGesture=false;releaseGesture()
 document.addEventListener('pointercancel',()=>{pointerGesture=false;releaseGesture();},true);
 document.addEventListener('focusin',()=>{syncDeviceAnnouncement();syncOutputRetries();requestAnimationFrame(syncCardMotion);});
 for(const name of ['pointerover','pointerout','focusout','visibilitychange']){
- document.addEventListener(name,()=>requestAnimationFrame(syncCardMotion));
+ document.addEventListener(name,()=>{
+  if(name==='visibilitychange')syncEditorPreview();
+  requestAnimationFrame(syncCardMotion);
+ });
 }
 reducedCardMotion?.addEventListener('change',syncCardMotion);
 document.addEventListener('keydown',event=>{
