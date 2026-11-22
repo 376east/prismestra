@@ -913,12 +913,12 @@ impl Editor {
         let c = &entry.config;
         let mut media = field(
             "media",
-            "Анимация",
+            "Фон LCD",
             c.media
                 .as_ref()
-                .map(|id| format!("Выбрана · {}", &id.as_str()[..8]))
-                .unwrap_or_else(|| "Не выбрана".into()),
-            "Выберите локальную анимацию или изображение, не более 32 МиБ.",
+                .map(|id| format!("Выбран · {}", &id.as_str()[..8]))
+                .unwrap_or_default(),
+            "Изображение или анимация до 32 МиБ. Очистите поле, чтобы оставить температуру на чёрном фоне.",
         );
         media.file = true;
         let mut font = field(
@@ -927,8 +927,8 @@ impl Editor {
             c.font
                 .as_ref()
                 .map(|id| format!("Выбран · {}", &id.as_str()[..8]))
-                .unwrap_or_else(|| "Не выбран".into()),
-            "Локальный файл TTF/OTF до 8 МиБ. Для GIF без панели шрифт не нужен.",
+                .unwrap_or_else(|| "Встроенный".into()),
+            "Можно выбрать TTF/OTF до 8 МиБ. По умолчанию используется встроенный шрифт.",
         );
         font.file = true;
         let mut rotation = field(
@@ -962,7 +962,7 @@ impl Editor {
                 "enabled",
                 "Воспроизводить",
                 c.enabled,
-                "Для включения нужна анимация.",
+                "Выберите фон или включите панель температур.",
             ),
             media,
             rotation,
@@ -1139,6 +1139,7 @@ impl Editor {
             }
             "rotation" => c.rotation = parse(value)?,
             "overlay" => c.overlay_enabled = boolean_value(value)?,
+            "media" if value.trim().is_empty() => c.media = None,
             "gauge_style" => {
                 c.gauge_style = crate::lcd::overlay::GaugeStyle::OPTIONS
                     .into_iter()
@@ -1616,6 +1617,27 @@ mod tests {
         assert!(editor.document.lcd[0].config.media.is_none());
         editor.set("enabled", "false").unwrap();
         editor.document.validate().unwrap();
+    }
+
+    #[test]
+    fn lcd_editor_clears_the_background_and_keeps_temperature_enabled() {
+        let mut editor = Editor {
+            document: document(),
+            page: Page::Lcd,
+            index: 0,
+        };
+        editor.document.lcd[0].config.media =
+            Some(crate::app::assets::AssetId::try_from("a".repeat(64)).unwrap());
+        editor.set("enabled", "true").unwrap();
+        assert!(editor.set("media", "C:/file.png").is_err());
+        editor.set("media", "").unwrap();
+        assert!(editor.document.validate().is_err());
+        editor.set("overlay", "true").unwrap();
+        let reopened = Document::decode(&editor.document.encode().unwrap()).unwrap();
+        let config = &reopened.lcd[0].config;
+        assert!(config.enabled && config.overlay_enabled);
+        assert_eq!(config.sources[0].key, "ram");
+        assert!(reopened.assets().is_empty());
     }
     #[cfg(windows)]
     #[test]

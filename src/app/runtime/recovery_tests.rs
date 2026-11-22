@@ -2625,6 +2625,82 @@ fn lcd_configuration_epoch_discards_old_arrivals_and_binding() {
 }
 
 #[test]
+fn reopened_lcd_scene_renders_a_still_image_or_temperature_without_media() {
+    use crate::lcd::protocol::{ReportTransport, validate_jpeg};
+    use image::{ImageFormat, Rgb as Pixel, RgbImage};
+    use std::io::Cursor;
+
+    let mut png = Cursor::new(Vec::new());
+    let color = Pixel([24, 80, 144]);
+    RgbImage::from_pixel(32, 32, color)
+        .write_to(&mut png, ImageFormat::Png)
+        .unwrap();
+    let runtime = runtime();
+    let (mut document, dir) = arrival_lcd_document(
+        runtime.document().clone(),
+        "still-or-temperature",
+        png.get_ref(),
+    );
+    let store = Assets::new(dir.clone()).unwrap();
+    let path = dir.join("scene.json");
+    let link = Arc::new(Link::default());
+    let mut transport = Reports(link);
+
+    document.save(&path).unwrap();
+    let saved = Document::load(&path).unwrap();
+    assert_eq!(saved, document);
+    let mut still = lcd::Controller::new(saved.lcd[0].config.clone(), &store).unwrap();
+    let sent = still.poll(&mut transport, true, &[]).unwrap().unwrap();
+    assert!(!sent.overlay_applied);
+    validate_jpeg(still.preview()).unwrap();
+    let image = image::load_from_memory(still.preview())
+        .unwrap()
+        .into_rgb8();
+    for (actual, expected) in image.get_pixel(240, 240).0.into_iter().zip(color.0) {
+        assert!(actual.abs_diff(expected) <= 2);
+    }
+
+    document
+        .temperatures
+        .sources
+        .push(crate::app::sensors::Source {
+            key: "cpu".into(),
+            value: crate::app::sensors::Value::Sensor {
+                input: "cpu-slot".into(),
+            },
+        });
+    let config = &mut document.lcd[0].config;
+    config.media = None;
+    config.overlay_enabled = true;
+    config.sources = vec![lcd::OverlaySource {
+        key: "cpu".into(),
+        label: "CPU".into(),
+    }];
+    document.save(&path).unwrap();
+    let saved = Document::load(&path).unwrap();
+    assert_eq!(saved, document);
+    assert!(saved.assets().is_empty());
+    let mut temperature = lcd::Controller::new(saved.lcd[0].config.clone(), &store).unwrap();
+    let sample = lcd::Sample {
+        key: "cpu".into(),
+        celsius: 58.0,
+        observed_ms: transport.now_ms(),
+    };
+    let sent = temperature
+        .poll(&mut transport, true, &[sample])
+        .unwrap()
+        .unwrap();
+    assert!(sent.overlay_applied);
+    validate_jpeg(temperature.preview()).unwrap();
+    let image = image::load_from_memory(temperature.preview())
+        .unwrap()
+        .into_rgb8();
+    assert_eq!(image.get_pixel(0, 0).0, [0; 3]);
+    assert!(image.pixels().any(|pixel| pixel.0 != [0; 3]));
+    remove_lcd_assets(runtime, dir);
+}
+
+#[test]
 fn reopened_scene_restores_the_saved_gif_without_restarting_rgb() {
     use crate::lcd::{media, protocol::validate_jpeg};
 

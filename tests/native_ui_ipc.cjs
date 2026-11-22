@@ -962,3 +962,16 @@ console.log('PASS: selected managed ARGB device exposes a read-only IPC route an
  assert.equal(commands.slice(firstSave).some(command=>command.op==='apply_scene'),false);
 }
 console.log('PASS: new scene opens its editor and focuses the effect only after a confirmed save');
+
+const lcdBackground = {
+ page:'lcd', index:0, deviceId:navLcd.id, targets:['LCD'], dirty:false,
+ fields:[{key:'media',label:'Фон LCD',value:'Выбран · 12345678',choices:[],hint:'',file:true}],
+};
+vm.runInContext('formStages.clear();view="lcd";pendingView=null',context);
+receiveDeviceState('snapshot',navFixture([navLcd],{editor:lcdBackground}));
+const backgroundInput=find('#field-0');
+backgroundInput.value='';
+events.input({target:backgroundInput});
+events.click({target:{closest:()=>({dataset:{action:'apply-document'},disabled:false,hasAttribute:()=>true})}});
+assert.deepEqual(commands.at(-1),{op:'apply_fields',fields:[{key:'media',value:''}]});
+console.log('PASS: clearing the LCD background sends an explicit empty field in Apply');

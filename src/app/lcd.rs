@@ -53,6 +53,10 @@ impl Default for Config {
     }
 }
 impl Config {
+    pub(crate) fn has_content(&self) -> bool {
+        self.media.is_some() || self.overlay_enabled
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         media::rotation(self.rotation)?;
         if !(2..=60).contains(&self.interval_seconds) || self.sources.len() > MAX_SOURCES {
@@ -69,11 +73,11 @@ impl Config {
                 );
             }
         }
-        if self.enabled && self.media.is_none() {
-            return Err("Enabled LCD requires a media asset".into());
+        if self.enabled && !self.has_content() {
+            return Err("Для LCD выберите фон или включите панель температур.".into());
         }
-        if self.overlay_enabled && (self.font.is_none() || self.sources.is_empty()) {
-            return Err("Enabled LCD overlay requires a font asset and selected sources".into());
+        if self.overlay_enabled && self.sources.is_empty() {
+            return Err("Выберите хотя бы один показатель для панели температур.".into());
         }
         Ok(())
     }
@@ -146,16 +150,18 @@ impl Controller {
     pub fn new(config: Config, store: &Store) -> Result<Self, String> {
         config.validate()?;
         let player = if config.enabled {
-            let source: Arc<[u8]> = Arc::from(store.read(
-                config.media.as_ref().ok_or("Missing LCD media")?,
-                media::MAX_SOURCE,
-            )?);
-            let prepared = Arc::new(media::prepare(source, config.rotation, || false)?);
+            let prepared = Arc::new(match &config.media {
+                Some(id) => {
+                    let source = store.read(id, media::MAX_SOURCE)?;
+                    media::prepare(source.into(), config.rotation, || false)?
+                }
+                None => media::black_background(config.rotation)?,
+            });
             Some(if config.overlay_enabled {
-                let font = store.read(
-                    config.font.as_ref().ok_or("Missing LCD overlay font")?,
-                    FONT_LIMIT,
-                )?;
+                let font = match &config.font {
+                    Some(id) => store.read(id, FONT_LIMIT)?,
+                    None => include_bytes!("../ui/windows/web/assets/SourceSans3.ttf").to_vec(),
+                };
                 let renderer = overlay::Renderer::new(font)?.with_style(config.gauge_style);
                 player::Player::new(prepared, renderer)?
             } else {

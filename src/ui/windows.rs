@@ -599,7 +599,9 @@ impl App {
                 .lcd
                 .get(self.editor.as_ref().map_or(0, |e| e.index))
             {
-                Some(entry) if entry.config.media.is_none() => "Выберите анимацию",
+                Some(entry) if !entry.config.has_content() => {
+                    "Выберите фон или включите панель температур"
+                }
                 Some(entry) if !entry.config.enabled => "Включите воспроизведение",
                 Some(entry)
                     if self
@@ -607,7 +609,7 @@ impl App {
                         .lcd_status(&entry.device)
                         .is_some_and(|s| s.error.is_some()) =>
                 {
-                    "Нет кадра.\nПроверьте файл."
+                    "Нет кадра.\nПроверьте настройки LCD."
                 }
                 Some(_) => "Подготовка кадра…",
                 None => "LCD не добавлен",
@@ -1668,7 +1670,8 @@ impl App {
                     self.editor_dirty = true;
                     self.dirty = true;
                     self.status =
-                        "LCD добавлен выключенным. Выберите анимацию и примените настройки.".into();
+                        "LCD добавлен выключенным. Выберите фон или настройте панель температур."
+                            .into();
                     self.refresh_editor(true);
                     return Ok(true);
                 }
@@ -2477,7 +2480,7 @@ fn import_asset(app: &mut App, path: &Path, key: &str) -> Result<(), String> {
     match key {
         "font" => config.font = Some(id),
         "media" => config.media = Some(id),
-        _ => return Err("Выберите анимацию или шрифт".into()),
+        _ => return Err("Выберите фон или шрифт".into()),
     };
     app.editor_dirty = true;
     app.dirty = true;
@@ -2509,7 +2512,7 @@ fn modal_command(hwnd: HWND, state: &State, id: i32) -> Result<(), String> {
             let field = a
                 .selected_field()
                 .filter(|f| f.file)
-                .ok_or("Выберите анимацию или шрифт")?;
+                .ok_or("Выберите фон или шрифт")?;
             let e = a.editor.as_ref().ok_or("Нет редактора")?;
             (
                 field.key,
