@@ -83,6 +83,11 @@ enum Command {
         scene: Scene,
         origin: Option<Origin>,
     },
+    CardPreview {
+        id: String,
+        request: u32,
+        start: bool,
+    },
     SaveScene {
         id: Option<String>,
         name: String,
@@ -151,6 +156,13 @@ struct CloseRequest {
 
 mod scene_files;
 
+const CARD_FRAME_INTERVAL: Duration = Duration::from_millis(125);
+
+struct CardMotion {
+    id: String,
+    renderer: crate::runtime::scene::Renderer,
+}
+
 pub(super) struct Session {
     alice: super::alice::Session,
     close_request: Option<CloseRequest>,
@@ -160,6 +172,9 @@ pub(super) struct Session {
     catalog: Catalog,
     catalog_view: BTreeMap<String, Value>,
     built_in_cards: Vec<Value>,
+    card_motion: Option<CardMotion>,
+    card_last_frame: Option<Instant>,
+    card_canvas: crate::devices::Canvas,
     catalog_path: PathBuf,
     draft: Option<Draft>,
     draft_path: PathBuf,
@@ -201,6 +216,9 @@ impl Session {
             alice: Default::default(),
             catalog_view,
             built_in_cards,
+            card_motion: None,
+            card_last_frame: None,
+            card_canvas: preview_canvas(48, 24),
             close_request: None,
             close_id: 0,
             close_ready: None,
@@ -250,6 +268,47 @@ impl Session {
         }
         Ok(())
     }
+
+    fn card_frame(&mut self, id: &str, start: bool) -> Option<Value> {
+        let now = Instant::now();
+        if self
+            .card_last_frame
+            .is_some_and(|last| now.duration_since(last) < CARD_FRAME_INTERVAL)
+        {
+            return None;
+        }
+        if start {
+            self.card_motion = None;
+            let mut scene =
+                if let Some(entry) = self.catalog.entries.iter().find(|entry| entry.id == id) {
+                    entry.scene.clone()
+                } else {
+                    let card = self
+                        .built_in_cards
+                        .iter()
+                        .find(|card| card["id"].as_str() == Some(id))?;
+                    Scene::deserialize(&card["scene"]).ok()?
+                };
+            if !card_can_move(&scene) {
+                return None;
+            }
+            scene.fps = 8;
+            self.card_motion = Some(CardMotion {
+                id: id.into(),
+                renderer: crate::runtime::scene::Renderer::new(scene).ok()?,
+            });
+        }
+        let motion = self.card_motion.as_mut().filter(|motion| motion.id == id)?;
+        self.card_last_frame = Some(now);
+        let pixels = motion.renderer.step(&self.card_canvas).ok()?;
+        let colors = pixels
+            .into_iter()
+            .map(|pixel| pixel.rrggbb())
+            .collect::<Vec<_>>();
+        Some(
+            json!({"width":self.card_canvas.width,"height":self.card_canvas.height,"colors":colors}),
+        )
+    }
 }
 fn preview_canvas(width: u32, height: u32) -> crate::devices::Canvas {
     crate::devices::Canvas {
@@ -268,11 +327,12 @@ fn preview_canvas(width: u32, height: u32) -> crate::devices::Canvas {
     }
 }
 
+fn card_can_move(scene: &Scene) -> bool {
+    !(scene.effect.uses_audio() || scene.effect.uses_context() || scene.effect.uses_reactive())
+}
+
 fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
-    if entry.scene.effect.uses_audio()
-        || entry.scene.effect.uses_context()
-        || entry.scene.effect.uses_reactive()
-    {
+    if !card_can_move(&entry.scene) {
         return json!({"id":entry.id,"name":entry.name,"scene":entry.scene});
     }
     let (width, height) = if entry.scene.effect.uses_normalized_canvas() {
@@ -824,6 +884,7 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
         Command::Snapshot
             | Command::PreviewOutput { .. }
             | Command::PreviewScene { .. }
+            | Command::CardPreview { .. }
             | Command::CloseReady { .. }
             | Command::Alice {
                 request: super::alice::Action::Status | super::alice::Action::Cancel
@@ -1066,6 +1127,19 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                 }
                 app.status = "Настройки локального входа экспортированы.".into();
             }
+        }
+        Command::CardPreview { id, request, start } => {
+            let frame = {
+                let mut slot = state.modern_session.borrow_mut();
+                slot.as_mut()
+                    .filter(|session| session.close_request.is_none())
+                    .and_then(|session| session.card_frame(&id, start))
+            };
+            send(
+                state,
+                &json!({"kind":"card_preview","id":id,"request":request,"frame":frame}),
+            )?;
+            return Ok(false);
         }
         Command::PreviewScene { scene, origin } => {
             let result = state
