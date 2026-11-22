@@ -12,10 +12,10 @@
 
 <dialog id="scene-file-dialog" aria-labelledby="scene-file-title">
   <h2 id="scene-file-title">Переносимая сцена</h2>
-  <p>Предпросмотр файла сцены. Активный профиль редактируется отдельно.</p>
+  <p id="scene-file-scope">В файл входят название, размер холста, слои и назначения LCD и ленты. Привязки и данные устройств остаются в профиле. Открытый файл показывается в предпросмотре.</p>
   <div class="scene-file-actions">
     <button class="button" id="scene-file-open">Открыть файл…</button>
-    <button class="button primary" id="scene-file-save">Сохранить файл…</button>
+    <button class="button primary" id="scene-file-save" aria-describedby="scene-file-scope">Сохранить файл…</button>
   </div>
   <p id="scene-file-status" role="status"></p>
   <fieldset id="scene-file-controls">
