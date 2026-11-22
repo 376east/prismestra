@@ -26,7 +26,6 @@ const glyphs = {
  sources:'<path d="M13 5h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-6M3 12h13m-4-4 4 4-4 4"/>',
  schedule:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
  edit:'<path d="m15 4 5 5M4 20l5-1L21 7a2 2 0 0 0-5-5L4 14Z"/>',
- play:'<path d="m9 5 11 7-11 7Z"/>',
  trash:'<path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 11v6m4-6v6"/>',
  plus:'<path d="M12 5v14M5 12h14"/>',
  sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2"/>',
@@ -38,6 +37,7 @@ let view = 'library', search = '', previewTimer = null, frame = null, commandPen
 const formStages = new Map();
 const libraryPageSize = 24;
 let libraryLimit = libraryPageSize, libraryEffect = '';
+let sceneActivation = null, sceneActivationRequest = 0;
 let deviceInspection = null;
 let visibleCandidateIds = new Set();
 const outputRetries = new Map();
@@ -100,7 +100,7 @@ function receiveOutputRetry({id,request,scope,status,message}) {
  syncOutputRetries();
 }
 let settingsOpener = null, settingsFocusReturn = null;
-const busy = () => closing || !state || !!state.pending || commandPending || savedSceneRequest !== null;
+const busy = () => closing || !state || !!state.pending || commandPending || sceneActivation?.pending || savedSceneRequest !== null;
 const disabled = () => busy() ? 'disabled' : '';
 const changed = () => !!draft && !!state && !same(draft,state.scene);
 const sourceNeedsApply = () => !!state?.native && !!draft
@@ -113,7 +113,7 @@ function focusKey(node=document.activeElement) {
  if(!node) return null;
  if(node.id) return '#'+CSS.escape(node.id);
  if(node.dataset?.deviceId!==undefined)return deviceFocusKey(node.dataset.deviceId);
- for(const key of ['view','action','edit','apply','remove','field','param','color','target','group','asset','remove-color','native-field','native-action']) if(node.dataset?.[key] !== undefined) return `[data-${key}="${CSS.escape(node.dataset[key])}"]`;
+ for(const key of ['view','action','preview','edit','apply','remove','field','param','color','target','group','asset','remove-color','native-field','native-action']) if(node.dataset?.[key] !== undefined) return `[data-${key}="${CSS.escape(node.dataset[key])}"]`;
  return null;
 }
 function restoreFocus(key, selection) {
@@ -203,7 +203,7 @@ function syncControls(keepRetryFocus) {
  document.querySelectorAll('[data-mutation]').forEach(node=>{
   const disabled=controlDisabled(node);
   // Keep the row focusable across the command acknowledgement and list updates.
-  if(node.dataset.deviceId!==undefined)node.setAttribute('aria-disabled',String(disabled));
+  if(node.dataset.deviceId!==undefined||node.dataset.apply!==undefined)node.setAttribute('aria-disabled',String(disabled));
   else node.disabled=disabled;
  });
  document.querySelectorAll('[data-native-control]').forEach(node=>node.disabled=nativeControlDisabled(node));
@@ -215,6 +215,7 @@ function syncControls(keepRetryFocus) {
  $('#player-name').textContent=state?effectLabel(state.scene.effect):'Prismestra';
  $('#player-status').textContent=state?.status||'Подключение к приложению…';
  const runtimeDetail=$('#native-runtime-detail');if(runtimeDetail)runtimeDetail.textContent=state?.detail||'';
+ if(sceneActivation)syncSceneActivation(sceneActivation.id,sceneActivation);
  const audioSource=$('#scene-audio-source');
  if(audioSource)audioSource.textContent=state?.native
   ? state.audioError&&audioEffects.has(state.scene.effect)?'Системный звук недоступен. Повторяю подключение.'
@@ -259,14 +260,17 @@ function renderLibrary() {
  const effectIds=[...Object.keys(effects).filter(id=>available.has(id)),...Array.from(available).filter(id=>!Object.hasOwn(effects,id))];
  const options=effectIds.map(id=>effectOption(id,libraryEffect)).join('');
  const cards=list.slice(0,libraryLimit).map(item=>`<article class="scene-card ${same(item.scene,state.scene)?'selected':''}">
-   <div class="art-wrap"><button class="scene-preview" data-edit="${esc(item.id)}" aria-label="Открыть: ${esc(item.name)}" data-mutation ${disabled()}>
-    ${item.preview?`<canvas data-library-preview="${esc(item.id)}" aria-label="Предпросмотр: ${esc(item.name)}"></canvas>`:palette(item.scene)}
+   <div class="art-wrap"><button class="scene-preview" data-preview="${esc(item.id)}" aria-label="Предпросмотр: ${esc(item.name)}">
+    ${item.preview?`<canvas data-library-preview="${esc(item.id)}" aria-hidden="true"></canvas>`:palette(item.scene)}
+    <span class="scene-preview-label">Предпросмотр</span>
    </button></div>
    <div class="scene-body"><div class="scene-title"><h2>${esc(item.name)}</h2><small class="muted">${item.builtIn?'Шаблон · ':''}${esc(effectLabel(item.scene.effect))}</small></div>
-    <div class="card-actions"><button class="button" data-apply="${esc(item.id)}" aria-label="Применить: ${esc(item.name)}" title="Применить" data-mutation ${disabled()}>${icon('play')}</button>
-     <button class="button" data-edit="${esc(item.id)}" aria-label="Редактировать: ${esc(item.name)}" data-mutation ${disabled()}>${icon('edit')}</button>
+    <div class="card-actions"><button class="button primary" data-apply="${esc(item.id)}" aria-label="Включить сцену: ${esc(item.name)}" aria-disabled="${!!busy()}" data-mutation>Включить сцену</button>
+     <button class="icon-button" data-edit="${esc(item.id)}" aria-label="Редактировать: ${esc(item.name)}" title="Редактировать" data-mutation ${disabled()}>${icon('edit')}</button>
      ${item.builtIn?'':`<button class="icon-button" data-remove="${esc(item.id)}" aria-label="Удалить: ${esc(item.name)}" data-mutation ${disabled()}>${icon('trash')}</button>`}
     </div>
+    <div id="scene-activation-${esc(item.id)}" class="scene-activation-status" role="status" aria-atomic="true"></div>
+    <button id="scene-devices-${esc(item.id)}" class="button scene-devices" data-view="devices" hidden>Проверить устройства</button>
    </div>
   </article>`).join('');
  return heading('Сцены','Сцены сохраняют параметры RGB. Устройства и LCD сохраняются в профиле.',action(icon('plus')+' Новая сцена','new',true))+`
@@ -367,6 +371,7 @@ function nativeProperties() {
 function deviceStatus(device) {
  if(!device)return '';
  const labels=state.deviceActivity?.labels;
+ if(state.deviceActivity?.reasons?.[device.id]==='endpointLeaseBusy')return 'Подключение занято другим выходом Prismestra';
  if(labels?.[device.id]==='Подключается' && outputRetries.get(device.id)?.awaitingActivity)return 'Кадры отправлены';
  if(labels&&Object.hasOwn(labels,device.id))return labels[device.id];
  return !device.enabled?'Выключено':state.native?'Недоступно':'Предпросмотр';
@@ -572,6 +577,37 @@ function openEntry(entry) {
  $('#draft-switch').showModal();
  $('#draft-stay').focus();
 }
+function previewLibraryEntry(entry) {
+ $('#library-preview-title').textContent=entry.name;
+ $('#library-preview-art').innerHTML=entry.preview?'<canvas aria-hidden="true"></canvas>':palette(entry.scene);
+ if(entry.preview)paintPixels($('#library-preview-art canvas'),entry.preview);
+ $('#library-preview-dialog').showModal();
+}
+function activateLibraryEntry(entry) {
+ if(busy())return;
+ const request=++sceneActivationRequest;
+ if(!send({op:'apply_scene',scene:clone(entry.scene),request}))return;
+ if(sceneActivation)syncSceneActivation(sceneActivation.id,null);
+ sceneActivation={request,id:entry.id,name:entry.name,pending:true,message:`Включаем «${entry.name}»…`};
+ syncControls();
+}
+function syncSceneActivation(id,result) {
+ const key=CSS.escape(id);
+ const status=$('#scene-activation-'+key);
+ const message=result?.message||'';
+ if(status&&status.textContent!==message)status.textContent=message;
+ const devices=$('#scene-devices-'+key);
+ if(devices)devices.hidden=!(result?.applied&&state?.native);
+}
+function receiveSceneActivation({request,status,message}) {
+ if(!sceneActivation?.pending||request!==sceneActivation.request)return;
+ if(status==='applied')sceneActivation.message=`Сцена «${sceneActivation.name}» применена.${message?' '+message:''}`;
+ else if(status==='failed')sceneActivation.message=`Не удалось включить «${sceneActivation.name}».${message?' '+message:''}`;
+ else return;
+ sceneActivation.pending=false;
+ sceneActivation.applied=status==='applied';
+ syncControls();
+}
 function closeDraftSwitch() {
  const id=draftSwitchId;
  draftSwitchId=null;
@@ -598,6 +634,7 @@ window.prismestraReceive = message => {
   if(typeof message==='string')message=JSON.parse(message);
   if(message.kind==='output_preview'){window.outputMap?.receive(message);return;}
   if(message.kind==='output_retry'){receiveOutputRetry(message);return;}
+  if(message.kind==='scene_activation'){receiveSceneActivation(message);return;}
   if(message.kind==='flush'){
    if(!Number.isSafeInteger(message.id)||message.id<0)throw Error('Некорректный запрос закрытия');
    if(window.sceneFile?.blockClose()){
@@ -660,7 +697,11 @@ window.prismestraReceive = message => {
    if(message.state.preview)frame=message.state.preview;
    if(nativeFormChanged||foundChanged||(!busy()&&!outputPageAvailable(view)))render();else {syncControls();syncDeviceAnnouncement();paintPreview();}if(!busy())flushPreview();
   }
- }catch(e){awaitingCommandAck=false;closing=false;commandPending=false;showError('Ошибка ответа приложения: '+e.message);syncControls();}
+ }catch(e){
+  awaitingCommandAck=false;closing=false;commandPending=false;
+  showError('Ошибка ответа приложения: '+e.message);
+  syncControls();
+ }
 };
 document.addEventListener('click',event=>{
  const b=event.target.closest('button');if(!b||b.disabled||(busy()&&b.hasAttribute('data-mutation')&&!recoveryAction(b.dataset.action)))return;
@@ -682,8 +723,9 @@ document.addEventListener('click',event=>{
  }
  if(b.dataset.nativeAction!==undefined)return void send({op:'native_action',id:b.dataset.nativeAction},true);
  if(b.dataset.view)return changeView(b.dataset.view,b);
+ if(b.dataset.preview!==undefined){const entry=state?.library.find(e=>e.id===b.dataset.preview);if(entry)previewLibraryEntry(entry);return;}
  if(b.dataset.edit){const entry=state.library.find(e=>e.id===b.dataset.edit);if(entry)openEntry(entry);return;}
- if(b.dataset.apply){const entry=state.library.find(e=>e.id===b.dataset.apply);if(entry)send({op:'apply_scene',scene:clone(entry.scene)},true);return;}
+ if(b.dataset.apply){const entry=state.library.find(e=>e.id===b.dataset.apply);if(entry)activateLibraryEntry(entry);return;}
  if(b.dataset.remove){const entry=state.library.find(e=>e.id===b.dataset.remove);if(entry&&!entry.builtIn){dialogReturn=focusKey();$('#remove-description').textContent=`Удалить сцену «${entry.name}» из профиля? Запущенный эффект продолжит работать.`;$('#remove-dialog').dataset.id=entry.id;$('#remove-dialog').showModal();$('#cancel-remove').focus();}return;}
  if(b.dataset.removeColor!==undefined){
   if(draft.colors.length>1){

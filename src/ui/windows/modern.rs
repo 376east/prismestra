@@ -69,6 +69,7 @@ enum Command {
     },
     ApplyScene {
         scene: Scene,
+        request: Option<u32>,
     },
     PreviewScene {
         scene: Scene,
@@ -1107,11 +1108,26 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                     stage_native(a, &fields)?;
                     native_forms::set_field(a, id, &value)?;
                 }
-                Command::ApplyScene { scene } => {
+                Command::ApplyScene { scene, request } => {
                     if a.editor_dirty {
                         return Err("Примените или сбросьте параметры устройств".into());
                     }
                     a.update_scene(scene, true)?;
+                    if let Some(request) = request {
+                        let message = if a.native_lighting.is_none() {
+                            Some("Режим предпросмотра.")
+                        } else if !a.runtime.group_on(Target::Pc)
+                            && !a.runtime.group_on(Target::Door)
+                        {
+                            Some("Свет выключен. Включите его в панели воспроизведения.")
+                        } else {
+                            None
+                        };
+                        send(
+                            state,
+                            &json!({"kind":"scene_activation","request":request,"status":"applied","message":message}),
+                        )?;
+                    }
                 }
                 Command::Groups { pc, door } => {
                     a.runtime.set_group(Target::Pc, pc)?;
@@ -1192,6 +1208,21 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
     }
     Ok(true)
 }
+fn scene_activation_request(command: Option<&Command>, raw: &str) -> Option<u32> {
+    match command {
+        Some(Command::ApplyScene { request, .. }) => *request,
+        Some(_) => None,
+        None => {
+            // A valid envelope can still carry an invalid scene.
+            let envelope: Value = serde_json::from_str(raw).ok()?;
+            if envelope.get("op")?.as_str()? != "apply_scene" {
+                return None;
+            }
+            u32::try_from(envelope.get("request")?.as_u64()?).ok()
+        }
+    }
+}
+
 pub(super) fn maintain(state: &State) {
     let messages = match state.webview.try_borrow() {
         Ok(slot) => match slot.as_ref() {
@@ -1228,14 +1259,21 @@ pub(super) fn maintain(state: &State) {
     }
     let mut snapshot_needed = false;
     for message in messages {
-        let result = serde_json::from_str::<Command>(&message)
+        let command = serde_json::from_str::<Command>(&message);
+        let request = scene_activation_request(command.as_ref().ok(), &message);
+        let result = command
             .map_err(|e| format!("Некорректная команда интерфейса: {e}"))
             .and_then(|c| execute(state, c));
         match result {
             Ok(value) => snapshot_needed |= value,
             Err(message) => {
                 snapshot_needed = true;
-                let _ = send(state, &json!({"kind":"error","message":message}));
+                let reply = if let Some(request) = request {
+                    json!({"kind":"scene_activation","request":request,"status":"failed","message":message})
+                } else {
+                    json!({"kind":"error","message":message})
+                };
+                let _ = send(state, &reply);
             }
         }
     }
@@ -1375,6 +1413,26 @@ pub(super) fn return_to_editor(state: &State) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::lighting::scene::Effect;
+
+    #[test]
+    fn scene_activation_request_survives_a_rejected_scene_payload() {
+        let scene = crate::ui::catalog::plum_dawn().scene;
+        let valid = json!({"op":"apply_scene","scene":scene,"request":42}).to_string();
+        let command = serde_json::from_str::<Command>(&valid).unwrap();
+        assert_eq!(scene_activation_request(Some(&command), &valid), Some(42));
+
+        let invalid = r#"{"op":"apply_scene","scene":false,"request":42}"#;
+        assert!(serde_json::from_str::<Command>(invalid).is_err());
+        assert_eq!(scene_activation_request(None, invalid), Some(42));
+        assert_eq!(
+            scene_activation_request(None, r#"{"op":"preview_scene","request":42}"#),
+            None
+        );
+        assert_eq!(
+            scene_activation_request(None, r#"{"op":"apply_scene","request":"42"}"#),
+            None
+        );
+    }
 
     #[test]
     fn only_interactive_close_can_offer_to_discard_fields() {

@@ -91,6 +91,12 @@
   </div>
 </dialog>
 <script src="output-map.js"></script>
+<dialog id="library-preview-dialog" aria-labelledby="library-preview-title" aria-describedby="library-preview-description">
+  <h2 id="library-preview-title"></h2>
+  <div id="library-preview-art" class="art-wrap"></div>
+  <p id="library-preview-description">Предпросмотр сцены</p>
+  <form method="dialog" class="dialog-actions"><button class="button primary" autofocus>Закрыть</button></form>
+</dialog>
 <footer class="player" aria-label="Воспроизведение сцены">
   <button class="player-scene" id="open-active" title="Открыть запущенную сцену"><canvas id="player-art" width="104" height="72"></canvas><span><strong id="player-name"></strong><small id="player-status"></small></span></button>
   <div class="transport"><button class="button" id="play">Выключить свет</button></div>
