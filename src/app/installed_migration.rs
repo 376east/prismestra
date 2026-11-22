@@ -61,6 +61,52 @@ const OPTIONAL_IMPORT_FILES: [(&str, usize); 3] = [
 const MAX_DISCOVERY: usize = 128 * 1024;
 const MAX_ASSETS: usize = 512 * 1024 * 1024;
 
+/// Called only under the verified installed owner's limited token. A missing
+/// or stale legacy source cannot prevent current outputs from opening.
+pub(super) fn saved_openrgb_zone_intents(
+    state: &Path,
+    endpoint: SocketAddr,
+) -> Vec<super::openrgb_zone_migration::SavedManualZones> {
+    use super::openrgb_zone_migration::{LIMIT, SavedManualZones};
+    use crate::devices::Driver;
+    let read = || -> Option<Vec<SavedManualZones>> {
+        let root = state.parent()?;
+        let receipt = read_receipt(root).ok()??;
+        if !receipt.complete || !receipt.used_bundled_backend {
+            return None;
+        }
+        let backend = owned_backend(&receipt.source)?;
+        let config =
+            read_optional(&backend.config_dir.join("Configuration.json"), LIMIT).ok()??;
+        let portable_bytes =
+            read_optional(&receipt.source.state.join(LOCAL), document::MAX_BYTES).ok()??;
+        let portable: Local = serde_json::from_value(
+            super::strict_json::unique_json(&portable_bytes, document::MAX_BYTES).ok()?,
+        )
+        .ok()?;
+        let current_bytes =
+            read_optional(&root.join("profile.json"), document::MAX_BYTES).ok()??;
+        let document = Document::decode(&current_bytes).ok()?;
+        let local = Local::read(&state.join(LOCAL), &document).ok()?;
+        Some(document.lighting.setup.devices.iter().filter_map(|device| {
+            if !device.enabled || device.driver != Driver::OpenRgb {
+                return None;
+            }
+            let Binding::OpenRgb { endpoint: current, identity, topology } = local.devices.get(&device.id)? else {
+                return None;
+            };
+            if *current != endpoint || !matches!(portable.devices.get(&device.id),
+                Some(Binding::OpenRgb { endpoint, identity: old_identity, topology: old_topology })
+                    if *endpoint == backend.endpoint && old_identity == identity && old_topology == topology)
+            {
+                return None;
+            }
+            SavedManualZones::read(&config, identity, topology, device.leds).ok()
+        }).collect())
+    };
+    read().unwrap_or_default()
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum MigrationOutcome {
     None,
@@ -1614,6 +1660,81 @@ mod tests {
         }
         document.validate().unwrap();
         document
+    }
+
+    #[test]
+    fn reads_manual_size_intent_only_from_the_completed_owned_binding() {
+        use crate::{
+            devices::openrgb::{identity, topology},
+            transport::openrgb::{ControllerInfo, ZoneInfo},
+        };
+        let fixture = Fixture::new();
+        let old_endpoint = "127.0.0.1:6742".parse().unwrap();
+        let doc = document(true);
+        fixture.populate(&doc, old_endpoint);
+        fixture.owned_backend(old_endpoint);
+        let observed = ControllerInfo {
+            id: 0,
+            name: "Fixture board".into(),
+            vendor: "Example".into(),
+            serial: String::new(),
+            location: "HID: fixture".into(),
+            kind: "Motherboard".into(),
+            leds: 1,
+            led_names: vec!["ARGB 0".into()],
+            supports_direct: true,
+            zones: vec![ZoneInfo {
+                id: 0,
+                name: "ARGB".into(),
+                kind: "Linear".into(),
+                leds: 1,
+                reported_leds: 1,
+                led_offset: 0,
+                matrix: None,
+                reported_matrix: None,
+                matrix_warning: None,
+            }],
+        };
+        let portable_path = fixture.source.state.join(LOCAL);
+        let mut local = Local::read(&portable_path, &doc).unwrap();
+        local.devices.insert(
+            "fixture".into(),
+            Binding::OpenRgb {
+                endpoint: old_endpoint,
+                identity: identity(&observed),
+                topology: topology(&observed),
+            },
+        );
+        fs::write(&portable_path, serde_json::to_vec(&local).unwrap()).unwrap();
+        let config = serde_json::json!({
+            "profile_version":6, "profile_name":"Controller Configuration", "controllers":[{
+                "type":0, "flags":1, "name":"Fixture board", "vendor":"Example", "serial":"",
+                "location":"HID: fixture", "leds":[{"name":"ARGB 0"}],
+                "modes":[{"name":"Direct","flags":0}],
+                "zones":[{"type":1,"name":"ARGB","flags":4098,"leds_min":0,"leds_max":256,
+                    "leds_count":1,"matrix_map":{"width":0,"height":0}}]
+            }]
+        });
+        let config_path = fixture
+            .source
+            .profile
+            .parent()
+            .unwrap()
+            .join("backend/Configuration.json");
+        fs::write(config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let state = fixture.target.join("state");
+        assert!(saved_openrgb_zone_intents(&state, bundled()).is_empty());
+        fixture.migrate(false).unwrap();
+        assert_eq!(saved_openrgb_zone_intents(&state, bundled()).len(), 1);
+        assert!(saved_openrgb_zone_intents(&state, old_endpoint).is_empty());
+        let path = state.join(LOCAL);
+        let mut migrated = Local::read(&path, &doc).unwrap();
+        let Binding::OpenRgb { topology, .. } = migrated.devices.get_mut("fixture").unwrap() else {
+            panic!("expected OpenRGB binding")
+        };
+        *topology = "0".repeat(64);
+        fs::write(path, serde_json::to_vec(&migrated).unwrap()).unwrap();
+        assert!(saved_openrgb_zone_intents(&state, bundled()).is_empty());
     }
 
     #[test]

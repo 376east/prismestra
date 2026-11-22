@@ -29,7 +29,7 @@ pub mod lighting_bindings;
 pub mod lighting_outputs;
 #[cfg(windows)]
 pub mod managed_backend;
-#[cfg(test)]
+#[cfg(any(test, windows))]
 mod openrgb_zone_migration;
 pub mod preview;
 #[cfg(windows)]

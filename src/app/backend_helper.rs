@@ -691,6 +691,21 @@ pub fn run_installed_helper() -> Result<(), String> {
             Ok(None) => return Ok(()),
             Ok(Some((request, _))) => {
                 authority.set_creator_owner()?;
+                let intents = if matches!(
+                    fs::symlink_metadata(policy.config_dir.join("Configuration.json")),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                ) {
+                    authority
+                        .with_limited(|| {
+                            super::installed_migration::saved_openrgb_zone_intents(
+                                &state,
+                                policy.endpoint,
+                            )
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 let Some((current, helper)) = helper_owner(&channels)? else {
                     return Ok(());
                 };
@@ -701,7 +716,7 @@ pub fn run_installed_helper() -> Result<(), String> {
                     &channels,
                     &current,
                     &helper,
-                    Manager::start_installed(&policy)?,
+                    Manager::start_installed(&policy, intents)?,
                 );
             }
             Err(error) => rejected = Some(error),

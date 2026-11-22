@@ -5,7 +5,7 @@ use crate::{
 };
 use serde::Deserialize;
 
-const LIMIT: usize = 1024 * 1024;
+pub(super) const LIMIT: usize = 1024 * 1024;
 const MANUAL_SIZE_ALLOWED: u32 = 1 << 1;
 const MANUAL_SIZE_SET: u32 = 1 << 12;
 
@@ -161,8 +161,96 @@ pub(crate) struct ManualSize {
     pub leds: usize,
 }
 
+pub(super) struct SavedManualZones {
+    pub(super) identity: String,
+    saved: ControllerInfo,
+    manual: Vec<ManualSize>,
+}
+
+impl SavedManualZones {
+    pub(super) fn read(
+        config: &[u8],
+        expected_identity: &str,
+        expected_topology: &str,
+        expected_leds: usize,
+    ) -> Result<Self, String> {
+        let controller = unique_controller(config, expected_identity)?;
+        let saved = describe(&controller)?;
+        if !saved.supports_direct
+            || saved.leds != expected_leds
+            || topology(&saved) != expected_topology
+        {
+            return Err("portable topology does not match the saved OpenRGB binding".into());
+        }
+        let manual: Vec<_> = controller
+            .zones
+            .iter()
+            .enumerate()
+            .filter_map(|(zone, data)| {
+                (data.flags & (MANUAL_SIZE_SET | MANUAL_SIZE_ALLOWED)
+                    == MANUAL_SIZE_SET | MANUAL_SIZE_ALLOWED
+                    && data.leds_count != 0)
+                    .then_some(ManualSize {
+                        zone,
+                        leds: data.leds_count,
+                    })
+            })
+            .collect();
+        if manual.is_empty() {
+            return Err("portable binding has no saved manual sizes".into());
+        }
+        Ok(Self {
+            identity: expected_identity.into(),
+            saved,
+            manual,
+        })
+    }
+
+    /// Evidence from the existing inventory alone, before validating driver
+    /// bounds and creating a configuration. Does not grant write authority.
+    pub(super) fn needs_target_validation(&self, inventory: &[ControllerInfo]) -> bool {
+        let mut matches = inventory
+            .iter()
+            .filter(|target| identity(target) == self.identity);
+        let Some(target) = matches.next() else {
+            return false;
+        };
+        if matches.next().is_some()
+            || !target.supports_direct
+            || target.zones.len() != self.saved.zones.len()
+        {
+            return false;
+        }
+        let mut unset = false;
+        for (saved, observed) in self.saved.zones.iter().zip(&target.zones) {
+            if saved.id != observed.id
+                || saved.name != observed.name
+                || saved.kind != observed.kind
+                || observed.matrix.is_some()
+                || observed.reported_matrix.is_some()
+                || observed.leds != observed.reported_leds
+            {
+                return false;
+            }
+            if saved.leds != observed.leds {
+                if observed.leds != 0
+                    || !self
+                        .manual
+                        .iter()
+                        .any(|entry| entry.zone == saved.id && entry.leds == saved.leds)
+                {
+                    return false;
+                }
+                unset = true;
+            }
+        }
+        unset
+    }
+}
+
 /// Compare two offline descriptions. Return a plan for unset, manually
 /// configurable zones only. A changed firmware layout requires a new binding.
+#[cfg(test)]
 fn plan(
     source: &[u8],
     current: &[u8],
@@ -279,6 +367,13 @@ fn restores_only_unset_manual_zones_and_requires_the_saved_hash() {
     let info = describe(&serde_json::from_value(saved["controllers"][0].clone()).unwrap()).unwrap();
     let key = identity(&info);
     let hash = topology(&info);
+    let intent =
+        SavedManualZones::read(&serde_json::to_vec(&saved).unwrap(), &key, &hash, 55).unwrap();
+    let observed =
+        describe(&serde_json::from_value(empty["controllers"][0].clone()).unwrap()).unwrap();
+    assert!(intent.needs_target_validation(std::slice::from_ref(&observed)));
+    assert!(!intent.needs_target_validation(&[observed.clone(), observed]));
+    assert!(!intent.needs_target_validation(std::slice::from_ref(&info)));
     assert_eq!(
         run(&saved, &empty, &key, &hash).unwrap(),
         [

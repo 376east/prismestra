@@ -210,6 +210,7 @@ struct InstalledLaunch {
     windows: PathBuf,
     system: PathBuf,
     outbox: PathBuf,
+    zone_intents: Vec<super::openrgb_zone_migration::SavedManualZones>,
 }
 
 impl Manager {
@@ -220,6 +221,7 @@ impl Manager {
     #[cfg(windows)]
     pub(super) fn start_installed(
         policy: &super::installed_policy::InstalledPolicy,
+        zone_intents: Vec<super::openrgb_zone_migration::SavedManualZones>,
     ) -> Result<Self, String> {
         let (windows, system) = super::installed_policy::windows_dirs()?;
         let config = Config {
@@ -237,6 +239,7 @@ impl Manager {
                 windows,
                 system,
                 outbox: policy.outbox.clone(),
+                zone_intents,
             }),
         )
     }
@@ -726,6 +729,7 @@ fn run(config: Config, installed: Option<&InstalledLaunch>, state: &Shared) {
             &mut owned,
             &mut retry,
             MonitorTiming::default(),
+            installed.map_or(&[], |launch| launch.zone_intents.as_slice()),
             |endpoint, pid| probe_owned_sdk(endpoint, pid, &|| state.cancel.load(Ordering::SeqCst)),
         );
         drop(owned);
@@ -766,6 +770,7 @@ fn monitor_owned(
     owned: &mut OwnedChild,
     retry: &mut Retry,
     timing: MonitorTiming,
+    zone_intents: &[super::openrgb_zone_migration::SavedManualZones],
     mut probe: impl FnMut(SocketAddr, u32) -> Result<(), ProbeFailure>,
 ) {
     let began = Instant::now();
@@ -774,6 +779,7 @@ fn monitor_owned(
     let mut unhealthy = 0;
     let mut inventory = InventoryWatch::default();
     let mut inventory_at = began;
+    let mut migration_observed = false;
     state
         .snapshot
         .lock()
@@ -830,11 +836,23 @@ fn monitor_owned(
             if Instant::now() >= inventory_at {
                 inventory_at = Instant::now() + timing.inventory_interval;
                 match scan_inventory(config.endpoint, &|| state.cancel.load(Ordering::SeqCst)) {
-                    Ok((count, fingerprint))
+                    Ok(controllers)
                         if !state.cancel.load(Ordering::SeqCst)
                             && listener_owned(config.endpoint, owned.child.id()) =>
                     {
-                        inventory.observe(count, fingerprint, state)
+                        if !migration_observed {
+                            let pending = zone_intents
+                                .iter()
+                                .filter(|intent| intent.needs_target_validation(&controllers))
+                                .count();
+                            if pending != 0 {
+                                state.lifecycle(owned.child.id(), format!(
+                                    "Saved manual zone sizes matched {pending} owned controllers; protected target validation pending"
+                                ));
+                                migration_observed = true;
+                            }
+                        }
+                        inventory.observe(controllers.len(), fingerprint(&controllers), state)
                     }
                     Err(e) if !state.cancel.load(Ordering::SeqCst) => state.detail(format!(
                         "Managed OpenRGB SDK ready; inventory scan unavailable: {e}"
@@ -891,15 +909,13 @@ fn fingerprint(controllers: &[crate::transport::openrgb::ControllerInfo]) -> [u8
 fn scan_inventory(
     endpoint: SocketAddr,
     cancelled: &impl Fn() -> bool,
-) -> Result<(usize, [u8; 32]), String> {
+) -> Result<Vec<crate::transport::openrgb::ControllerInfo>, String> {
     // One shared deadline bounds connect+scan. Session checks cancellation every
     //10ms, so a slow large inventory never delays owner shutdown to this limit.
     let deadline = Instant::now() + SDK_READ_LIMIT;
     let mut session =
         crate::transport::openrgb::OpenRgbSession::connect(endpoint, deadline, cancelled)?;
-    session
-        .scan(deadline, cancelled)
-        .map(|controllers| (controllers.len(), fingerprint(&controllers)))
+    session.scan(deadline, cancelled)
 }
 
 struct InventoryWatch {
@@ -1190,6 +1206,7 @@ mod tests {
             windows: PathBuf::from("windows"),
             system: PathBuf::from("system"),
             outbox: PathBuf::from("outbox"),
+            zone_intents: Vec::new(),
         };
         let mut command = command(&config);
         installed_command(&mut command, &config, &launch);
@@ -1428,6 +1445,7 @@ mod tests {
                 inventory_interval: Duration::from_secs(60),
                 ..MonitorTiming::default()
             },
+            &[],
             |endpoint, _| {
                 probes += 1;
                 assert!(probes <= 7, "the monitor did not restart a stalled SDK");
@@ -1560,6 +1578,7 @@ mod tests {
                 health_interval: Duration::ZERO,
                 ..MonitorTiming::default()
             },
+            &[],
             |_, _| {
                 probes += 1;
                 let snapshot = state.snapshot.lock().unwrap();
