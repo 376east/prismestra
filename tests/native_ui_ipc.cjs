@@ -439,6 +439,36 @@ assert.ok(hasCandidate(candidateFixtures.replacement.deviceCandidates[0].id));
 assert.equal(discoveryAnnouncement.textContent, 'Найдено устройство: Fixture.');
 console.log('PASS: candidate identity, applied precedence, metadata replacement, empty device selection');
 
+{
+ const empty = {...foundState, devices: [], deviceCandidates: [], startupDiscoveryRetry: true};
+ vm.runInContext('view="library"',context);
+ receiveDeviceState('snapshot', empty);
+ assert.ok(mainMarkup.includes('data-action="retry-startup-discovery"'));
+ receiveDeviceState('status',{startupDiscoveryRetry:false});
+ assert.ok(!mainMarkup.includes('data-action="retry-startup-discovery"'),'running search hides the action');
+ receiveDeviceState('status',{startupDiscoveryRetry:true});
+ assert.ok(mainMarkup.includes('data-action="retry-startup-discovery"'),'an empty result allows a fresh user action');
+ vm.runInContext('view="devices"',context);
+ receiveDeviceState('snapshot', empty);
+ assert.ok(mainMarkup.includes('data-action="retry-startup-discovery"'));
+ const retry = {dataset:{action:'retry-startup-discovery'},disabled:false,hasAttribute:()=>true};
+ const clickRetry = () => events.click({target:{closest:()=>retry}});
+ const before = commands.length;
+ vm.runInContext('formStages.set("pending",{kind:"native",page:"devices",id:714,value:"Keep"})',context);
+ clickRetry();
+ assert.equal(commands.length,before,'unapplied edits protect the profile from a rescan');
+ vm.runInContext('formStages.clear()',context);
+ clickRetry();
+ clickRetry();
+ assert.deepEqual(commands.slice(before),[{op:'retry_startup_discovery'}]);
+ receiveDeviceState('status',{startupDiscoveryRetry:false,deviceCandidates:[foundRgb]});
+ assert.ok(hasCandidate(foundRgb.id));
+ assert.ok(!mainMarkup.includes('data-action="retry-startup-discovery"'));
+ receiveDeviceState('snapshot',{...empty,startupDiscoveryRetry:false,devices:[{...foundRgb,leds:1}]});
+ assert.ok(!hasCandidate(foundRgb.id),'committed device replaces the late proposal');
+ console.log('PASS: one rescan from an empty profile; late candidate becomes an applied device');
+}
+
 vm.runInContext('view="devices";state.editor={page:"devices",index:0,targets:["Strip"],fields:[],dirty:false};state.detail="Ошибка RGB: <test>";render()',context);
 assert.ok(find('#main').innerHTML.includes('Ошибка RGB: &lt;test&gt;'));
 

@@ -7,6 +7,8 @@ use crate::app::{
 use crate::devices::{Device, Role};
 use std::{thread::JoinHandle, time::Duration};
 
+const STARTUP_SEARCHES: u8 = 3;
+
 #[derive(serde::Serialize)]
 pub(super) struct DeviceCandidate<'a> {
     id: &'a str,
@@ -58,6 +60,7 @@ pub(super) struct Startup {
     path: Option<PathBuf>,
     context: u64,
     attempts: u8,
+    search_limit: u8,
     next: Instant,
 }
 
@@ -79,6 +82,7 @@ impl Startup {
             path: None,
             context: 0,
             attempts: 0,
+            search_limit: STARTUP_SEARCHES,
             next: Instant::now(),
         }
     }
@@ -98,9 +102,67 @@ impl Startup {
     pub(super) fn configuring(&self) -> bool {
         self.applying.is_some() || self.restoring.is_some()
     }
+
+    fn can_retry_search(&self) -> bool {
+        self.installed
+            && self.initialized
+            && self.phase == "complete"
+            && !self.configuring()
+            && self.drained()
+    }
+
+    fn retry_search(&mut self, document: &Document, path: &Path, context: u64) {
+        self.expected = Some(document.clone());
+        self.path = Some(path.to_path_buf());
+        self.context = context;
+        self.attempts = 0;
+        self.search_limit = 1;
+        self.next = Instant::now();
+        self.enabled = true;
+        self.phase = "discovering";
+        self.discovery_issues.clear();
+    }
+
+    fn complete_search(&mut self) -> bool {
+        if self.attempts < self.search_limit || !self.worker.is_idle() {
+            return false;
+        }
+        self.enabled = false;
+        self.phase = "complete";
+        true
+    }
 }
 
 impl App {
+    pub(super) fn can_retry_startup_discovery(&self) -> bool {
+        self.first_run.can_retry_search()
+            && self.runtime.document().lighting.setup.devices.is_empty()
+            && self.path.is_some()
+            && self.path == self.first_run.path
+            && self.native_lighting.is_some()
+            && !self.shutdown.active()
+            && !self.dirty
+            && !self.editor_dirty
+            && self.pending_open.is_none()
+            && !self.runtime.pending_configuration()
+            && !self.connection_switching()
+            && self.guard_connections_close().is_ok()
+            && self.connections.scan.is_idle()
+    }
+
+    pub(super) fn retry_startup_discovery(&mut self) -> Result<(), String> {
+        if !self.can_retry_startup_discovery() {
+            return Err("Повторный поиск сейчас недоступен.".into());
+        }
+        self.first_run.retry_search(
+            self.runtime.document(),
+            self.path.as_deref().ok_or("Нет пути профиля")?,
+            self.context_revision,
+        );
+        self.status = "Ищу поддерживаемые устройства…".into();
+        Ok(())
+    }
+
     fn pending_plan_matches(&self, pending: &Applying) -> bool {
         self.path.as_ref() == Some(&pending.path)
             && self.context_revision == pending.context
@@ -424,18 +486,19 @@ impl App {
             )?;
             return Ok(false);
         }
-        if !self.first_run.worker.is_idle() || Instant::now() < self.first_run.next {
+        if !self.first_run.worker.is_idle() {
             return Ok(false);
         }
-        if self.first_run.attempts >= 3 {
-            self.first_run.enabled = false;
-            self.first_run.phase = "complete";
+        if self.first_run.complete_search() {
             self.status = format!(
                 "Автопоиск завершён. Устройств на карте: {}. {}",
                 self.runtime.document().lighting.setup.devices.len(),
                 self.first_run.discovery_issues.join("; ")
             );
             return Ok(true);
+        }
+        if Instant::now() < self.first_run.next {
+            return Ok(false);
         }
         let local = self
             .native_lighting
@@ -462,6 +525,33 @@ impl App {
 mod tests {
     use super::*;
     use crate::devices::Driver;
+
+    #[test]
+    fn empty_startup_search_can_be_rearmed_for_one_pass_without_handover() {
+        let (_fixture, profile, _, _) = crate::app::installed::tests::fresh_profile();
+        let document = Document::load(&profile).unwrap();
+        let mut startup = Startup::new(true);
+        assert!(!startup.can_retry_search());
+        startup.initialized = true;
+        startup.attempts = STARTUP_SEARCHES;
+        assert!(startup.complete_search());
+        assert!(startup.can_retry_search());
+
+        startup.retry_search(&document, &profile, 7);
+        assert!(startup.enabled && startup.initialized);
+        assert!(startup.handover.is_none());
+        assert_eq!(startup.expected.as_ref(), Some(&document));
+        assert_eq!(startup.path.as_ref(), Some(&profile));
+        assert_eq!(startup.context, 7);
+        assert!(!startup.can_retry_search());
+        assert!(!startup.complete_search());
+        startup.attempts += 1;
+        assert!(startup.complete_search());
+        assert!(startup.can_retry_search());
+
+        startup.cancel();
+        assert!(!startup.can_retry_search());
+    }
 
     #[test]
     fn discovery_dto_follows_only_the_current_proposal() {

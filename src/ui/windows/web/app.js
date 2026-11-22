@@ -128,6 +128,7 @@ function controlDisabled(node) {
  if(closing)return true;
  const code=node.dataset.action;
  if(code==='classic')return !state;
+ if(code==='retry-startup-discovery')return !state?.startupDiscoveryRetry||busy()||stagedDirty();
  if(code==='revert-document')return !state || !(busy()||state.editor?.dirty||stagedDirty());
  if(code==='retry-document')return !state || !(busy()||error||state.error);
  if(['insert-palette-color','move-palette-earlier','move-palette-later'].includes(code)){
@@ -273,7 +274,7 @@ function renderLibrary() {
     <button id="scene-devices-${esc(item.id)}" class="button scene-devices" data-view="devices" hidden>Проверить устройства</button>
    </div>
   </article>`).join('');
- return heading('Сцены','Сцены сохраняют параметры RGB. Устройства и LCD сохраняются в профиле.',action(icon('plus')+' Новая сцена','new',true))+`
+ return heading('Сцены','Сцены сохраняют параметры RGB. Устройства и LCD сохраняются в профиле.',startupDiscoveryAction()+action(icon('plus')+' Новая сцена','new',!state.startupDiscoveryRetry))+`
   <div class="toolbar">
    <select id="library-effect" aria-label="Тип эффекта"><option value="">Все эффекты</option>${options}</select>
    <output class="muted" aria-live="polite">Показано ${Math.min(libraryLimit,list.length)} из ${list.length}</output>
@@ -418,6 +419,10 @@ function outputPageAvailable(page) {
  return !outputPage(page) || !!state?.devices.some(device=>device.role===page);
 }
 
+function startupDiscoveryAction() {
+ return state.startupDiscoveryRetry ? action('Найти устройства','retry-startup-discovery',true) : '';
+}
+
 function renderDevices(candidates) {
  const devices=state.devices.map(d=>{
   const statusId=`device-status-${encodeURIComponent(d.id)}`;
@@ -434,11 +439,11 @@ function renderDevices(candidates) {
   <div class="device-info"><h2>${esc(candidate.label)}</h2><p>${esc(candidate.role)}</p></div>
   <div class="device-meta"><small>Найдено</small></div>
  </article>`);
- const entries=[...devices,...found].join('')||'<div class="empty"><h2>В профиле нет устройств</h2><p>Добавьте устройство в свойствах профиля.</p></div>';
+ const entries=[...devices,...found].join('')||`<div class="empty"><h2>В профиле нет устройств</h2><p>${state.startupDiscoveryRetry?'Подключите устройство и запустите поиск.':'Добавьте устройство в свойствах профиля.'}</p></div>`;
  const add = state.nativeAux?.page==='devices' && state.nativeAux.fields.some(field=>field.id===devicePresetField && field.enabled)
   ? action('Добавить устройство','focus-device-setup',true)
   : '';
- const shortcuts = add + pageButton('connections')
+ const shortcuts = startupDiscoveryAction() + add + pageButton('connections')
   + (outputPageAvailable('lcd') ? pageButton('lcd','Настроить LCD') : '')
   + (outputPageAvailable('ambient') ? pageButton('ambient','Настроить экран') : '');
  return heading('Устройства','Изменения действуют после «Применить». Профиль сохраняется отдельно.',shortcuts)
@@ -741,6 +746,8 @@ window.prismestraReceive = message => {
    followActiveScene();
    render();if(!busy())flushPreview();
   } else if(message.kind==='status'&&state) {
+   const searchChanged=(view==='library'||view==='devices')&&Object.hasOwn(message.state,'startupDiscoveryRetry')
+    && state.startupDiscoveryRetry!==message.state.startupDiscoveryRetry;
    const foundChanged=view==='devices'&&(
     (Object.hasOwn(message.state,'deviceCandidates')&&!same(state.deviceCandidates,message.state.deviceCandidates)) ||
     (Object.hasOwn(message.state,'argbDevice')&&state.argbDevice!==message.state.argbDevice)
@@ -753,7 +760,7 @@ window.prismestraReceive = message => {
    followActiveScene();
    if(!state.pending&&!nativeAwaitingAck&&!savedSceneRequest)commandPending=false;
    if(message.state.preview)frame=message.state.preview;
-   if(nativeFormChanged||foundChanged||(!busy()&&!outputPageAvailable(view)))render();else {syncControls();syncDeviceAnnouncement();paintPreview();}if(!busy())flushPreview();
+   if(nativeFormChanged||foundChanged||searchChanged||(!busy()&&!outputPageAvailable(view)))render();else {syncControls();syncDeviceAnnouncement();paintPreview();}if(!busy())flushPreview();
   }
  }catch(e){
   awaitingCommandAck=false;closing=false;commandPending=false;
@@ -885,6 +892,7 @@ document.addEventListener('click',event=>{
   break;
  }
  case 'focus-device-setup':$(`[data-native-field="${devicePresetField}"]`)?.focus();break;
+ case 'retry-startup-discovery':if(!controlDisabled(b))send({op:'retry_startup_discovery'},true);break;
  case 'new':case 'clone':case 'rename':return nameDialog(b.dataset.action);
  case 'save-scene':return nameDialog('save');
  case 'apply-scene':send({op:'apply_scene',scene:clone(draft)},true);break;
