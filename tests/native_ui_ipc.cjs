@@ -178,7 +178,19 @@ events.pointerup({});const applyButton={dataset:{action:'apply-document'},disabl
 vm.runInContext('window.prismestraReceive({kind:"error",message:"Invalid port"});window.prismestraReceive(payload)',context);assert.equal(find('#field-0').value,'not-a-number','invalid text retained after backend validation error');assert.equal(find('#field-1').value,'Unfocused text','nonfocused stage retained across snapshot');assert.ok(find('#native-error').innerHTML.includes('Отменить незавершённый ввод'));
 // Choices include the outstanding generic text atomically, then acknowledge only submitted stages.
 const mode=new Node();mode.tagName='SELECT';mode.dataset.field='mode';mode.value='b';events.change({target:mode});assert.equal(commands.at(-1).op,'set_field');assert.equal(commands.at(-1).fields[0].value,'not-a-number');vm.runInContext('window.prismestraReceive({kind:"error",message:"Still invalid"})',context);
-document.activeElement=find('#field-0');vm.runInContext('window.prismestraReceive({kind:"flush",id:500})',context);assert.equal(commands.at(-1).op,'close_ready');assert.equal(commands.at(-1).form_dirty,true,'close handshake reports unblurred form input');vm.runInContext('window.prismestraReceive({kind:"error",message:"Finish forms before closing"})',context);assert.equal(vm.runInContext('stagedDirty()',context),true);
+document.activeElement=find('#field-0');
+const beforeClose=commands.length;
+vm.runInContext('window.prismestraReceive({kind:"flush",id:500})',context);
+assert.equal(commands.length,beforeClose+1,'close sends only the draft receipt and never applies fields');
+assert.equal(commands.at(-1).op,'close_ready');
+assert.equal(commands.at(-1).form_dirty,true,'close handshake reports unblurred form input');
+assert.ok(commands.at(-1).scene,'scene draft accompanies the dirty-form receipt');
+assert.ok(!JSON.stringify(commands.at(-1)).includes(document.activeElement.value),'close receipt excludes staged field values');
+vm.runInContext('window.prismestraReceive({kind:"close_cancelled"})',context);
+assert.equal(vm.runInContext('closing',context),false);
+assert.equal(vm.runInContext('stagedDirty()',context),true,'returning to edits preserves the staged form');
+vm.runInContext('const previousSceneFile=window.sceneFile;window.sceneFile={blockClose:()=>true};window.prismestraReceive({kind:"flush",id:501});window.sceneFile=previousSceneFile',context);
+assert.deepEqual(commands.at(-1),{op:'close_ready',id:501,scene:null,blocked:true},'an active scene-file operation cannot be discarded as a form');
 const discard={dataset:{action:'discard-fields'},disabled:false,hasAttribute:()=>false};events.click({target:{closest:()=>discard}});assert.equal(vm.runInContext('stagedDirty()',context),false);assert.equal(find('#field-0').value,'8080','explicit discard renders backend values');
 // Empty device profiles expose actual native auxiliary Add actions and blank select placeholders.
 const aux={page:'devices',fields:[{id:411,label:'Name',kind:'text',value:'',choices:[],enabled:true},{id:412,label:'Driver',kind:'select',value:'missing',choices:[{label:'First driver',value:'first'}],enabled:true}],actions:[{id:410,label:'Add device',enabled:true}],notes:['No configured devices']};context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeAux:aux,editor:{page:'devices',index:0,targets:[],fields:[],dirty:false}}};vm.runInContext('window.prismestraReceive(payload)',context);assert.ok(find('#main').innerHTML.includes('Add device'));assert.ok(!find('#main').innerHTML.includes('Расширенные настройки'));assert.ok(find('#main').innerHTML.includes('<option value="" disabled selected>Выберите…</option>'));
