@@ -6,6 +6,8 @@ The Windows installer bundles and configures a private backend automatically, in
 
 ## Configure a portable backend
 
+For a new or ordinary-user portable configuration, exit the resident session and open a Windows shortcut to the extracted `Prismestra.exe` with `--configure-portable-openrgb "C:\Apps\OpenRGB\OpenRGB.exe" "C:\Lighting\OpenRGB-config"`. An optional final argument sets a numeric loopback endpoint. Confirm the displayed endpoint and SHA-256 to save. Leave any configured helper task in place. If a proposed change would affect that configuration, Prismestra leaves both files intact so that the task's authorization can be reviewed separately.
+
 Select an OpenRGB SDK6 executable and an isolated configuration directory. Disable unrelated plugins and detectors for devices driven directly by Prismestra. Exit any server using the intended endpoint. From the extracted Prismestra folder, substitute your paths:
 
 ```powershell

@@ -65,6 +65,80 @@ fn arguments(root: &Path, flags: &[OsString]) -> Result<Vec<OsString>, String> {
     Ok(args)
 }
 
+pub(super) fn configure_openrgb(args: &[OsString]) -> Result<(), String> {
+    use super::{resident::Instance, wide};
+    use crate::app::managed_backend::provision::{self, Outcome};
+    use std::{net::SocketAddr, ptr::null_mut};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW,
+    };
+
+    let (executable, config_dir, endpoint) = match args {
+        [executable, config_dir] => (executable, config_dir, None),
+        [executable, config_dir, endpoint] => {
+            let endpoint = endpoint.to_str().and_then(|value| value.parse::<SocketAddr>().ok())
+                .ok_or("Укажите числовой адрес и порт OpenRGB.")?;
+            (executable, config_dir, Some(endpoint))
+        }
+        _ => return Err("Используйте --configure-portable-openrgb <OpenRGB.exe> <папка-конфигурации> [IP:порт].".into()),
+    };
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let root = exe.parent().ok_or("Не найдена папка Prismestra.exe")?;
+    let installed = match fs::symlink_metadata(root.join("install-manifest.json")) {
+        Ok(_) => true,
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => return Err(error.to_string()),
+    };
+    if installed || !file_exists(&root.join("release-manifest.json"))? {
+        return Err(
+            "Настройка OpenRGB этой командой доступна только в распакованном portable ZIP.".into(),
+        );
+    }
+    let state = provision::prepare_state(root)?;
+    let _instance = Instance::acquire(&state)?;
+    let title = wide("Управляемый OpenRGB");
+    let outcome = provision::configure(
+        &state,
+        Path::new(executable),
+        Path::new(config_dir),
+        endpoint,
+        |replace, pin, endpoint| {
+            let action = if replace {
+                "Заменить существующие настройки OpenRGB?"
+            } else {
+                "Сохранить настройки OpenRGB?"
+            };
+            let text = wide(&format!(
+                "{action}\n\n{}\n{}\n{endpoint}\nSHA-256 {pin}",
+                Path::new(executable).display(),
+                Path::new(config_dir).display()
+            ));
+            unsafe {
+                MessageBoxW(
+                    null_mut(),
+                    text.as_ptr(),
+                    title.as_ptr(),
+                    MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION,
+                ) == IDYES
+            }
+        },
+    )?;
+    let message = match outcome {
+        Outcome::Saved => "Настройки OpenRGB сохранены.",
+        Outcome::Unchanged => "Настройки OpenRGB уже сохранены.",
+        Outcome::Cancelled => return Ok(()),
+    };
+    unsafe {
+        MessageBoxW(
+            null_mut(),
+            wide(message).as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        )
+    };
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
