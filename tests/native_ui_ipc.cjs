@@ -309,6 +309,51 @@ assert.equal(commands.length,beforePendingPage,'Do not send a card selection bef
 vm.runInContext('pendingView=null',context);
 console.log('PASS: device cards select by logical identity and the draft dropdown still uses indices');
 
+// Duplicate names must remain distinguishable on the cards, like in the native target selector.
+{
+ const [working, blocked] = ['rgb-left','rgb-right'].map(id=>({
+  id,label:'ARGB',role:'canvas',driver:{type:'open_rgb'},leds:32,rate_hz:30,enabled:true
+ }));
+ const lcd = {id:'usb-lcd',label:'LCD',role:'lcd',driver:{type:'tt_lcd'},leds:0,rate_hz:30,enabled:true};
+ const activity = {
+  labels:{[working.id]:'Кадры отправлены',[blocked.id]:'Недоступно',[lcd.id]:'Недоступно'},
+  reasons:{[blocked.id]:'endpointLeaseBusy'}
+ };
+ const snapshot = (devices,selected,detail) => {
+  context.payload={kind:'snapshot',state:{
+   ...structuredClone(initial),devices,draftDevices:devices,detail,deviceActivity:activity,
+   editor:{page:'devices',deviceId:selected.id,index:devices.indexOf(selected),
+    targets:devices.map(({label,id})=>`${label} (${id})`),fields:[],dirty:false}
+  }};
+  vm.runInContext('window.prismestraReceive(payload)',context);
+ };
+ const selectCard = device => {
+  const button=find(`[data-device-id="${device.id}"]`);
+  button.dataset.deviceId=device.id;
+  button.focus();
+  events.click({target:{closest:()=>button}});
+  assert.deepEqual(commands.at(-1),{op:'select_device',id:device.id});
+  return button;
+ };
+ vm.runInContext('formStages.clear();view="devices";pendingView=null',context);
+ snapshot([working,blocked,lcd],working,'Кадры отправлены: 5');
+ assert.match(mainMarkup,/<h2>ARGB \(rgb-left\)<\/h2>/);
+ assert.match(mainMarkup,/<h2>ARGB \(rgb-right\)<\/h2>/);
+ assert.match(mainMarkup,/aria-label="Свойства: ARGB \(rgb-right\)" aria-describedby="device-status-rgb-right"/);
+ assert.match(mainMarkup,/aria-label="Свойства: LCD" aria-describedby="device-status-usb-lcd"/);
+ const conflictCard=selectCard(blocked);
+ snapshot([blocked,working,lcd],blocked,'Ожидает повтора');
+ assert.equal(document.activeElement,conflictCard);
+ assert.match(mainMarkup,/data-output-status="rgb-right">Подключение занято другим выходом Prismestra/);
+ assert.match(mainMarkup,/data-connection-device="rgb-right"/);
+ selectCard(lcd);
+ snapshot([lcd,blocked,working],lcd,'Недоступно: Requested TT HID interface is unavailable; fallback is forbidden');
+ assert.match(mainMarkup,/id="native-runtime-detail">Недоступно: Requested TT HID interface is unavailable/);
+ assert.match(mainMarkup,/data-connection-device="usb-lcd"/);
+ vm.runInContext('deviceInspection=null',context);
+ console.log('PASS: same-name cards identify their outputs; selection, reason and connection target survive a reordered snapshot');
+}
+
 // A retry belongs to one saved row, request and profile scope.
 {
  const button=new Node(), status=new Node(), help=new Node(), disabled=new Map();
