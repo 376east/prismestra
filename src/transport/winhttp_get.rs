@@ -1,4 +1,4 @@
-//! Bounded native GET. The caller supplies its approved origin and path.
+//! Bounded native HTTP. The caller supplies its approved origin and path.
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use std::time::Instant;
@@ -37,6 +37,26 @@ pub(crate) fn get(
     deadline: Instant,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<u8>, Error> {
+    send(spec, "GET", &[], deadline, cancelled)
+}
+
+pub(crate) fn post(
+    spec: &Request<'_>,
+    body: &[u8],
+    deadline: Instant,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<u8>, Error> {
+    send(spec, "POST", body, deadline, cancelled)
+}
+
+fn send(
+    spec: &Request<'_>,
+    method: &str,
+    body: &[u8],
+    deadline: Instant,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<u8>, Error> {
+    let length = u32::try_from(body.len()).map_err(|_| Error::InvalidResponse)?;
     check(deadline, cancelled)?;
     let agent = wide(spec.agent);
     let access_type = match spec.proxy {
@@ -49,7 +69,7 @@ pub(crate) fn get(
     let host = wide(spec.host);
     let connection =
         Handle::new(unsafe { WinHttpConnect(session.0, host.as_ptr(), spec.port, 0) })?;
-    let method = wide("GET");
+    let method = wide(method);
     let path = wide(spec.path);
     let request = Handle::new(unsafe {
         WinHttpOpenRequest(
@@ -80,9 +100,13 @@ pub(crate) fn get(
                     headers.as_ptr()
                 },
                 (headers.len() - 1) as u32,
-                null(),
-                0,
-                0,
+                if body.is_empty() {
+                    null()
+                } else {
+                    body.as_ptr().cast()
+                },
+                length,
+                length,
                 0,
             )
         },

@@ -19,6 +19,10 @@ One WLED controller can appear as a direct DDP output and as one or more `light.
 
 In **Devices and properties**, enable the route you want and disable the other outputs for that controller, then apply the configuration. Choose DDP for per-pixel animation or an HA light for slower whole-light control. To check the selection on a test controller, change the scene. A DDP-only selection sends frames to the configured UDP port (normally `4048`) and issues no HA light commands for that controller. An HA-only selection issues light commands for the selected entity and sends no DDP frames to the controller. HA automations can still write to WLED independently. [WLED DDP](https://kno.wled.ge/interfaces/ddp/) · [Output enable setting](../src/ui/editor.rs)
 
+## Alice pilot
+
+The WebView2 editor has a foreground Alice pilot under **Settings**. It uses the Prismestra Desktop Pilot OAuth registration with `iot:view`, `iot:control` and the redirect `http://127.0.0.1:45183/alice/callback`. Select **Sign in with Yandex ID** and confirm access in the system browser. Return to Prismestra, select one lamp from the room named «Кабинет», and explicitly apply one brightness value. The sign-in and selection never send a command. The session keeps the grant in memory and consumes it on the apply attempt. The pilot has no scene or scheduler integration. [Yandex OAuth](https://yandex.ru/dev/id/doc/ru/codes/code-url) · [Yandex Smart Home API](https://yandex.ru/dev/dialogs/smart-home/doc/ru/concepts/platform-protocol)
+
 ## Discovery boundaries
 
 DNS-SD browses `_wled._tcp.local.` and `_home-assistant._tcp.local.` for at most three seconds, with bounded result/event counts and explicit shutdown. It does not scan IP ranges. Advertisements are untrusted hints; TXT URLs are not followed and credentials are never supplied during discovery. IPv6 link-local addresses requiring an interface scope are currently omitted. mDNS can be disabled or blocked between network segments; manual endpoints remain available.

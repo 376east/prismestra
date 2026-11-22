@@ -91,6 +91,20 @@
   </div>
 </dialog>
 <script src="output-map.js"></script>
+<dialog id="alice-dialog" aria-labelledby="alice-title">
+  <h2 id="alice-title">Алиса · Кабинет</h2>
+  <button type="button" class="button" data-action="alice-sign-in">Войти через Яндекс ID</button>
+  <p>Яндекс запросит чтение каталога и управление. Из Prismestra команда уйдёт только выбранной лампе.</p>
+  <p id="alice-status" role="status" aria-live="polite"></p>
+  <div id="alice-choice" hidden>
+    <label for="alice-lamp">Лампа</label>
+    <select id="alice-lamp"><option value="">Выберите лампу</option></select>
+    <label for="alice-brightness">Яркость, %</label>
+    <input id="alice-brightness" type="number" min="1" max="100" step="1" value="40">
+    <button type="button" class="button primary" id="alice-apply" data-action="alice-apply" disabled>Установить яркость один раз</button>
+  </div>
+  <div class="dialog-actions"><button type="button" class="button" data-action="alice-close">Закрыть</button></div>
+</dialog>
 <dialog id="argb-dialog" aria-labelledby="argb-title" aria-describedby="argb-label">
   <h2 id="argb-title">Каналы ARGB</h2>
   <p id="argb-label"></p>
