@@ -12,7 +12,7 @@ Select an OpenRGB SDK6 executable and an isolated configuration directory. Disab
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Configure OpenRGB.ps1" -Executable "C:\Apps\OpenRGB\OpenRGB.exe" -ConfigDirectory "C:\Lighting\OpenRGB-config"
 ```
 
-Setup pins the EXE SHA256 in `data/state/managed-openrgb.json`. Options: `-StateDirectory`, `-Endpoint` (numeric IPv4/bracketed IPv6) and explicit `-Force` replacement. It never executes a backend, installs drivers, registers tasks or requests elevation. Use Connections discovery and save the profile/bindings, then `Start saved scene.cmd`. Explicit discovery can start the backend before binding identities exist; it waits in its worker. Saving bindings alone does not activate lights. Connected startup starts the backend only for enabled matching OpenRGB bindings.
+Setup pins the EXE SHA256 in `data/state/managed-openrgb.json`. The available options are `-StateDirectory`, `-Endpoint` (numeric IPv4/bracketed IPv6) and explicit `-Force` replacement. It never executes a backend, installs drivers, registers tasks or requests elevation. Use Connections discovery and save the profile and bindings, then use the [portable EXE shortcut for connected startup](portable-launch.md#first-setup). Explicit discovery can start the backend before binding identities exist. It waits in its worker. Saving bindings alone does not activate lights. Connected startup starts the backend only for enabled matching OpenRGB bindings.
 
 To return to an external server, exit Prismestra, remove the managed configuration or set `enabled` to false while retaining its other fields, then restart. Do not run two servers on one endpoint.
 

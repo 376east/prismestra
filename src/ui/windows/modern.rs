@@ -727,9 +727,9 @@ pub(crate) fn device_activity_for(
         }
         if active
             && !busy
-            && let Some(ticket) = runtime.openrgb_retry_ticket(&device.id)
+            && let Some(ticket) = retry_output::wire_ticket(runtime, &device.id, context)
         {
-            tickets.insert(&device.id, retry_output::encode(context, ticket));
+            tickets.insert(&device.id, ticket);
         }
     }
     json!({

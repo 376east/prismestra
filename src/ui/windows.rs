@@ -3097,6 +3097,8 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
         runtime.configure_managed_backend(&state_dir, local)?;
         local.attach_missing(&mut runtime, &asset_root)?;
     } else {
+        #[cfg(test)]
+        webview_recovery_stand::attach_retry_lcd(&mut runtime, &asset_root, &feed)?;
         super::stand::attach_missing(&mut runtime, &asset_root, &feed)?;
     }
     runtime.tick(crate::clock::monotonic_us(), wall())?;
@@ -3316,6 +3318,9 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
         if o.selftest {
             #[cfg(test)]
             if webview_recovery_stand::enabled() {
+                if webview_recovery_stand::lcd_retry_enabled() {
+                    return webview_recovery_stand::exercise_lcd_retry(&state);
+                }
                 return webview_recovery_stand::exercise(&state);
             }
             selftest(raw, &state)?;
