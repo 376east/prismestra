@@ -90,6 +90,26 @@ fn controller_layout(
     zone_layout: Option<&[(&str, u32)]>,
     mode: &str,
 ) -> Vec<u8> {
+    controller_layout_with_manual_zone(
+        serial,
+        future,
+        matrices,
+        effects_only,
+        zone_layout,
+        mode,
+        None,
+    )
+}
+
+fn controller_layout_with_manual_zone(
+    serial: &str,
+    future: bool,
+    matrices: &[Option<&[u32]>],
+    effects_only: bool,
+    zone_layout: Option<&[(&str, u32)]>,
+    mode: &str,
+    manual_zone: Option<(usize, u32)>,
+) -> Vec<u8> {
     let mut b = vec![0; 4];
     u32v(&mut b, if future { 99 } else { 14 });
     for value in [
@@ -125,6 +145,9 @@ fn controller_layout(
     let mut outputs = 0;
     for (zone, matrix) in matrices.iter().enumerate() {
         let (name, count) = zone_layout.map_or(("Zone", 2), |layout| layout[zone]);
+        let manual_max = manual_zone
+            .filter(|(index, _)| *index == zone)
+            .map(|(_, max)| max);
         outputs += count;
         string(&mut b, name);
         for value in [
@@ -135,8 +158,8 @@ fn controller_layout(
             } else {
                 1
             },
-            count,
-            count,
+            if manual_max.is_some() { 0 } else { count },
+            manual_max.unwrap_or(count),
             count,
         ] {
             u32v(&mut b, value);
@@ -155,7 +178,9 @@ fn controller_layout(
         u16v(&mut b, 0); // segments
         u32v(
             &mut b,
-            (1 << 30) | if effects_only && zone == 0 { 1 } else { 0 },
+            (1 << 30)
+                | if effects_only && zone == 0 { 1 } else { 0 }
+                | if manual_max.is_some() { 1 << 1 } else { 0 },
         );
         u32v(&mut b, u32::MAX);
         u16v(&mut b, 0);
@@ -600,6 +625,51 @@ fn matrix_server(payloads: Vec<Vec<u8>>) -> (SocketAddr, Captured, thread::JoinH
         }
     });
     (addr, calls, h)
+}
+
+#[test]
+fn argb_inventory_reads_empty_manual_and_fixed_zones_without_writes() {
+    use crate::devices::openrgb::{identity, topology};
+    let payload = controller_layout_with_manual_zone(
+        "SERIAL",
+        false,
+        &[None, None],
+        false,
+        Some(&[("ARGB 1/3", 0), ("Fixed", 2)]),
+        "Direct",
+        Some((0, 64)),
+    );
+    let (endpoint, calls, server) = matrix_server(vec![payload.clone(), payload]);
+    let mut session = OpenRgbSession::connect(endpoint, deadline(), &|| false).unwrap();
+    let controller = session.scan(deadline(), &|| false).unwrap().remove(0);
+    let inventory = session
+        .read_channels(&identity(&controller), deadline(), &|| false)
+        .unwrap();
+    assert_eq!(inventory.topology, topology(&controller));
+    let [manual, fixed] = &inventory.channels[..] else {
+        panic!("expected both channels")
+    };
+    assert_eq!(
+        (
+            &manual.id[..],
+            &manual.label[..],
+            manual.leds,
+            manual.mode,
+            manual.min,
+            manual.max
+        ),
+        ("0", "ARGB 1/3", 0, "manual", 1, 64)
+    );
+    assert_eq!((fixed.leds, fixed.mode), (2, "autoUnsupported"));
+    drop(session);
+    server.join().unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, id, _)| matches!(id, 0 | 1 | 40 | 52))
+    );
 }
 
 #[test]

@@ -65,6 +65,18 @@ impl OpenRgbPolicies {
 }
 
 impl Runtime {
+    /// Inspect a bound managed controller without starting or changing its owner.
+    #[cfg(windows)]
+    pub(crate) fn managed_argb_reader(
+        &self,
+        id: &str,
+        endpoint: SocketAddr,
+    ) -> Option<BackendGuard> {
+        let backend = self.managed_backend.as_ref()?;
+        (self.managed_backend_ids.contains(id) && backend.endpoint() == endpoint)
+            .then(|| backend.guard())
+    }
+
     pub(super) fn managed_openrgb_retry_available(&self, id: &str) -> bool {
         let Some((backend, spec)) = self.managed_backend.as_ref().zip(self.rgb_specs.get(id))
         else {

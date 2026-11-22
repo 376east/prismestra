@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 
+mod argb_channels;
 mod output_preview;
 mod retry_output;
 
@@ -34,6 +35,10 @@ struct NativeValue {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
     Snapshot,
+    ArgbChannels {
+        request: u32,
+        device: String,
+    },
     PreviewOutput {
         request: u32,
         device: String,
@@ -167,6 +172,7 @@ pub(super) struct Session {
     snapshot_requested: bool,
     draft_map: output_preview::DraftRevision,
     output_retries: BTreeMap<String, retry_output::Pending>,
+    argb_channels: Option<argb_channels::Pending>,
 }
 impl Session {
     fn new(app: &App) -> Result<Self, String> {
@@ -211,6 +217,7 @@ impl Session {
             snapshot_requested: false,
             draft_map: Default::default(),
             output_retries: BTreeMap::new(),
+            argb_channels: None,
         };
         let scene = result
             .draft
@@ -316,6 +323,10 @@ fn assets(path: &str) -> Option<(&'static str, &'static [u8])> {
         "/output-map.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("web/output-map.js"),
+        ),
+        "/argb-channel.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("web/argb-channel.js"),
         ),
         "/ui.css" => ("text/css; charset=utf-8", include_bytes!("web/ui.css")),
         "/assets/SourceSans3.ttf" => ("font/ttf", include_bytes!("web/assets/SourceSans3.ttf")),
@@ -719,6 +730,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
     value["state"]["draftMapRevision"] = json!(draft_map_revision);
     value["state"]["captureAuthorized"] = json!(app.runtime.read(Runtime::capture_authorized));
     value["state"]["mapConnection"] = map_connection(app);
+    value["state"]["argbDevice"] = json!(argb_channels::available(app));
     let schedule = &app.runtime.project().schedule;
     value["state"]["schedule"] = json!({"enabled":schedule.enabled,"paused":schedule.paused});
     Ok(value)
@@ -785,6 +797,10 @@ fn stage_native(app: &mut App, fields: &[NativeValue]) -> Result<(), String> {
 }
 fn execute(state: &State, command: Command) -> Result<bool, String> {
     let hwnd = state.editor_window.get();
+    if let Command::ArgbChannels { request, device } = command {
+        argb_channels::request(state, device, request)?;
+        return Ok(false);
+    }
     if let Command::RetryOutput {
         id,
         request,
@@ -1278,6 +1294,7 @@ pub(super) fn maintain(state: &State) {
         }
     }
     retry_output::maintain(state);
+    argb_channels::maintain(state);
     if let (Ok(slot), Ok(mut sessions)) = (
         state.app.try_borrow(),
         state.modern_session.try_borrow_mut(),
@@ -1367,6 +1384,7 @@ pub(super) fn maintain(state: &State) {
             value["state"]["deviceCandidates"] = json!(device_candidates(app));
             if app.page == Page::Devices {
                 value["state"]["deviceActivity"] = device_activity(app);
+                value["state"]["argbDevice"] = json!(argb_channels::available(app));
             }
             value["state"]["mapConnection"] = map_connection(app);
             if let Some(form) = native_forms::snapshot(app) {

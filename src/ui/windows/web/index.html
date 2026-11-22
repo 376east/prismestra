@@ -91,6 +91,35 @@
   </div>
 </dialog>
 <script src="output-map.js"></script>
+<dialog id="argb-dialog" aria-labelledby="argb-title" aria-describedby="argb-label">
+  <h2 id="argb-title">Каналы ARGB</h2>
+  <p id="argb-label"></p>
+  <form id="argb-form">
+    <label for="argb-channel">Канал контроллера</label>
+    <select id="argb-channel" class="native-target"></select>
+    <div id="argb-options" hidden>
+      <p id="argb-current"></p>
+      <label for="argb-template">Шаблон устройства</label>
+      <select id="argb-template" class="native-target"></select>
+      <label for="argb-count">Число адресуемых LED</label>
+      <input id="argb-count" type="number" step="1" required aria-describedby="argb-range argb-splitter">
+      <p id="argb-range"></p>
+      <p id="argb-splitter">Сплиттер передаёт один сигнал на все ветки. Укажите число адресов самой длинной ветки. Цвета на одинаковых позициях повторятся.</p>
+    </div>
+    <div id="argb-preview" hidden>
+      <p>Схема адресации</p>
+      <div id="argb-dots" aria-hidden="true"></div>
+      <p id="argb-summary"></p>
+    </div>
+    <p id="argb-read-only" hidden>Доступен предпросмотр. Сохранение числа LED пока недоступно.</p>
+    <p id="argb-status" role="status" aria-atomic="true"></p>
+    <div class="dialog-actions">
+      <button id="argb-close" type="button" class="button" autofocus>Закрыть</button>
+      <button id="argb-save" type="submit" class="button primary" hidden>Сохранить</button>
+    </div>
+  </form>
+</dialog>
+<script src="argb-channel.js"></script>
 <dialog id="library-preview-dialog" aria-labelledby="library-preview-title" aria-describedby="library-preview-description">
   <h2 id="library-preview-title"></h2>
   <div id="library-preview-art" class="art-wrap"></div>

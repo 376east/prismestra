@@ -12,6 +12,11 @@ pub const MAX_CONTROLLERS: usize = 128;
 pub const MAX_LEDS: usize = 8192;
 const OPERATION_LIMIT: Duration = Duration::from_secs(3);
 
+#[cfg(any(windows, test))]
+mod channels;
+#[cfg(any(windows, test))]
+pub(crate) use channels::ChannelInventory;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ZoneInfo {
     pub id: usize,
