@@ -50,11 +50,16 @@ function outputRetryTicket(id) {
  if(selectedRetryOutput()!==id)return null;
  const tickets=state?.deviceActivity?.retryTickets;
  const ticket=tickets&&Object.hasOwn(tickets,id)?tickets[id]:null;
- return ticket===outputRetries.get(id)?.ticket?null:ticket;
+ const retry=outputRetries.get(id);
+ return retry&&ticket===retry.ticket&&!retry.republished?null:ticket;
 }
 function reconcileRetryActivity(activity) {
  if(!activity)return;
  for(const [id,retry] of outputRetries) {
+  if(retry.status==='failed'){
+   const tickets=activity.retryTickets;
+   retry.republished=!!tickets&&Object.hasOwn(tickets,id)&&tickets[id]===retry.ticket;
+  }
   const label=activity.labels?.[id];
   if(retry.awaitingActivity && label && label!=='Подключается')retry.awaitingActivity=false;
  }
