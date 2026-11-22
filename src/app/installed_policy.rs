@@ -68,6 +68,8 @@ const MAX_FILES: usize = 1024;
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const RUNTIME: &str = "components/openrgb/runtime";
 const BACKEND: &str = "OpenRGB.exe";
+const EXACT_ZONE_PATCH_SHA256: &str =
+    "fe1b4ecc9be10e6b5a8f0c5704cf83f706148a7a3cfe534f7084ee5126158117";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PolicyFile {
@@ -126,8 +128,6 @@ pub(super) struct InstalledPolicy {
 
 impl InstalledPolicy {
     pub(super) fn supports_exact_zone_location(&self) -> bool {
-        const EXACT_ZONE_PATCH_SHA256: &str =
-            "fb59982e531fbbe8d9b659ded0247a15546fbdc231050eff253d0a6f4cc9a19c";
         let valid = || -> Option<()> {
             let lock: serde_json::Value =
                 serde_json::from_str(include_str!("../../components/openrgb/source-lock.json"))
@@ -262,6 +262,16 @@ fn exact_zone_component(manifest: &serde_json::Value, image: &str, patch: &str) 
 
 #[test]
 fn exact_zone_capability_requires_both_pinned_hashes_and_a_unique_entry() {
+    let lock: serde_json::Value =
+        serde_json::from_str(include_str!("../../components/openrgb/source-lock.json")).unwrap();
+    let patch = include_bytes!("../../components/openrgb/prismestra-pc.patch");
+    assert_eq!(lock["patch_sha256"], EXACT_ZONE_PATCH_SHA256);
+    let actual: String = Sha256::digest(patch)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(actual, EXACT_ZONE_PATCH_SHA256);
+
     let mut manifest = serde_json::json!({
         "version":1,"engine_sha256":"installed",
         "files":[{"path":"build/prismestra-pc.patch","sha256":"exact"}]
