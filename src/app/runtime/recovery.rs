@@ -26,6 +26,7 @@ pub(super) struct Recovery {
     attempts: usize,
     failed_generation: Option<u64>,
     due_us: Option<u64>,
+    bluetooth_retry: bool,
     manual_retry: Option<OpenRgbRetryTicket>,
     manual_attempt: u64,
     manual_started: Option<(OpenRgbRetryTicket, Option<u64>)>,
@@ -231,6 +232,46 @@ impl Runtime {
         }
     }
 
+    #[cfg(windows)]
+    pub(super) fn has_recoverable_surplife_output(&self) -> bool {
+        self.document.lighting.setup.devices.iter().any(|device| {
+            is_bound_surplife(device, self.rgb_specs.get(&device.id))
+                && self.output_recovery.contains_key(&device.id)
+        })
+    }
+
+    /// One extra attempt for a failed saved Surplife route after its normal
+    /// budget. The registered factory still owns endpoint and capacity checks.
+    #[cfg(any(windows, test))]
+    pub(super) fn bluetooth_adapter_arrived(&mut self) {
+        use crate::runtime::output::Phase;
+
+        if self.automatic_recovery_paused() {
+            return;
+        }
+        for device in &self.document.lighting.setup.devices {
+            if !is_bound_surplife(device, self.rgb_specs.get(&device.id))
+                || self.pending.as_ref().is_some_and(|pending| {
+                    pending
+                        .live_rgb
+                        .as_ref()
+                        .is_some_and(|plan| !plan.retained.contains(&device.id))
+                })
+            {
+                continue;
+            }
+            if let Some(recovery) = self.output_recovery.get_mut(&device.id)
+                && recovery.attempts == RETRY_DELAYS_US.len()
+                && recovery.due_us.is_none()
+                && self.host.status(&device.id).is_some_and(|snapshot| {
+                    snapshot.phase == Phase::Failed && !snapshot.requires_action
+                })
+            {
+                recovery.bluetooth_retry = true;
+            }
+        }
+    }
+
     /// Enable at most three reconnects (1/5/15s), including initial connection failures.
     /// Success does not replenish the budget. Budget is renewed only by
     /// an explicit configuration/refresh/power epoch or the return of a bound
@@ -349,12 +390,16 @@ impl Runtime {
     }
 
     pub(super) fn recover_failed_outputs(&mut self, now: u64) -> Result<(), String> {
-        if self.output_recovery_paused() {
+        let automatic_paused = self.automatic_recovery_paused();
+        if self.pending.is_some() || automatic_paused {
             for state in self.output_recovery.values_mut() {
                 state.manual_retry = None;
+                if automatic_paused {
+                    state.bluetooth_retry = false;
+                }
             }
         }
-        if self.automatic_recovery_paused() {
+        if automatic_paused {
             return Ok(());
         }
         let live = self
@@ -376,6 +421,7 @@ impl Runtime {
                     || snapshot.as_ref().is_some_and(|s| s.requires_action)
                 {
                     state.manual_retry = None;
+                    state.bluetooth_retry = false;
                     continue;
                 }
                 let failed = state.start_error.is_some()
@@ -395,10 +441,15 @@ impl Runtime {
                     state.manual_retry = None;
                 }
                 if !failed {
+                    state.bluetooth_retry = false;
                     continue;
                 }
                 let reaped = snapshot.is_none() || self.host.output_reaped(id);
-                if (reaped && state.manual_retry.is_some()) || state.take_attempt(now, reaped) {
+                let bluetooth_retry = reaped && std::mem::take(&mut state.bluetooth_retry);
+                if bluetooth_retry
+                    || (reaped && state.manual_retry.is_some())
+                    || state.take_attempt(now, reaped)
+                {
                     rgb.push((
                         id.clone(),
                         spec.keys.clone(),
@@ -453,6 +504,16 @@ impl Runtime {
         }
         Ok(())
     }
+}
+
+#[cfg(any(windows, test))]
+fn is_bound_surplife(device: &crate::devices::Device, spec: Option<&RgbSpec>) -> bool {
+    device.enabled
+        && device.driver == crate::devices::Driver::SurplifeE1Pixels
+        && spec.is_some_and(|spec| {
+            spec.action_required_error.is_none()
+                && spec.keys.iter().any(|key| key.starts_with("ble:"))
+        })
 }
 
 #[cfg(test)]

@@ -395,6 +395,15 @@ fn surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame() {
 
 #[test]
 fn surplife_first_light_recovers_after_bluetooth_appears() {
+    surplife_first_light_after_adapter_arrival(false);
+}
+
+#[test]
+fn surplife_adapter_arrival_recovers_after_the_automatic_budget() {
+    surplife_first_light_after_adapter_arrival(true);
+}
+
+fn surplife_first_light_after_adapter_arrival(exhaust_budget: bool) {
     const NO_ADAPTER: &str = "Windows не обнаружила Bluetooth-адаптер.";
     let mut runtime =
         Runtime::new(Document::from_lighting(surplife_project()).unwrap(), None).unwrap();
@@ -454,8 +463,38 @@ fn surplife_first_light_recovers_after_bluetooth_appears() {
     assert!(traces.lock().unwrap().is_empty());
     assert_eq!(opens.load(Ordering::SeqCst), 1);
 
-    adapter_present.store(true, Ordering::SeqCst);
-    now += 1_000_000;
+    let expected_opens = if exhaust_budget {
+        for (opens_so_far, delay) in [(2, 1_000_000), (3, 5_000_000), (4, 15_000_000)] {
+            now += delay;
+            wait(|| {
+                tick(&mut runtime, &mut now);
+                opens.load(Ordering::SeqCst) == opens_so_far
+                    && runtime.host.status("a").unwrap().phase == Phase::Failed
+                    && runtime.host.output_reaped("a")
+            });
+        }
+        now += 180_000_000;
+        tick(&mut runtime, &mut now);
+        assert_eq!(opens.load(Ordering::SeqCst), 4);
+        // A real arrival can still fail if the saved peripheral is unavailable.
+        runtime.bluetooth_adapter_arrived();
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            opens.load(Ordering::SeqCst) == 5
+                && runtime.host.status("a").unwrap().phase == Phase::Failed
+                && runtime.host.output_reaped("a")
+        });
+        adapter_present.store(true, Ordering::SeqCst);
+        now += 180_000_000;
+        tick(&mut runtime, &mut now);
+        assert_eq!(opens.load(Ordering::SeqCst), 5);
+        runtime.bluetooth_adapter_arrived();
+        6
+    } else {
+        adapter_present.store(true, Ordering::SeqCst);
+        now += 1_000_000;
+        2
+    };
     working(&mut runtime, "a", &mut now);
     assert_ne!(
         runtime.host.status("a").unwrap().generation,
@@ -465,7 +504,7 @@ fn surplife_first_light_recovers_after_bluetooth_appears() {
     assert_eq!(current_neighbor.generation, neighbor.generation);
     assert!(current_neighbor.submitted > neighbor.submitted);
     assert_eq!(independent.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(opens.load(Ordering::SeqCst), 2);
+    assert_eq!(opens.load(Ordering::SeqCst), expected_opens);
     drain(&mut runtime);
 
     let traces = traces.lock().unwrap();

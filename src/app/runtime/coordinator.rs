@@ -259,6 +259,10 @@ fn run(shared: &Shared, wall: impl Fn() -> Result<i64, String>) -> Result<(), St
     let mut targets = Vec::new();
     #[cfg(windows)]
     let mut notification_due = std::time::Instant::now();
+    #[cfg(windows)]
+    let mut bluetooth_notifications = None;
+    #[cfg(windows)]
+    let mut bluetooth_notification_due = std::time::Instant::now();
     let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
     loop {
         if state.runtime.stopped {
@@ -270,8 +274,30 @@ fn run(shared: &Shared, wall: impl Fn() -> Result<i64, String>) -> Result<(), St
         #[cfg(windows)]
         {
             let desired = state.runtime.lcd_interface_targets();
-            if !desired.is_empty() || notifications.is_some() {
+            let watch_bluetooth = state.runtime.has_recoverable_surplife_output();
+            if !desired.is_empty()
+                || notifications.is_some()
+                || watch_bluetooth
+                || bluetooth_notifications.is_some()
+            {
                 drop(state);
+                if !watch_bluetooth {
+                    bluetooth_notifications = None;
+                } else if bluetooth_notifications.is_none()
+                    && std::time::Instant::now() >= bluetooth_notification_due
+                {
+                    match crate::lcd::hid_notifications::Watch::bluetooth_radios() {
+                        Ok(watch) => bluetooth_notifications = Some(watch),
+                        Err(error) => {
+                            bluetooth_notification_due =
+                                std::time::Instant::now() + Duration::from_secs(5);
+                            eprintln!("Bluetooth radio arrival notifications unavailable: {error}");
+                        }
+                    }
+                }
+                let radio_arrived = bluetooth_notifications
+                    .as_mut()
+                    .is_some_and(|watch| watch.take_radio_arrival());
                 let update = if desired != targets && std::time::Instant::now() >= notification_due
                 {
                     let result = (|| -> Result<(), String> {
@@ -313,6 +339,9 @@ fn run(shared: &Shared, wall: impl Fn() -> Result<i64, String>) -> Result<(), St
                     state
                         .runtime
                         .lcd_interface_arrived(&arrival.path, arrival.reappeared);
+                }
+                if radio_arrived {
+                    state.runtime.bluetooth_adapter_arrived();
                 }
                 if state.runtime.stopped {
                     drop(state);
