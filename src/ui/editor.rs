@@ -10,6 +10,7 @@ use crate::{
     capture::ambient::Mode,
     lighting::ambient::Rect,
 };
+const SCENE_EDGES: &str = "@scene_edges";
 #[derive(Clone, Debug)]
 pub struct Field {
     pub key: &'static str,
@@ -447,6 +448,7 @@ impl Editor {
         next.ambient.routes.push(ambient::Route {
             device: device.into(),
             source,
+            scene_edges: false,
             enabled: false,
             zone: crate::capture::ambient::Zone::linear(d.leds, false, Mode::ScreenCopy)?,
             processing: Default::default(),
@@ -730,8 +732,12 @@ impl Editor {
         let mut source = field(
             "source",
             "Источник",
-            &r.source,
-            "Общий источник изображения для этого устройства.",
+            if r.scene_edges {
+                SCENE_EDGES
+            } else {
+                &r.source
+            },
+            "Края общей сцены идут от верхнего левого угла по часовой стрелке. Этот источник работает без захвата монитора.",
         );
         source.choices = self
             .document
@@ -740,6 +746,9 @@ impl Editor {
             .iter()
             .map(|s| (s.key.clone(), s.key.clone()))
             .collect();
+        source
+            .choices
+            .push(("Края общей сцены".into(), SCENE_EDGES.into()));
         let mut mode = field(
             "mode",
             "Режим",
@@ -763,7 +772,7 @@ impl Editor {
             .find(|d| d.id == r.device)
             .unwrap()
             .rate_hz;
-        vec![
+        let mut fields = vec![
             boolean(
                 "enabled",
                 "Включено",
@@ -891,7 +900,11 @@ impl Editor {
                 s.stale_after_ms,
                 "От 100 до 60000. Старый кадр не остаётся навсегда.",
             ),
-        ]
+        ];
+        if r.scene_edges {
+            fields.retain(|f| matches!(f.key, "enabled" | "source" | "output_rate" | "reverse"));
+        }
+        fields
     }
     fn lcd_fields(&self) -> Vec<Field> {
         let Some(entry) = self.document.lcd.get(self.index) else {
@@ -1045,10 +1058,15 @@ impl Editor {
             return Ok(());
         }
         if key == "source" {
+            if value == SCENE_EDGES {
+                r.scene_edges = true;
+                return Ok(());
+            }
             if !self.document.ambient.sources.iter().any(|s| s.key == value) {
                 return Err("Неизвестный источник".into());
             }
             r.source = value.into();
+            r.scene_edges = false;
             return Ok(());
         }
         let s = self
@@ -1297,6 +1315,7 @@ mod tests {
                 routes: vec![ambient::Route {
                     device: "screen".into(),
                     source: "main".into(),
+                    scene_edges: false,
                     enabled: true,
                     zone: Zone::linear(2, false, Mode::ScreenCopy).unwrap(),
                     processing: Settings::default(),

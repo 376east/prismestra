@@ -2403,6 +2403,7 @@ mod tests {
             routes: vec![ambient::Route {
                 device: "ambient-strip".into(),
                 source: "saved-source".into(),
+                scene_edges: false,
                 enabled: true,
                 zone,
                 processing: Default::default(),

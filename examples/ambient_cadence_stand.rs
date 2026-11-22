@@ -118,6 +118,7 @@ fn run() -> Result<(), String> {
                 stale_after_ms: 500,
             }],
             routes: vec![ambient::Route {
+                scene_edges: false,
                 device: "software-door".into(),
                 source: "software".into(),
                 enabled: true,

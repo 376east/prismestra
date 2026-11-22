@@ -25,6 +25,8 @@ pub struct Source {
 pub struct Route {
     pub device: String,
     pub source: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scene_edges: bool,
     pub enabled: bool,
     pub zone: Zone,
     pub processing: Settings,
@@ -44,6 +46,55 @@ pub(crate) fn key(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 impl Config {
+    pub(crate) fn scene_edges_without_capture(&self) -> bool {
+        self.routes.iter().any(|r| r.scene_edges)
+            && !self.routes.iter().any(|r| r.enabled && !r.scene_edges)
+    }
+
+    pub(crate) fn render_canvas(&self, setup: &Setup) -> Option<crate::devices::Canvas> {
+        let mut routes = self
+            .routes
+            .iter()
+            .filter(|r| r.enabled && r.scene_edges)
+            .peekable();
+        routes.peek()?;
+        let mut canvas = setup.canvas.clone();
+        let (w, h) = (canvas.width - 1, canvas.height - 1);
+        let span = if w == 0 || h == 0 {
+            w + h + 1
+        } else {
+            2 * (w + h)
+        };
+        for route in routes {
+            canvas.points.extend((0..route.zone.leds).map(|led| {
+                let i = if route.zone.reverse {
+                    route.zone.leds - 1 - led
+                } else {
+                    led
+                };
+                let at = (i * span as usize / route.zone.leds) as u32;
+                let (x, y) = if w == 0 {
+                    (0, at)
+                } else if h == 0 || at <= w {
+                    (at, 0)
+                } else if at <= w + h {
+                    (w, at - w)
+                } else if at <= 2 * w + h {
+                    (2 * w + h - at, h)
+                } else {
+                    (0, span - at)
+                };
+                crate::devices::Point {
+                    device: route.device.clone(),
+                    led,
+                    x,
+                    y,
+                }
+            }));
+        }
+        Some(canvas)
+    }
+
     pub fn validate(&self, setup: &Setup) -> Result<(), String> {
         setup.validate()?;
         if self.sources.len() > 16 || self.routes.len() > crate::devices::MAX_DEVICES {
@@ -106,6 +157,17 @@ impl Config {
             if !self.routes.iter().any(|r| r.device == d.id && r.enabled) {
                 return Err("Enabled ambient device has no enabled route".into());
             }
+        }
+        if setup.canvas.points.len()
+            + self
+                .routes
+                .iter()
+                .filter(|r| r.enabled && r.scene_edges)
+                .map(|r| r.zone.leds)
+                .sum::<usize>()
+            > 65536
+        {
+            return Err("Scene edge routes exceed the common canvas sample limit".into());
         }
         Ok(())
     }
@@ -273,7 +335,7 @@ impl Controller {
             self.config
                 .routes
                 .iter()
-                .any(|r| r.enabled && r.source == s.key)
+                .any(|r| r.enabled && !r.scene_edges && r.source == s.key)
         });
         let mut due = None;
         for source in sources {
@@ -297,6 +359,7 @@ impl Controller {
         }
         for (route, output) in self.config.routes.iter().zip(&self.outputs) {
             if route.enabled
+                && !route.scene_edges
                 && let Some(next) = output.cadence.0
             {
                 due = Some(due.map_or(next, |old| old.min(next)));
@@ -328,7 +391,7 @@ impl Controller {
                     .config
                     .routes
                     .iter()
-                    .any(|r| r.enabled && r.source == s.key)
+                    .any(|r| r.enabled && !r.scene_edges && r.source == s.key)
                 {
                     continue;
                 }
@@ -355,7 +418,7 @@ impl Controller {
                             .routes
                             .iter()
                             .zip(&mut self.outputs)
-                            .filter(|(r, _)| r.enabled && r.source == s.key)
+                            .filter(|(r, _)| r.enabled && !r.scene_edges && r.source == s.key)
                         {
                             let _ = r;
                             o.processor.accept(f)?;
@@ -382,6 +445,9 @@ impl Controller {
         }
         let mut submitted = 0;
         for (r, o) in self.config.routes.iter().zip(&mut self.outputs) {
+            if r.scene_edges {
+                continue;
+            }
             let s = self
                 .config
                 .sources
@@ -502,6 +568,7 @@ mod tests {
                 .map(|id| Route {
                     device: id.into(),
                     source: "monitor".into(),
+                    scene_edges: false,
                     enabled: true,
                     zone: Zone::linear(2, id == "b", Mode::ScreenCopy).unwrap(),
                     processing: Settings::default(),
@@ -549,6 +616,28 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn scene_edges_add_clockwise_samples_and_leave_monitor_routes_independent() {
+        let (setup, mut config, _) = fixture();
+        config.routes[1].scene_edges = true;
+        let points = config.render_canvas(&setup).unwrap().points;
+        assert_eq!(
+            points
+                .iter()
+                .map(|p| (&*p.device, p.led, p.x, p.y))
+                .collect::<Vec<_>>(),
+            vec![("b", 0, 1, 1), ("b", 1, 0, 0)]
+        );
+        let mut controller = Controller::new(config, &setup).unwrap();
+        let mut provider = Feed::new();
+        controller.prepare(0, true, &mut provider).unwrap();
+        assert_eq!(provider.calls, 1);
+        assert_eq!(
+            controller.changes().map(|(id, _)| id).collect::<Vec<_>>(),
+            vec!["a"]
+        );
+    }
+
     #[test]
     fn one_capture_fans_out_with_separate_output_cadence_and_reverse() {
         let (setup, config, mut host) = fixture();
