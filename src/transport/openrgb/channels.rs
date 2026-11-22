@@ -3,6 +3,31 @@ use super::*;
 use crate::devices::openrgb::{identity_from_fields, topology};
 use serde::Serialize;
 
+/// One managed owner rechecks this complete physical identity and topology
+/// before writing. Success requires a fresh read of the resulting configuration.
+#[cfg(windows)]
+pub(crate) type ZoneSizeWriter =
+    std::sync::Arc<dyn Fn(ZoneSizeRequest) -> Result<ConfirmedZoneSize, String> + Send + Sync>;
+
+#[cfg(windows)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ZoneSizeRequest {
+    pub controller: String,
+    pub expected_topology: String,
+    pub zone: usize,
+    pub leds: usize,
+    pub min: usize,
+    pub max: usize,
+}
+
+#[cfg(windows)]
+pub(crate) struct ConfirmedZoneSize {
+    pub controller: String,
+    pub topology: String,
+    pub zone: usize,
+    pub leds: usize,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct ChannelInventory {
     pub topology: String,
@@ -17,6 +42,9 @@ pub(crate) struct ZoneChannel {
     pub mode: &'static str,
     pub min: usize,
     pub max: usize,
+    #[cfg(windows)]
+    #[serde(skip)]
+    pub empty_manual: bool,
 }
 
 impl OpenRgbSession {
@@ -87,6 +115,15 @@ fn describe_channels(controller: &Controller) -> OpenRgbResult<ChannelInventory>
                 mode: if manual { "manual" } else { "autoUnsupported" },
                 min: if manual { min } else { 0 },
                 max: if manual { max } else { 0 },
+                #[cfg(windows)]
+                empty_manual: manual
+                    && info.kind == "Motherboard"
+                    && info.location.starts_with("HID: ")
+                    && zone.num_leds() == 0
+                    && zone.flags().is_some_and(|flags| {
+                        !flags.contains(ZoneFlags::ManuallyConfiguredSize)
+                            && !flags.contains(ZoneFlags::ZoneGeometryMayChange)
+                    }),
             }
         })
         .collect();

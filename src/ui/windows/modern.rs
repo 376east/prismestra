@@ -39,6 +39,13 @@ enum Command {
         request: u32,
         device: String,
     },
+    ArgbChannelSave {
+        request: u32,
+        device: String,
+        revision: String,
+        zone: usize,
+        leds: usize,
+    },
     PreviewOutput {
         request: u32,
         device: String,
@@ -173,6 +180,7 @@ pub(super) struct Session {
     draft_map: output_preview::DraftRevision,
     output_retries: BTreeMap<String, retry_output::Pending>,
     argb_channels: Option<argb_channels::Pending>,
+    argb_save: argb_channels::save::Session,
 }
 impl Session {
     fn new(app: &App) -> Result<Self, String> {
@@ -218,6 +226,7 @@ impl Session {
             draft_map: Default::default(),
             output_retries: BTreeMap::new(),
             argb_channels: None,
+            argb_save: Default::default(),
         };
         let scene = result
             .draft
@@ -801,6 +810,26 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
         argb_channels::request(state, device, request)?;
         return Ok(false);
     }
+    if let Command::ArgbChannelSave {
+        request,
+        device,
+        revision,
+        zone,
+        leds,
+    } = command
+    {
+        argb_channels::save::request(
+            state,
+            argb_channels::save::Request {
+                request,
+                device,
+                revision,
+                zone,
+                leds,
+            },
+        )?;
+        return Ok(false);
+    }
     if let Command::RetryOutput {
         id,
         request,
@@ -1295,6 +1324,7 @@ pub(super) fn maintain(state: &State) {
     }
     retry_output::maintain(state);
     argb_channels::maintain(state);
+    argb_channels::save::maintain(state);
     if let (Ok(slot), Ok(mut sessions)) = (
         state.app.try_borrow(),
         state.modern_session.try_borrow_mut(),
