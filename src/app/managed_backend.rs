@@ -548,10 +548,10 @@ fn spawn_owned(command: &mut Command, image: File) -> Result<OwnedChild, String>
 fn spawn_owned(_: &mut Command, _: File) -> Result<OwnedChild, String> {
     Err("Managed backend requires Windows".into())
 }
-impl Drop for OwnedChild {
-    fn drop(&mut self) {
+impl OwnedChild {
+    fn shutdown(&mut self) -> bool {
         if matches!(self.child.try_wait(), Ok(Some(_))) {
-            return;
+            return true;
         }
         let cooperative = self.running && self.child.stdin.is_some();
         // The sole parent write-end is the lease. EOF requests the component's
@@ -561,7 +561,7 @@ impl Drop for OwnedChild {
             let deadline = Instant::now() + self.shutdown_grace;
             while Instant::now() < deadline {
                 match self.child.try_wait() {
-                    Ok(Some(_)) => return,
+                    Ok(Some(_)) => return true,
                     Ok(None) => thread::sleep(Duration::from_millis(10)),
                     Err(_) => break,
                 }
@@ -576,10 +576,17 @@ impl Drop for OwnedChild {
         let deadline = Instant::now() + Duration::from_millis(300);
         while Instant::now() < deadline {
             if matches!(self.child.try_wait(), Ok(Some(_))) {
-                break;
+                return true;
             }
             thread::sleep(Duration::from_millis(5));
         }
+        false
+    }
+}
+
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -728,12 +735,19 @@ fn run(config: Config, installed: Option<&InstalledLaunch>, state: &Shared) {
             MonitorTiming::default(),
             |endpoint, pid| probe_owned_sdk(endpoint, pid, &|| state.cancel.load(Ordering::SeqCst)),
         );
-        drop(owned);
+        let exited = owned.shutdown();
         {
             let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
             snapshot.ready = false;
-            snapshot.backend_pid = None;
+            if exited {
+                snapshot.backend_pid = None;
+            }
         }
+        if !exited {
+            state.detail("Managed OpenRGB exit could not be confirmed; restart blocked");
+            return;
+        }
+        drop(owned);
         if !state.cancel.load(Ordering::SeqCst) {
             state.wait(retry.delay());
         }
@@ -1761,7 +1775,7 @@ mod tests {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            let owned = spawn_owned(&mut command, regular_file(&image).unwrap()).unwrap();
+            let mut owned = spawn_owned(&mut command, regular_file(&image).unwrap()).unwrap();
             assert_eq!(owned.shutdown_grace, Duration::from_secs(30));
             let deadline = Instant::now() + Duration::from_secs(5);
             while !ready.exists() && Instant::now() < deadline {
@@ -1771,7 +1785,7 @@ mod tests {
             let handle = unsafe { OpenProcess(0x0010_0000, 0, owned.child.id()) };
             assert!(!handle.is_null());
             let began = Instant::now();
-            drop(owned);
+            assert!(owned.shutdown());
             assert!(began.elapsed() >= Duration::from_millis(delay_ms));
             assert!(began.elapsed() < Duration::from_millis(delay_ms) + Duration::from_secs(2));
             assert_eq!(fs::read(&exit).unwrap(), b"clean EOF");
@@ -1800,7 +1814,7 @@ mod tests {
         let handle = unsafe { OpenProcess(0x0010_0000, 0, owned.child.id()) };
         assert!(!handle.is_null());
         let began = Instant::now();
-        drop(owned);
+        assert!(owned.shutdown());
         assert!(began.elapsed() >= Duration::from_millis(100));
         assert!(began.elapsed() < Duration::from_secs(2));
         assert_eq!(unsafe { WaitForSingleObject(handle, 0) }, 0);
