@@ -419,7 +419,7 @@ function outputPageAvailable(page) {
 }
 
 function renderDevices(candidates) {
- const firstSetup=!state.devices.length && candidates.length>0 && !pageHasEdits();
+ const firstSetup=state.pending===true && !state.devices.length && candidates.length>0 && !pageHasEdits();
  const devices=state.devices.map(d=>{
   const statusId=`device-status-${encodeURIComponent(d.id)}`;
   return `<article class="device">
@@ -741,6 +741,8 @@ window.prismestraReceive = message => {
    followActiveScene();
    render();if(!busy())flushPreview();
   } else if(message.kind==='status'&&state) {
+   const firstSetupPendingChanged=view==='devices'&&!state.devices.length&&state.deviceCandidates?.length>0
+    && Object.hasOwn(message.state,'pending')&&state.pending!==message.state.pending;
    const foundChanged=view==='devices'&&(
     (Object.hasOwn(message.state,'deviceCandidates')&&!same(state.deviceCandidates,message.state.deviceCandidates)) ||
     (Object.hasOwn(message.state,'argbDevice')&&state.argbDevice!==message.state.argbDevice)
@@ -753,7 +755,7 @@ window.prismestraReceive = message => {
    followActiveScene();
    if(!state.pending&&!nativeAwaitingAck&&!savedSceneRequest)commandPending=false;
    if(message.state.preview)frame=message.state.preview;
-   if(nativeFormChanged||foundChanged||(!busy()&&!outputPageAvailable(view)))render();else {syncControls();syncDeviceAnnouncement();paintPreview();}if(!busy())flushPreview();
+   if(nativeFormChanged||foundChanged||firstSetupPendingChanged||(!busy()&&!outputPageAvailable(view)))render();else {syncControls();syncDeviceAnnouncement();paintPreview();}if(!busy())flushPreview();
   }
  }catch(e){
   awaitingCommandAck=false;closing=false;commandPending=false;
