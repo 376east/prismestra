@@ -65,7 +65,7 @@ struct Core {
     generation: u64,
     sequence: u64,
     last_us: Option<u64>,
-    muted: BTreeMap<String, bool>,
+    muted_since: BTreeMap<String, u64>,
     requested: BTreeMap<String, Ticket>,
 }
 impl Core {
@@ -88,7 +88,7 @@ impl Core {
             generation: 0,
             sequence: 0,
             last_us: None,
-            muted: BTreeMap::new(),
+            muted_since: BTreeMap::new(),
             requested: BTreeMap::new(),
         })
     }
@@ -118,7 +118,7 @@ impl Core {
         self.frame = Default::default();
         self.external.clear();
         self.feed = None;
-        self.muted.clear();
+        self.muted_since.clear();
         self.requested.clear();
 
         self.scene_cadence = Cadence::default();
@@ -191,7 +191,13 @@ impl Core {
         {
             return Err("Unknown RGB device".into());
         }
-        self.muted.insert(id.to_owned(), off);
+        if off {
+            self.muted_since
+                .entry(id.to_owned())
+                .or_insert(self.sequence);
+        } else {
+            self.muted_since.remove(id);
+        }
         self.cadences.remove(id);
         Ok(())
     }
@@ -347,7 +353,8 @@ impl Core {
                 .get(&device.id)
                 .map(Vec::as_slice)
                 .or_else(|| self.external.get(&device.id).map(|v| v.as_ref()));
-            let off = self.muted.get(&device.id) == Some(&true);
+            let muted_since = self.muted_since.get(&device.id).copied();
+            let off = muted_since.is_some();
             if device.role == Role::Canvas && !off && source.is_none() {
                 continue;
             }
@@ -389,7 +396,7 @@ impl Core {
                 generation: output.snapshot().generation,
                 sequence,
             };
-            if output.submit(ticket, colors)? {
+            if output.submit_frame(ticket, colors, muted_since)? {
                 self.sequence = sequence;
                 self.requested.insert(device.id.clone(), ticket);
                 accepted += 1;

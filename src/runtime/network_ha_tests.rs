@@ -9,12 +9,19 @@ use std::{
 fn start_peer(
     bodies: Vec<(&'static str, &'static str)>,
 ) -> (String, thread::JoinHandle<Vec<String>>) {
+    start_peer_with(bodies, |_| {})
+}
+
+fn start_peer_with(
+    bodies: Vec<(&'static str, &'static str)>,
+    mut before_reply: impl FnMut(usize) + Send + 'static,
+) -> (String, thread::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}/ha", listener.local_addr().unwrap());
     let task = thread::spawn(move || {
         let mut requests = vec![];
-        for (status, body) in bodies {
+        for (index, (status, body)) in bodies.into_iter().enumerate() {
             let end = Instant::now() + Duration::from_secs(5);
             let mut stream = loop {
                 match listener.accept() {
@@ -54,6 +61,7 @@ fn start_peer(
                 }
             }
             requests.push(String::from_utf8(data).unwrap());
+            before_reply(index);
             write!(stream,"HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         }
         requests
@@ -1103,4 +1111,166 @@ fn saved_scene_ha_opt_in_off_during_outage_and_explicit_reselect() {
     }
     assert!(requests[3].starts_with("GET /ha/api/states/light.room "));
     assert!(requests[5].starts_with("GET /ha/api/states/light.reselected "));
+}
+
+#[test]
+fn ha_off_status_waits_for_a_new_submission_after_a_color_frame() {
+    use crate::{
+        app::{
+            config::{Groups, Project},
+            device_setup,
+            document::Document,
+            runtime::{OutputActivity, Runtime},
+        },
+        devices::{Canvas, Point, Setup},
+        schedule::Target,
+    };
+    use std::sync::{Arc, mpsc};
+
+    const LIGHT: &str =
+        r#"{"entity_id":"light.room","state":"on","attributes":{"supported_color_modes":["rgb"]}}"#;
+    let (observed, arrived) = mpsc::channel();
+    let (release, proceed) = mpsc::channel();
+    let (url, peer) = start_peer_with(
+        vec![
+            ("200 OK", LIGHT),
+            ("200 OK", "[]"),
+            ("503 Service Unavailable", "{}"),
+            ("200 OK", LIGHT),
+            ("200 OK", "[]"),
+            ("200 OK", "[]"),
+        ],
+        move |index| {
+            if index == 2 {
+                observed.send(()).unwrap();
+                let _ = proceed.recv_timeout(Duration::from_secs(2));
+            }
+        },
+    );
+    let mut device = device_setup::preset("home-assistant-light")
+        .unwrap()
+        .device("ha")
+        .unwrap();
+    device.enabled = true;
+    let mut scene = crate::runtime::scene::example();
+    scene.colors.fill(0x5a1e00);
+    scene.brightness = 100;
+    let document = Document::from_lighting(Project {
+        version: 1,
+        setup: Setup {
+            version: 1,
+            devices: vec![device.clone()],
+            canvas: Canvas {
+                width: 1,
+                height: 1,
+                points: vec![Point {
+                    device: "ha".into(),
+                    led: 0,
+                    x: 0,
+                    y: 0,
+                }],
+            },
+        },
+        scene,
+        schedule: Default::default(),
+        groups: Groups {
+            pc: vec!["ha".into()],
+            door: vec![],
+        },
+    })
+    .unwrap();
+    let mut runtime = Runtime::new(document, None).unwrap();
+    runtime
+        .attach_rgb(
+            "ha",
+            vec![],
+            Arc::new(move |_| {
+                HomeAssistant::with_token(&url, "light.room", Some("fake.test-token".into()))
+                    .map(|driver| Box::new(driver) as Box<dyn RgbDriver>)
+            }),
+        )
+        .unwrap();
+    let mut now = 0;
+    let mut wait = |runtime: &mut Runtime,
+                    stage: &str,
+                    mut condition: Box<dyn FnMut(&Runtime) -> bool + '_>| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !condition(runtime) {
+            now += 20_000;
+            runtime.tick(now, 1_800_000_000).unwrap();
+            assert!(
+                Instant::now() < deadline,
+                "{stage}: {:?}",
+                runtime.host().status("ha")
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    };
+    wait(
+        &mut runtime,
+        "color",
+        Box::new(|r| r.host().status("ha").unwrap().submitted == 1),
+    );
+    let previous = runtime.host().status("ha").unwrap().last_submitted.unwrap();
+    runtime.set_group(Target::Pc, false).unwrap();
+    wait(
+        &mut runtime,
+        "Off request",
+        Box::new(|_| arrived.try_recv().is_ok()),
+    );
+    assert_eq!(
+        runtime.host().status("ha").unwrap().last_submitted,
+        Some(previous)
+    );
+    let delayed = runtime.output_activity(&device);
+    release.send(()).unwrap();
+    wait(
+        &mut runtime,
+        "rejected Off",
+        Box::new(
+            |r| matches!(r.output_activity(&device), OutputActivity::Retrying(error) if error.contains("503")),
+        ),
+    );
+    wait(
+        &mut runtime,
+        "successful Off",
+        Box::new(|r| r.host().status("ha").unwrap().submitted == 2),
+    );
+    let after = runtime.host().status("ha").unwrap().last_submitted.unwrap();
+    assert_eq!(after.generation, previous.generation);
+    assert!(after.sequence > previous.sequence);
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Off
+    ));
+    // No color frame is submitted between these intents. HA's cached black
+    // must not stand in for delivery of the next explicit Off.
+    runtime.set_group(Target::Pc, true).unwrap();
+    runtime.set_group(Target::Pc, false).unwrap();
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::TurningOff
+    ));
+    wait(
+        &mut runtime,
+        "new Off after toggle",
+        Box::new(|r| r.host().status("ha").unwrap().submitted == 3),
+    );
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Off
+    ));
+    runtime.stop();
+    let requests = peer.join().unwrap();
+    assert!(requests[1].starts_with("POST /ha/api/services/light/turn_on "));
+    for request in [&requests[2], &requests[4], &requests[5]] {
+        assert!(request.starts_with("POST /ha/api/services/light/turn_off "));
+        let body: serde_json::Value =
+            serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body, serde_json::json!({"entity_id":"light.room"}));
+    }
+    assert!(
+        matches!(delayed, OutputActivity::TurningOff),
+        "an outstanding Off request cannot reuse the color acknowledgement"
+    );
 }
