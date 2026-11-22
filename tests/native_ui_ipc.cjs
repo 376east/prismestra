@@ -1069,11 +1069,11 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
  assert.doesNotMatch(mainMarkup,/id="open-argb"/);
  receiveDeviceState('status',{argbDevice:controller.id});
  assert.match(mainMarkup,/id="open-argb"[^>]*>Каналы ARGB/);
- let reply;
+ let reply, save;
  context.window.argbChannel={
   open(device,label,api){
    assert.equal(label,controller.label);
-   assert.equal(api.save,undefined,'read-only editor registers no write callback');
+   save=api.save;
    return api.list({device,request:31});
   },
   receive(message){reply=message;},
@@ -1082,13 +1082,18 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
   dataset:{action:'open-argb'},hasAttribute:name=>name==='data-mutation',
  })}});
  assert.deepEqual(commands.at(-1),{op:'argb_channels',device:controller.id,request:31});
+ save({device:controller.id,request:32,revision:'confirmed-inventory',zone:0,leds:27});
+ assert.deepEqual(commands.at(-1),{op:'argb_channel_save',device:controller.id,request:32,revision:'confirmed-inventory',zone:0,leds:27});
  const inventory={kind:'argb_channels',device:controller.id,request:31,status:'ready',writable:false,channels:[]};
  vm.runInContext('window.prismestraReceive('+JSON.stringify(inventory)+')',context);
  assert.deepEqual(JSON.parse(JSON.stringify(reply)),inventory);
+ const rejected={kind:'argb_channel_saved',device:controller.id,request:32,revision:'confirmed-inventory',status:'failed'};
+ vm.runInContext('window.prismestraReceive('+JSON.stringify(rejected)+')',context);
+ assert.deepEqual(JSON.parse(JSON.stringify(reply)),rejected);
  receiveDeviceState('status',{argbDevice:null});
  assert.doesNotMatch(mainMarkup,/id="open-argb"/);
 }
-console.log('PASS: selected managed ARGB device exposes a read-only IPC route and removes it when unavailable');
+console.log('PASS: managed ARGB editor routes typed inventory/save IPC and correlated save errors');
 
 {
  restoreDraft(draftState);
