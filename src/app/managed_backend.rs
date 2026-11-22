@@ -711,14 +711,9 @@ fn run(config: Config, installed: Option<&InstalledLaunch>, state: &Shared) {
     let mut retry = Retry::default();
     let mut intents = installed.map_or(&[][..], |launch| launch.zone_intents.as_slice());
     let mut verification = installed.and_then(|launch| launch.verify_zones.clone());
+    let configuration_path = config.config_dir.join("Configuration.json");
     let mut published = None;
-    while !state.cancel.load(Ordering::SeqCst) {
-        if !state.restarting.load(Ordering::SeqCst) {
-            state.detail("Managed OpenRGB restarts stopped");
-            // Avoid a hot loop once shutdown disables respawn.
-            thread::sleep(POLL);
-            continue;
-        }
+    while !state.cancel.load(Ordering::SeqCst) && state.restarting.load(Ordering::SeqCst) {
         if !retry.permitted(Instant::now()) {
             state.detail("Managed OpenRGB crash limit: waiting 60 seconds");
             state.wait(Duration::from_secs(60));
@@ -791,11 +786,14 @@ fn run(config: Config, installed: Option<&InstalledLaunch>, state: &Shared) {
         match transition {
             MonitorExit::Prepare(bytes) => {
                 intents = &[];
-                let path = config.config_dir.join("Configuration.json");
                 let _gate = state.gate.lock().unwrap_or_else(|e| e.into_inner());
                 if !state.cancel.load(Ordering::SeqCst) && state.restarting.load(Ordering::SeqCst) {
                     if let Ok(Some(expected)) = zone_migration::expectation(&bytes) {
-                        match crate::storage::atomic_create(&path, &bytes, zone_migration::LIMIT) {
+                        match crate::storage::atomic_create(
+                            &configuration_path,
+                            &bytes,
+                            zone_migration::LIMIT,
+                        ) {
                             Ok(()) => {
                                 verification = Some(expected);
                                 published = Some(bytes);
@@ -809,23 +807,7 @@ fn run(config: Config, installed: Option<&InstalledLaunch>, state: &Shared) {
             }
             MonitorExit::Unverified => {
                 if let Some(bytes) = published.take() {
-                    let path = config.config_dir.join("Configuration.json");
-                    let _gate = state.gate.lock().unwrap_or_else(|e| e.into_inner());
-                    if state.cancel.load(Ordering::SeqCst)
-                        || !state.restarting.load(Ordering::SeqCst)
-                    {
-                        return;
-                    }
-                    let mut current = Vec::new();
-                    if File::open(&path)
-                        .and_then(|file| {
-                            file.take(zone_migration::LIMIT as u64 + 1)
-                                .read_to_end(&mut current)
-                        })
-                        .is_ok()
-                        && current == bytes
-                        && fs::remove_file(&path).is_ok()
-                    {
+                    if rollback_zone_configuration(&configuration_path, &bytes) {
                         verification = None;
                         state.detail("Manual ARGB topology did not match; retrying with the unmodified backend");
                     } else {
@@ -849,7 +831,29 @@ fn run(config: Config, installed: Option<&InstalledLaunch>, state: &Shared) {
             state.wait(retry.delay());
         }
     }
+    // Orderly cancellation may occur between create-new and the verification
+    // launch. Only the unverified file created by this worker can be rolled back.
+    if let Some(bytes) = published
+        && !rollback_zone_configuration(&configuration_path, &bytes)
+    {
+        state.detail(
+            "Managed OpenRGB stopped; pending ARGB configuration rollback did not complete",
+        );
+        return;
+    }
     state.detail("Managed OpenRGB stopped");
+}
+
+fn rollback_zone_configuration(path: &Path, published: &[u8]) -> bool {
+    let mut current = Vec::new();
+    File::open(path)
+        .and_then(|file| {
+            file.take(zone_migration::LIMIT as u64 + 1)
+                .read_to_end(&mut current)
+        })
+        .is_ok()
+        && current == published
+        && fs::remove_file(path).is_ok()
 }
 
 #[derive(Default)]
@@ -1345,8 +1349,12 @@ mod tests {
         fs::write(&path, original).unwrap();
         assert!(read_restore_expectation(&directory).unwrap().is_none());
         assert!(crate::storage::atomic_create(&path, b"{}", zone_migration::LIMIT).is_err());
+        assert!(!rollback_zone_configuration(&path, b"{}"));
         assert_eq!(fs::read(&path).unwrap(), original);
-        fs::remove_file(path).unwrap();
+        fs::remove_file(&path).unwrap();
+        crate::storage::atomic_create(&path, b"{}", zone_migration::LIMIT).unwrap();
+        assert!(rollback_zone_configuration(&path, b"{}"));
+        assert!(!path.exists());
         fs::remove_dir(directory).unwrap();
     }
 
