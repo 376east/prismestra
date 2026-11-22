@@ -84,6 +84,9 @@ enum Command {
         scene: Scene,
         origin: Option<Origin>,
     },
+    EditorPreviewVisible {
+        visible: bool,
+    },
     CardPreview {
         id: String,
         request: u32,
@@ -183,6 +186,7 @@ pub(super) struct Session {
     portable_preview: Option<scene_files::Running>,
     lcd_layout_preview: Option<scene_files::Layout>,
     preview: Option<crate::runtime::scene::Renderer>,
+    editor_preview_visible: bool,
     canvas: crate::devices::Canvas,
     detailed_canvas: crate::devices::Canvas,
     last_send: Instant,
@@ -232,6 +236,7 @@ impl Session {
             portable_preview: None,
             lcd_layout_preview: None,
             preview: None,
+            editor_preview_visible: false,
             canvas: preview_canvas(36, 18),
             detailed_canvas: preview_canvas(96, 48),
             last_send: Instant::now(),
@@ -923,6 +928,7 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
         Command::Snapshot
             | Command::PreviewOutput { .. }
             | Command::PreviewScene { .. }
+            | Command::EditorPreviewVisible { .. }
             | Command::CardPreview { .. }
             | Command::CloseReady { .. }
             | Command::Alice {
@@ -1184,6 +1190,12 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                 state,
                 &json!({"kind":"card_preview","id":id,"request":request,"frame":frame}),
             )?;
+            return Ok(false);
+        }
+        Command::EditorPreviewVisible { visible } => {
+            if let Some(session) = state.modern_session.borrow_mut().as_mut() {
+                session.editor_preview_visible = visible;
+            }
             return Ok(false);
         }
         Command::PreviewScene { scene, origin } => {
@@ -1481,9 +1493,11 @@ pub(super) fn maintain(state: &State) {
         }
         let frames = (session.last_send.elapsed().as_millis() / 50).min(1000) as u32;
         session.last_send += Duration::from_millis(u64::from(frames) * 50);
-        let mut pixels = Vec::new();
-        let mut canvas = &session.canvas;
-        if let Some(renderer) = session.preview.as_mut() {
+        let preview = if session.editor_preview_visible
+            && let Some(renderer) = session.preview.as_mut()
+        {
+            let mut pixels = Vec::new();
+            let mut canvas = &session.canvas;
             if renderer.scene().effect.uses_audio() {
                 renderer.set_audio(app.runtime.read(|runtime| runtime.audio_input()));
             }
@@ -1506,9 +1520,15 @@ pub(super) fn maintain(state: &State) {
             for _ in 0..frames.clamp(1, 8) {
                 pixels = renderer.step(canvas)?;
             }
+            let colors = pixels.iter().map(|c| c.rrggbb()).collect::<Vec<_>>();
+            Some(json!({"width":canvas.width,"height":canvas.height,"colors":colors}))
+        } else {
+            None
+        };
+        let mut value = json!({"kind":"status","state":{"scene":app.runtime.project().scene,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error())}});
+        if let Some(preview) = preview {
+            value["state"]["preview"] = preview;
         }
-        let colors = pixels.iter().map(|c| c.rrggbb()).collect::<Vec<_>>();
-        let mut value = json!({"kind":"status","state":{"scene":app.runtime.project().scene,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"preview":{"width":canvas.width,"height":canvas.height,"colors":colors}}});
         if app.runtime.project().scene.effect.uses_audio() {
             value["state"]["audioError"] = app.runtime.read(|runtime| json!(runtime.audio_error()));
         }
