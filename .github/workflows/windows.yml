@@ -46,6 +46,8 @@ jobs:
           node tests/native_ui_ipc.cjs
       - name: Check the OpenRGB cache contract
         run: python scripts/test_openrgb_cache.py
+      - name: Check pinned Setup downloads
+        run: python scripts/test_pinned_setup_download.py
 
   software:
     name: Full software checks
