@@ -33,7 +33,7 @@ For devices using the OpenRGB adapter, configure [managed local OpenRGB](managed
 
 The package retains the Windows x64, Visual C++ v14 and WebView2 requirements described in `START-HERE.md`. To use the classic editor, add `--portable --classic-editor` to the Windows shortcut target. Add `--start-connected` there when you want to activate the saved connections.
 
-Keep the application and its data together when updating. Exit the session first, back up your data, and replace program files while preserving `data`.
+Keep the application and its data together when updating. Exit the session first, back up your data, and replace program files while preserving `data`. This retains local bindings, managed OpenRGB configuration and any authorized task reference. Managed backend paths and existing task actions refer to specific locations on this PC. Review them before starting from a different location.
 
 ## Moving an existing shortcut
 

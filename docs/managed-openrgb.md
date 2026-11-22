@@ -2,7 +2,7 @@
 
 Prismestra can own a local OpenRGB SDK server without its window or tray icon. Executable, configuration directory and numeric loopback endpoint are machine settings; device models/counts and personal paths are not compiled in. Remote or manually managed servers remain external.
 
-The Windows installer bundles and configures a private backend automatically, including its protected authorization policy. Its first-run coordinator can discover devices before saved bindings exist. See [the installed startup path](windows-installer.md). The manual configuration below applies to source builds and older portable packages.
+The Windows installer bundles and configures a private backend automatically, including its protected authorization policy. Its first-run coordinator can discover devices before saved bindings exist. See [the installed startup path](windows-installer.md). In portable mode, Connections uses an existing managed configuration or connects to an external server. Creating the managed configuration for a new portable folder is a separate step.
 
 ## Configure a portable backend
 
