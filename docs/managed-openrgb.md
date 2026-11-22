@@ -2,9 +2,11 @@
 
 Prismestra can own a local OpenRGB SDK server without its window or tray icon. Executable, configuration directory and numeric loopback endpoint are machine settings; device models/counts and personal paths are not compiled in. Remote or manually managed servers remain external.
 
-The Windows installer bundles and configures a private backend automatically, including its protected authorization policy. Its first-run coordinator can discover devices before saved bindings exist. See [the installed startup path](windows-installer.md). In portable mode, Connections uses an existing managed configuration or connects to an external server. Creating the managed configuration for a new portable folder is a separate step.
+The Windows installer bundles and configures a private backend automatically, including its protected authorization policy. Its first-run coordinator can discover devices before saved bindings exist. See [the installed startup path](windows-installer.md).
 
 ## Configure a portable backend
+
+In a fresh portable folder, open **Connections → Configure local OpenRGB** («Подключения → Настроить локальный OpenRGB…»). Select your OpenRGB SDK6 executable and an isolated configuration folder. Review the paths, default loopback endpoint and SHA-256, then confirm. To test the connection, select an OpenRGB device in Connections and start discovery. This action is available before a portable configuration or helper reference exists.
 
 For a new or ordinary-user portable configuration, exit the resident session and open a Windows shortcut to the extracted `Prismestra.exe` with `--configure-portable-openrgb "C:\Apps\OpenRGB\OpenRGB.exe" "C:\Lighting\OpenRGB-config"`. An optional final argument sets a numeric loopback endpoint. Confirm the displayed endpoint and SHA-256 to save. Leave any configured helper task in place. If a proposed change would affect that configuration, Prismestra leaves both files intact so that the task's authorization can be reviewed separately.
 
