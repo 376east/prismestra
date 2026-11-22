@@ -346,12 +346,45 @@ console.log('PASS: device cards select by logical identity and the draft dropdow
  assert.equal(document.activeElement,conflictCard);
  assert.match(mainMarkup,/data-output-status="rgb-right">Подключение занято другим выходом Prismestra/);
  assert.match(mainMarkup,/data-connection-device="rgb-right"/);
- selectCard(lcd);
- snapshot([lcd,blocked,working],lcd,'Недоступно: Requested TT HID interface is unavailable; fallback is forbidden');
- assert.match(mainMarkup,/id="native-runtime-detail">Недоступно: Requested TT HID interface is unavailable/);
- assert.match(mainMarkup,/data-connection-device="usb-lcd"/);
  vm.runInContext('deviceInspection=null',context);
  console.log('PASS: same-name cards identify their outputs; selection, reason and connection target survive a reordered snapshot');
+}
+
+// Runtime detail is scoped to the selected LCD. Its existing connection action uses the same ID.
+{
+ const [missing,neighbor]=['missing-lcd','neighbor-lcd'].map(id=>({
+  id,label:'LCD',role:'lcd',driver:{type:'tt_lcd'},leds:0,rate_hz:30,enabled:true
+ }));
+ const guidance='Windows не находит LCD по сохранённому подключению. Проверьте питание и USB-кабель экрана. Если экран подключён, откройте его подключение и проверьте привязку.';
+ const snapshot = (devices,selected,detail) => {
+  context.payload={kind:'snapshot',state:{
+   ...structuredClone(initial),devices,draftDevices:devices,detail,
+   editor:{page:'devices',deviceId:selected?.id,index:selected?devices.indexOf(selected):0,
+    targets:devices.map(({label,id})=>`${label} (${id})`),fields:[],dirty:false}
+  }};
+  vm.runInContext('window.prismestraReceive(payload)',context);
+ };
+ vm.runInContext('formStages.clear();view="devices";pendingView=null',context);
+ snapshot([missing,neighbor],missing,'Подключается');
+ context.payload={kind:'status',state:{detail:guidance}};
+ vm.runInContext('window.prismestraReceive(payload)',context);
+ assert.equal(find('#native-runtime-detail').textContent,guidance);
+ snapshot([neighbor,missing],missing,guidance);
+ assert.match(mainMarkup,/data-connection-device="missing-lcd"/);
+ const repair=new Node();
+ repair.dataset={view:'connections',connectionDevice:missing.id};
+ const beforeRepair=commands.length;
+ events.click({target:{closest:()=>repair}});
+ assert.deepEqual(commands.slice(beforeRepair),[{op:'page',page:'connections',device:missing.id}]);
+ vm.runInContext('window.prismestraReceive({kind:"error",message:"Fixture return to Devices"})',context);
+ snapshot([neighbor,missing],neighbor,'Кадры отправлены: 5');
+ assert.equal(find('#native-runtime-detail').textContent,'Кадры отправлены: 5');
+ assert.match(mainMarkup,/data-connection-device="neighbor-lcd"/);
+ assert.doesNotMatch(mainMarkup,/Windows не находит LCD/);
+ snapshot([],undefined,'Добавьте устройство из списка поддерживаемых протоколов.');
+ assert.doesNotMatch(find('nav').innerHTML,/data-view="lcd"/);
+ assert.doesNotMatch(mainMarkup,/data-connection-device|data-view="lcd"|Windows не находит LCD/);
+ console.log('PASS: missing LCD guidance refreshes in place, opens only its binding, and stays hidden without LCD');
 }
 
 // A retry belongs to one saved row, request and profile scope.

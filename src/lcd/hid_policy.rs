@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Pure descriptor policy from native TT display/liquid source, without enumeration.
 //! Metadata must come from successful complete caps queries; this is not device proof.
+pub(crate) const TARGET_UNAVAILABLE: &str =
+    "Requested TT HID interface is unavailable; fallback is forbidden";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Display,
@@ -144,9 +147,7 @@ pub fn select(
             return Err(fail("Ambiguous TT HID interface selection"));
         }
     }
-    selected
-        .cloned()
-        .ok_or_else(|| fail("Requested TT HID interface is unavailable; fallback is forbidden"))
+    selected.cloned().ok_or_else(|| fail(TARGET_UNAVAILABLE))
 }
 /// Complete process basenames must be supplied by the host. Enumeration failures are
 /// host errors, not an empty successful inventory. No process is queried here.
