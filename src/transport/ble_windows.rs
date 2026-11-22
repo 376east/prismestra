@@ -118,10 +118,11 @@ fn wait_completion<F: Future>(
     let mut context = Context::from_waker(&waker);
     let mut future = std::pin::pin!(future);
     loop {
-        if let Poll::Ready(result) = future.as_mut().poll(&mut context) {
+        let result = future.as_mut().poll(&mut context);
+        ble::check_wait(control, started)?;
+        if let Poll::Ready(result) = result {
             return Ok(result);
         }
-        ble::check_wait(control, started)?;
         let remaining = ble::TIMEOUT.saturating_sub(control.now().saturating_sub(started));
         // Production invokes the event wait; fake controls advance their clock instead.
         // A retained predicate handles completion between poll and entering the wait.
@@ -1169,6 +1170,28 @@ mod tests {
         assert_eq!(result.unwrap_err().code(), failure.code());
         assert_eq!(clock.time, Duration::ZERO);
     }
+    #[test]
+    fn completion_at_the_deadline_cannot_report_success() {
+        let mut clock = Clock {
+            time: ble::TIMEOUT - ble::POLL,
+            cancel: false,
+        };
+        let mut pending = true;
+        let completes_on_next_poll = std::future::poll_fn(|_| {
+            if std::mem::take(&mut pending) {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        });
+        let result = wait_completion(completes_on_next_poll, &mut clock, Duration::ZERO);
+        assert_eq!(clock.time, ble::TIMEOUT);
+        assert_eq!(
+            result,
+            Err("Operation cancelled or timed out; disconnected".into())
+        );
+    }
+
     #[test]
     fn late_completion_waker_is_safe_after_waiter_has_timed_out() {
         struct SaveWaker(Arc<Mutex<Option<Waker>>>);
