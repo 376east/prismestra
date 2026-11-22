@@ -3,7 +3,10 @@ use crate::{
     devices::openrgb::{identity, topology},
     transport::openrgb::{ControllerInfo, MAX_CONTROLLERS, MAX_LEDS, ZoneInfo},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+#[cfg(windows)]
+use crate::transport::openrgb::ManualZoneTarget;
 
 pub(super) const LIMIT: usize = 1024 * 1024;
 const MANUAL_SIZE_ALLOWED: u32 = 1 << 1;
@@ -168,6 +171,14 @@ pub(super) struct SavedManualZones {
 }
 
 impl SavedManualZones {
+    pub(super) fn already_correct(&self, inventory: &[ControllerInfo]) -> bool {
+        Expectation {
+            identity: self.identity.clone(),
+            topology: topology(&self.saved),
+        }
+        .verified(inventory)
+    }
+
     pub(super) fn read(
         config: &[u8],
         expected_identity: &str,
@@ -208,7 +219,8 @@ impl SavedManualZones {
 
     /// Evidence from the existing inventory alone, before validating driver
     /// bounds and creating a configuration. Does not grant write authority.
-    pub(super) fn needs_target_validation(&self, inventory: &[ControllerInfo]) -> bool {
+    #[cfg(test)]
+    fn needs_target_validation(&self, inventory: &[ControllerInfo]) -> bool {
         let mut matches = inventory
             .iter()
             .filter(|target| identity(target) == self.identity);
@@ -246,6 +258,133 @@ impl SavedManualZones {
         }
         unset
     }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Expectation {
+    identity: String,
+    topology: String,
+}
+
+impl Expectation {
+    pub(super) fn verified(&self, inventory: &[ControllerInfo]) -> bool {
+        let mut matched = inventory
+            .iter()
+            .filter(|info| identity(info) == self.identity);
+        matched
+            .next()
+            .is_some_and(|info| topology(info) == self.topology)
+            && matched.next().is_none()
+    }
+}
+
+#[cfg(windows)]
+pub(super) fn prepare(intent: &SavedManualZones, targets: &[ManualZoneTarget]) -> Option<Vec<u8>> {
+    use serde_json::json;
+    let mut matched = targets
+        .iter()
+        .filter(|target| identity(&target.info) == intent.identity);
+    let target = matched.next()?;
+    let info = &target.info;
+    if matched.next().is_some()
+        || !info.location.starts_with("HID: ")
+        || !info.supports_direct
+        || info.zones.len() != intent.saved.zones.len()
+        || info.zones.len() != target.limits.len()
+    {
+        return None;
+    }
+    let mut projected = info.clone();
+    projected.led_names.clear();
+    let mut zones = Vec::new();
+    let mut offset = 0;
+    let mut changes = 0;
+    for (i, ((observed, saved), (low, high, manual))) in info
+        .zones
+        .iter()
+        .zip(&intent.saved.zones)
+        .zip(&target.limits)
+        .enumerate()
+    {
+        if (observed.id, &observed.name, &observed.kind) != (saved.id, &saved.name, &saved.kind)
+            || observed.leds != observed.reported_leds
+            || observed.matrix.is_some()
+            || observed.reported_matrix.is_some()
+        {
+            return None;
+        }
+        let (count, flags) = if observed.leds == saved.leds {
+            // Leave all already correct and auto-sized zones with the driver.
+            let names = info
+                .led_names
+                .get(observed.led_offset..observed.led_offset + observed.leds)?;
+            projected.led_names.extend_from_slice(names);
+            (observed.leds, 0)
+        } else {
+            let size = intent
+                .manual
+                .iter()
+                .find(|zone| zone.zone == observed.id)?
+                .leds;
+            if !manual || observed.leds != 0 || !(*low..=*high).contains(&size) {
+                return None;
+            }
+            projected.led_names.extend_from_slice(
+                intent
+                    .saved
+                    .led_names
+                    .get(saved.led_offset..saved.led_offset + size)?,
+            );
+            changes += 1;
+            (size, MANUAL_SIZE_SET)
+        };
+        let kind = match observed.kind.as_str() {
+            "Single" => 0,
+            "Linear" => 1,
+            _ => return None,
+        };
+        zones.push(json!({"name":observed.name,"type":kind,"flags":flags,
+            "leds_min":low,"leds_max":high,"leds_count":count,
+            "active_mode":0,"matrix_map":{"width":0,"height":0}}));
+        projected.zones[i].led_offset = offset;
+        projected.zones[i].leds = count;
+        projected.zones[i].reported_leds = count;
+        offset += count;
+    }
+    projected.leds = offset;
+    let expected = Expectation {
+        identity: intent.identity.clone(),
+        topology: topology(&intent.saved),
+    };
+    if changes == 0 || topology(&projected) != expected.topology {
+        return None;
+    }
+    serde_json::to_vec(&json!({
+        "profile_version":6, "profile_name":"Controller Configuration",
+        "prismestra_expected_topology":expected,
+        "controllers":[{
+            "name":info.name,"vendor":info.vendor,"serial":info.serial,"location":info.location,
+            "description":target.description,"version":target.version,"type":0,"flags":1,"active_mode":0,
+            "configuration":{"prismestra_require_exact_location":true},
+            "zones":zones
+        }]
+    })).ok()
+}
+
+pub(super) fn expectation(bytes: &[u8]) -> Result<Option<Expectation>, String> {
+    let config = super::strict_json::unique_json(bytes, LIMIT)?;
+    let Some(value) = config.get("prismestra_expected_topology") else {
+        return Ok(None);
+    };
+    let expected: Expectation =
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+    if !crate::devices::openrgb::valid_hash(&expected.identity)
+        || !crate::devices::openrgb::valid_hash(&expected.topology)
+    {
+        return Err("invalid protected ARGB topology record".into());
+    }
+    Ok(Some(expected))
 }
 
 /// Compare two offline descriptions. Return a plan for unset, manually
@@ -374,6 +513,33 @@ fn restores_only_unset_manual_zones_and_requires_the_saved_hash() {
     assert!(intent.needs_target_validation(std::slice::from_ref(&observed)));
     assert!(!intent.needs_target_validation(&[observed.clone(), observed]));
     assert!(!intent.needs_target_validation(std::slice::from_ref(&info)));
+    #[cfg(windows)]
+    {
+        let current =
+            describe(&serde_json::from_value(empty["controllers"][0].clone()).unwrap()).unwrap();
+        let mut target = ManualZoneTarget {
+            info: current,
+            description: "Fixture board".into(),
+            version: "v1".into(),
+            limits: vec![(0, 256, true), (0, 256, true), (1, 1, false)],
+        };
+        let bytes = prepare(&intent, std::slice::from_ref(&target)).unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let controller = &value["controllers"][0];
+        assert_eq!(
+            controller["configuration"]["prismestra_require_exact_location"],
+            true
+        );
+        assert_eq!(controller["zones"][0]["leds_count"], 27);
+        assert_eq!(controller["zones"][1]["leds_count"], 27);
+        assert_eq!(controller["zones"][2]["flags"], 0);
+        let expected = expectation(&bytes).unwrap().unwrap();
+        assert!(!expected.verified(std::slice::from_ref(&target.info)));
+        assert!(expected.verified(std::slice::from_ref(&info)));
+        assert!(!expected.verified(&[info.clone(), info.clone()]));
+        target.limits[0].1 = 26;
+        assert!(prepare(&intent, std::slice::from_ref(&target)).is_none());
+    }
     assert_eq!(
         run(&saved, &empty, &key, &hash).unwrap(),
         [

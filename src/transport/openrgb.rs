@@ -58,6 +58,14 @@ pub struct ControllerInfo {
     pub supports_direct: bool,
 }
 
+#[cfg(windows)]
+pub(crate) struct ManualZoneTarget {
+    pub info: ControllerInfo,
+    pub description: String,
+    pub version: String,
+    pub limits: Vec<(usize, usize, bool)>,
+}
+
 impl ControllerInfo {
     pub(crate) fn physical_identity(&self) -> [&str; 5] {
         [
@@ -216,6 +224,49 @@ pub struct OpenRgbSession {
 }
 
 impl OpenRgbSession {
+    #[cfg(windows)]
+    pub(crate) fn scan_manual_zone_targets(
+        &mut self,
+        deadline: Instant,
+        cancelled: &impl Fn() -> bool,
+    ) -> Result<Vec<ManualZoneTarget>, String> {
+        let client = self.client.as_ref().ok_or("OpenRGB connection discarded")?;
+        let result = self.runtime.block_on(bounded(
+            async {
+                let group = client.get_all_controllers().await?;
+                group
+                    .iter()
+                    .map(|controller| {
+                        let info = describe(controller)?;
+                        let limits = controller
+                            .get_all_zones()
+                            .map(|zone| {
+                                use openrgb2::ZoneFlags as F;
+                                let mutable = zone.flags().is_some_and(|flags| {
+                                    flags.contains(F::ManuallyConfigurableSize)
+                                        && !flags.contains(F::ManuallyConfiguredSize)
+                                        && !flags.contains(F::ResizableForEffectsOnly)
+                                        && !flags.contains(F::ZoneGeometryMayChange)
+                                        && zone.segment_iter().next().is_none()
+                                });
+                                (zone.leds_min(), zone.leds_max(), mutable)
+                            })
+                            .collect();
+                        Ok(ManualZoneTarget {
+                            info,
+                            description: controller.description().into(),
+                            version: controller.version().into(),
+                            limits,
+                        })
+                    })
+                    .collect()
+            },
+            deadline,
+            cancelled,
+        ));
+        self.finish(result)
+    }
+
     /// An explicit endpoint avoids implicit access to a running hardware server.
     pub fn connect(
         endpoint: SocketAddr,

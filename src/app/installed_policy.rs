@@ -125,6 +125,36 @@ pub(super) struct InstalledPolicy {
 }
 
 impl InstalledPolicy {
+    pub(super) fn supports_exact_zone_location(&self) -> bool {
+        const PATCH: &str = include_str!("../../components/openrgb/prismestra-pc.patch");
+        let valid = || -> Option<()> {
+            if !PATCH.contains("prismestra_require_exact_location") {
+                return None;
+            }
+            let component = self.backend.parent()?.parent()?;
+            let manifest = component.join("component-manifest.json");
+            let program_files = known_folder(&FOLDERID_ProgramFiles).ok()?;
+            protected_chain(&manifest, &program_files, false).ok()?;
+            let mut bytes = Vec::new();
+            File::open(manifest)
+                .ok()?
+                .take(2 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .ok()?;
+            let manifest = super::strict_json::unique_json(&bytes, 2 * 1024 * 1024).ok()?;
+            let lock: serde_json::Value =
+                serde_json::from_str(include_str!("../../components/openrgb/source-lock.json"))
+                    .ok()?;
+            exact_zone_component(
+                &manifest,
+                &self.backend_sha256,
+                lock["patch_sha256"].as_str()?,
+            )
+            .then_some(())
+        };
+        valid().is_some()
+    }
+
     pub(super) fn client(state: &Path, install_dir: &Path) -> Result<Option<Self>, String> {
         let token = process_token(
             unsafe { GetCurrentProcess() },
@@ -218,6 +248,33 @@ impl InstalledPolicy {
             task_name: format!("\\Prismestra-Backend-{sid}"),
         }))
     }
+}
+
+fn exact_zone_component(manifest: &serde_json::Value, image: &str, patch: &str) -> bool {
+    let Some(rows) = manifest["files"].as_array() else {
+        return false;
+    };
+    let mut entries = rows
+        .iter()
+        .filter(|row| row["path"] == "build/prismestra-pc.patch");
+    manifest["version"] == 1
+        && manifest["engine_sha256"] == image
+        && entries.next().is_some_and(|row| row["sha256"] == patch)
+        && entries.next().is_none()
+}
+
+#[test]
+fn exact_zone_capability_requires_both_pinned_hashes_and_a_unique_entry() {
+    let mut manifest = serde_json::json!({
+        "version":1,"engine_sha256":"installed",
+        "files":[{"path":"build/prismestra-pc.patch","sha256":"exact"}]
+    });
+    assert!(exact_zone_component(&manifest, "installed", "exact"));
+    assert!(!exact_zone_component(&manifest, "old-image", "exact"));
+    assert!(!exact_zone_component(&manifest, "installed", "legacy"));
+    let duplicate = manifest["files"][0].clone();
+    manifest["files"].as_array_mut().unwrap().push(duplicate);
+    assert!(!exact_zone_component(&manifest, "installed", "exact"));
 }
 
 struct ExpectedOwner {

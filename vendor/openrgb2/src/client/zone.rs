@@ -45,6 +45,11 @@ impl<'c> Zone<'c> {
         }
     }
 
+    /// Settings flags reported by the SDK, when supported by the server.
+    pub fn flags(&self) -> Option<crate::FlagSet<crate::ZoneFlags>> {
+        self.zone_data.flags.value().copied()
+    }
+
     delegate::delegate! {
         to self.zone_data {
             /// Returns the ID of this zone.

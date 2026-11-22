@@ -691,10 +691,11 @@ pub fn run_installed_helper() -> Result<(), String> {
             Ok(None) => return Ok(()),
             Ok(Some((request, _))) => {
                 authority.set_creator_owner()?;
-                let intents = if matches!(
-                    fs::symlink_metadata(policy.config_dir.join("Configuration.json")),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
-                ) {
+                let intents = if policy.supports_exact_zone_location()
+                    && matches!(
+                        fs::symlink_metadata(policy.config_dir.join("Configuration.json")),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                    ) {
                     authority
                         .with_limited(|| {
                             super::installed_migration::saved_openrgb_zone_intents(

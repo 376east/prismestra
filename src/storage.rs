@@ -23,6 +23,13 @@ pub fn atomic_write(path: &Path, bytes: &[u8], max_bytes: usize) -> io::Result<(
     atomic_write_with(path, bytes, max_bytes, replace)
 }
 
+#[cfg(windows)]
+pub(crate) fn atomic_create(path: &Path, bytes: &[u8], max_bytes: usize) -> io::Result<()> {
+    atomic_write_with(path, bytes, max_bytes, |source, destination| {
+        move_same_volume(source, destination, 0x8)
+    })
+}
+
 /// Publish a live helper record while existing readers permit delete sharing.
 /// Durable configuration and other control writes use the normal replacement.
 pub(crate) fn atomic_write_live_record(
@@ -115,6 +122,11 @@ fn atomic_write_with(
 
 #[cfg(windows)]
 fn replace(source: &Path, destination: &Path) -> io::Result<()> {
+    move_same_volume(source, destination, 0x1 | 0x8)
+}
+
+#[cfg(windows)]
+fn move_same_volume(source: &Path, destination: &Path, flags: u32) -> io::Result<()> {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn MoveFileExW(source: *const u16, destination: *const u16, flags: u32) -> i32;
@@ -123,7 +135,7 @@ fn replace(source: &Path, destination: &Path) -> io::Result<()> {
     let destination = wide(destination)?;
     // Same-directory source. No copy, deferred-at-reboot, registry or power flags.
     // https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-movefileexw
-    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0x1 | 0x8) } == 0 {
+    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), flags) } == 0 {
         Err(io::Error::last_os_error())
     } else {
         Ok(())
@@ -322,6 +334,19 @@ mod tests {
         fs::remove_dir(parent).unwrap();
         fs::remove_dir(root).unwrap();
     }
+    #[cfg(windows)]
+    #[test]
+    fn atomic_create_publishes_once_and_preserves_a_concurrent_destination() {
+        let dir = fixture();
+        let path = dir.join("Configuration.json");
+        atomic_create(&path, b"first", 32).unwrap();
+        assert!(atomic_create(&path, b"second", 32).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
     #[cfg(windows)]
     #[test]
     fn locked_destination_preserves_previous_bytes_and_cleans_temp() {

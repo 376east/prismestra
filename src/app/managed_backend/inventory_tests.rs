@@ -91,7 +91,7 @@ fn fixture_manager(directory: &Path) -> (Manager, SocketAddr) {
                 inventory_interval: Duration::from_millis(15),
                 poll: Duration::from_millis(5),
             },
-            &[],
+            ZoneRestore::default(),
             |endpoint, pid| {
                 probe_owned_sdk(endpoint, pid, &|| child_state.cancel.load(Ordering::SeqCst))
             },
