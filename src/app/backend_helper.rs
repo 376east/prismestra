@@ -22,6 +22,7 @@ use std::{
 
 const LIMIT: usize = 16_384;
 const POLL: Duration = Duration::from_millis(200);
+const DELAYED_HEARTBEAT_MAX_AGE_MS: u64 = 12_000;
 const FRESH_MS: u64 = 2_000;
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
@@ -805,6 +806,10 @@ fn own_backend(
     helper: &Identity,
     manager: Manager,
 ) -> Result<(), String> {
+    #[cfg(windows)]
+    let allow_heartbeat_catch_up = channels.authority.is_some();
+    #[cfg(not(windows))]
+    let allow_heartbeat_catch_up = false;
     helper_note(
         channels.output,
         request,
@@ -819,6 +824,7 @@ fn own_backend(
         || manager.snapshot(),
         || manager.stop_restarting(),
         &ActiveClock,
+        allow_heartbeat_catch_up,
     );
     manager.stop_restarting();
     helper_note(
@@ -869,6 +875,7 @@ fn supervise_helper_with_clock(
         snapshot,
         stop_restarting,
         clock,
+        false,
     )
 }
 
@@ -879,6 +886,7 @@ fn supervise_channels(
     snapshot: impl Fn() -> super::managed_backend::Snapshot,
     stop_restarting: impl Fn(),
     clock: &impl Clock,
+    allow_heartbeat_catch_up: bool,
 ) -> Result<(), String> {
     let output = channels.output;
     let now = clock.now_ms()?;
@@ -889,6 +897,7 @@ fn supervise_channels(
     }
     let mut lease_deadline = clock::deadline(request.timestamp_ms, now)?;
     let mut last_valid_poll_ms = now;
+    let mut catch_up_tick = None;
     let mut status_write_failed = false;
     let mut owner_read_failed = false;
     let mut last_backend_state = None;
@@ -926,7 +935,11 @@ fn supervise_channels(
             );
             break;
         }
-        if channels.control("owner-pause.json", request) {
+        let pause = channels.read::<Cancel>("owner-pause.json");
+        if pause
+            .as_ref()
+            .is_ok_and(|pause| matches_control(pause, request))
+        {
             stop_restarting();
         }
         let current = channels.read::<Request>("owner-request.json");
@@ -934,12 +947,66 @@ fn supervise_channels(
             .is_ok()
             .then(|| channels.read::<Cancel>("owner-cancel.json"));
         let now = clock.now_ms()?;
+        let mut renewed_during_catch_up = false;
+        if now >= lease_deadline
+            && allow_heartbeat_catch_up
+            && let Ok(current) = &current
+            && same_owner_request(current, request)
+            && current.restarting
+            && control_clear(&pause, request)
+            && cancellation
+                .as_ref()
+                .is_some_and(|cancel| control_clear(cancel, request))
+        {
+            // Both the writer and the supervisor can be delayed. Require an authenticated
+            // publication made after the last poll and before its original deadline.
+            if catch_up_tick.is_none()
+                && now.saturating_sub(last_valid_poll_ms) >= clock::LEASE_MS
+                && current.timestamp_ms > last_valid_poll_ms
+                && current.timestamp_ms < lease_deadline
+                && !live_request(current, now)
+            {
+                catch_up_tick = Some(current.timestamp_ms);
+            }
+            if let Some(tick) = catch_up_tick
+                && let Some(until) = tick.checked_add(DELAYED_HEARTBEAT_MAX_AGE_MS)
+                && now < until
+            {
+                if !channels
+                    .parent_identity(request.parent.pid)
+                    .is_ok_and(|parent| parent == request.parent)
+                {
+                    helper_note(
+                        output,
+                        request,
+                        "helper_stop",
+                        None,
+                        "Managed helper stopping: parent identity lost during heartbeat catch-up",
+                    );
+                    break;
+                }
+                let checked_at = clock.now_ms()?;
+                if checked_at < until {
+                    if current.timestamp_ms == tick {
+                        // This is a fixed deadline since publication. Re-reading the
+                        // stale record publishes no readiness and never extends it.
+                        clock.sleep(POLL.min(Duration::from_millis(until - checked_at)));
+                        continue;
+                    }
+                    renewed_during_catch_up = current.timestamp_ms > tick
+                        && clock::deadline(current.timestamp_ms, checked_at)
+                            .is_ok_and(|next| checked_at < next);
+                }
+            }
+        }
         // A late poll needs a fresh heartbeat with a timely publication.
         // The current heartbeat may have already replaced that publication.
         if now >= lease_deadline
-            && (!current
-                .as_ref()
-                .is_ok_and(|current| covers_lease_deadline(current, lease_deadline, now))
+            && !renewed_during_catch_up
+            && (catch_up_tick.is_some()
+                || !current
+                    .as_ref()
+                    .is_ok_and(|current| covers_lease_deadline(current, lease_deadline, now))
                 || cancellation.as_ref().is_some_and(|result| match result {
                     Ok(_) => false,
                     Err(ControlRead::Io(error)) => error.kind() != std::io::ErrorKind::NotFound,
@@ -997,12 +1064,7 @@ fn supervise_channels(
                     );
                     owner_read_failed = false;
                 }
-                if current.version != clock::PROTOCOL
-                    || current.clock_domain != clock::DOMAIN
-                    || current.nonce != request.nonce
-                    || current.parent != request.parent
-                    || !live_request(&current, now)
-                {
+                if !same_owner_request(&current, request) || !live_request(&current, now) {
                     helper_note(
                         output,
                         request,
@@ -1029,6 +1091,7 @@ fn supervise_channels(
                 }
                 lease_deadline = clock::deadline(current.timestamp_ms, now)?;
                 last_valid_poll_ms = now;
+                catch_up_tick = None;
                 if !current.restarting {
                     stop_restarting();
                 }
@@ -1195,6 +1258,21 @@ fn live_request(request: &Request, now: u64) -> bool {
         && request.clock_domain == clock::DOMAIN
         && clock::fresh(request.timestamp_ms, now, clock::LEASE_MS)
 }
+fn same_owner_request(current: &Request, request: &Request) -> bool {
+    current.version == clock::PROTOCOL
+        && current.clock_domain == clock::DOMAIN
+        && current.nonce == request.nonce
+        && current.parent == request.parent
+}
+
+fn control_clear(read: &Result<Cancel, ControlRead>, request: &Request) -> bool {
+    match read {
+        Ok(control) => !matches_control(control, request),
+        Err(ControlRead::Io(error)) => error.kind() == std::io::ErrorKind::NotFound,
+        Err(ControlRead::Invalid(_)) => false,
+    }
+}
+
 fn covers_lease_deadline(request: &Request, deadline: u64, now: u64) -> bool {
     clock::deadline(request.timestamp_ms, now).is_ok_and(|next| now < next)
         && (request.timestamp_ms < deadline
@@ -1683,6 +1761,148 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn installed_owner_heartbeat_recovers_after_joint_writer_and_poll_delay() {
+        struct WakeClock<'a> {
+            active: Cell<u64>,
+            on_sleep: &'a dyn Fn(u64) -> u64,
+        }
+        impl Clock for WakeClock<'_> {
+            fn now_ms(&self) -> Result<u64, String> {
+                Ok(self.active.get())
+            }
+            fn sleep(&self, duration: Duration) {
+                let next = self.active.get() + u64::try_from(duration.as_millis()).unwrap();
+                self.active.set((self.on_sleep)(next));
+            }
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum OnLatePoll {
+            Renew,
+            FrozenWriter,
+            CancelOwner,
+            UnreadableCancel,
+            Pause,
+            ReplaceIdentity,
+            ReplaceNonce,
+            NoUnseenTick,
+            PublishedAfterDeadline,
+        }
+        use OnLatePoll::*;
+        const POLL_MS: u64 = 200;
+        for (late_ms, poll_ms, owner_age_ms, action) in [
+            (3_623, 7_965, 7_256, Renew),
+            (4_733, 9_339, 9_114, Renew),
+            (8_641, 10_420, 9_819, Renew),
+            (8_641, 10_420, 9_819, FrozenWriter),
+            (8_641, 10_420, 9_819, CancelOwner),
+            (8_641, 10_420, 9_819, UnreadableCancel),
+            (8_641, 10_420, 9_819, Pause),
+            (8_641, 10_420, 9_819, ReplaceIdentity),
+            (8_641, 10_420, 9_819, ReplaceNonce),
+            (8_641, 10_420, 9_819, NoUnseenTick),
+            (8_641, 10_420, 9_819, PublishedAfterDeadline),
+        ] {
+            let (directory, mut request, helper) = sharing_fixture("installed-late-heartbeat");
+            let last_poll = 10_000;
+            let old_deadline = last_poll + poll_ms - late_ms;
+            request.timestamp_ms = old_deadline - clock::LEASE_MS;
+            let late_poll = last_poll + poll_ms;
+            let unseen_tick = late_poll - owner_age_ms;
+            let path = directory.join("owner-request.json");
+            let cancel_path = directory.join("owner-cancel.json");
+            write_json(&path, &request).unwrap();
+            let write_control = |path: &Path, nonce: &str| {
+                write_json(
+                    path,
+                    &Cancel {
+                        version: clock::PROTOCOL,
+                        clock_domain: clock::DOMAIN.into(),
+                        nonce: nonce.into(),
+                    },
+                )
+                .unwrap();
+            };
+            if late_ms == 4_733 {
+                write_control(&cancel_path, "previous-owner");
+            }
+            let publish = |now| {
+                assert!(matches!(
+                    refresh_heartbeat_with_clock(&directory, &request, true, &FakeClock::new(now)),
+                    Heartbeat::Published
+                ));
+            };
+            let publications = Cell::new(0);
+            let clock = WakeClock {
+                active: Cell::new(last_poll),
+                on_sleep: &|next| {
+                    if next == last_poll + POLL_MS {
+                        match action {
+                            NoUnseenTick => {}
+                            PublishedAfterDeadline => publish(old_deadline),
+                            _ => publish(unseen_tick),
+                        }
+                        return late_poll;
+                    }
+                    if next == late_poll + POLL_MS {
+                        match action {
+                            Renew => publish(next),
+                            CancelOwner => write_control(&cancel_path, &request.nonce),
+                            UnreadableCancel => fs::write(&cancel_path, b"{").unwrap(),
+                            Pause => {
+                                write_control(&directory.join("owner-pause.json"), &request.nonce)
+                            }
+                            ReplaceIdentity | ReplaceNonce => {
+                                let mut replacement = request.clone();
+                                replacement.timestamp_ms = next;
+                                if action == ReplaceIdentity {
+                                    replacement.parent.created ^= 1;
+                                } else {
+                                    replacement.nonce.push_str("-new");
+                                }
+                                write_json(&path, &replacement).unwrap();
+                            }
+                            _ => {}
+                        }
+                    }
+                    next
+                },
+            };
+            supervise_channels(
+                &HelperChannels::private(&directory),
+                &request,
+                &helper,
+                || {
+                    let count = publications.get() + 1;
+                    publications.set(count);
+                    if count == 2 {
+                        assert_eq!(action, Renew, "unexpected readiness from a stale record");
+                        write_control(&cancel_path, &request.nonce);
+                    }
+                    super::super::managed_backend::Snapshot::default()
+                },
+                || {},
+                &clock,
+                true,
+            )
+            .unwrap();
+            fs::remove_dir_all(&directory).unwrap();
+            let (expected_publications, ended) = match action {
+                Renew => (2, late_poll + 2 * POLL_MS),
+                FrozenWriter => (1, unseen_tick + DELAYED_HEARTBEAT_MAX_AGE_MS),
+                NoUnseenTick | PublishedAfterDeadline => (1, late_poll),
+                _ => (1, late_poll + POLL_MS),
+            };
+            assert_eq!(
+                (publications.get(), clock.active.get()),
+                (expected_publications, ended),
+                "{action:?}, late={late_ms} owner={owner_age_ms}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn supervisor_active_clock_api_failure_stops_status_publication() {
         let (directory, mut request, helper) = sharing_fixture("clock-failure");
         request.timestamp_ms = 10_000;
@@ -1741,6 +1961,7 @@ mod tests {
                 super::super::managed_backend::Snapshot::default,
                 || {},
                 &clock,
+                false,
             )
             .is_err()
         );
