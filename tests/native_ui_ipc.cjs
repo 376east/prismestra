@@ -234,6 +234,19 @@ assert.deepEqual(commands.at(-1),{op:'native_action',id:1811,fields:[{id:101,val
 assert.equal(bindingSaveDisabled(),true,'the save remains locked until the native acknowledgement');
 console.log('PASS: first click saves staged connection text only when the host can accept it');
 
+// First-time portable setup uses the existing native action bridge.
+const portableAction={id:1822,label:'Настроить локальный OpenRGB…',enabled:true};
+context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeForm:{page:'connections',fields:[],actions:[portableAction],notes:[]}}};
+vm.runInContext('formStages.clear();window.prismestraReceive(payload)',context);
+assert.match(find('#main').innerHTML,/data-native-action="1822"[^>]*>Настроить локальный OpenRGB…<\/button>/);
+const portableButton={dataset:{nativeAction:'1822'},disabled:false,hasAttribute:()=>false};
+events.click({target:{closest:()=>portableButton}});
+assert.deepEqual(commands.at(-1),{op:'native_action',id:1822,fields:[],editor_fields:[]});
+context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeForm:{page:'connections',fields:[],actions:[],notes:[]}}};
+vm.runInContext('window.prismestraReceive(payload)',context);
+assert.doesNotMatch(find('#main').innerHTML,/data-native-action="1822"/);
+console.log('PASS: portable OpenRGB setup appears and dispatches through the native action bridge');
+
 // The selected LCD can have a different index from its binding.
 const connectionDevices=['first-lcd','selected-lcd'].map(id=>({
  id,label:'LCD',role:'lcd',driver:{type:'tt_lcd'},leds:0,rate_hz:30,enabled:false
@@ -337,9 +350,23 @@ console.log('PASS: device cards select by logical identity and the draft dropdow
  assert.equal(status.textContent,'Подключаемся…');
  reply('rgb',first.request,'before','Identity changed');
  assert.equal(status.textContent,'Identity changed');
+ click();
+ assert.equal(commands.length,start+1,'a failure alone does not re-enable the last ticket');
  receive({kind:'status',state:{deviceActivity:{retryScope:'before',retryTickets:{},reasons:{}}}});
  assert(help.hidden);
  assert.equal(vm.runInContext('deviceStatus(state.devices[0])',context),'Недоступно');
+ receive({kind:'status',state:{deviceActivity:{retryScope:'before',retryTickets:{wled:'first'}}}});
+ click();
+ assert.equal(commands.length,start+1,'a ticket for another output cannot re-enable the selected one');
+ receive({kind:'status',state:{deviceActivity:{retryScope:'before',retryTickets:{rgb:'first'}}}});
+ assert.equal(disabled.get('aria-disabled'),'false','the host republished the selected output ticket');
+ click();click();
+ const republished=commands.at(-1);
+ assert.deepEqual(republished,{op:'retry_output',id:'rgb',ticket:'first',request:republished.request});
+ assert.equal(commands.length,start+2,'exactly one new attempt uses the republished ticket');
+ assert.notEqual(republished.request,first.request);
+ reply('rgb',first.request,'before','late rejection');
+ assert.equal(status.textContent,'Подключаемся…','the previous request cannot settle the new one');
  receive({kind:'snapshot',state:stateForScope('after','next')});
  click();
  assert.equal(status.textContent,'Подключаемся…');
@@ -461,13 +488,47 @@ console.log('PASS: candidate identity, applied precedence, metadata replacement,
  clickRetry();
  clickRetry();
  assert.deepEqual(commands.slice(before),[{op:'retry_startup_discovery'}]);
- receiveDeviceState('status',{startupDiscoveryRetry:false,deviceCandidates:[foundRgb]});
+ receiveDeviceState('status',{startupDiscoveryRetry:false,pending:true,deviceCandidates:[foundRgb]});
  assert.ok(hasCandidate(foundRgb.id));
+ assert.match(mainMarkup,/Настраивается автоматически/,'the late proposal is still being applied');
  assert.ok(!mainMarkup.includes('data-action="retry-startup-discovery"'));
  receiveDeviceState('snapshot',{...empty,startupDiscoveryRetry:false,devices:[{...foundRgb,leds:1}]});
  assert.ok(!hasCandidate(foundRgb.id),'committed device replaces the late proposal');
+ assert.match(mainMarkup,new RegExp(`data-device-id="${foundRgb.id}"`));
  console.log('PASS: one rescan from an empty profile; late candidate becomes an applied device');
 }
+{
+ const pending={...foundState,pending:true,deviceCandidates:[foundRgb],nativeAux:{
+  page:'devices',fields:[{id:714,label:'Семейство',kind:'select',enabled:true,value:'openrgb',choices:[]}],actions:[],notes:[],
+ }};
+ const before=commands.length;
+ receiveDeviceState('snapshot',pending);
+ assert.match(mainMarkup,/Prismestra добавляет найденное устройство в профиль/);
+ assert.match(mainMarkup,/Настраивается автоматически/);
+ assert.doesNotMatch(mainMarkup,/data-action="apply-document"|id="native-target"/);
+ receiveDeviceState('status',{pending:false,error:'Таймаут подключения'});
+ assert.ok(hasCandidate(foundRgb.id),'the stale discovery row is still present');
+ assert.doesNotMatch(mainMarkup,/Настраивается автоматически|Prismestra добавляет/);
+ assert.match(mainMarkup,/<button[^>]*data-action="focus-device-setup" data-mutation\s*>Добавить устройство/);
+ assert.match(mainMarkup,/id="native-target"/);
+ receiveDeviceState('snapshot',{...pending,pending:false});
+ assert.doesNotMatch(mainMarkup,/Настраивается автоматически|Prismestra добавляет/);
+ assert.match(mainMarkup,/data-action="focus-device-setup"/);
+ receiveDeviceState('status',{pending:true});
+ assert.match(mainMarkup,/Настраивается автоматически/,'a fresh active transition can show progress again');
+ assert.equal(commands.length,before,'candidate arrival must not issue a command');
+ receiveDeviceState('snapshot',{...pending,editor:{...pending.editor,dirty:true}});
+ assert.match(mainMarkup,/id="native-target"/,'existing edits keep their form');
+ receiveDeviceState('snapshot',{...pending,pending:false,deviceCandidates:[],error:'Подключение не применилось'});
+ assert.doesNotMatch(mainMarkup,/Настраивается автоматически/,'cancelled discovery restores the empty state');
+ assert.match(mainMarkup,/<button[^>]*data-action="focus-device-setup" data-mutation\s*>Добавить устройство/,
+  'a failed setup enables manual device setup');
+ receiveDeviceState('snapshot',{...pending,pending:false,deviceCandidates:[],devices:[{...foundRgb,leds:1}],
+  editor:{page:'devices',index:0,targets:[foundRgb.label],fields:[],dirty:false}});
+ assert.match(mainMarkup,/id="native-target"/,'properties return after the output is applied');
+ assert.doesNotMatch(mainMarkup,/Настраивается автоматически/);
+}
+console.log('PASS: first discovered output presents automatic setup until it becomes configurable');
 
 vm.runInContext('view="devices";state.editor={page:"devices",index:0,targets:["Strip"],fields:[],dirty:false};state.detail="Ошибка RGB: <test>";render()',context);
 assert.ok(find('#main').innerHTML.includes('Ошибка RGB: &lt;test&gt;'));
