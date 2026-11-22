@@ -464,7 +464,8 @@ function renderDevices(candidates) {
 }
 function renderNativeForm(form=nativeFormForView()) {
  if(!form||form.page!==view)return '<div class="native-wait" role="status">Загрузка настроек…</div>';
- return `<section class="native-properties"><div class="parameter-panel"><div class="native-form">${form.fields.map((field,index)=>{
+ const notice=form.notice?`<p class="parameter-note" role="status">${esc(form.notice)}</p>`:'';
+ return `<section class="native-properties"><div class="parameter-panel">${notice}<div class="native-form">${form.fields.map((field,index)=>{
   const id='native-field-'+index,common=`id="${id}" data-native-field="${esc(field.id)}" data-native-kind="${esc(field.kind)}" data-native-control ${nativeControlDisabled({dataset:{nativeField:String(field.id)}})?'disabled':''}`;
   if(field.kind==='checkbox')return `<label class="native-group" for="${id}"><input type="checkbox" ${common} ${field.value==='true'?'checked':''}>${esc(field.label)}</label>`;
   const control=field.kind==='select'?`<select ${common}>${!field.choices.some(choice=>String(choice.value)===String(field.value))?'<option value="" disabled selected>Выберите…</option>':''}${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===field.value?'selected':''}>${esc(choice.label)}</option>`).join('')}</select>`:`<input ${common} type="${field.kind==='secret'?'password':'text'}" autocomplete="off" value="${field.kind==='secret'?'':esc(nativeValue(field))}">`;

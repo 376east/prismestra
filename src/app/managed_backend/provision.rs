@@ -34,7 +34,11 @@ fn entry_present(path: &Path) -> Result<bool, String> {
 }
 
 pub(crate) fn initial_available(state: &Path) -> Result<bool, String> {
-    Ok(!entry_present(&state.join(CONFIG_FILE))? && !entry_present(&state.join(HELPER_FILE))?)
+    Ok(!entry_present(&state.join(CONFIG_FILE))? && !helper_reference_present(state)?)
+}
+
+pub(crate) fn helper_reference_present(state: &Path) -> Result<bool, String> {
+    entry_present(&state.join(HELPER_FILE))
 }
 
 fn image_pin(file: &File) -> Result<String, String> {
@@ -108,7 +112,7 @@ pub(crate) fn configure(
     if previous.as_ref() == Some(&next) {
         return Ok(Outcome::Unchanged);
     }
-    if entry_present(&state.join(HELPER_FILE))? {
+    if helper_reference_present(state)? {
         return Err("Настройка не изменена: сначала согласуйте новый OpenRGB с авторизованной задачей. Ссылка на задачу сохранена.".into());
     }
     if !confirm(
@@ -118,7 +122,7 @@ pub(crate) fn configure(
     ) {
         return Ok(Outcome::Cancelled);
     }
-    if entry_present(&state.join(HELPER_FILE))? || Config::read_saved(state)? != previous {
+    if helper_reference_present(state)? || Config::read_saved(state)? != previous {
         return Err(
             "Настройки OpenRGB изменились во время подтверждения. Повторите попытку.".into(),
         );
@@ -149,8 +153,10 @@ mod tests {
         let settings = state.join(CONFIG_FILE);
         let helper = state.join(HELPER_FILE);
         assert!(initial_available(&state).unwrap());
+        assert!(!helper_reference_present(&state).unwrap());
         fs::write(&helper, b"foreign task reference").unwrap();
         assert!(!initial_available(&state).unwrap());
+        assert!(helper_reference_present(&state).unwrap());
         fs::remove_file(&helper).unwrap();
         fs::write(&sdk, b"synthetic SDK revision one").unwrap();
         let configure = |confirm: fn(bool, &str, SocketAddr) -> bool| {
