@@ -53,7 +53,8 @@ def load_or_build_component(root, vsdevcmd, cache, key, *, write_cache=False):
 def package_candidate(root, commit, version, component, prerequisites, iscc, pawnio):
     release = root / "release"
     run("cargo", "fetch", "--locked")
-    recipe("package_release.py", "--expected-commit", commit, "--output", release)
+    recipe("package_release.py", "--expected-commit", commit, "--output", release,
+           "--include-upgrade-route-probe")
     binary = release / "binary/Prismestra"
     manifest = read(binary / "release-manifest.json")
     common = ["--app-exe", binary / "Prismestra.exe", "--app-sha256", manifest["executable_sha256"],
@@ -81,6 +82,9 @@ def package_candidate(root, commit, version, component, prerequisites, iscc, paw
     fixtures = root / "fixtures"
     namespace = str(uuid.uuid4())
     (fixtures / "first").mkdir(parents=True)
+    route_probe = fixtures / "setup_upgrade_routes.exe"
+    shutil.copyfile(release / "build/x86_64-pc-windows-msvc/release/examples" / route_probe.name, route_probe)
+    (fixtures / "upgrade-routes.sha256").write_text(sha256(route_probe) + "\n", encoding="ascii")
     shutil.copyfile(production / "stage/prerequisites" / WEBVIEW_PROBE, fixtures / WEBVIEW_PROBE)
     (fixtures / "webview-probe.sha256").write_text(receipt["webview_probe_sha256"] + "\n", encoding="ascii")
     (fixtures / "namespace.txt").write_text(namespace + "\n", encoding="ascii")

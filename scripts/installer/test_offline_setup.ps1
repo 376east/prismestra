@@ -6,6 +6,8 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string]$ManifestSha256,
     [Parameter(Mandatory)][string]$ReportDirectory,
     [string]$PreviousInstaller,
+    [string]$UpgradeRouteProbe,
+    [ValidatePattern('^[0-9a-f]{64}$')][string]$UpgradeRouteProbeSha256,
     [switch]$DisposableRunner
 )
 
@@ -31,6 +33,8 @@ $arpKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{${appId}}_
 $policyKey = "HKLM:\SOFTWARE\Prismestra\Installer\$appId"
 $policyDirectory = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) (
     'Prismestra\Policies\' + $identity.User.Value)
+$configurationDirectory = Join-Path $policyDirectory 'config'
+$configurationPath = Join-Path $configurationDirectory 'Configuration.json'
 $taskName = 'Prismestra-Backend-' + $identity.User.Value
 $startupKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $pawnKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\PawnIO'
@@ -189,12 +193,8 @@ function Get-RegisteredUninstaller {
     $uninstaller
 }
 
-function Test-ManagedUninstall([string]$CurrentHash, [string]$PreviousHash) {
-    Assert-Expected ($CurrentHash -cne $PreviousHash) 'Managed uninstall requires two distinct application pins.'
+function New-FixturePolicyTree {
     $sid = $identity.User.Value
-    $scheduler = New-Object -ComObject 'Schedule.Service'
-    $scheduler.Connect()
-    $folder = $scheduler.GetFolder('\')
     $policies = Split-Path -Parent $policyDirectory
     $data = Split-Path -Parent $policies
     foreach ($path in @($data, $policies, $policyDirectory)) {
@@ -202,7 +202,69 @@ function Test-ManagedUninstall([string]$CurrentHash, [string]$PreviousHash) {
         $acl = [Security.AccessControl.DirectorySecurity]::new()
         $acl.SetSecurityDescriptorSddlForm("O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FRFX;;;$reader)")
         $null = [IO.FileSystemAclExtensions]::Create([IO.DirectoryInfo]::new($path), $acl)
+        $directory = Get-Item -LiteralPath $path -Force
+        Assert-Expected ($directory.PSIsContainer -and -not ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) (
+            'Unexpected directory in the protected fixture policy tree.')
     }
+}
+
+function Set-FixtureFileAcl([string]$Path) {
+    $sid = $identity.User.Value
+    $acl = [Security.AccessControl.FileSecurity]::new()
+    $acl.SetSecurityDescriptorSddlForm("O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FRFX;;;$sid)")
+    [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($Path), $acl)
+}
+
+function Initialize-ConfigurationFixture {
+    New-FixturePolicyTree
+    Assert-Expected (-not (Test-Path -LiteralPath $configurationPath)) 'Expected an empty protected OpenRGB configuration.'
+    $sid = $identity.User.Value
+    $acl = [Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetSecurityDescriptorSddlForm("O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FRFX;;;$sid)")
+    $null = [IO.FileSystemAclExtensions]::Create([IO.DirectoryInfo]::new($configurationDirectory), $acl)
+    $directory = Get-Item -LiteralPath $configurationDirectory -Force
+    Assert-Expected ($directory.PSIsContainer -and -not ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) (
+        'Expected a regular protected configuration directory.')
+    $bytes = [Text.Encoding]::UTF8.GetBytes('{"profile_version":6,"profile_name":"Controller Configuration","controllers":[]}')
+    $file = [IO.File]::Open($configurationPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+    try { $file.Write($bytes, 0, $bytes.Length) } finally { $file.Dispose() }
+    Set-FixtureFileAcl $configurationPath
+}
+
+function Read-ConfigurationEvidence {
+    $file = Get-Item -LiteralPath $configurationPath -Force
+    $directory = Get-Item -LiteralPath $configurationDirectory -Force
+    Assert-Expected (-not $file.PSIsContainer -and $directory.PSIsContainer -and
+        -not (($file.Attributes -bor $directory.Attributes) -band [IO.FileAttributes]::ReparsePoint)) (
+        'Expected a regular protected configuration and directory.')
+    $fileAcl = Get-Acl -LiteralPath $configurationPath
+    $directoryAcl = Get-Acl -LiteralPath $configurationDirectory
+    Assert-Expected ($fileAcl.AreAccessRulesProtected -and $directoryAcl.AreAccessRulesProtected) (
+        'Protected configuration ACL inheritance changed.')
+    $sddl = [Text.Encoding]::UTF8.GetBytes($fileAcl.Sddl + "`n" + $directoryAcl.Sddl)
+    [ordered]@{
+        sha256 = Get-Sha256 $configurationPath
+        acl_sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($sddl)).ToLowerInvariant()
+    }
+}
+
+function Invoke-UpgradeRouteProbe([string]$Operation) {
+    $output = & $UpgradeRouteProbe $Operation $userRoot
+    Assert-Expected ($LASTEXITCODE -eq 0) "The upgrade route probe failed during $Operation."
+    if ($Operation -eq 'verify') {
+        $result = $output | ConvertFrom-Json
+        Assert-Expected ($result.routes.Count -eq 5) 'The upgrade route probe did not resolve five routes.'
+        return $result
+    }
+}
+
+function Test-ManagedUninstall([string]$CurrentHash, [string]$PreviousHash) {
+    Assert-Expected ($CurrentHash -cne $PreviousHash) 'Managed uninstall requires two distinct application pins.'
+    $sid = $identity.User.Value
+    $scheduler = New-Object -ComObject 'Schedule.Service'
+    $scheduler.Connect()
+    $folder = $scheduler.GetFolder('\')
+    New-FixturePolicyTree
     $record = @{ version = 1; executable = $image; sid = $sid; app_sha256 = $CurrentHash; previous_app_sha256 = $PreviousHash }
     $policy = @{ version = 1; sid = $sid; endpoint = '127.0.0.1:17422'; app_sha256 = $PreviousHash; runtime_sha256 = @{} }
     $pins = @{}
@@ -210,9 +272,7 @@ function Test-ManagedUninstall([string]$CurrentHash, [string]$PreviousHash) {
         $value = if ($file -eq 'installation') { $record } else { $policy }
         $path = Join-Path $policyDirectory "$file.json"
         [IO.File]::WriteAllText($path, ($value | ConvertTo-Json -Compress))
-        $acl = [Security.AccessControl.FileSecurity]::new()
-        $acl.SetSecurityDescriptorSddlForm("O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FRFX;;;$sid)")
-        [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($path), $acl)
+        Set-FixtureFileAcl $path
         $pins[$path] = Get-Sha256 $path
     }
     $null = New-Item -Path $policyKey -Force
@@ -299,6 +359,14 @@ $receiptName = 'offline-setup.json'
 if ($PreviousInstaller) {
     $receipt.scope = 'production_upgrade_lifecycle'
     $receiptName = 'production-upgrade.json'
+    $temperatureEvidence = [ordered]@{
+        commit = $Commit; installer_sha256 = $Sha256; scope = 'saved_catalog_resolution'
+        result = 'incomplete'; before = $null; after = $null
+    }
+    $configurationEvidence = [ordered]@{
+        commit = $Commit; installer_sha256 = $Sha256; scope = 'preexisting_protected_fixture'
+        result = 'incomplete'; before = $null; after = $null
+    }
 }
 try {
     $installerPath = (Resolve-Path -LiteralPath $Installer).Path
@@ -311,6 +379,13 @@ try {
     # No optional PawnIO, launch or autostart selections.
     $options = '/SP- /TASKS="" /RESTARTEXITCODE=3010'
     if ($PreviousInstaller) {
+        Assert-Expected ($UpgradeRouteProbe -and $UpgradeRouteProbeSha256) 'Missing the exact-run upgrade route probe.'
+        $UpgradeRouteProbe = (Resolve-Path -LiteralPath $UpgradeRouteProbe).Path
+        $probe = Get-Item -LiteralPath $UpgradeRouteProbe
+        Assert-Expected ($probe.Name -ceq 'setup_upgrade_routes.exe' -and -not $probe.PSIsContainer -and
+            -not ($probe.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+            (Get-Sha256 $UpgradeRouteProbe) -ceq $UpgradeRouteProbeSha256) 'Unexpected upgrade route probe.'
+        $temperatureEvidence.probe_sha256 = $UpgradeRouteProbeSha256
         Assert-Expected (-not (Test-Path -LiteralPath $userRoot)) 'Upgrade requires a fresh runner profile.'
         $baseline = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'upgrade-baseline.lock.json') -Raw | ConvertFrom-Json
         $previous = Get-Item -LiteralPath $PreviousInstaller
@@ -336,17 +411,22 @@ try {
         }
         Assert-Expected (-not (Test-Path -LiteralPath $userRoot)) 'Previous Setup touched the synthetic profile location.'
         [void][IO.Directory]::CreateDirectory((Join-Path $userRoot 'state/assets'))
+        Invoke-UpgradeRouteProbe seed
+        $temperatureEvidence.before = Invoke-UpgradeRouteProbe verify
         $files = [ordered]@{
-            'profile.json' = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'upgrade-profile.fixture.json') -Raw
             'state/lighting-local.json' = '{"version":1,"devices":{},"monitors":{"monitors":[]},"door_brightness":80}'
             'state/assets/ci-upgrade.txt' = 'Synthetic Prismestra upgrade fixture.'
         }
         foreach ($name in $files.Keys) {
             $path = Join-Path $userRoot $name
             [IO.File]::WriteAllText($path, $files[$name], [Text.UTF8Encoding]::new($false))
-            $savedData[$name] = Get-Sha256 $path
+        }
+        foreach ($name in (@('profile.json', 'state/sensor-sources.json') + @($files.Keys))) {
+            $savedData[$name] = Get-Sha256 (Join-Path $userRoot $name)
         }
         $receipt.saved_data_sha256 = $savedData
+        Initialize-ConfigurationFixture
+        $configurationEvidence.before = Read-ConfigurationEvidence
     }
     $setupAttempted = $true
     $receipt.setup_exit_code = Invoke-Installer $installerPath $options $setupLog
@@ -393,6 +473,15 @@ try {
         foreach ($name in $savedData.Keys) {
             Assert-Expected ((Get-Sha256 (Join-Path $userRoot $name)) -ceq $savedData[$name]) "Upgrade changed synthetic data: $name"
         }
+        $temperatureEvidence.after = Invoke-UpgradeRouteProbe verify
+        Assert-Expected (($temperatureEvidence.before | ConvertTo-Json -Depth 6 -Compress) -ceq
+            ($temperatureEvidence.after | ConvertTo-Json -Depth 6 -Compress)) 'Upgrade changed the resolved temperature routes.'
+        $temperatureEvidence.result = 'passed'
+        $configurationEvidence.after = Read-ConfigurationEvidence
+        Assert-Expected ($configurationEvidence.before.sha256 -ceq $configurationEvidence.after.sha256 -and
+            $configurationEvidence.before.acl_sha256 -ceq $configurationEvidence.after.acl_sha256) (
+            'Upgrade changed protected OpenRGB Configuration.json bytes or ACLs.')
+        $configurationEvidence.result = 'passed'
         $receipt.upgrade_verified = $true
     }
     $receipt.installer_version = $manifest.installer_version
@@ -438,6 +527,10 @@ try {
         $receipt.result = 'reboot_required_incomplete'
     }
     $receipt.errors = $failures.ToArray()
+    if ($PreviousInstaller) {
+        $temperatureEvidence | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $report 'temperature-routes.json') -Encoding UTF8
+        $configurationEvidence | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $report 'openrgb-configuration.json') -Encoding UTF8
+    }
     $receipt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $report $receiptName) -Encoding UTF8
 }
 

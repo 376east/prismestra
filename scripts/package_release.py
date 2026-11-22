@@ -104,6 +104,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--include-upgrade-route-probe", action="store_true")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parent.parent
     clean_commit(repo, args.expected_commit)
@@ -136,9 +137,12 @@ def main():
                               "--format-version", "1", cwd=source, env=build_env))
     packages = inventory(metadata)
     build = stage / "build"
+    targets = ["--bin", "pc-control-ui"]
+    if args.include_upgrade_route_probe:
+        targets += ["--example", "setup_upgrade_routes"]
     subprocess.run(["cargo", "build", "--release", "--locked", "--offline",
-                    "--target", target, "--target-dir", str(build),
-                    "--bin", "pc-control-ui"], cwd=source, env=build_env, check=True)
+                    "--target", target, "--target-dir", str(build), *targets],
+                   cwd=source, env=build_env, check=True)
     clean_commit(repo, args.expected_commit)
     binary = stage / "binary" / "Prismestra"
     binary.mkdir(parents=True)
