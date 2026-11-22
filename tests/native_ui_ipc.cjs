@@ -803,6 +803,7 @@ console.log('PASS: restored capture is inert and can be explicitly applied witho
   dataset:{[key]:'night'},hasAttribute:name=>name==='data-mutation'&&key!=='preview',
  })}});
  const status=find('#scene-activation-night');
+ const devices=find('#scene-devices-night');
  const before=commands.length;
  click('preview');
  assert.equal(find('#library-preview-dialog').open,true);
@@ -813,6 +814,7 @@ console.log('PASS: restored capture is inert and can be explicitly applied witho
  assert.deepEqual(apply,{op:'apply_scene',scene:entry.scene,request:apply.request});
  assert.deepEqual(commands.slice(before).filter(command=>command.op==='apply_scene'),[apply]);
  assert.match(status.textContent,/Включаем/);
+ assert.equal(devices.hidden,true);
  receiveDeviceState('snapshot',{...libraryState,scene:entry.scene});
  receiveDeviceState('status',{scene:entry.scene,pending:false});
  assert.match(status.textContent,/Включаем/,'snapshots and unrelated status cannot confirm even the same scene');
@@ -822,13 +824,17 @@ console.log('PASS: restored capture is inert and can be explicitly applied witho
  assert.match(status.textContent,/Включаем/);
  reply(apply.request,'failed','Устройство недоступно.');
  assert.match(status.textContent,/Не удалось включить.*Устройство недоступно/);
+ assert.equal(devices.hidden,true);
  click('apply');
  const second=commands.at(-1);
  assert.notEqual(second.request,apply.request);
  reply(apply.request,'applied');
  assert.match(status.textContent,/Включаем/);
- reply(second.request,'applied','Режим предпросмотра.');
- assert.equal(status.textContent,'Сцена «Ночная» применена. Режим предпросмотра.');
+ reply(second.request,'applied');
+ assert.equal(status.textContent,'Сцена «Ночная» применена.');
+ assert.equal(devices.hidden,false);
+ receiveDeviceState('status',{native:false});
+ assert.equal(devices.hidden,true,'hardware status is not offered in preview');
  assert.equal(viewNow(),'library');
  assert.equal(vm.runInContext('draft.brightness',context),65,'activation does not replace the editor draft');
 }

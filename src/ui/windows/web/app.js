@@ -215,11 +215,7 @@ function syncControls(keepRetryFocus) {
  $('#player-name').textContent=state?effectLabel(state.scene.effect):'Prismestra';
  $('#player-status').textContent=state?.status||'Подключение к приложению…';
  const runtimeDetail=$('#native-runtime-detail');if(runtimeDetail)runtimeDetail.textContent=state?.detail||'';
- const activationStatus=sceneActivation&&$('#scene-activation-'+CSS.escape(sceneActivation.id));
- if(activationStatus){
-  const message=sceneActivation?.message||'';
-  if(activationStatus.textContent!==message)activationStatus.textContent=message;
- }
+ if(sceneActivation)syncSceneActivation(sceneActivation.id,sceneActivation);
  const audioSource=$('#scene-audio-source');
  if(audioSource)audioSource.textContent=state?.native
   ? state.audioError&&audioEffects.has(state.scene.effect)?'Системный звук недоступен. Повторяю подключение.'
@@ -274,6 +270,7 @@ function renderLibrary() {
      ${item.builtIn?'':`<button class="icon-button" data-remove="${esc(item.id)}" aria-label="Удалить: ${esc(item.name)}" data-mutation ${disabled()}>${icon('trash')}</button>`}
     </div>
     <div id="scene-activation-${esc(item.id)}" class="scene-activation-status" role="status" aria-atomic="true"></div>
+    <button id="scene-devices-${esc(item.id)}" class="button scene-devices" data-view="devices" hidden>Проверить устройства</button>
    </div>
   </article>`).join('');
  return heading('Сцены','Сцены сохраняют параметры RGB. Устройства и LCD сохраняются в профиле.',action(icon('plus')+' Новая сцена','new',true))+`
@@ -589,10 +586,17 @@ function previewLibraryEntry(entry) {
 function activateLibraryEntry(entry) {
  const request=++sceneActivationRequest;
  if(!send({op:'apply_scene',scene:clone(entry.scene),request},true))return;
- const previousStatus=sceneActivation&&$('#scene-activation-'+CSS.escape(sceneActivation.id));
- if(previousStatus)previousStatus.textContent='';
+ if(sceneActivation)syncSceneActivation(sceneActivation.id,null);
  sceneActivation={request,id:entry.id,name:entry.name,pending:true,message:`Включаем «${entry.name}»…`};
  syncControls();
+}
+function syncSceneActivation(id,result) {
+ const key=CSS.escape(id);
+ const status=$('#scene-activation-'+key);
+ const message=result?.message||'';
+ if(status&&status.textContent!==message)status.textContent=message;
+ const devices=$('#scene-devices-'+key);
+ if(devices)devices.hidden=!(result?.applied&&state?.native);
 }
 function receiveSceneActivation({request,status,message}) {
  if(!sceneActivation?.pending||request!==sceneActivation.request)return;
@@ -600,6 +604,7 @@ function receiveSceneActivation({request,status,message}) {
  else if(status==='failed')sceneActivation.message=`Не удалось включить «${sceneActivation.name}».${message?' '+message:''}`;
  else return;
  sceneActivation.pending=false;
+ sceneActivation.applied=status==='applied';
  syncControls();
 }
 function closeDraftSwitch() {

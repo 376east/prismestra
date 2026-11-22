@@ -25,6 +25,7 @@ nav button.active,#appearance-toggle[aria-expanded=true]{background:var(--ui-sel
 .card-actions .primary[aria-disabled="true"]{filter:none;opacity:.65;cursor:default}
 .scene-activation-status:empty{position:absolute}
 .scene-activation-status{color:var(--ui-muted);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.scene-devices{justify-self:start;height:auto;min-height:var(--command-height);max-width:100%;padding:4px 12px;white-space:normal}
 #library-preview-description{margin-top:8px}
 .scene-title small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .empty{grid-column:1/-1;padding:36px 24px;border-radius:var(--radius-panel);background:var(--ui-panel)}.empty h2{font-size:20px;line-height:26px;margin-bottom:8px}.empty p{font-size:14px;line-height:20px;color:var(--ui-muted);max-width:48ch}
