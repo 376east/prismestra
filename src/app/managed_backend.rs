@@ -1,5 +1,5 @@
 //! Explicit, application-owned headless OpenRGB process. Never adopts a listener.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
@@ -24,7 +24,10 @@ const POLL: Duration = Duration::from_millis(100);
 // to finish before falling back to termination of the owned child only.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Debug, Deserialize)]
+#[cfg(windows)]
+pub(crate) mod provision;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     version: u32,
@@ -40,6 +43,10 @@ pub struct Config {
 
 impl Config {
     pub fn read_optional(state_dir: &Path) -> Result<Option<Self>, String> {
+        Ok(Self::read_saved(state_dir)?.filter(|config| config.enabled))
+    }
+
+    fn read_saved(state_dir: &Path) -> Result<Option<Self>, String> {
         let path = state_dir.join("managed-openrgb.json");
         match fs::symlink_metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -59,7 +66,7 @@ impl Config {
         let config: Self =
             serde_json::from_slice(&bytes).map_err(|e| format!("Managed OpenRGB config: {e}"))?;
         config.validate()?;
-        Ok(config.enabled.then_some(config))
+        Ok(Some(config))
     }
 
     pub fn endpoint(&self) -> SocketAddr {

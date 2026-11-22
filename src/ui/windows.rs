@@ -3004,6 +3004,13 @@ fn native_sources_allowed(snapshot: bool, selftest: bool) -> bool {
     !snapshot && !selftest
 }
 fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Result<(), String> {
+    if installed.is_none()
+        && args
+            .first()
+            .is_some_and(|arg| arg == "--configure-portable-openrgb")
+    {
+        return portable::configure_openrgb(&args[1..]);
+    }
     let (args, portable_exe) = if installed.is_none() {
         portable::resolve(args)?
     } else {
