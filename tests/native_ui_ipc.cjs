@@ -1,6 +1,7 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict'),path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'..','src','ui','windows','web','app.js'),'utf8');
 const outputMapSource=fs.readFileSync(path.join(__dirname,'..','src','ui','windows','web','output-map.js'),'utf8');
+new vm.Script(fs.readFileSync(path.join(__dirname,'..','src','ui','windows','web','argb-channel.js'),'utf8'));
 const nodes=new Map(),commands=[],events={},rafQueue=[];
 class Node {constructor(){this.tagName='INPUT';this.validity={valid:true};this.dataset={};this.width=104;this.height=72;this.value='';this.disabled=false;this.innerHTML='';this.textContent='';}setAttribute(){}focus(){document.activeElement=this;}select(){}hasAttribute(name){return name==='data-target'&&this.dataset.target!==undefined;}before(){}append(){}addEventListener(){}setCustomValidity(){}reportValidity(){}showModal(){this.open=true;}close(){this.open=false;}getContext(){return {fillRect(){},clearRect(){},createImageData:(w,h)=>({data:new Uint8ClampedArray(w*h*4)}),putImageData:pixels=>{this.lastPixels=pixels;}};}}
 const find=s=>{if(!nodes.has(s))nodes.set(s,new Node());return nodes.get(s);};
@@ -846,3 +847,33 @@ console.log('PASS: restored capture is inert and can be explicitly applied witho
  assert.equal(vm.runInContext('draft.brightness',context),65,'activation does not replace the editor draft');
 }
 console.log('PASS: scene activation survives an unrelated error, ignores stale replies, and settles only on matching rejection or success');
+
+{
+ const controller={id:'argb-controller',label:'Контроллер ARGB',role:'canvas',driver:{type:'openrgb'},leds:1,rate_hz:25,enabled:true};
+ const editor={page:'devices',index:0,targets:[controller.label],fields:[],dirty:false};
+ const snapshot={...initial,devices:[controller],draftDevices:[controller],editor};
+ vm.runInContext('view="devices";pendingView=null',context);
+ receiveDeviceState('snapshot',snapshot);
+ assert.doesNotMatch(mainMarkup,/id="open-argb"/);
+ receiveDeviceState('status',{argbDevice:controller.id});
+ assert.match(mainMarkup,/id="open-argb"[^>]*>Каналы ARGB/);
+ let reply;
+ context.window.argbChannel={
+  open(device,label,api){
+   assert.equal(label,controller.label);
+   assert.equal(api.save,undefined,'read-only editor registers no write callback');
+   return api.list({device,request:31});
+  },
+  receive(message){reply=message;},
+ };
+ events.click({target:{closest:()=>({
+  dataset:{action:'open-argb'},hasAttribute:name=>name==='data-mutation',
+ })}});
+ assert.deepEqual(commands.at(-1),{op:'argb_channels',device:controller.id,request:31});
+ const inventory={kind:'argb_channels',device:controller.id,request:31,status:'ready',writable:false,channels:[]};
+ vm.runInContext('window.prismestraReceive('+JSON.stringify(inventory)+')',context);
+ assert.deepEqual(JSON.parse(JSON.stringify(reply)),inventory);
+ receiveDeviceState('status',{argbDevice:null});
+ assert.doesNotMatch(mainMarkup,/id="open-argb"/);
+}
+console.log('PASS: selected managed ARGB device exposes a read-only IPC route and removes it when unavailable');

@@ -364,9 +364,11 @@ function sceneParameters() {
 function nativeProperties() {
  const editor=state.editor;
  if(!editor || editor.page!==view)return state.nativeAux?.page===view?renderNativeForm(state.nativeAux):'<div class="native-wait">Настройки загружаются…</div>';
+ const argb=view==='devices'&&state.argbDevice
+  ? '<button id="open-argb" class="button" data-action="open-argb" data-mutation>Каналы ARGB</button>' : '';
  const repair=state.devices.some(device=>device.id===editor.deviceId)
   ? `<button class="button" data-view="connections" data-connection-device="${esc(editor.deviceId)}" data-mutation ${disabled()}>Открыть подключение устройства</button>` : '';
- return `<section class="native-properties"><div class="native-inline"><label for="native-target">Объект</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${view==='devices'&&editor.index>=editor.targets.length?'<option value="" disabled selected>Выберите устройство…</option>':''}${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select>${repair}</div><div class="parameter-panel"><p class="parameter-note" id="native-runtime-detail"${view==='devices'?'':' role="status"'}>${esc(state.detail||'')}</p><div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>Выбрать…</button>`:''}</div>`}${field.hint?`<small>${esc(field.hint)}</small>`:''}</div>`).join('')||'<p class="muted">Параметров объекта нет.</p>'}</div><div class="native-property-actions">${action('Применить','apply-document',true,'data-needs-change="document"')}${action('Отменить изменения','revert-document')}${action('Повторить','retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
+ return `<section class="native-properties"><div class="native-inline"><label for="native-target">Объект</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${view==='devices'&&editor.index>=editor.targets.length?'<option value="" disabled selected>Выберите устройство…</option>':''}${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select>${repair}${argb}</div><div class="parameter-panel"><p class="parameter-note" id="native-runtime-detail"${view==='devices'?'':' role="status"'}>${esc(state.detail||'')}</p><div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>Выбрать…</button>`:''}</div>`}${field.hint?`<small>${esc(field.hint)}</small>`:''}</div>`).join('')||'<p class="muted">Параметров объекта нет.</p>'}</div><div class="native-property-actions">${action('Применить','apply-document',true,'data-needs-change="document"')}${action('Отменить изменения','revert-document')}${action('Повторить','retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
 }
 function deviceStatus(device) {
  if(!device)return '';
@@ -633,6 +635,7 @@ window.prismestraReceive = message => {
  try {
   if(typeof message==='string')message=JSON.parse(message);
   if(message.kind==='output_preview'){window.outputMap?.receive(message);return;}
+  if(message.kind==='argb_channels'){window.argbChannel?.receive(message);return;}
   if(message.kind==='output_retry'){receiveOutputRetry(message);return;}
   if(message.kind==='scene_activation'){receiveSceneActivation(message);return;}
   if(message.kind==='flush'){
@@ -686,7 +689,10 @@ window.prismestraReceive = message => {
    followActiveScene();
    render();if(!busy())flushPreview();
   } else if(message.kind==='status'&&state) {
-   const foundChanged=view==='devices'&&Object.hasOwn(message.state,'deviceCandidates')&&!same(state.deviceCandidates,message.state.deviceCandidates);
+   const foundChanged=view==='devices'&&(
+    (Object.hasOwn(message.state,'deviceCandidates')&&!same(state.deviceCandidates,message.state.deviceCandidates)) ||
+    (Object.hasOwn(message.state,'argbDevice')&&state.argbDevice!==message.state.argbDevice)
+   );
    const nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));
    if(message.state.deviceActivity&&retryScope()!==message.state.deviceActivity.retryScope)outputRetries.clear();
    Object.assign(state,message.state);
@@ -748,6 +754,14 @@ document.addEventListener('click',event=>{
   return;
  }
  switch(b.dataset.action){
+ case 'open-argb': {
+  const device=state?.devices.find(item=>item.id===state.argbDevice);
+  if(device&&view==='devices')window.argbChannel?.open(device.id,device.label,{
+   list: request=>send({op:'argb_channels',...request}),
+   restoreFocus: ()=>restoreFocus('#open-argb'),
+  });
+  break;
+ }
  case 'focus-device-setup':$(`[data-native-field="${devicePresetField}"]`)?.focus();break;
  case 'new':case 'clone':case 'rename':return nameDialog(b.dataset.action);
  case 'save-scene':return nameDialog('save');

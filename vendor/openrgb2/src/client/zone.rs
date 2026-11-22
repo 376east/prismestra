@@ -45,9 +45,9 @@ impl<'c> Zone<'c> {
         }
     }
 
-    /// Settings flags reported by the SDK, when supported by the server.
-    pub fn flags(&self) -> Option<crate::FlagSet<crate::ZoneFlags>> {
-        self.zone_data.flags.value().copied()
+    /// Capability flags supplied by the controller, when supported by the SDK.
+    pub fn flags(&self) -> Option<&crate::ZoneFlags> {
+        self.zone_data.flags.value()
     }
 
     delegate::delegate! {

@@ -126,9 +126,13 @@ pub(super) struct InstalledPolicy {
 
 impl InstalledPolicy {
     pub(super) fn supports_exact_zone_location(&self) -> bool {
-        const PATCH: &str = include_str!("../../components/openrgb/prismestra-pc.patch");
+        const EXACT_ZONE_PATCH_SHA256: &str =
+            "fb59982e531fbbe8d9b659ded0247a15546fbdc231050eff253d0a6f4cc9a19c";
         let valid = || -> Option<()> {
-            if !PATCH.contains("prismestra_require_exact_location") {
+            let lock: serde_json::Value =
+                serde_json::from_str(include_str!("../../components/openrgb/source-lock.json"))
+                    .ok()?;
+            if lock["patch_sha256"].as_str()? != EXACT_ZONE_PATCH_SHA256 {
                 return None;
             }
             let component = self.backend.parent()?.parent()?;
@@ -142,15 +146,8 @@ impl InstalledPolicy {
                 .read_to_end(&mut bytes)
                 .ok()?;
             let manifest = super::strict_json::unique_json(&bytes, 2 * 1024 * 1024).ok()?;
-            let lock: serde_json::Value =
-                serde_json::from_str(include_str!("../../components/openrgb/source-lock.json"))
-                    .ok()?;
-            exact_zone_component(
-                &manifest,
-                &self.backend_sha256,
-                lock["patch_sha256"].as_str()?,
-            )
-            .then_some(())
+            exact_zone_component(&manifest, &self.backend_sha256, EXACT_ZONE_PATCH_SHA256)
+                .then_some(())
         };
         valid().is_some()
     }
