@@ -37,6 +37,8 @@ const REVERT_OUTPUTS: i32 = 1819;
 const ACTIVE_STATUS: i32 = 1820;
 const SAVE_KEY: i32 = 1821;
 pub(super) const CONFIGURE_PORTABLE_OPENRGB: i32 = 1822;
+const PORTABLE_HELPER_NOTE: i32 = 1823;
+const PORTABLE_HELPER_MESSAGE: &str = "Настройки локального OpenRGB заблокированы существующей авторизацией. Ссылка на задачу находится в data/state/backend-task.json в папке Prismestra. Для замены OpenRGB обратитесь к администратору, который авторизовал задачу.";
 type PlanFactory = std::sync::Arc<
     dyn Fn(
             &crate::app::lighting_outputs::Local,
@@ -64,7 +66,7 @@ struct Pending {
 }
 
 pub(super) fn is_control(id: i32) -> bool {
-    (TARGET_LABEL..=CONFIGURE_PORTABLE_OPENRGB).contains(&id)
+    (TARGET_LABEL..=PORTABLE_HELPER_NOTE).contains(&id)
 }
 pub(super) struct Editor {
     activation: Option<Activation>,
@@ -251,13 +253,29 @@ impl App {
             "",
             ES_READONLY as u32 | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | WS_VSCROLL,
         )?;
+        self.control(
+            parent,
+            PORTABLE_HELPER_NOTE,
+            "STATIC",
+            PORTABLE_HELPER_MESSAGE,
+            0,
+        )?;
         Ok(())
     }
+    pub(super) fn portable_helper_notice(&self) -> Option<&'static str> {
+        (self.page == Page::Connections
+            && self.portable_openrgb_setup
+            && crate::app::managed_backend::provision::helper_reference_present(&self.state_dir)
+                .unwrap_or(false))
+        .then_some(PORTABLE_HELPER_MESSAGE)
+    }
+
     pub(super) fn connection_visible(&self, id: i32) -> bool {
         if self.page != Page::Connections {
             return false;
         }
         match id {
+            PORTABLE_HELPER_NOTE => self.portable_helper_notice().is_some(),
             CONFIGURE_PORTABLE_OPENRGB => {
                 self.portable_openrgb_setup
                     && crate::app::managed_backend::provision::initial_available(&self.state_dir)
@@ -283,7 +301,19 @@ impl App {
         self.pos(CONFIGURE_PORTABLE_OPENRGB, r, 194, 280, 24);
         self.pos(SCAN, r, 220, 280, 30);
         self.pos(RESULT_LABEL, CONTENT_LEFT, 246, left, 20);
-        self.pos(LIST, CONTENT_LEFT, 268, left, (h - 416).max(120));
+        let helper_height = if self.portable_helper_notice().is_some() {
+            80
+        } else {
+            0
+        };
+        self.pos(
+            LIST,
+            CONTENT_LEFT,
+            268,
+            left,
+            (h - 416 - helper_height).max(120),
+        );
+        self.pos(PORTABLE_HELPER_NOTE, CONTENT_LEFT, h - 220, left, 76);
         self.pos(NOTE, CONTENT_LEFT, h - 140, left, 64);
         for (label, field, y) in [
             (ENDPOINT_LABEL, ENDPOINT, 262),

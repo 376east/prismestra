@@ -171,6 +171,9 @@ pub(super) fn snapshot(app: &App) -> Option<Value> {
         _ => return None,
     };
     let mut form = form_snapshot(app, page, ids);
+    if let Some(notice) = app.portable_helper_notice() {
+        form["notice"] = json!(notice);
+    }
     if app.page == Page::Schedule {
         let dirty = schedule_dirty(app);
         form["dirty"] = json!(dirty);

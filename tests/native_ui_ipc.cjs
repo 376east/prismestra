@@ -247,6 +247,19 @@ vm.runInContext('window.prismestraReceive(payload)',context);
 assert.doesNotMatch(find('#main').innerHTML,/data-native-action="1822"/);
 console.log('PASS: portable OpenRGB setup appears and dispatches through the native action bridge');
 
+const helperNotice='Настройки локального OpenRGB заблокированы существующей авторизацией. Ссылка на задачу находится в data/state/backend-task.json в папке Prismestra. Для замены OpenRGB обратитесь к администратору, который авторизовал задачу.';
+const linkedForm={page:'connections',fields:[],actions:[],notes:[],notice:helperNotice};
+context.payload={kind:'status',state:{nativeForm:linkedForm}};
+const beforeHelperHint=commands.length;
+vm.runInContext('window.prismestraReceive(payload)',context);
+assert.match(find('#main').innerHTML,/<p class="parameter-note" role="status">[^<]*заблокированы[^<]*data\/state\/backend-task\.json[^<]*обратитесь к администратору[^<]*<\/p><div class="native-form">/);
+assert.doesNotMatch(find('#main').innerHTML,/data-native-action="1822"/);
+assert.equal(commands.length,beforeHelperHint,'helper notice is read-only');
+context.payload={kind:'status',state:{nativeForm:{...linkedForm,notice:undefined}}};
+vm.runInContext('window.prismestraReceive(payload)',context);
+assert.doesNotMatch(find('#main').innerHTML,/backend-task\.json/);
+console.log('PASS: linked portable OpenRGB explains the block and its safe next step above the form');
+
 // The selected LCD can have a different index from its binding.
 const connectionDevices=['first-lcd','selected-lcd'].map(id=>({
  id,label:'LCD',role:'lcd',driver:{type:'tt_lcd'},leds:0,rate_hz:30,enabled:false
