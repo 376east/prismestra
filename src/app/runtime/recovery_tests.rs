@@ -617,23 +617,39 @@ fn startup_isolates_endpoint_contention_and_retries_the_returned_output() {
     working(&mut runtime, "a", &mut now);
     assert!(matches!(runtime.output_activity(device), OutputActivity::Sent(frames) if frames > 0));
 
+    let active_generation = runtime.host.status("a").unwrap().generation;
     disconnected(&mut runtime, &a, "a", &mut now);
     assert!(matches!(
         runtime.output_activity(device),
         OutputActivity::Retrying(error) if error == "Disconnected stand output"
     ));
-    a.fail.store(false, Ordering::SeqCst);
+    let before_retry = a.frames.lock().unwrap().len();
     runtime.set_group(Target::Pc, false).unwrap();
+    assert!(!runtime.group_on(Target::Pc));
+    assert!(matches!(
+        runtime.output_activity(device),
+        OutputActivity::Retrying(error) if error == "Disconnected stand output"
+    ));
+    assert_eq!(a.frames.lock().unwrap().len(), before_retry);
+    assert_eq!(a.calls.load(Ordering::SeqCst), 1);
+
+    a.fail.store(false, Ordering::SeqCst);
+    now += 1_000_000;
+    working(&mut runtime, "a", &mut now);
+    let returned = runtime.host.status("a").unwrap();
+    assert_ne!(returned.generation, active_generation);
+    assert_eq!(
+        returned.last_submitted.unwrap().generation,
+        returned.generation
+    );
+    assert_eq!(a.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(b.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.host.status("b").unwrap().generation, healthy);
+    assert_eq!(a.frames.lock().unwrap()[before_retry], [Rgb::default()]);
     assert!(matches!(
         runtime.output_activity(device),
         OutputActivity::Off
     ));
-    now += 1_000_000;
-    working(&mut runtime, "a", &mut now);
-    assert_eq!(a.calls.load(Ordering::SeqCst), 2);
-    assert_eq!(b.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(runtime.host.status("b").unwrap().generation, healthy);
-    assert_eq!(a.frames.lock().unwrap().last().unwrap(), &[Rgb::default()]);
     drain(&mut runtime);
 }
 
