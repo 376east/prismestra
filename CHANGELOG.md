@@ -1,10 +1,18 @@
 # Changelog
 
-For downloads, see [GitHub Releases](https://github.com/malyarq/prismestra/releases). For physical device coverage, see the [compatibility table](docs/compatibility.md).
+For downloads, see [GitHub Releases](https://github.com/376east/prismestra/releases). For physical device coverage, see the [compatibility table](docs/compatibility.md).
 
-## Unreleased
+## Preview 8 (0.1.0.8) · 2026-11-22
 
-These changes are in `main` and are pending a Windows release.
+- Start a lighting scene from the library. Preview and edit remain separate actions. Failed activation links to device status.
+- New profiles start with the Peach Surf effect. Existing profiles keep their saved layout and scene.
+- Reopen the editor from a session started at sign-in. Recover the managed OpenRGB backend and show invalid motherboard zone sizes in device status.
+- Reconnect a saved Surplife E1 strip when the Bluetooth radio appears later.
+- The published Windows Setup passed offline installation, upgrade from Preview 7, uninstall, and standard-account startup in CI.
+
+[Download Preview 8](https://github.com/376east/prismestra/releases/tag/v0.1.0-preview.8) · [Windows verification](https://github.com/376east/prismestra/actions/runs/45023869783) · [All changes since Preview 7](https://github.com/376east/prismestra/compare/v0.1.0-preview.7...v0.1.0-preview.8)
+
+## Preview 7 (0.1.0.7) · 2026-11-21
 
 ### Scenes and editor
 
@@ -26,7 +34,7 @@ These changes are in `main` and are pending a Windows release.
 - Open the editor from the tray by keyboard. Respect Windows menu alignment and ignore tray activation after exit begins. [Tray access](https://github.com/malyarq/prismestra/pull/43) · [Exit fix](https://github.com/malyarq/prismestra/pull/60)
 - Announce changes to the selected device status and restore keyboard focus to the button that opened a settings page. [Device status](https://github.com/malyarq/prismestra/pull/57) · [Settings focus](https://github.com/malyarq/prismestra/pull/59)
 
-[All changes since Preview 6](https://github.com/malyarq/prismestra/compare/v0.1.0-preview.6...main)
+[Download Preview 7](https://github.com/376east/prismestra/releases/tag/v0.1.0-preview.7) · [All changes since Preview 6](https://github.com/376east/prismestra/compare/v0.1.0-preview.6...v0.1.0-preview.7)
 
 ## Preview 6 (0.1.0.6) · 2026-11-19
 
