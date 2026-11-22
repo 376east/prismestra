@@ -1,18 +1,50 @@
 use super::*;
-use crate::app::runtime::{OpenRgbRetryStatus, OpenRgbRetryTicket};
+use crate::app::runtime::{LcdRetryTicket, OpenRgbRetryTicket, OutputRetryStatus};
+
+enum Ticket {
+    OpenRgb(OpenRgbRetryTicket),
+    Lcd(LcdRetryTicket),
+}
+
+enum Started {
+    OpenRgb(OpenRgbRetryTicket),
+    Lcd {
+        document_revision: u64,
+        generation: u64,
+    },
+}
 
 pub(super) struct Pending {
     request: u32,
     context: u64,
-    ticket: OpenRgbRetryTicket,
+    started_output: Started,
     started: Instant,
 }
 
-pub(super) fn encode(context: u64, ticket: OpenRgbRetryTicket) -> String {
-    format!(
-        "{context}/{}/{}/{}",
-        ticket.document_revision, ticket.generation, ticket.attempt
-    )
+impl Ticket {
+    fn for_output(runtime: &Runtime, id: &str) -> Option<Self> {
+        runtime
+            .openrgb_retry_ticket(id)
+            .map(Self::OpenRgb)
+            .or_else(|| runtime.lcd_retry_ticket(id).map(Self::Lcd))
+    }
+
+    fn encode(&self, context: u64) -> String {
+        match self {
+            Self::OpenRgb(t) => format!(
+                "{context}/{}/{}/{}",
+                t.document_revision, t.generation, t.attempt
+            ),
+            Self::Lcd(t) => format!(
+                "lcd/{context}/{}/{}/{}",
+                t.document_revision, t.generation, t.attempt
+            ),
+        }
+    }
+}
+
+pub(super) fn wire_ticket(runtime: &Runtime, id: &str, context: u64) -> Option<String> {
+    Ticket::for_output(runtime, id).map(|ticket| ticket.encode(context))
 }
 
 fn respond(
@@ -71,20 +103,34 @@ pub(super) fn request(state: &State, id: String, request: u32, wire: &str) -> Re
         Ok(None)
     } else {
         app.runtime.with(|runtime, _| {
-            let ticket = runtime
-                .openrgb_retry_ticket(&id)
-                .filter(|ticket| encode(context, *ticket) == wire);
-            Ok(ticket.filter(|ticket| runtime.request_openrgb_retry(&id, *ticket)))
+            let ticket =
+                Ticket::for_output(runtime, &id).filter(|ticket| ticket.encode(context) == wire);
+            match ticket {
+                Some(Ticket::OpenRgb(ticket)) => Ok(runtime
+                    .request_openrgb_retry(&id, ticket)
+                    .then_some(Started::OpenRgb(ticket))),
+                Some(Ticket::Lcd(ticket)) => {
+                    if !runtime.retry_lcd_output(&id, ticket.generation)? {
+                        return Ok(None);
+                    }
+                    let generation = runtime.lcd_status(&id).ok_or("LCD недоступен")?.generation;
+                    Ok(Some(Started::Lcd {
+                        document_revision: ticket.document_revision,
+                        generation,
+                    }))
+                }
+                None => Ok(None),
+            }
         })
     };
     match accepted {
-        Ok(Some(ticket)) => {
+        Ok(Some(started_output)) => {
             session.output_retries.insert(
                 id,
                 Pending {
                     request,
                     context,
-                    ticket,
+                    started_output,
                     started: Instant::now(),
                 },
             );
@@ -120,22 +166,28 @@ pub(super) fn maintain(state: &State) {
         if pending.context != app.context_revision {
             return false;
         }
-        let result = app
-            .runtime
-            .read(|runtime| runtime.openrgb_retry_status(id, pending.ticket));
+        let result = app.runtime.read(|runtime| match pending.started_output {
+            Started::OpenRgb(ticket) => runtime.openrgb_retry_status(id, ticket),
+            Started::Lcd {
+                document_revision,
+                generation,
+            } => runtime.lcd_retry_status(id, document_revision, generation),
+        });
         let (status, message) = match result {
-            OpenRgbRetryStatus::Pending if pending.started.elapsed() < Duration::from_secs(15) => {
+            OutputRetryStatus::Pending if pending.started.elapsed() < Duration::from_secs(15) => {
                 return true;
             }
-            OpenRgbRetryStatus::Pending => {
-                let _ = app
-                    .runtime
-                    .with(|runtime, _| Ok(runtime.cancel_openrgb_retry(id, pending.ticket)));
+            OutputRetryStatus::Pending => {
+                if let Started::OpenRgb(ticket) = pending.started_output {
+                    let _ = app
+                        .runtime
+                        .with(|runtime, _| Ok(runtime.cancel_openrgb_retry(id, ticket)));
+                }
                 ("failed", Some("Истекло ожидание первого кадра".into()))
             }
-            OpenRgbRetryStatus::Submitted => ("submitted", None),
-            OpenRgbRetryStatus::Failed(error) => ("failed", Some(error)),
-            OpenRgbRetryStatus::Cancelled => ("cancelled", None),
+            OutputRetryStatus::Submitted => ("submitted", None),
+            OutputRetryStatus::Failed(error) => ("failed", Some(error)),
+            OutputRetryStatus::Cancelled => ("cancelled", None),
         };
         let _ = respond(
             state,
