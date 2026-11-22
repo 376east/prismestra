@@ -7,11 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       validation:
-        description: Run the full software suite or also build and test Setup
+        description: Run full software checks, test Setup, or warm only the master OpenRGB cache
         required: true
         default: software
         type: choice
-        options: [software, setup]
+        options: [software, setup, openrgb]
       installer_version:
         description: Four-part Windows installer version for a candidate build
         required: true
@@ -46,10 +46,12 @@ jobs:
           node tests/native_ui_ipc.cjs
       - name: Check the OpenRGB cache contract
         run: python scripts/test_openrgb_cache.py
+      - name: Check pinned Setup downloads
+        run: python scripts/test_pinned_setup_download.py
 
   software:
     name: Full software checks
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && (inputs.validation == 'software' || inputs.validation == 'setup')
     needs: quick
     runs-on: windows-latest
     timeout-minutes: 25
@@ -102,10 +104,16 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
 
   package:
-    name: Build Windows Setup candidate
+    name: ${{ inputs.validation == 'openrgb' && 'Warm OpenRGB component cache' || 'Build Windows Setup candidate' }}
     if: >-
       github.repository_id == '1450402221' &&
-      github.event_name == 'workflow_dispatch' && inputs.validation == 'setup'
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.validation == 'setup' ||
+       (inputs.validation == 'openrgb' && github.ref == 'refs/heads/master' &&
+        github.event.repository.default_branch == 'master' && !inputs.publish_release))
+    permissions:
+      contents: read
+      actions: read
     # VS 2022 keeps linker output within the pinned VC runtime floor.
     runs-on: windows-2022
     timeout-minutes: 65
@@ -127,37 +135,37 @@ jobs:
           "vsdevcmd=$vsdevcmd" >> $env:GITHUB_OUTPUT
       - name: Fingerprint the OpenRGB build environment
         id: openrgb
-        if: github.ref == 'refs/heads/master' && runner.environment == 'github-hosted'
+        if: >-
+          github.event.repository.default_branch == 'master' && runner.environment == 'github-hosted' &&
+          (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
         continue-on-error: true
         shell: pwsh
         env:
           VSDEVCMD: ${{ steps.msvc.outputs.vsdevcmd }}
-          OPENRGB_INPUTS: ${{ hashFiles('components/openrgb/**', 'scripts/components/**', 'docs/openrgb-component-verification.md', 'scripts/build_windows_candidate.py', 'scripts/openrgb_cache.py', 'scripts/package_installer.py', 'scripts/package_release.py', 'scripts/installer/prerequisites.lock.json', '.gitattributes', '.github/workflows/windows.yml') }}
+        run: ./scripts/components/openrgb_cache_key.ps1
+      - name: Check release cache scope
+        id: release-cache
+        if: startsWith(github.ref, 'refs/tags/v') && steps.openrgb.outputs.key != ''
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENRGB_KEY: ${{ steps.openrgb.outputs.key }}
         run: |
-          if (!$env:ImageOS -or !$env:ImageVersion -or $env:RUNNER_ARCH -ne 'X64') { throw 'Expected an exact hosted Windows x64 image' }
-          $selected = @{}
-          & $env:ComSpec /c ('call "' + $env:VSDEVCMD + '" -no_logo -arch=x64 -host_arch=x64 >NUL && set') | ForEach-Object {
-            if ($_ -match '^(VCToolsInstallDir|VCToolsVersion|WindowsSdkDir|WindowsSDKVersion)=(.+)$') {
-              $selected[$Matches[1]] = $Matches[2]
-            }
+          # GitHub searches the current ref first. Skip a potentially shadowed master entry.
+          $route = "repos/$env:GITHUB_REPOSITORY/actions/caches"
+          $tag = gh api --method GET $route -f "ref=$env:GITHUB_REF" -f "key=$env:OPENRGB_KEY" --jq .total_count
+          if ($LASTEXITCODE -ne 0 -or $tag -cnotmatch '^\d+$') { throw 'Could not verify tag cache scope' }
+          $master = gh api --method GET $route -f 'ref=refs/heads/master' -f "key=$env:OPENRGB_KEY" --jq '.actions_caches[].key'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify master cache scope' }
+          if ($tag -ceq '0' -and @($master) -ccontains $env:OPENRGB_KEY) {
+            'master_entry=true' >> $env:GITHUB_OUTPUT
           }
-          if ($LASTEXITCODE -ne 0 -or $selected.Count -ne 4) { throw 'MSVC or Windows SDK version could not be established' }
-          $compiler = Join-Path $selected.VCToolsInstallDir 'bin/Hostx64/x64'
-          $sdk = Join-Path (Join-Path $selected.WindowsSdkDir 'bin') ($selected.WindowsSDKVersion.TrimEnd('\') + '/x64')
-          $key = python scripts/openrgb_cache.py --inputs $env:OPENRGB_INPUTS --image "$env:ImageOS/${env:ImageVersion}" `
-            --toolchain "$($selected.VCToolsVersion)/$($selected.WindowsSDKVersion)" `
-            --tool vsdevcmd $env:VSDEVCMD --tool cl (Join-Path $compiler 'cl.exe') `
-            --tool link (Join-Path $compiler 'link.exe') --tool lib (Join-Path $compiler 'lib.exe') `
-            --tool rc (Join-Path $sdk 'rc.exe') --tool mt (Join-Path $sdk 'mt.exe') `
-            --tool 7z (Join-Path $env:ProgramFiles '7-Zip/7z.exe') `
-            --tool git (Get-Command git -CommandType Application | Select-Object -First 1).Source `
-            --tool powershell (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe')
-          if ($LASTEXITCODE -ne 0 -or $key -cnotmatch '^openrgb-windows-x64-v1-[0-9a-f]{64}$') {
-            throw 'OpenRGB cache key could not be established'
-          }
-          "key=$key" >> $env:GITHUB_OUTPUT
       - name: Restore verified OpenRGB component
-        if: steps.openrgb.outputs.key != ''
+        id: openrgb-restore
+        if: >-
+          steps.openrgb.outputs.key != '' &&
+          (github.ref == 'refs/heads/master' || steps.release-cache.outputs.master_entry == 'true')
         continue-on-error: true
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -170,9 +178,25 @@ jobs:
           DISPATCH_VERSION: ${{ inputs.installer_version }}
           VSDEVCMD: ${{ steps.msvc.outputs.vsdevcmd }}
           OPENRGB_CACHE_KEY: ${{ steps.openrgb.outputs.key }}
+          OPENRGB_ONLY: ${{ inputs.validation == 'openrgb' }}
+          OPENRGB_WRITE: ${{ github.ref == 'refs/heads/master' && runner.environment == 'github-hosted' }}
+          OPENRGB_HIT: ${{ steps.openrgb-restore.outputs.cache-hit }}
           PRISMESTRA_VC_REDIST_X64_URL: ${{ vars.PRISMESTRA_VC_REDIST_X64_URL }}
           PRISMESTRA_WEBVIEW2_X64_URL: ${{ vars.PRISMESTRA_WEBVIEW2_X64_URL }}
         run: |
+          $output = Join-Path $env:RUNNER_TEMP prismestra-candidate
+          $cacheArgs = @()
+          if ($env:OPENRGB_CACHE_KEY -and ($env:OPENRGB_WRITE -ceq 'true' -or $env:OPENRGB_HIT -ceq 'true')) {
+            $cacheArgs = @('--openrgb-cache', (Join-Path $env:RUNNER_TEMP 'prismestra-openrgb-cache'), '--openrgb-cache-key', $env:OPENRGB_CACHE_KEY)
+            if ($env:OPENRGB_WRITE -ceq 'true') { $cacheArgs += '--write-openrgb-cache' }
+          }
+          if ($env:OPENRGB_ONLY -ceq 'true') {
+            if (!$cacheArgs.Count) { throw 'Warm-up requires a fingerprinted hosted master runner' }
+            python scripts/build_windows_candidate.py --commit $env:GITHUB_SHA --vsdevcmd $env:VSDEVCMD --output $output --openrgb-only @cacheArgs
+            if ($LASTEXITCODE -ne 0) { throw 'OpenRGB cache warm-up failed' }
+            "openrgb_cache_ready=$(Test-Path -LiteralPath (Join-Path $output 'openrgb-cache-ready') -PathType Leaf)" >> $env:GITHUB_OUTPUT
+            return
+          }
           $version = $env:DISPATCH_VERSION
           if ($env:GITHUB_REF_TYPE -ceq 'tag') {
             if ($env:GITHUB_REF_NAME -cmatch '^v(\d+\.\d+\.\d+)-preview\.([1-9]\d*)$') {
@@ -188,11 +212,6 @@ jobs:
           rustup toolchain install 1.99.1 --profile minimal
           if ($LASTEXITCODE) { throw 'Installing the candidate Rust toolchain failed' }
           $env:RUSTUP_TOOLCHAIN = '1.99.1'
-          $output = Join-Path $env:RUNNER_TEMP prismestra-candidate
-          $cacheArgs = @()
-          if ($env:OPENRGB_CACHE_KEY) {
-            $cacheArgs = @('--openrgb-cache', (Join-Path $env:RUNNER_TEMP 'prismestra-openrgb-cache'), '--openrgb-cache-key', $env:OPENRGB_CACHE_KEY)
-          }
           python scripts/build_windows_candidate.py --commit $env:GITHUB_SHA --version $version --vsdevcmd $env:VSDEVCMD --output $output @cacheArgs
           if ($LASTEXITCODE) { throw 'Building the Windows candidate failed' }
           "candidate=prismestra-compiled-$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_OUTPUT
@@ -200,13 +219,16 @@ jobs:
           "sums_sha256=$((Get-FileHash (Join-Path $output 'candidate/SHA256SUMS.txt')).Hash.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           "openrgb_cache_ready=$(Test-Path -LiteralPath (Join-Path $output 'openrgb-cache-ready') -PathType Leaf)" >> $env:GITHUB_OUTPUT
       - name: Save verified OpenRGB component
-        if: steps.build.outputs.openrgb_cache_ready == 'True'
-        continue-on-error: true
+        if: >-
+          github.ref == 'refs/heads/master' && runner.environment == 'github-hosted' &&
+          steps.openrgb.outputs.key != '' && steps.build.outputs.openrgb_cache_ready == 'True'
+        continue-on-error: ${{ inputs.validation != 'openrgb' }}
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ runner.temp }}/prismestra-openrgb-cache
           key: ${{ steps.openrgb.outputs.key }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: inputs.validation == 'setup'
         with:
           name: ${{ steps.build.outputs.candidate }}
           path: ${{ runner.temp }}/prismestra-candidate/candidate/
@@ -214,6 +236,7 @@ jobs:
           compression-level: 0
           retention-days: 14
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: inputs.validation == 'setup'
         with:
           name: ${{ steps.build.outputs.fixtures }}
           path: ${{ runner.temp }}/prismestra-candidate/fixtures/
@@ -234,6 +257,7 @@ jobs:
   installer:
     name: Windows lifecycle (${{ matrix.test }})
     needs: package
+    if: inputs.validation == 'setup'
     runs-on: windows-2025
     timeout-minutes: 15
     strategy:

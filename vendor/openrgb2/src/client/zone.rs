@@ -45,6 +45,11 @@ impl<'c> Zone<'c> {
         }
     }
 
+    /// Capability flags supplied by the controller, when supported by the SDK.
+    pub fn flags(&self) -> Option<&crate::ZoneFlags> {
+        self.zone_data.flags.value()
+    }
+
     delegate::delegate! {
         to self.zone_data {
             /// Returns the ID of this zone.

@@ -21,7 +21,11 @@ Installed releases, profiles, private captures, rollback backups and raw accepta
 
 ## Check and build
 
-Pull requests and pushes to `master` run formatting and embedded editor checks. Start full validation only at the product owner’s explicit request. In GitHub Actions, dispatch CI with `software` for the full software suite or `setup` to also build and test the installer. Run the following commands when checking a full build locally on Windows with the MSVC Rust toolchain:
+Pull requests and pushes to `master` run formatting and embedded editor checks. Start full validation only at the product owner’s explicit request. In GitHub Actions, dispatch CI with `software` for the full software suite or `setup` to also build and test the installer.
+
+The manual `openrgb` mode on hosted `master` warms only the verified OpenRGB cache. It uses the same Windows 2022 runner and exact input key as Setup. Release tags can read an exact entry from `master` when their own ref has no matching cache entry. Restored archives always pass the bundle validator before use.
+
+Run the following commands when checking a full build locally on Windows with the MSVC Rust toolchain:
 
 ```powershell
 cargo fmt --all -- --check

@@ -12,6 +12,14 @@ Device topology, output groups, LCD media, screen capture and temperature routes
 
 Closing the editor first requests the latest RGB draft and waits for its atomic save. An error or timeout cancels closing instead of discarding changes. Unsaved device/connection/source forms still require Apply or Revert. The resident session's Stop and Exit paths remain distinct. Source: [close handshake](../src/ui/windows/modern.rs), [resident session](../src/ui/windows/resident.rs).
 
+## ARGB channels
+
+Open **ARGB channels** from the properties of a device bound to managed OpenRGB. The editor reads the selected controller's channel sizes and limits from SDK6 without activating any output. A fixed or automatic zone shows its current size. For a manually sized zone, choose a fan or strip template, or enter the exact number of addressable LEDs for the channel. The ring or strip is a preview of the address count. A passive splitter repeats the same addresses on every branch, so use the longest branch's address count.
+
+The starter counts are based on published specifications: 8 and 12 for fans, and 10, 30 and 60 for strips. Match the count to the actual model and strip length. [Corsair SP RGB Elite](https://www.corsair.com/newsroom/press-release/your-guiding-light-for-great-cooling-corsair-launches-sp-rgb-elite-fan-series) · [ARCTIC P12 PWM PST A-RGB](https://www.arctic.de/en/P12-PWM-PST/) · [Corsair Lighting Node PRO guide](https://assets.corsair.com/image/upload/corsairmedia/sys_master/productcontent/WW_LightingNodePRO_QSG_revAD_.pdf) · [Adafruit RGB NeoPixel strips](https://learn.adafruit.com/adafruit-neopixel-uberguide/neopixel-strips)
+
+The editor currently offers inventory and preview. Saving a new channel size requires the protected OpenRGB update path. [Managed OpenRGB](managed-openrgb.md)
+
 ## Runtime and recovery
 
 The new editor requires Windows x64 and Microsoft Edge WebView2 Runtime 105 or newer. Microsoft describes runtime installation and servicing in its [distribution guide](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution). All editor resources are local. Navigation, resource requests, downloads, new windows and permissions are restricted by the host; the browser frontend cannot issue network requests through its page policy. Device backends retain their own explicit network connections.

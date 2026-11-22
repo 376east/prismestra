@@ -5,155 +5,27 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
-import sys
 import time
-from urllib.parse import urlsplit
-from urllib.request import urlopen
 import uuid
-from zipfile import BadZipFile, ZipFile
+from zipfile import BadZipFile
 from zlib import error as ZlibError
 
 import openrgb_cache
-from package_release import sha256
-from package_installer import WEBVIEW_PROBE, json_object
+from build_openrgb_component import POWERSHELL, REPO, build_component, checkout, read, recipe, run
+from component_archive import sha256
+from package_installer import WEBVIEW_PROBE
+from pinned_setup_download import fetch
 
-REPO = Path(__file__).resolve().parent.parent
-COMPONENT = REPO / "components/openrgb"
+
 INSTALLER = REPO / "scripts/installer"
-POWERSHELL = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-PINNED_INPUTS = {
-    "Prismestra-Sources-0.1.0.5.zip": (
-        "https://github.com/malyarq/prismestra/releases/download/v0.1.0-preview.5/Prismestra-Sources-0.1.0.5.zip",
-        "a3ed186b4d08cf25930689902a0f1d260cc3eca678379d897281a51bc2b0307e",
-        55900191,
-    ),
-    "innosetup-6.7.4.exe": (
-        "https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe",
-        "a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c",
-        10604576,
-    ),
-    "jom.zip": (
-        "https://download.qt.io/official_releases/jom/jom_1_1_4.zip",
-        "d533c1ef49214229681e90196ed2094691e8c4a0a0bef0b2c901debcb562682b",
-        1696930,
-    ),
-    "qtbase.7z": (
-        "https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qt6_683/qt6_683/qt.qt6.683.win64_msvc2022_64/"
-        "6.8.3-0-202503201308qtbase-Windows-Windows_11_23H2-MSVC2022-Windows-Windows_11_23H2-X86_64.7z",
-        "41688269fac0565db956c66d9eecae777d16197e0c02cd81b88640c1f5d73d3f",
-        39484220,
-    ),
-}
+INNO_INPUT = (
+    "https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe",
+    "a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c",
+    10604576,
+)
 
 
-def run(*args, cwd=REPO, env=None):
-    subprocess.run(args, cwd=cwd, env=env, check=True)
-
-
-def recipe(name, *args):
-    run(sys.executable, REPO / "scripts" / name, *args)
-
-
-def read(path):
-    return json_object(path.read_bytes())
-
-
-def fetch(directory, name, url, digest, size):
-    destination = directory / name
-    parsed = urlsplit(url)
-    if parsed.scheme != "https" or parsed.username or parsed.password or not parsed.hostname:
-        raise ValueError(f"{name}: expected an HTTPS download URL without credentials")
-    print(f"Fetching pinned {name} from {parsed.hostname}", flush=True)
-    with urlopen(url, timeout=90) as response, destination.open("xb") as output:
-        if urlsplit(response.url).scheme != "https":
-            raise ValueError(f"{name}: download redirected away from HTTPS")
-        remaining = size
-        while chunk := response.read(min(1024 * 1024, remaining + 1)):
-            remaining -= len(chunk)
-            if remaining < 0:
-                raise ValueError(f"{name}: download exceeded pinned size")
-            output.write(chunk)
-    if destination.stat().st_size != size or sha256(destination) != digest:
-        raise ValueError(f"{name}: download differs from pinned size/SHA-256")
-    return destination
-
-
-def checkout(lock, path):
-    run("git", "init", "-q", path)
-    run("git", "-C", path, "config", "core.autocrlf", "true")
-    run("git", "-C", path, "remote", "add", "origin", lock["repository"])
-    run("git", "-C", path, "fetch", "--depth=1", "origin", lock["revision"])
-    run("git", "-C", path, "checkout", "--detach", lock["revision"])
-    return path
-
-
-def build_component(root, vsdevcmd):
-    from components.verify_openrgb_component import REQUIRED, MSVC_RUNTIME
-
-    source_lock = COMPONENT / "source-lock.json"
-    dependency_lock = COMPONENT / "dependency-lock.json"
-    tools = {name: fetch(root, name, *PINNED_INPUTS[name])
-             for name in ("Prismestra-Sources-0.1.0.5.zip", "jom.zip", "qtbase.7z")}
-    lock = read(source_lock)
-    source = checkout(lock, root / "openrgb-source")
-    patch = COMPONENT / lock["patch"]
-    if sha256(patch) != lock["patch_sha256"]:
-        raise ValueError("OpenRGB patch differs from its source lock")
-    run("git", "-C", source, "apply", "--check", patch)
-    run("git", "-C", source, "apply", "--intent-to-add", patch)
-
-    # Reuse the published, pinned user-mode dependency bytes and source archives.
-    # The previous OpenRGB.exe is deliberately excluded from the new component.
-    with ZipFile(tools["Prismestra-Sources-0.1.0.5.zip"]) as previous:
-        base = root / "previous-component.zip"
-        base.write_bytes(previous.read("openrgb/Prismestra-OpenRGB-component.zip"))
-    if sha256(base) != "42ab552ffb4d429a9df7d83aab8d53a1df30269491f2e28c9dd57c7d9187f8e7":
-        raise ValueError("Unexpected dependency baseline component")
-    runtime = root / "runtime"
-    archives = root / "component-sources"
-    runtime.mkdir()
-    archives.mkdir()
-    assets = COMPONENT / "distribution-assets.json"
-    with ZipFile(base) as previous:
-        for name in sorted((REQUIRED - {"OpenRGB.exe"}) | MSVC_RUNTIME):
-            member = f"runtime/{name}"
-            if member in previous.namelist():
-                (runtime / name).write_bytes(previous.read(member))
-        for entry in read(assets)["files"]:
-            role, name = entry["path"].split("/")
-            if role == "source":
-                (archives / name).write_bytes(previous.read(entry["path"]))
-
-    jom = root / "jom"
-    with ZipFile(tools["jom.zip"]) as archive:
-        jom.mkdir()
-        (jom / "jom.exe").write_bytes(archive.read("jom.exe"))
-    qt = root / "qt"
-    seven_zip = Path(os.environ["ProgramFiles"]) / "7-Zip/7z.exe"
-    run(seven_zip, "x", "-y", f"-o{qt}", tools["qtbase.7z"])
-    (qmake,) = qt.rglob("qmake.exe")
-    build = root / "openrgb-build"
-    run(POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-        "-File", REPO / "scripts/components/build_openrgb.ps1", "-SourceRoot", source,
-        "-BuildRoot", build, "-QtRoot", qmake.parent.parent, "-Jom", jom / "jom.exe",
-        "-VsDevCmd", vsdevcmd)
-    shutil.copy2(build / "release/OpenRGB.exe", runtime)
-    inventory = root / "openrgb-inventory.json"
-    recipe("components/verify_openrgb_component.py", "--source-root", source, "--release-dir", runtime,
-           "--source-lock", source_lock, "--dependency-lock", dependency_lock, "--output", inventory)
-    bundle = root / openrgb_cache.BUNDLE
-    recipe("components/package_openrgb_component.py", "--runtime-dir", runtime, "--inventory", inventory,
-           "--source-lock", source_lock, "--dependency-lock", dependency_lock, "--patch", patch,
-           "--source-archives-dir", archives, "--licenses-dir", COMPONENT / "licenses",
-           "--recipes-dir", REPO / "scripts/components", "--asset-manifest", assets,
-           "--verification-doc", REPO / "docs/openrgb-component-verification.md", "--output", bundle)
-    recipe("components/test_parent_pipe.py", "--exe", runtime / "OpenRGB.exe",
-           "--sha256", sha256(runtime / "OpenRGB.exe"), "--artifacts", root / "component-parent-smoke")
-    return bundle
-
-
-def load_or_build_component(root, vsdevcmd, cache, key):
+def load_or_build_component(root, vsdevcmd, cache, key, *, write_cache=False):
     started = time.monotonic()
     existing = cache is not None and (cache.exists() or cache.is_symlink())
     bundle = None
@@ -167,7 +39,7 @@ def load_or_build_component(root, vsdevcmd, cache, key):
             status = "rejected"
     if bundle is None:
         bundle = build_component(root, vsdevcmd)
-        if cache is not None and not existing:
+        if cache is not None and not existing and write_cache:
             try:
                 openrgb_cache.save(cache, key, bundle)
                 (root / openrgb_cache.READY).touch(exist_ok=False)
@@ -227,34 +99,47 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--commit", required=True)
-    parser.add_argument("--version", required=True)
+    parser.add_argument("--version")
     parser.add_argument("--vsdevcmd", type=Path, required=True)
     parser.add_argument("--openrgb-cache", type=Path)
     parser.add_argument("--openrgb-cache-key")
+    parser.add_argument("--write-openrgb-cache", action="store_true")
+    parser.add_argument("--openrgb-only", action="store_true")
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{40}", args.commit):
         parser.error("expected a full checkout commit")
-    if (not re.fullmatch(r"(?:0|[1-9][0-9]{0,4})(?:\.(?:0|[1-9][0-9]{0,4})){3}", args.version)
+    if not args.openrgb_only and (not args.version
+            or not re.fullmatch(r"(?:0|[1-9][0-9]{0,4})(?:\.(?:0|[1-9][0-9]{0,4})){3}", args.version)
             or args.version == "0.0.0.0" or any(int(part) > 65535 for part in args.version.split("."))):
         parser.error("expected a nonzero four-part installer version with 16-bit components")
     root = args.output.resolve()
     if root.is_relative_to(REPO):
         parser.error("output must be outside the checkout")
-    cache = args.openrgb_cache
+    cache = None if args.openrgb_cache is None else args.openrgb_cache.absolute()
     key = args.openrgb_cache_key
-    if (cache is None) != (key is None) or (key is not None and not re.fullmatch(r"openrgb-windows-x64-v1-[0-9a-f]{64}", key)):
+    if (cache is None) != (key is None) or (key is not None and not openrgb_cache.KEY.fullmatch(key)):
         parser.error("an OpenRGB cache directory and exact build key must be supplied together")
+    if (args.write_openrgb_cache and cache is None) or (args.openrgb_only and not args.write_openrgb_cache):
+        parser.error("OpenRGB warm-up requires an exact cache key and write access")
     if cache is not None and (cache.resolve().is_relative_to(REPO) or cache.resolve().is_relative_to(root)):
         parser.error("OpenRGB cache must be outside both the checkout and candidate output")
     from package_release import clean_commit
 
     clean_commit(REPO, args.commit)
     root.mkdir(parents=True)
-    inno_bootstrap = fetch(root, "innosetup-6.7.4.exe", *PINNED_INPUTS["innosetup-6.7.4.exe"])
+    vsdevcmd = args.vsdevcmd.resolve(strict=True)
+    if args.openrgb_only:
+        component = load_or_build_component(root, vsdevcmd, cache, key, write_cache=True)
+        if component != cache / openrgb_cache.BUNDLE:
+            if not (root / openrgb_cache.READY).is_file():
+                raise ValueError("OpenRGB cache could not be staged for warm-up")
+            openrgb_cache.restore(cache, key, root)
+        return
+    inno_bootstrap = fetch(root, "innosetup-6.7.4.exe", *INNO_INPUT)
     prerequisites = root / "prerequisites"
     prerequisites.mkdir()
-    for key, pin in read(INSTALLER / "prerequisites.lock.json")["packages"].items():
-        url = os.environ.get("PRISMESTRA_" + key.upper() + "_URL") or pin["source"]
+    for prerequisite, pin in read(INSTALLER / "prerequisites.lock.json")["packages"].items():
+        url = os.environ.get("PRISMESTRA_" + prerequisite.upper() + "_URL") or pin["source"]
         fetch(prerequisites, pin["file"], url, pin["sha256"], pin["size"])
     inno = root / "inno"
     run(POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
@@ -264,7 +149,7 @@ def main():
         "-Wait -PassThru -WindowStyle Hidden -ArgumentList $params; exit $p.ExitCode",
         env=dict(os.environ, PRISMESTRA_INNO_BOOTSTRAP=str(inno_bootstrap),
                  PRISMESTRA_INNO_DIRECTORY=str(inno)))
-    component = load_or_build_component(root, args.vsdevcmd.resolve(strict=True), cache, key)
+    component = load_or_build_component(root, vsdevcmd, cache, key, write_cache=args.write_openrgb_cache)
     pawnio = checkout(read(INSTALLER / "pawnio-source.lock.json"), root / "pawnio-source")
     run("git", "-C", pawnio, "submodule", "update", "--init", "--recursive", "--depth=1")
     package_candidate(root, args.commit, args.version, component, prerequisites, inno / "ISCC.exe", pawnio)
