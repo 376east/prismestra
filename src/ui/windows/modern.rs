@@ -69,6 +69,7 @@ enum Command {
     },
     ApplyScene {
         scene: Scene,
+        request: Option<u32>,
     },
     PreviewScene {
         scene: Scene,
@@ -1107,11 +1108,39 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                     stage_native(a, &fields)?;
                     native_forms::set_field(a, id, &value)?;
                 }
-                Command::ApplyScene { scene } => {
-                    if a.editor_dirty {
-                        return Err("Примените или сбросьте параметры устройств".into());
+                Command::ApplyScene { scene, request } => {
+                    let result = if a.editor_dirty {
+                        Err("Примените или сбросьте параметры устройств".into())
+                    } else {
+                        a.update_scene(scene, true)
+                    };
+                    if let Some(request) = request {
+                        let (status, message) = match result {
+                            Err(message) => ("failed", Some(message)),
+                            Ok(()) if a.native_lighting.is_none() => {
+                                ("applied", Some("Режим предпросмотра.".into()))
+                            }
+                            Ok(())
+                                if !a.runtime.group_on(Target::Pc)
+                                    && !a.runtime.group_on(Target::Door) =>
+                            {
+                                (
+                                    "applied",
+                                    Some(
+                                        "Свет выключен. Включите его в панели воспроизведения."
+                                            .into(),
+                                    ),
+                                )
+                            }
+                            Ok(()) => ("applied", None),
+                        };
+                        send(
+                            state,
+                            &json!({"kind":"scene_activation","request":request,"status":status,"message":message}),
+                        )?;
+                    } else {
+                        result?;
                     }
-                    a.update_scene(scene, true)?;
                 }
                 Command::Groups { pc, door } => {
                     a.runtime.set_group(Target::Pc, pc)?;

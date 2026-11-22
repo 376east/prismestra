@@ -313,6 +313,7 @@ console.log('PASS: device cards select by logical identity and the draft dropdow
  receive({kind:'snapshot',state:stateForScope('before','first',1)});
  assert(button.hidden);
  assert(help.hidden);
+ assert.match(mainMarkup,/data-output-status="rgb">Подключение занято другим выходом Prismestra/);
  const beforeSelection=commands.length;
  click();
  assert.equal(commands.length,beforeSelection);
@@ -337,6 +338,7 @@ console.log('PASS: device cards select by logical identity and the draft dropdow
  assert.equal(status.textContent,'Identity changed');
  receive({kind:'status',state:{deviceActivity:{retryScope:'before',retryTickets:{},reasons:{}}}});
  assert(help.hidden);
+ assert.equal(vm.runInContext('deviceStatus(state.devices[0])',context),'Недоступно');
  receive({kind:'snapshot',state:stateForScope('after','next')});
  click();
  assert.equal(status.textContent,'Подключаемся…');
@@ -788,3 +790,46 @@ console.log('PASS: 80 effect choices in provider order, shared escaped labels an
  assert.equal(find('#footer-apply').disabled,true,'an applied unchanged scene needs no second click');
 }
 console.log('PASS: restored capture is inert and can be explicitly applied without editing the effect');
+
+{
+ const entry={id:'night',name:'Ночная',scene:{...scene,brightness:37},preview:{width:1,height:1,colors:[0x123456]}};
+ const libraryState={...initial,library:[entry]};
+ vm.runInContext('view="library";draft=null;search="";libraryEffect=""',context);
+ receiveDeviceState('snapshot',libraryState);
+ assert.match(mainMarkup,/<button[^>]+data-apply="night"[^>]*>Включить сцену<\/button>/);
+ assert.match(mainMarkup,/data-preview="night"/);
+ assert.match(mainMarkup,/data-edit="night"/);
+ const click=(key)=>events.click({target:{closest:()=>({
+  dataset:{[key]:'night'},hasAttribute:name=>name==='data-mutation'&&key!=='preview',
+ })}});
+ const status=find('#scene-activation-night');
+ const before=commands.length;
+ click('preview');
+ assert.equal(find('#library-preview-dialog').open,true);
+ assert.equal(commands.length,before,'preview uses the cached frame and sends no command');
+ assert.equal(viewNow(),'library');
+ click('apply');click('apply');
+ const apply=commands.at(-1);
+ assert.deepEqual(apply,{op:'apply_scene',scene:entry.scene,request:apply.request});
+ assert.deepEqual(commands.slice(before).filter(command=>command.op==='apply_scene'),[apply]);
+ assert.match(status.textContent,/Включаем/);
+ receiveDeviceState('snapshot',{...libraryState,scene:entry.scene});
+ receiveDeviceState('status',{scene:entry.scene,pending:false});
+ assert.match(status.textContent,/Включаем/,'snapshots and unrelated status cannot confirm even the same scene');
+ const reply=(request,result,message)=>vm.runInContext(
+  'window.prismestraReceive('+JSON.stringify({kind:'scene_activation',request,status:result,message})+')',context);
+ reply(apply.request+1,'applied');
+ assert.match(status.textContent,/Включаем/);
+ reply(apply.request,'failed','Устройство недоступно.');
+ assert.match(status.textContent,/Не удалось включить.*Устройство недоступно/);
+ click('apply');
+ const second=commands.at(-1);
+ assert.notEqual(second.request,apply.request);
+ reply(apply.request,'applied');
+ assert.match(status.textContent,/Включаем/);
+ reply(second.request,'applied','Режим предпросмотра.');
+ assert.equal(status.textContent,'Сцена «Ночная» применена. Режим предпросмотра.');
+ assert.equal(viewNow(),'library');
+ assert.equal(vm.runInContext('draft.brightness',context),65,'activation does not replace the editor draft');
+}
+console.log('PASS: separate library preview/edit, one correlated scene activation, stale messages, rejection and confirmed result');
