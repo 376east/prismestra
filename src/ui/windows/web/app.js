@@ -419,6 +419,7 @@ function outputPageAvailable(page) {
 }
 
 function renderDevices(candidates) {
+ const firstSetup=state.pending===true && !state.devices.length && candidates.length>0 && !pageHasEdits();
  const devices=state.devices.map(d=>{
   const statusId=`device-status-${encodeURIComponent(d.id)}`;
   return `<article class="device">
@@ -432,17 +433,21 @@ function renderDevices(candidates) {
  const found=candidates.map(candidate=>`<article class="device" data-candidate-id="${esc(candidate.id)}">
   <div class="device-symbol">${icon('devices')}</div>
   <div class="device-info"><h2>${esc(candidate.label)}</h2><p>${esc(candidate.role)}</p></div>
-  <div class="device-meta"><small>Найдено</small></div>
+  <div class="device-meta"><small>${firstSetup?'Настраивается автоматически':'Найдено'}</small></div>
  </article>`);
  const entries=[...devices,...found].join('')||'<div class="empty"><h2>В профиле нет устройств</h2><p>Добавьте устройство в свойствах профиля.</p></div>';
- const add = state.nativeAux?.page==='devices' && state.nativeAux.fields.some(field=>field.id===devicePresetField && field.enabled)
+ const add = !firstSetup && state.nativeAux?.page==='devices' && state.nativeAux.fields.some(field=>field.id===devicePresetField && field.enabled)
   ? action('Добавить устройство','focus-device-setup',true)
   : '';
  const shortcuts = add + pageButton('connections')
   + (outputPageAvailable('lcd') ? pageButton('lcd','Настроить LCD') : '')
   + (outputPageAvailable('ambient') ? pageButton('ambient','Настроить экран') : '');
- return heading('Устройства','Изменения действуют после «Применить». Профиль сохраняется отдельно.',shortcuts)
-  + `<div class="device-list">${entries}</div><div id="device-properties" style="margin-top:24px">${nativeProperties()}</div>`;
+ const description=firstSetup
+  ? (candidates.length===1?'Prismestra добавляет найденное устройство в профиль.':'Prismestra добавляет найденные устройства в профиль.')
+  : 'Изменения действуют после «Применить». Профиль сохраняется отдельно.';
+ return heading('Устройства',description,shortcuts)
+  + `<div class="device-list">${entries}</div>`
+  + (firstSetup?'':`<div id="device-properties" style="margin-top:24px">${nativeProperties()}</div>`);
 }
 function renderNativeForm(form=nativeFormForView()) {
  if(!form||form.page!==view)return '<div class="native-wait" role="status">Загрузка настроек…</div>';
@@ -741,6 +746,8 @@ window.prismestraReceive = message => {
    followActiveScene();
    render();if(!busy())flushPreview();
   } else if(message.kind==='status'&&state) {
+   const firstSetupPendingChanged=view==='devices'&&!state.devices.length&&state.deviceCandidates?.length>0
+    && Object.hasOwn(message.state,'pending')&&state.pending!==message.state.pending;
    const foundChanged=view==='devices'&&(
     (Object.hasOwn(message.state,'deviceCandidates')&&!same(state.deviceCandidates,message.state.deviceCandidates)) ||
     (Object.hasOwn(message.state,'argbDevice')&&state.argbDevice!==message.state.argbDevice)
@@ -753,7 +760,7 @@ window.prismestraReceive = message => {
    followActiveScene();
    if(!state.pending&&!nativeAwaitingAck&&!savedSceneRequest)commandPending=false;
    if(message.state.preview)frame=message.state.preview;
-   if(nativeFormChanged||foundChanged||(!busy()&&!outputPageAvailable(view)))render();else {syncControls();syncDeviceAnnouncement();paintPreview();}if(!busy())flushPreview();
+   if(nativeFormChanged||foundChanged||firstSetupPendingChanged||(!busy()&&!outputPageAvailable(view)))render();else {syncControls();syncDeviceAnnouncement();paintPreview();}if(!busy())flushPreview();
   }
  }catch(e){
   awaitingCommandAck=false;closing=false;commandPending=false;

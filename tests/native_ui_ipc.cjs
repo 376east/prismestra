@@ -439,6 +439,37 @@ assert.ok(hasCandidate(candidateFixtures.replacement.deviceCandidates[0].id));
 assert.equal(discoveryAnnouncement.textContent, 'Найдено устройство: Fixture.');
 console.log('PASS: candidate identity, applied precedence, metadata replacement, empty device selection');
 
+{
+ const pending={...foundState,pending:true,deviceCandidates:[foundRgb],nativeAux:{
+  page:'devices',fields:[{id:714,label:'Семейство',kind:'select',enabled:true,value:'openrgb',choices:[]}],actions:[],notes:[],
+ }};
+ const before=commands.length;
+ receiveDeviceState('snapshot',pending);
+ assert.match(mainMarkup,/Prismestra добавляет найденное устройство в профиль/);
+ assert.match(mainMarkup,/Настраивается автоматически/);
+ assert.doesNotMatch(mainMarkup,/data-action="apply-document"|id="native-target"/);
+ receiveDeviceState('status',{pending:false});
+ assert.ok(hasCandidate(foundRgb.id),'the stale discovery row is still present');
+ assert.doesNotMatch(mainMarkup,/Настраивается автоматически|Prismestra добавляет/);
+ assert.match(mainMarkup,/<button[^>]*data-action="focus-device-setup" data-mutation\s*>Добавить устройство/);
+ assert.match(mainMarkup,/id="native-target"/);
+ receiveDeviceState('snapshot',{...pending,pending:false});
+ assert.doesNotMatch(mainMarkup,/Настраивается автоматически|Prismestra добавляет/);
+ assert.match(mainMarkup,/data-action="focus-device-setup"/);
+ receiveDeviceState('status',{pending:true});
+ assert.match(mainMarkup,/Настраивается автоматически/,'a fresh active transition can show progress again');
+ assert.equal(commands.length,before,'candidate arrival must not issue a command');
+ receiveDeviceState('snapshot',{...pending,editor:{...pending.editor,dirty:true}});
+ assert.match(mainMarkup,/id="native-target"/,'existing edits keep their form');
+ receiveDeviceState('snapshot',{...pending,pending:false,deviceCandidates:[]});
+ assert.doesNotMatch(mainMarkup,/Настраивается автоматически/,'cancelled discovery restores the empty state');
+ receiveDeviceState('snapshot',{...pending,pending:false,deviceCandidates:[],devices:[{...foundRgb,leds:1}],
+  editor:{page:'devices',index:0,targets:[foundRgb.label],fields:[],dirty:false}});
+ assert.match(mainMarkup,/id="native-target"/,'properties return after the output is applied');
+ assert.doesNotMatch(mainMarkup,/Настраивается автоматически/);
+}
+console.log('PASS: first discovered output presents automatic setup until it becomes configurable');
+
 vm.runInContext('view="devices";state.editor={page:"devices",index:0,targets:["Strip"],fields:[],dirty:false};state.detail="Ошибка RGB: <test>";render()',context);
 assert.ok(find('#main').innerHTML.includes('Ошибка RGB: &lt;test&gt;'));
 
