@@ -467,6 +467,37 @@ assert.equal(discoveryAnnouncement.textContent, 'Найдено устройст
 console.log('PASS: candidate identity, applied precedence, metadata replacement, empty device selection');
 
 {
+ const empty = {...foundState, devices: [], deviceCandidates: [], startupDiscoveryRetry: true};
+ vm.runInContext('view="library"',context);
+ receiveDeviceState('snapshot', empty);
+ assert.ok(mainMarkup.includes('data-action="retry-startup-discovery"'));
+ receiveDeviceState('status',{startupDiscoveryRetry:false});
+ assert.ok(!mainMarkup.includes('data-action="retry-startup-discovery"'),'running search hides the action');
+ receiveDeviceState('status',{startupDiscoveryRetry:true});
+ assert.ok(mainMarkup.includes('data-action="retry-startup-discovery"'),'an empty result allows a fresh user action');
+ vm.runInContext('view="devices"',context);
+ receiveDeviceState('snapshot', empty);
+ assert.ok(mainMarkup.includes('data-action="retry-startup-discovery"'));
+ const retry = {dataset:{action:'retry-startup-discovery'},disabled:false,hasAttribute:()=>true};
+ const clickRetry = () => events.click({target:{closest:()=>retry}});
+ const before = commands.length;
+ vm.runInContext('formStages.set("pending",{kind:"native",page:"devices",id:714,value:"Keep"})',context);
+ clickRetry();
+ assert.equal(commands.length,before,'unapplied edits protect the profile from a rescan');
+ vm.runInContext('formStages.clear()',context);
+ clickRetry();
+ clickRetry();
+ assert.deepEqual(commands.slice(before),[{op:'retry_startup_discovery'}]);
+ receiveDeviceState('status',{startupDiscoveryRetry:false,pending:true,deviceCandidates:[foundRgb]});
+ assert.ok(hasCandidate(foundRgb.id));
+ assert.match(mainMarkup,/Настраивается автоматически/,'the late proposal is still being applied');
+ assert.ok(!mainMarkup.includes('data-action="retry-startup-discovery"'));
+ receiveDeviceState('snapshot',{...empty,startupDiscoveryRetry:false,devices:[{...foundRgb,leds:1}]});
+ assert.ok(!hasCandidate(foundRgb.id),'committed device replaces the late proposal');
+ assert.match(mainMarkup,new RegExp(`data-device-id="${foundRgb.id}"`));
+ console.log('PASS: one rescan from an empty profile; late candidate becomes an applied device');
+}
+{
  const pending={...foundState,pending:true,deviceCandidates:[foundRgb],nativeAux:{
   page:'devices',fields:[{id:714,label:'Семейство',kind:'select',enabled:true,value:'openrgb',choices:[]}],actions:[],notes:[],
  }};
@@ -475,7 +506,7 @@ console.log('PASS: candidate identity, applied precedence, metadata replacement,
  assert.match(mainMarkup,/Prismestra добавляет найденное устройство в профиль/);
  assert.match(mainMarkup,/Настраивается автоматически/);
  assert.doesNotMatch(mainMarkup,/data-action="apply-document"|id="native-target"/);
- receiveDeviceState('status',{pending:false});
+ receiveDeviceState('status',{pending:false,error:'Таймаут подключения'});
  assert.ok(hasCandidate(foundRgb.id),'the stale discovery row is still present');
  assert.doesNotMatch(mainMarkup,/Настраивается автоматически|Prismestra добавляет/);
  assert.match(mainMarkup,/<button[^>]*data-action="focus-device-setup" data-mutation\s*>Добавить устройство/);
@@ -488,8 +519,10 @@ console.log('PASS: candidate identity, applied precedence, metadata replacement,
  assert.equal(commands.length,before,'candidate arrival must not issue a command');
  receiveDeviceState('snapshot',{...pending,editor:{...pending.editor,dirty:true}});
  assert.match(mainMarkup,/id="native-target"/,'existing edits keep their form');
- receiveDeviceState('snapshot',{...pending,pending:false,deviceCandidates:[]});
+ receiveDeviceState('snapshot',{...pending,pending:false,deviceCandidates:[],error:'Подключение не применилось'});
  assert.doesNotMatch(mainMarkup,/Настраивается автоматически/,'cancelled discovery restores the empty state');
+ assert.match(mainMarkup,/<button[^>]*data-action="focus-device-setup" data-mutation\s*>Добавить устройство/,
+  'a failed setup enables manual device setup');
  receiveDeviceState('snapshot',{...pending,pending:false,deviceCandidates:[],devices:[{...foundRgb,leds:1}],
   editor:{page:'devices',index:0,targets:[foundRgb.label],fields:[],dirty:false}});
  assert.match(mainMarkup,/id="native-target"/,'properties return after the output is applied');
