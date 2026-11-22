@@ -680,10 +680,10 @@ function stayInDraft() {
  closeDraftSwitch();
  changeView('editor');
 }
-function saveDraft(name,id=null,nextId=null,openCreated=false) {
+function saveDraft(name,id=null,nextId=null,editCreatedFrom=null) {
  const scene=clone(draft);
  if(!send({op:'save_scene',id,name,scene},true))return false;
- savedSceneRequest={id,name,scene,nextId,openCreated,ids:state.library.map(item=>item.id)};
+ savedSceneRequest={id,name,scene,nextId,editCreatedFrom,ids:state.library.map(item=>item.id)};
  return true;
 }
 function nameDialog(mode) {
@@ -737,11 +737,11 @@ window.prismestraReceive = message => {
     setDraftOrigin(state.draftScene?state.draftOrigin??null:{id:null,name:null,scene:state.scene});
    }
    if(savedSceneRequest){
-    const {id,name,scene,ids,nextId,openCreated}=savedSceneRequest;
+    const {id,name,scene,ids,nextId,editCreatedFrom}=savedSceneRequest;
     const saved=state.library.find(item=>(id?item.id===id:!ids.includes(item.id))&&item.name===name&&same(item.scene,scene));
     if(saved){
      savedSceneRequest=null;
-     if(openCreated&&view==='library'){
+     if(editCreatedFrom===view){
       loadEntry(saved);
       $('#scene-effect')?.focus();
       return;
@@ -990,7 +990,8 @@ $('#name-form').onsubmit=event=>{
  event.preventDefault();if(busy())return;
  const name=$('#scene-name').value.trim();if(!name||name.length>48||/[\u0000-\u001f\u007f]/.test(name)){$('#scene-name').setCustomValidity('Введите название до 48 символов без управляющих знаков');$('#scene-name').reportValidity();return;}
  const id=['save','rename'].includes(dialogMode)?selectedId:null;
- if(saveDraft(name,id,dialogMode==='save-switch'?draftSwitchId:null,dialogMode==='new')){draftSwitchId=null;$('#name-dialog').close();restoreFocus(dialogReturn);}
+ const editCreatedFrom=['new','clone'].includes(dialogMode)?view:null;
+ if(saveDraft(name,id,dialogMode==='save-switch'?draftSwitchId:null,editCreatedFrom)){draftSwitchId=null;$('#name-dialog').close();restoreFocus(dialogReturn);}
 };
 $('#scene-name').oninput=()=>$('#scene-name').setCustomValidity('');
 $('#cancel-name').onclick=()=>{$('#name-dialog').close();draftSwitchId=null;restoreFocus(dialogReturn);};

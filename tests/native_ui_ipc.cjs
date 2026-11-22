@@ -996,6 +996,32 @@ console.log('PASS: selected managed ARGB device exposes a read-only IPC route an
 }
 console.log('PASS: new scene opens its editor and focuses the effect only after a confirmed save');
 
+{
+ const templateState={...draftState,library:[plumDawn]};
+ restoreDraft(templateState);
+ selectScene(plumDawn.id);
+ evaluate('nameDialog("clone")');
+ find('#scene-name').value='My plum template';
+ find('#name-form').onsubmit({preventDefault(){}});
+ assert.deepEqual(commands.at(-1),{op:'save_scene',id:null,name:'My plum template',scene:plumDawn.scene});
+
+ context.payload={kind:'snapshot',state:templateState};
+ evaluate('window.prismestraReceive(payload)');
+ assert.equal(evaluate('selectedId'),null);
+ assert.equal(evaluate('draftName'),plumDawn.name);
+
+ const copy={id:'plum-copy',name:'My plum template',scene:plumDawn.scene};
+ const beforeAck=commands.length;
+ context.payload={kind:'snapshot',state:{...templateState,library:[plumDawn,copy]}};
+ evaluate('window.prismestraReceive(payload)');
+ assert.equal(evaluate('view'),'editor');
+ assert.equal(evaluate('selectedId'),copy.id);
+ assert.equal(document.activeElement,find('#scene-effect'));
+ assert.equal(commands.at(-1).origin.id,copy.id);
+ assert.equal(commands.slice(beforeAck).some(command=>command.op==='apply_scene'),false);
+}
+console.log('PASS: copying a built-in scene focuses the effect on the confirmed copy');
+
 const lcdBackground = {
  page:'lcd', index:0, deviceId:navLcd.id, targets:['LCD'], dirty:false,
  fields:[{key:'media',label:'Фон LCD',value:'Выбран · 12345678',choices:[],hint:'',file:true}],
