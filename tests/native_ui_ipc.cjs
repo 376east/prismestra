@@ -877,3 +877,30 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
  assert.doesNotMatch(mainMarkup,/id="open-argb"/);
 }
 console.log('PASS: selected managed ARGB device exposes a read-only IPC route and removes it when unavailable');
+
+{
+ restoreDraft(draftState);
+ const submitNew=()=>{
+  evaluate('nameDialog("new")');
+  find('#scene-name').value='New fixture';
+  find('#name-form').onsubmit({preventDefault(){}});
+  return commands.at(-1);
+ };
+ assert.deepEqual(submitNew(),{op:'save_scene',id:null,name:'New fixture',scene});
+ evaluate('window.prismestraReceive(payload)');
+ assert.equal(evaluate('view'),'library','an unrelated snapshot cannot open the editor');
+ evaluate('window.prismestraReceive({kind:"error",message:"Cannot write catalog"})');
+ assert.equal(evaluate('view'),'library');
+ assert.equal(evaluate('busy()'),false);
+ submitNew();
+ const firstSave=commands.length;
+ const created={id:'created',name:'New fixture',scene};
+ context.payload={kind:'snapshot',state:{...draftState,library:[entryA,entryB,created]}};
+ evaluate('window.prismestraReceive(payload)');
+ assert.equal(evaluate('view'),'editor');
+ assert.equal(evaluate('selectedId'),created.id);
+ assert.equal(document.activeElement,find('#scene-effect'));
+ assert.equal(commands.at(-1).origin.id,created.id);
+ assert.equal(commands.slice(firstSave).some(command=>command.op==='apply_scene'),false);
+}
+console.log('PASS: new scene opens its editor and focuses the effect only after a confirmed save');
