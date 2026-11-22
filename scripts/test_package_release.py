@@ -14,7 +14,7 @@ spec.loader.exec_module(release)
 
 
 class PackageChecks(unittest.TestCase):
-    def test_portable_launch_allowlist_excludes_cmd_wrappers_and_personal_state(self):
+    def test_portable_launch_allowlist_excludes_legacy_launchers_and_personal_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source, binary = root / "source", root / "binary"
@@ -29,11 +29,30 @@ class PackageChecks(unittest.TestCase):
             (portable / "lighting-local.json").write_text("private bindings", encoding="utf-8")
             (portable / "profile.json").write_text("personal scene", encoding="utf-8")
             hashes = release.copy_launch_files(source, binary)
-            self.assertEqual(set(hashes), {"Launch Prismestra.ps1", "Configure OpenRGB.ps1",
-                                           "managed-openrgb.md", "PORTABLE-LAUNCH.md"})
+            self.assertEqual(set(hashes), {"Configure OpenRGB.ps1", "managed-openrgb.md",
+                                           "PORTABLE-LAUNCH.md"})
             self.assertEqual(set(p.name for p in binary.iterdir()), set(hashes))
             for name, digest in hashes.items():
                 self.assertEqual(digest, release.sha256(binary / name))
+
+            old_root = root / "existing" / binary.name
+            existing = {
+                "data/profile.json": b"saved profile",
+                "data/state/lighting-local.json": b"saved bindings",
+                "data/state/managed-openrgb.json": b"pinned backend configuration",
+                "data/state/backend-task.json": b"authorized task reference",
+            }
+            for name, contents in existing.items():
+                path = old_root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(contents)
+            archive = root / "update.zip"
+            release.write_zip(binary, archive)
+            with zipfile.ZipFile(archive) as package:
+                self.assertEqual(set(package.namelist()), {f"{binary.name}/{name}" for name in hashes})
+                package.extractall(old_root.parent)
+            for name, contents in existing.items():
+                self.assertEqual((old_root / name).read_bytes(), contents)
 
     def test_missing_portable_launch_file_fails_before_partial_copy(self):
         with tempfile.TemporaryDirectory() as temporary:
