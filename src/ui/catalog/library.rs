@@ -18,6 +18,33 @@ macro_rules! preset {
     };
 }
 
+const PEACH_SURF: Preset = preset!(
+    "peach-surf",
+    "Персиковый прибой",
+    [0x453260, 0xcb729a, 0xfaba85],
+    68,
+    34,
+    12
+);
+
+impl Preset {
+    fn scene(&self, effect: Effect, base: &super::Scene) -> super::Scene {
+        super::Scene {
+            effect,
+            colors: self.colors.to_vec(),
+            brightness: self.brightness,
+            speed: self.speed,
+            rainbow_width: self.scale,
+            ..base.clone()
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn first_light_scene() -> super::Scene {
+    PEACH_SURF.scene(Effect::GradientWave, &plum_dawn().scene)
+}
+
 #[rustfmt::skip]
 const GROUPS: &[(Effect, &[Preset; 10])] = &[
     (Effect::NoiseMap, &[
@@ -45,7 +72,7 @@ const GROUPS: &[(Effect, &[Preset; 10])] = &[
         preset!("soft-chalk", "Мягкий мел", [0xe3e4db], 38, 28, 10),
     ]),
     (Effect::GradientWave, &[
-        preset!("peach-surf", "Персиковый прибой", [0x453260, 0xcb729a, 0xfaba85], 68, 34, 12),
+        PEACH_SURF,
         preset!("neon-citrus", "Неоновый цитрус", [0x274616, 0x91ce21, 0xf6f578], 66, 58, 20),
         preset!("pink-celadon", "Розовый и селадон", [0x9aeaaf, 0xf2ebc7, 0xec95b8], 54, 29, 8),
         preset!("red-clay", "Красная глина", [0x371210, 0xa74126, 0xf99559], 63, 34, 10),
@@ -252,24 +279,12 @@ pub(crate) fn built_in() -> Vec<Entry> {
     entries.extend(MOTION_EXAMPLES.iter().map(|(effect, preset)| Entry {
         id: format!("builtin:{}", preset.id),
         name: preset.name.into(),
-        scene: super::Scene {
-            effect: *effect,
-            colors: preset.colors.to_vec(),
-            speed: preset.speed,
-            brightness: preset.brightness,
-            rainbow_width: preset.scale,
-            ..plum.scene.clone()
-        },
+        scene: preset.scene(*effect, &plum.scene),
     }));
     for index in 0..10 {
         for (effect, group) in GROUPS {
             let preset = &group[index];
-            let mut scene = plum.scene.clone();
-            scene.effect = *effect;
-            scene.colors = preset.colors.to_vec();
-            scene.brightness = preset.brightness;
-            scene.speed = preset.speed;
-            scene.rainbow_width = preset.scale;
+            let mut scene = preset.scene(*effect, &plum.scene);
             if *effect == Effect::NoiseMap {
                 scene.noise.frequency = 0.02 + f32::from(preset.scale as u8) * 0.0026;
                 scene.noise.motion = if preset.id == "frost" { 2 } else { 3 };
