@@ -71,7 +71,6 @@ def write_zip(folder, destination):
 def copy_launch_files(source, binary):
     """Use an explicit allowlist; never copy a workstation's data or bindings."""
     files = {
-        "Configure OpenRGB.ps1": source / "scripts/portable/Configure OpenRGB.ps1",
         "managed-openrgb.md": source / "docs/managed-openrgb.md",
         "PORTABLE-LAUNCH.md": source / "docs/portable-launch.md",
     }

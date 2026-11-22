@@ -14,10 +14,10 @@ spec.loader.exec_module(release)
 
 
 class PackageChecks(unittest.TestCase):
-    def test_portable_launch_allowlist_excludes_legacy_launchers_and_personal_state(self):
+    def test_portable_zip_excludes_shell_scripts_and_preserves_existing_helper_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            source, binary = root / "source", root / "binary"
+            source, binary = root / "prismestra-source", root / "Prismestra"
             portable = source / "scripts/portable"
             portable.mkdir(parents=True)
             (source / "docs").mkdir()
@@ -29,12 +29,12 @@ class PackageChecks(unittest.TestCase):
             (portable / "lighting-local.json").write_text("private bindings", encoding="utf-8")
             (portable / "profile.json").write_text("personal scene", encoding="utf-8")
             hashes = release.copy_launch_files(source, binary)
-            self.assertEqual(set(hashes), {"Configure OpenRGB.ps1", "managed-openrgb.md",
-                                           "PORTABLE-LAUNCH.md"})
+            self.assertEqual(set(hashes), {"managed-openrgb.md", "PORTABLE-LAUNCH.md"})
             self.assertEqual(set(p.name for p in binary.iterdir()), set(hashes))
             for name, digest in hashes.items():
                 self.assertEqual(digest, release.sha256(binary / name))
 
+            (binary / "Prismestra.exe").write_bytes(b"new portable executable")
             old_root = root / "existing" / binary.name
             existing = {
                 "data/profile.json": b"saved profile",
@@ -46,13 +46,29 @@ class PackageChecks(unittest.TestCase):
                 path = old_root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(contents)
+            portable_exe = old_root / "Prismestra.exe"
+            portable_exe.write_bytes(b"previous portable executable")
+            previous_exe = portable_exe.read_bytes()
             archive = root / "update.zip"
             release.write_zip(binary, archive)
             with zipfile.ZipFile(archive) as package:
-                self.assertEqual(set(package.namelist()), {f"{binary.name}/{name}" for name in hashes})
+                self.assertEqual(set(package.namelist()),
+                                 {f"{binary.name}/{name}" for name in [*hashes, "Prismestra.exe"]})
                 package.extractall(old_root.parent)
+            self.assertEqual(portable_exe.read_bytes(), b"new portable executable")
             for name, contents in existing.items():
                 self.assertEqual((old_root / name).read_bytes(), contents)
+
+            portable_exe.write_bytes(previous_exe)
+            self.assertEqual(portable_exe.read_bytes(), b"previous portable executable")
+            for name, contents in existing.items():
+                self.assertEqual((old_root / name).read_bytes(), contents)
+
+            source_archive = root / "source.zip"
+            release.write_zip(source, source_archive)
+            with zipfile.ZipFile(source_archive) as package:
+                self.assertEqual(package.read(f"{source.name}/scripts/portable/Configure OpenRGB.ps1"),
+                                 b"Configure OpenRGB.ps1")
 
     def test_missing_portable_launch_file_fails_before_partial_copy(self):
         with tempfile.TemporaryDirectory() as temporary:
