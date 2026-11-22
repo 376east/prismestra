@@ -181,13 +181,46 @@ class OpenRGBCacheTests(unittest.TestCase):
         ):
             candidate.main()
         stages["load_or_build_component"].assert_called_once_with(
-            output.resolve(), vsdevcmd.resolve(), self.cache, self.key)
+            output.resolve(), vsdevcmd.resolve(), self.cache, self.key, write_cache=False)
+
+    def test_openrgb_only_verifies_new_cache_without_entering_setup_packaging(self):
+        source = self.make_bundle()
+        output = self.root / "output"
+        vsdevcmd = self.root / "VsDevCmd.bat"
+        vsdevcmd.touch()
+        argv = ["build_windows_candidate.py", "--commit", "a" * 40, "--openrgb-only",
+                "--output", str(output), "--vsdevcmd", str(vsdevcmd),
+                "--openrgb-cache", str(self.cache), "--openrgb-cache-key", self.key, "--write-openrgb-cache"]
+        restore = cache.restore
+        with (
+            patch.object(sys, "argv", argv),
+            patch("package_release.clean_commit"),
+            patch.object(cache, "restore", side_effect=lambda *args: restore(*args, repo=self.repo)) as verify,
+            patch.multiple(candidate, fetch=DEFAULT, checkout=DEFAULT, run=DEFAULT,
+                           build_component=DEFAULT, package_candidate=DEFAULT) as stages,
+        ):
+            stages["build_component"].return_value = source
+            candidate.main()
+        stages["build_component"].assert_called_once_with(output.resolve(), vsdevcmd.resolve())
+        verify.assert_called_once_with(self.cache, self.key, output.resolve())
+        for name in ("fetch", "checkout", "run", "package_candidate"):
+            stages[name].assert_not_called()
+        self.assertTrue((output / cache.READY).is_file())
+
+    def test_read_only_cache_miss_builds_without_staging_a_cache_entry(self):
+        original = self.make_bundle()
+        with patch.object(candidate, "build_component", return_value=original) as build:
+            result = candidate.load_or_build_component(self.root, self.root / "vs.bat", self.cache, self.key)
+        build.assert_called_once()
+        self.assertEqual(result, original)
+        self.assertFalse(self.cache.exists())
+        self.assertFalse((self.root / cache.READY).exists())
 
     def test_candidate_only_queues_a_new_cache_after_a_cold_build(self):
         original = self.make_bundle()
         vsdevcmd = self.root / "vs.bat"
         with patch.object(candidate, "build_component", return_value=original) as build:
-            result = candidate.load_or_build_component(self.root, vsdevcmd, self.cache, self.key)
+            result = candidate.load_or_build_component(self.root, vsdevcmd, self.cache, self.key, write_cache=True)
         build.assert_called_once_with(self.root, vsdevcmd)
         self.assertEqual(result, original)
         self.assertTrue((self.root / cache.READY).is_file())

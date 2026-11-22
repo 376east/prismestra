@@ -25,7 +25,7 @@ INNO_INPUT = (
 )
 
 
-def load_or_build_component(root, vsdevcmd, cache, key):
+def load_or_build_component(root, vsdevcmd, cache, key, *, write_cache=False):
     started = time.monotonic()
     existing = cache is not None and (cache.exists() or cache.is_symlink())
     bundle = None
@@ -39,7 +39,7 @@ def load_or_build_component(root, vsdevcmd, cache, key):
             status = "rejected"
     if bundle is None:
         bundle = build_component(root, vsdevcmd)
-        if cache is not None and not existing:
+        if cache is not None and not existing and write_cache:
             try:
                 openrgb_cache.save(cache, key, bundle)
                 (root / openrgb_cache.READY).touch(exist_ok=False)
@@ -99,29 +99,42 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--commit", required=True)
-    parser.add_argument("--version", required=True)
+    parser.add_argument("--version")
     parser.add_argument("--vsdevcmd", type=Path, required=True)
     parser.add_argument("--openrgb-cache", type=Path)
     parser.add_argument("--openrgb-cache-key")
+    parser.add_argument("--write-openrgb-cache", action="store_true")
+    parser.add_argument("--openrgb-only", action="store_true")
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{40}", args.commit):
         parser.error("expected a full checkout commit")
-    if (not re.fullmatch(r"(?:0|[1-9][0-9]{0,4})(?:\.(?:0|[1-9][0-9]{0,4})){3}", args.version)
+    if not args.openrgb_only and (not args.version
+            or not re.fullmatch(r"(?:0|[1-9][0-9]{0,4})(?:\.(?:0|[1-9][0-9]{0,4})){3}", args.version)
             or args.version == "0.0.0.0" or any(int(part) > 65535 for part in args.version.split("."))):
         parser.error("expected a nonzero four-part installer version with 16-bit components")
     root = args.output.resolve()
     if root.is_relative_to(REPO):
         parser.error("output must be outside the checkout")
-    cache = args.openrgb_cache
+    cache = None if args.openrgb_cache is None else args.openrgb_cache.absolute()
     key = args.openrgb_cache_key
     if (cache is None) != (key is None) or (key is not None and not openrgb_cache.KEY.fullmatch(key)):
         parser.error("an OpenRGB cache directory and exact build key must be supplied together")
+    if (args.write_openrgb_cache and cache is None) or (args.openrgb_only and not args.write_openrgb_cache):
+        parser.error("OpenRGB warm-up requires an exact cache key and write access")
     if cache is not None and (cache.resolve().is_relative_to(REPO) or cache.resolve().is_relative_to(root)):
         parser.error("OpenRGB cache must be outside both the checkout and candidate output")
     from package_release import clean_commit
 
     clean_commit(REPO, args.commit)
     root.mkdir(parents=True)
+    vsdevcmd = args.vsdevcmd.resolve(strict=True)
+    if args.openrgb_only:
+        component = load_or_build_component(root, vsdevcmd, cache, key, write_cache=True)
+        if component != cache / openrgb_cache.BUNDLE:
+            if not (root / openrgb_cache.READY).is_file():
+                raise ValueError("OpenRGB cache could not be staged for warm-up")
+            openrgb_cache.restore(cache, key, root)
+        return
     inno_bootstrap = fetch(root, "innosetup-6.7.4.exe", *INNO_INPUT)
     prerequisites = root / "prerequisites"
     prerequisites.mkdir()
@@ -136,7 +149,7 @@ def main():
         "-Wait -PassThru -WindowStyle Hidden -ArgumentList $params; exit $p.ExitCode",
         env=dict(os.environ, PRISMESTRA_INNO_BOOTSTRAP=str(inno_bootstrap),
                  PRISMESTRA_INNO_DIRECTORY=str(inno)))
-    component = load_or_build_component(root, args.vsdevcmd.resolve(strict=True), cache, key)
+    component = load_or_build_component(root, vsdevcmd, cache, key, write_cache=args.write_openrgb_cache)
     pawnio = checkout(read(INSTALLER / "pawnio-source.lock.json"), root / "pawnio-source")
     run("git", "-C", pawnio, "submodule", "update", "--init", "--recursive", "--depth=1")
     package_candidate(root, args.commit, args.version, component, prerequisites, inno / "ISCC.exe", pawnio)
