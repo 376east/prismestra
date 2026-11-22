@@ -160,6 +160,214 @@ fn ha_discovery_is_read_only_and_errors_do_not_expose_credentials() {
 }
 
 #[test]
+fn smart_home_route_failures_keep_local_frames_without_enabling_the_alternate() {
+    use crate::{
+        app::{
+            config::{Groups, Project},
+            document::Document,
+            lighting_outputs::Local,
+            runtime::Runtime,
+        },
+        devices::{Binding, Canvas, Device, Point, Role, Setup, home_assistant, wled::Controller},
+        runtime::output::Phase,
+    };
+    use std::{net::UdpSocket, sync::Arc};
+
+    for (driver, response) in [
+        (Driver::HomeAssistant, Some(("404 Not Found", "{}"))),
+        (Driver::HomeAssistant, None),
+        (
+            Driver::HomeAssistant,
+            Some(("503 Service Unavailable", "{}")),
+        ),
+        (Driver::WledDdp, Some(("503 Service Unavailable", "{}"))),
+        (Driver::WledDdp, None),
+    ] {
+        let absent = response
+            .is_none()
+            .then(|| TcpListener::bind("127.0.0.1:0").unwrap());
+        let (url, peer) = match response {
+            Some(response) => {
+                let (url, peer) = start_peer(vec![response]);
+                (url, Some(peer))
+            }
+            None => (
+                format!(
+                    "http://{}/ha",
+                    absent.as_ref().unwrap().local_addr().unwrap()
+                ),
+                None,
+            ),
+        };
+        // Close the socket to simulate a missing HTTP service.
+        drop(absent);
+        let local = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let remote = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let local_address = local.local_addr().unwrap();
+        let remote_address = remote.local_addr().unwrap();
+        remote.set_nonblocking(true).unwrap();
+        let alternate = if driver == Driver::HomeAssistant {
+            Driver::WledDdp
+        } else {
+            Driver::HomeAssistant
+        };
+        let document = Document::from_lighting(Project {
+            version: 1,
+            setup: Setup {
+                version: 1,
+                devices: [
+                    ("local", Driver::WledDdp, true),
+                    ("remote", driver.clone(), true),
+                    ("alternate", alternate, false),
+                ]
+                .into_iter()
+                .map(|(id, driver, enabled)| Device {
+                    id: id.into(),
+                    label: id.into(),
+                    rate_hz: if driver == Driver::HomeAssistant {
+                        1
+                    } else {
+                        25
+                    },
+                    driver,
+                    role: Role::Canvas,
+                    leds: 1,
+                    enabled,
+                })
+                .collect(),
+                canvas: Canvas {
+                    width: 3,
+                    height: 1,
+                    points: ["local", "remote", "alternate"]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(x, id)| Point {
+                            device: id.into(),
+                            led: 0,
+                            x: x as u32,
+                            y: 0,
+                        })
+                        .collect(),
+                },
+            },
+            scene: crate::runtime::scene::example(),
+            schedule: Default::default(),
+            groups: Groups {
+                pc: vec!["local".into(), "remote".into(), "alternate".into()],
+                door: vec![],
+            },
+        })
+        .unwrap();
+        let ha = Binding::HomeAssistant {
+            endpoint: url.clone(),
+            entity: "light.room".into(),
+            credential_id: home_assistant::credential_id(&url).unwrap(),
+        };
+        let ddp = Binding::WledDdp {
+            endpoint: remote_address,
+            controller: Some(Controller {
+                http_endpoint: url.trim_end_matches("/ha").into(),
+                identity: "wled:a1b2c3d4e5f6".into(),
+            }),
+        };
+        let (selected, alternate) = if driver == Driver::HomeAssistant {
+            (ha, ddp)
+        } else {
+            (ddp, ha)
+        };
+        let bindings = Local {
+            version: 1,
+            devices: [
+                (
+                    "local".into(),
+                    Binding::WledDdp {
+                        endpoint: local_address,
+                        controller: None,
+                    },
+                ),
+                ("remote".into(), selected),
+                ("alternate".into(), alternate),
+            ]
+            .into(),
+            monitors: Default::default(),
+            door_brightness: 15,
+        };
+        let plan = bindings
+            .prepare(&document, std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+            .unwrap();
+        let [
+            (local_id, local_keys, local_factory),
+            (remote_id, remote_keys, remote_factory),
+        ] = plan
+            .rgb
+            .try_into()
+            .ok()
+            .expect("only the two enabled routes can have workers");
+        assert_eq!((&*local_id, &*remote_id), ("local", "remote"));
+        let mut runtime = Runtime::new(document, None).unwrap();
+        runtime
+            .attach_rgb(&local_id, local_keys, local_factory)
+            .unwrap();
+        let mut now = 0;
+        let mut wait_for = |runtime: &mut Runtime, predicate: &dyn Fn(&Runtime) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !predicate(runtime) {
+                now += 10_000;
+                runtime.tick(now, 1_800_000_000).unwrap();
+                assert!(
+                    Instant::now() < deadline,
+                    "fixture timed out for {driver:?}"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+        };
+        let submitted = |runtime: &Runtime| runtime.host().status("local").unwrap().submitted;
+        wait_for(&mut runtime, &|runtime| submitted(runtime) > 0);
+        let remote_factory = if driver == Driver::HomeAssistant {
+            // Substitute only the credential store.
+            Arc::new(move |_| {
+                Ok(Box::new(HomeAssistant::with_token(
+                    &url,
+                    "light.room",
+                    Some("fake.test-token".into()),
+                )?) as Box<dyn RgbDriver>)
+            })
+        } else {
+            remote_factory
+        };
+        runtime
+            .attach_rgb(&remote_id, remote_keys, remote_factory)
+            .unwrap();
+        wait_for(&mut runtime, &|runtime| {
+            runtime.host().status("remote").unwrap().phase == Phase::Failed
+        });
+        runtime.enable_registered_output_recovery();
+        let before = submitted(&runtime);
+        wait_for(&mut runtime, &|runtime| submitted(runtime) > before);
+        assert!(runtime.host().status("alternate").is_none());
+        assert_eq!(
+            remote.recv(&mut [0; 32]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        if let Some(peer) = peer {
+            let requests = peer.join().unwrap();
+            let path = if driver == Driver::HomeAssistant {
+                "GET /ha/api/states/light.room "
+            } else {
+                "GET /json/info "
+            };
+            assert!(requests[0].starts_with(path));
+        }
+        runtime.stop();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !runtime.drained() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
+#[test]
 fn ha_rebinds_before_resending_latest_color_and_leaves_auth_failure_terminal() {
     const AVAILABLE: &str =
         r#"{"entity_id":"light.room","state":"on","attributes":{"supported_color_modes":["rgb"]}}"#;
@@ -414,6 +622,31 @@ fn assert_ha_authorization_recovery(
         thread::sleep(Duration::from_millis(2));
     };
     assert!(failed.requires_action);
+    let activity =
+        |runtime: &Runtime| crate::ui::windows::device_activity_for(runtime, true, false, 1);
+    let label = |runtime: &Runtime| activity(runtime)["labels"]["ha"].clone();
+    let assert_access = |runtime: &mut Runtime| {
+        let target = schedule::Target::Pc;
+        let active = runtime.group_on(target);
+        if !active {
+            assert_eq!(label(runtime), "Выключено");
+            assert_eq!(activity(runtime)["reasons"], serde_json::json!({}));
+            runtime.set_group(target, true).unwrap();
+        }
+        assert_eq!(label(runtime), "Проверьте доступ Home Assistant");
+        assert_eq!(activity(runtime)["retryTickets"], serde_json::json!({}));
+        assert_eq!(
+            activity(runtime)["reasons"],
+            serde_json::json!({"ha": "homeAssistantAccessRequired"})
+        );
+        if !active {
+            runtime.set_group(target, false).unwrap();
+        }
+    };
+    assert_access(&mut runtime);
+    let preview = crate::ui::windows::device_activity_for(&runtime, false, false, 1);
+    assert_eq!(preview["labels"]["ha"], "Предпросмотр");
+    assert_eq!(preview["reasons"], serde_json::json!({}));
     assert_eq!(failed.submitted == 0, initial);
     assert_eq!(failed.error.as_deref(), Some(error));
     assert_eq!(runtime.outputs_ready(), Err(error.into()));
@@ -475,6 +708,7 @@ fn assert_ha_authorization_recovery(
         "document edit reopened HA"
     );
     assert_eq!(runtime.outputs_ready(), Err(error.into()));
+    assert_access(&mut runtime);
     if initial {
         let ha = &runtime.document().lighting.setup.devices[0];
         assert!(
@@ -550,6 +784,7 @@ fn assert_ha_authorization_recovery(
         "startup plan reopened HA"
     );
     assert_eq!(runtime.outputs_ready(), Err(error.into()));
+    assert_access(&mut runtime);
 
     key_saved.store(true, Ordering::SeqCst);
     match recovery {
@@ -580,6 +815,15 @@ fn assert_ha_authorization_recovery(
         );
         thread::sleep(Duration::from_millis(2));
     }
+    assert_eq!(
+        label(&runtime),
+        if initial {
+            "Кадры отправлены"
+        } else {
+            "Выключено"
+        }
+    );
+    assert_eq!(activity(&runtime)["reasons"], serde_json::json!({}));
     if matches!(recovery, RecoveryAction::Apply) {
         assert_eq!(
             runtime.host().status("neighbor").unwrap().generation,

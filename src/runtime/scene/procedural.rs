@@ -1,11 +1,26 @@
-use super::{Canvas, Effect, Rgb, Scene};
+use super::{Canvas, Effect, Rgb, Scene, shade};
 use std::f64::consts::TAU;
+
+mod display;
+mod dynamics;
+mod kinetic;
+mod nature;
+mod optics;
+mod premium;
+mod premium_extra;
+mod simulations;
 
 fn wave(turns: f64) -> f64 {
     0.5 + 0.5 * (TAU * turns).cos()
 }
 
-fn sample(effect: Effect, x: f64, y: f64, scale: f64, phase: f64) -> (f64, f64) {
+fn soft_disc(dx: f64, dy: f64, radius: f64) -> f64 {
+    (1.0 - (dx * dx + dy * dy) / (radius * radius))
+        .max(0.0)
+        .powi(2)
+}
+
+pub(super) fn sample(effect: Effect, x: f64, y: f64, scale: f64, phase: f64) -> (f64, f64) {
     match effect {
         Effect::GradientWave => (wave((x + 0.26 * y) * scale - phase), 1.0),
         Effect::CrossingBeams => {
@@ -58,6 +73,15 @@ fn sample(effect: Effect, x: f64, y: f64, scale: f64, phase: f64) -> (f64, f64) 
         Effect::NoiseMap | Effect::Breathing | Effect::RainbowWave => {
             unreachable!("legacy effects have their own rendering state")
         }
+        _ => kinetic::sample(effect, x, y, scale, phase)
+            .or_else(|| optics::sample(effect, x, y, scale, phase))
+            .or_else(|| nature::sample(effect, x, y, scale, phase))
+            .or_else(|| simulations::sample(effect, x, y, scale, phase))
+            .or_else(|| display::sample(effect, x, y, scale, phase))
+            .or_else(|| dynamics::sample(effect, x, y, scale, phase))
+            .or_else(|| premium::sample(effect, x, y, scale, phase))
+            .or_else(|| premium_extra::sample(effect, x, y, scale, phase))
+            .expect("every procedural effect belongs to a renderer family"),
     }
 }
 
@@ -66,7 +90,7 @@ pub(super) fn frame(scene: &Scene, canvas: &Canvas, phase: f64) -> Result<Vec<Rg
     let width = f64::from(canvas.width.saturating_sub(1).max(1));
     let height = f64::from(canvas.height.saturating_sub(1).max(1));
     let scale = 0.6 + f64::from(scene.rainbow_width) / 20.0;
-    let brightness = f32::from(scene.brightness) / 100.0;
+    let playback = scene.playback();
     canvas
         .points
         .iter()
@@ -78,19 +102,7 @@ pub(super) fn frame(scene: &Scene, canvas: &Canvas, phase: f64) -> Result<Vec<Rg
                 scale,
                 phase,
             );
-            let index = position.clamp(0.0, 1.0) * (palette.len() - 1) as f64;
-            let left = palette[index.floor() as usize];
-            let right = palette[index.ceil() as usize];
-            let mix = |a: u8, b: u8| {
-                (f64::from(a) + (f64::from(b) - f64::from(a)) * index.fract()).round() as u8
-            };
-            Rgb::new(
-                mix(left.r, right.r),
-                mix(left.g, right.g),
-                mix(left.b, right.b),
-            )
-            .adjusted(brightness * intensity as f32, scene.temperature, scene.tint)
-            .map_err(str::to_owned)
+            shade(&palette, playback, position, intensity)
         })
         .collect()
 }
@@ -101,58 +113,67 @@ fn procedural_effects_have_distinct_geometry_and_follow_elapsed_time() {
     use crate::devices::Point;
 
     let canvas = Canvas {
-        width: 9,
-        height: 7,
-        points: (0..7)
+        width: 19,
+        height: 13,
+        points: (0..13)
             .flat_map(|y| {
-                (0..9).map(move |x| Point {
+                (0..19).map(move |x| Point {
                     device: "test".into(),
-                    led: (9 * y + x) as usize,
+                    led: (19 * y + x) as usize,
                     x,
                     y,
                 })
             })
             .collect(),
     };
-    let effects = [
-        Effect::GradientWave,
-        Effect::CrossingBeams,
-        Effect::TidalRings,
-        Effect::HorizonSweep,
-        Effect::EmberDrift,
-        Effect::PrismLattice,
-        Effect::CometTrail,
-        Effect::Fireflies,
-    ];
     let mut signatures = Vec::new();
-    for effect in effects {
+    for effect in Effect::ALL.iter().copied().filter(|e| {
+        e.uses_normalized_canvas() && !e.uses_audio() && !e.uses_context() && !e.uses_reactive()
+    }) {
         let scene = Scene {
             effect,
-            colors: vec![0x2545d0, 0x4ab04a, 0xff932d],
+            // These two effects move through the same neutral ramp; all others
+            // must still animate with a single color.
+            colors: if matches!(effect, Effect::GradientWave | Effect::ColorCycle) {
+                vec![0x575757, 0x9b9b9b, 0xefefef]
+            } else {
+                vec![0xdcdcdc]
+            },
             speed: 80,
             ..example()
         };
-        let mut renderer = Renderer::new(scene.clone()).unwrap();
-        let first = renderer.step(&canvas).unwrap();
-        assert!(first.iter().any(|color| color != &first[0]), "{effect:?}");
-        let mut second = first.clone();
-        for _ in 1..25 {
-            second = renderer.step(&canvas).unwrap();
-        }
-        assert_ne!(first, second, "{effect:?}");
-        assert!(!signatures.contains(&second), "{effect:?}");
-        signatures.push(second.clone());
-        let mut skipped = Renderer::new(scene.clone()).unwrap();
+        let signature: Vec<_> = [0.07, 0.137, 0.297, 0.411, 0.61, 0.837]
+            .into_iter()
+            .map(|phase| frame(&scene, &canvas, phase).unwrap())
+            .collect();
+        let has_spatial_variation = signature
+            .iter()
+            .any(|frame| frame.iter().any(|color| color != &frame[0]));
         assert_eq!(
-            skipped.step_after_skips(&canvas, 24).unwrap(),
-            second,
+            has_spatial_variation,
+            effect != Effect::ColorCycle,
             "{effect:?}"
         );
-        let mut faster_fps = Renderer::new(Scene { fps: 50, ..scene }).unwrap();
-        assert_eq!(
-            faster_fps.step_after_skips(&canvas, 49).unwrap(),
-            second,
+        assert!(
+            signature.iter().any(|frame| frame != &signature[0]),
             "{effect:?}"
+        );
+        assert!(!signatures.contains(&signature), "{effect:?}");
+        signatures.push(signature);
+        let mut renderer = Renderer::new(scene.clone()).unwrap();
+        let mut phase_frame = renderer.step(&canvas).unwrap();
+        for _ in 1..23 {
+            phase_frame = renderer.step(&canvas).unwrap();
+        }
+        let mut skipped = Renderer::new(scene.clone()).unwrap();
+        assert!(
+            skipped.step_after_skips(&canvas, 22).unwrap() == phase_frame,
+            "skipped steps changed {effect:?}"
+        );
+        let mut faster_fps = Renderer::new(Scene { fps: 50, ..scene }).unwrap();
+        assert!(
+            faster_fps.step_after_skips(&canvas, 45).unwrap() == phase_frame,
+            "frame rate changed {effect:?}"
         );
     }
 }

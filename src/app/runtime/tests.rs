@@ -32,6 +32,71 @@ use std::{
     time::{Duration, Instant},
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(windows)]
+#[test]
+fn sensitive_scene_inputs_require_apply_even_after_connected_restore() {
+    use crate::lighting::scene::{Effect, ReactiveSource};
+
+    let stand = Stand::new();
+    let mut profile = stand.document.clone();
+    profile.lighting.scene.effect = Effect::CameraColor;
+    let saved = serde_json::to_vec(&profile).unwrap();
+    let mut runtime = Runtime::new(serde_json::from_slice(&saved).unwrap(), None).unwrap();
+    runtime.enable_native_scene_inputs();
+    assert!(runtime.wanted_reactive(true).is_none());
+    runtime.tick(now(), wall()).unwrap();
+    assert!(!runtime.reactive.wanted());
+
+    let mut scene = profile.lighting.scene;
+    scene.brightness = 42;
+    runtime.set_scene(scene.clone()).unwrap();
+    assert!(runtime.wanted_reactive(true).is_none());
+    runtime.apply_native_scene(scene.clone()).unwrap();
+    assert!(matches!(
+        runtime.wanted_reactive(true),
+        Some(ReactiveSource::Camera)
+    ));
+    assert!(runtime.wanted_reactive(false).is_none());
+
+    let restored = Runtime::new(runtime.document().clone(), None).unwrap();
+    assert!(restored.wanted_reactive(true).is_none());
+    scene.effect = Effect::KeyRipple;
+    runtime.set_scene(scene.clone()).unwrap();
+    assert!(runtime.wanted_reactive(true).is_none());
+    runtime.apply_native_scene(scene.clone()).unwrap();
+    assert!(matches!(
+        runtime.wanted_reactive(true),
+        Some(ReactiveSource::Keys)
+    ));
+
+    scene.effect = Effect::GameEvents;
+    runtime.set_scene(scene.clone()).unwrap();
+    assert!(matches!(
+        runtime.wanted_reactive(true),
+        Some(ReactiveSource::Game)
+    ));
+    scene.effect = Effect::CameraColor;
+    runtime.set_scene(scene.clone()).unwrap();
+    assert!(runtime.wanted_reactive(true).is_none());
+    runtime.apply_native_scene(scene).unwrap();
+    runtime.stop_channels();
+    assert!(runtime.wanted_reactive(true).is_none());
+}
+
+#[cfg(windows)]
+#[test]
+fn lighting_resume_does_not_wait_for_a_stalled_audio_worker() {
+    let stand = Stand::new();
+    let mut runtime = stand.runtime(false);
+    let (audio, release) = sound::Input::held_for_test();
+    runtime.sound = audio;
+    runtime.stop_channels();
+    assert!(runtime.sound.has_worker());
+    assert!(runtime.resume_owners_drained());
+    release.send(()).unwrap();
+}
+
 fn gpu_binding() -> crate::sensors::nvidia::PciIdentity {
     crate::sensors::nvidia::PciIdentity {
         device_id: 0x2684_10de,

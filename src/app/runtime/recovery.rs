@@ -4,6 +4,8 @@ use crate::runtime::output::OutputStartError;
 
 const RETRY_DELAYS_US: [u64; 3] = [1_000_000, 5_000_000, 15_000_000];
 
+const BEFORE_FIRST_RGB_WORKER: u64 = 0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpenRgbRetryTicket {
     pub document_revision: u64,
@@ -24,6 +26,7 @@ pub(super) struct Recovery {
     attempts: usize,
     failed_generation: Option<u64>,
     due_us: Option<u64>,
+    bluetooth_retry: bool,
     manual_retry: Option<OpenRgbRetryTicket>,
     manual_attempt: u64,
     manual_started: Option<(OpenRgbRetryTicket, Option<u64>)>,
@@ -72,24 +75,26 @@ impl Runtime {
             || self.refresh.is_some()
     }
 
-    /// Failed generation eligible for one explicit retry of a saved external OpenRGB output.
-    /// The returned ticket is tied to the current runtime and must be echoed by the caller.
-    pub fn openrgb_retry_ticket(&self, id: &str) -> Option<OpenRgbRetryTicket> {
-        use crate::{devices::Driver, runtime::output::Phase};
+    fn supports_openrgb_retry(&self, id: &str) -> bool {
+        use crate::devices::Driver;
 
-        if self.output_recovery_paused()
-            || !self
-                .document
-                .lighting
-                .setup
-                .devices
-                .iter()
-                .any(|device| device.id == id && device.enabled && device.driver == Driver::OpenRgb)
-        {
-            return None;
-        }
         #[cfg(windows)]
-        if self.managed_backend_ids.contains(id) {
+        if self.managed_backend_ids.contains(id) && !self.managed_openrgb_retry_available(id) {
+            return false;
+        }
+        self.document
+            .lighting
+            .setup
+            .devices
+            .iter()
+            .any(|device| device.id == id && device.enabled && device.driver == Driver::OpenRgb)
+    }
+
+    /// One explicit retry for a saved OpenRGB output after its automatic budget.
+    pub fn openrgb_retry_ticket(&self, id: &str) -> Option<OpenRgbRetryTicket> {
+        use crate::runtime::output::Phase;
+
+        if self.output_recovery_paused() || !self.supports_openrgb_retry(id) {
             return None;
         }
         let spec = self.rgb_specs.get(id)?;
@@ -97,16 +102,26 @@ impl Runtime {
             return None;
         }
         let recovery = self.output_recovery.get(id)?;
-        let snapshot = self.host.status(id)?;
+        let generation = match self.host.status(id) {
+            Some(snapshot) if snapshot.phase == Phase::Failed && !snapshot.requires_action => {
+                snapshot.generation
+            }
+            None if matches!(
+                recovery.start_error,
+                Some(OutputStartError::EndpointLeaseBusy(_))
+            ) && recovery.manual_attempt != 0 =>
+            {
+                BEFORE_FIRST_RGB_WORKER
+            }
+            _ => return None,
+        };
         (recovery.attempts == RETRY_DELAYS_US.len()
             && recovery.due_us.is_none()
             && recovery.manual_retry.is_none()
-            && recovery.manual_attempt < u64::MAX
-            && snapshot.phase == Phase::Failed
-            && !snapshot.requires_action)
+            && recovery.manual_attempt < u64::MAX)
             .then_some(OpenRgbRetryTicket {
                 document_revision: self.document_revision,
-                generation: snapshot.generation,
+                generation,
                 attempt: recovery.manual_attempt,
             })
     }
@@ -117,8 +132,17 @@ impl Runtime {
         if self.openrgb_retry_ticket(id) != Some(ticket) {
             return false;
         }
+        let attempt = if ticket.generation == BEFORE_FIRST_RGB_WORKER {
+            // Reserve a fresh nonce even if the request is cancelled before dispatch.
+            let Ok(attempt) = self.next_generation() else {
+                return false;
+            };
+            attempt
+        } else {
+            ticket.attempt + 1
+        };
         let recovery = self.output_recovery.get_mut(id).unwrap();
-        recovery.manual_attempt += 1;
+        recovery.manual_attempt = attempt;
         recovery.manual_retry = Some(ticket);
         recovery.manual_started = None;
         self.bump_view();
@@ -208,6 +232,46 @@ impl Runtime {
         }
     }
 
+    #[cfg(windows)]
+    pub(super) fn has_recoverable_surplife_output(&self) -> bool {
+        self.document.lighting.setup.devices.iter().any(|device| {
+            is_bound_surplife(device, self.rgb_specs.get(&device.id))
+                && self.output_recovery.contains_key(&device.id)
+        })
+    }
+
+    /// One extra attempt for a failed saved Surplife route after its normal
+    /// budget. The registered factory still owns endpoint and capacity checks.
+    #[cfg(any(windows, test))]
+    pub(super) fn bluetooth_adapter_arrived(&mut self) {
+        use crate::runtime::output::Phase;
+
+        if self.automatic_recovery_paused() {
+            return;
+        }
+        for device in &self.document.lighting.setup.devices {
+            if !is_bound_surplife(device, self.rgb_specs.get(&device.id))
+                || self.pending.as_ref().is_some_and(|pending| {
+                    pending
+                        .live_rgb
+                        .as_ref()
+                        .is_some_and(|plan| !plan.retained.contains(&device.id))
+                })
+            {
+                continue;
+            }
+            if let Some(recovery) = self.output_recovery.get_mut(&device.id)
+                && recovery.attempts == RETRY_DELAYS_US.len()
+                && recovery.due_us.is_none()
+                && self.host.status(&device.id).is_some_and(|snapshot| {
+                    snapshot.phase == Phase::Failed && !snapshot.requires_action
+                })
+            {
+                recovery.bluetooth_retry = true;
+            }
+        }
+    }
+
     /// Enable at most three reconnects (1/5/15s), including initial connection failures.
     /// Success does not replenish the budget. Budget is renewed only by
     /// an explicit configuration/refresh/power epoch or the return of a bound
@@ -247,7 +311,17 @@ impl Runtime {
         id: &str,
         result: Result<(), OutputStartError>,
     ) -> Result<(), String> {
+        let before_first_worker = matches!(result, Err(OutputStartError::EndpointLeaseBusy(_)))
+            && self.output_recovery.contains_key(id)
+            && self.supports_openrgb_retry(id)
+            && self.host.status(id).is_none();
+        let attempt = before_first_worker.then(|| self.next_generation().unwrap_or(u64::MAX));
         if let Some(state) = self.output_recovery.get_mut(id) {
+            if let Some(attempt) = attempt {
+                // Initial failures have no worker generation. A runtime nonce
+                // keeps their tickets distinct across outputs and power epochs.
+                state.manual_attempt = attempt;
+            }
             state.start_error = result.err();
             Ok(())
         } else {
@@ -290,6 +364,11 @@ impl Runtime {
         keys: Vec<String>,
         factory: LcdFactory,
     ) -> Result<(), String> {
+        // Resume can restore other outputs while the old LCD call unwinds.
+        // Keep this logical owner until it has actually released its worker.
+        if self.lcd.get(id).is_some_and(|worker| !worker.is_reaped()) {
+            return Err("Previous LCD owner is still stopping".into());
+        }
         let config = self
             .document
             .lcd
@@ -311,12 +390,16 @@ impl Runtime {
     }
 
     pub(super) fn recover_failed_outputs(&mut self, now: u64) -> Result<(), String> {
-        if self.output_recovery_paused() {
+        let automatic_paused = self.automatic_recovery_paused();
+        if self.pending.is_some() || automatic_paused {
             for state in self.output_recovery.values_mut() {
                 state.manual_retry = None;
+                if automatic_paused {
+                    state.bluetooth_retry = false;
+                }
             }
         }
-        if self.automatic_recovery_paused() {
+        if automatic_paused {
             return Ok(());
         }
         let live = self
@@ -338,6 +421,7 @@ impl Runtime {
                     || snapshot.as_ref().is_some_and(|s| s.requires_action)
                 {
                     state.manual_retry = None;
+                    state.bluetooth_retry = false;
                     continue;
                 }
                 let failed = state.start_error.is_some()
@@ -349,15 +433,23 @@ impl Runtime {
                 if state.manual_retry.is_some_and(|ticket| {
                     !failed
                         || ticket.document_revision != self.document_revision
-                        || snapshot.as_ref().map(|s| s.generation) != Some(ticket.generation)
+                        || snapshot
+                            .as_ref()
+                            .map_or(BEFORE_FIRST_RGB_WORKER, |s| s.generation)
+                            != ticket.generation
                 }) {
                     state.manual_retry = None;
                 }
                 if !failed {
+                    state.bluetooth_retry = false;
                     continue;
                 }
                 let reaped = snapshot.is_none() || self.host.output_reaped(id);
-                if (reaped && state.manual_retry.is_some()) || state.take_attempt(now, reaped) {
+                let bluetooth_retry = reaped && std::mem::take(&mut state.bluetooth_retry);
+                if bluetooth_retry
+                    || (reaped && state.manual_retry.is_some())
+                    || state.take_attempt(now, reaped)
+                {
                     rgb.push((
                         id.clone(),
                         spec.keys.clone(),
@@ -412,6 +504,16 @@ impl Runtime {
         }
         Ok(())
     }
+}
+
+#[cfg(any(windows, test))]
+fn is_bound_surplife(device: &crate::devices::Device, spec: Option<&RgbSpec>) -> bool {
+    device.enabled
+        && device.driver == crate::devices::Driver::SurplifeE1Pixels
+        && spec.is_some_and(|spec| {
+            spec.action_required_error.is_none()
+                && spec.keys.iter().any(|key| key.starts_with("ble:"))
+        })
 }
 
 #[cfg(test)]

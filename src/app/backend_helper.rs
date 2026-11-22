@@ -62,6 +62,8 @@ struct Request {
     nonce: String,
     parent: Identity,
     timestamp_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_timestamp_ms: Option<u64>,
     restarting: bool,
 }
 #[derive(Serialize, Deserialize)]
@@ -240,6 +242,7 @@ impl Proxy {
             nonce: nonce.clone(),
             parent,
             timestamp_ms: now_ms()?,
+            previous_timestamp_ms: None,
             restarting: true,
         };
         write_json(&state_dir.join("owner-request.json"), &request)?;
@@ -259,15 +262,18 @@ impl Proxy {
         let worker = thread::Builder::new()
             .name("backend-helper-client".into())
             .spawn(move || {
-                let _client_lock = client_lock;
                 proxy_loop(
                     &directory,
                     &status_dir,
                     &task_name,
                     &request,
                     &output,
-                    &cancel,
-                    &restart,
+                    &ProxyControl {
+                        client_lock: Arc::new(client_lock),
+                        stop: cancel,
+                        restarting: restart,
+                    },
+                    launch_task,
                 );
             })
             .map_err(|e| e.to_string())?;
@@ -308,21 +314,31 @@ impl Drop for Proxy {
     }
 }
 
+struct ProxyControl {
+    client_lock: Arc<File>,
+    stop: Arc<AtomicBool>,
+    restarting: Arc<AtomicBool>,
+}
+
 fn proxy_loop(
     directory: &Path,
     status_dir: &Path,
     task_name: &str,
     request: &Request,
     output: &Mutex<Snapshot>,
-    stop: &AtomicBool,
-    restarting: &AtomicBool,
+    control: &ProxyControl,
+    launcher: impl Fn(&str, &AtomicBool) -> Result<(), String> + Clone + Send + 'static,
 ) {
+    let stop = &control.stop;
+    let restarting = &control.restarting;
     let mut attempts = VecDeque::new();
     let mut next_attempt = Instant::now();
     let mut generation = 0u64;
     let mut previous = None;
     let mut failure_detail = String::new();
     let mut heartbeat = Instant::now();
+    let mut launch: Option<thread::JoinHandle<Result<(), String>>> = None;
+    let mut report_launch_result = false;
     while !stop.load(Ordering::SeqCst) {
         if heartbeat.elapsed() >= Duration::from_millis(600) {
             match refresh_heartbeat(directory, request, restarting.load(Ordering::SeqCst)) {
@@ -340,6 +356,16 @@ fn proxy_loop(
                 Heartbeat::Published => {}
             }
             heartbeat = Instant::now();
+        }
+        if launch.as_ref().is_some_and(|worker| worker.is_finished()) {
+            let result = launch
+                .take()
+                .unwrap()
+                .join()
+                .unwrap_or_else(|_| Err("Backend helper launch worker panicked".into()));
+            if report_launch_result {
+                failure_detail = result.err().unwrap_or_default();
+            }
         }
         let status_path = status_dir.join("helper-status.json");
         let installed = status_dir != directory;
@@ -363,6 +389,8 @@ fn proxy_loop(
             ..Snapshot::default()
         };
         if let Some(status) = status {
+            failure_detail.clear();
+            report_launch_result = false;
             let key = (
                 status.helper.created,
                 status.helper.pid,
@@ -379,7 +407,10 @@ fn proxy_loop(
                 backend_pid: status.backend_pid,
                 timestamp_ms: status.timestamp_ms,
             };
-        } else if restarting.load(Ordering::SeqCst) && Instant::now() >= next_attempt {
+        } else if launch.is_none()
+            && restarting.load(Ordering::SeqCst)
+            && Instant::now() >= next_attempt
+        {
             let now = Instant::now();
             while attempts
                 .front()
@@ -389,7 +420,29 @@ fn proxy_loop(
             }
             if attempts.len() < 6 {
                 attempts.push_back(now);
-                failure_detail = launch_task(task_name, stop).err().unwrap_or_default();
+                let task_name = task_name.to_owned();
+                let lock = control.client_lock.clone();
+                let cancelled = stop.clone();
+                let may_restart = restarting.clone();
+                let launcher = launcher.clone();
+                failure_detail.clear();
+                match thread::Builder::new()
+                    .name("backend-helper-launch".into())
+                    .spawn(move || {
+                        // Retain the client lease until any in-flight call finishes.
+                        // A new proxy must not race a delayed request from this one.
+                        let _lock = lock;
+                        if cancelled.load(Ordering::SeqCst) || !may_restart.load(Ordering::SeqCst) {
+                            return Ok(());
+                        }
+                        launcher(&task_name, &cancelled)
+                    }) {
+                    Ok(worker) => {
+                        launch = Some(worker);
+                        report_launch_result = true;
+                    }
+                    Err(error) => failure_detail = error.to_string(),
+                }
                 next_attempt = now + Duration::from_secs((1u64 << attempts.len().min(5)).max(3));
             } else {
                 failure_detail =
@@ -403,6 +456,7 @@ fn proxy_loop(
         *output.lock().unwrap_or_else(|p| p.into_inner()) = snapshot;
         thread::sleep(POLL);
     }
+    stop.store(true, Ordering::SeqCst);
     let mut snapshot = output.lock().unwrap_or_else(|p| p.into_inner());
     snapshot.ready = false;
     snapshot.detail = "Backend helper client ownership ended".into();
@@ -501,20 +555,27 @@ fn refresh_heartbeat_with_clock(
         Err(_) => return Heartbeat::Lost,
     };
     let path = directory.join("owner-request.json");
-    match read_json_typed::<Request>(&path) {
+    let previous = match read_json_typed::<Request>(&path) {
         Ok(current)
             if current.version == clock::PROTOCOL
                 && current.clock_domain == clock::DOMAIN
                 && current.timestamp_ms <= now
                 && current.nonce == request.nonce
-                && current.parent == request.parent => {}
+                && current.parent == request.parent =>
+        {
+            current.timestamp_ms
+        }
         Ok(_) | Err(ControlRead::Invalid(_)) => return Heartbeat::Lost,
         Err(ControlRead::Io(error)) => return Heartbeat::Retry(error.to_string()),
-    }
+    };
     let mut current = request.clone();
     current.timestamp_ms = now;
+    current.previous_timestamp_ms = now
+        .checked_sub(previous)
+        .filter(|gap| (1..clock::LEASE_MS).contains(gap))
+        .map(|_| previous);
     current.restarting = restarting;
-    match write_json(&path, &current) {
+    match write_live_record(&path, &current) {
         Ok(()) => Heartbeat::Published,
         Err(error) => Heartbeat::Retry(error),
     }
@@ -539,23 +600,43 @@ fn task_guard(
     snapshot: Arc<Mutex<Snapshot>>,
     stop: Arc<AtomicBool>,
 ) -> Arc<dyn Fn() -> Result<(), String> + Send + Sync> {
+    task_guard_with_owner_query(snapshot, stop, move || {
+        super::managed_backend::listener_owner(endpoint)
+    })
+}
+
+fn task_guard_with_owner_query(
+    snapshot: Arc<Mutex<Snapshot>>,
+    stop: Arc<AtomicBool>,
+    listener_owner: impl Fn() -> Result<Option<u32>, String> + Send + Sync + 'static,
+) -> Arc<dyn Fn() -> Result<(), String> + Send + Sync> {
     Arc::new(move || {
-        let snapshot = snapshot.lock().unwrap_or_else(|p| p.into_inner());
-        let now = now_ms()?;
-        if stop.load(Ordering::SeqCst)
-            || !snapshot.ready
-            || !clock::fresh(snapshot.timestamp_ms, now, FRESH_MS)
-        {
-            return Err("Managed backend helper is not ready or its status is stale".into());
-        }
-        let pid = snapshot
-            .backend_pid
-            .ok_or("Managed backend helper has no owned child")?;
-        if super::managed_backend::listener_owner(endpoint)? != Some(pid) {
+        let expected = current_task_owner(&snapshot, &stop)?;
+        // A system TCP-table query can block. The proxy must be able to
+        // publish its snapshot and continue renewing the owner's lease.
+        if listener_owner()? != Some(expected.0) {
             return Err("OpenRGB endpoint is not owned by the managed backend child".into());
+        }
+        if current_task_owner(&snapshot, &stop)? != expected {
+            return Err("Managed backend helper changed while checking the endpoint".into());
         }
         Ok(())
     })
+}
+
+fn current_task_owner(snapshot: &Mutex<Snapshot>, stop: &AtomicBool) -> Result<(u32, u64), String> {
+    let snapshot = snapshot.lock().unwrap_or_else(|p| p.into_inner());
+    let now = now_ms()?;
+    if stop.load(Ordering::SeqCst)
+        || !snapshot.ready
+        || !clock::fresh(snapshot.timestamp_ms, now, FRESH_MS)
+    {
+        return Err("Managed backend helper is not ready or its status is stale".into());
+    }
+    let pid = snapshot
+        .backend_pid
+        .ok_or("Managed backend helper has no owned child")?;
+    Ok((pid, snapshot.ready_generation))
 }
 
 /// Called only by the product's explicit --backend-helper entrypoint.
@@ -807,6 +888,7 @@ fn supervise_channels(
         );
     }
     let mut lease_deadline = clock::deadline(request.timestamp_ms, now)?;
+    let mut last_valid_poll_ms = now;
     let mut status_write_failed = false;
     let mut owner_read_failed = false;
     let mut last_backend_state = None;
@@ -852,24 +934,39 @@ fn supervise_channels(
             .is_ok()
             .then(|| channels.read::<Cancel>("owner-cancel.json"));
         let now = clock.now_ms()?;
-        // A late poll can observe a heartbeat issued before the cached lease
-        // expired. Without that evidence, never revive an expired lease.
+        // A late poll needs a fresh heartbeat with a timely publication.
+        // The current heartbeat may have already replaced that publication.
         if now >= lease_deadline
-            && (!current.as_ref().is_ok_and(|current| {
-                current.timestamp_ms < lease_deadline
-                    && clock::deadline(current.timestamp_ms, now).is_ok_and(|next| now < next)
-            }) || cancellation.as_ref().is_some_and(|result| match result {
-                Ok(_) => false,
-                Err(ControlRead::Io(error)) => error.kind() != std::io::ErrorKind::NotFound,
-                Err(ControlRead::Invalid(_)) => true,
-            }))
+            && (!current
+                .as_ref()
+                .is_ok_and(|current| covers_lease_deadline(current, lease_deadline, now))
+                || cancellation.as_ref().is_some_and(|result| match result {
+                    Ok(_) => false,
+                    Err(ControlRead::Io(error)) => error.kind() != std::io::ErrorKind::NotFound,
+                    Err(ControlRead::Invalid(_)) => true,
+                }))
         {
+            let owner = match &current {
+                Ok(current) => now
+                    .checked_sub(current.timestamp_ms)
+                    .map_or_else(|| "future".into(), |age| format!("age:{age}")),
+                Err(error) => error.diagnostic_code(),
+            };
+            let cancel = match &cancellation {
+                None => "not-read".into(),
+                Some(Ok(_)) => "read".into(),
+                Some(Err(error)) => error.diagnostic_code(),
+            };
             helper_note(
                 output,
                 request,
                 "helper_stop",
                 None,
-                "Managed helper stopping: parent heartbeat lease expired",
+                &format!(
+                    "Managed helper stopping: parent heartbeat lease expired late_ms={} poll_ms={} owner={owner} cancel={cancel}",
+                    now.saturating_sub(lease_deadline),
+                    now.saturating_sub(last_valid_poll_ms),
+                ),
             );
             break;
         }
@@ -931,6 +1028,7 @@ fn supervise_channels(
                     break;
                 }
                 lease_deadline = clock::deadline(current.timestamp_ms, now)?;
+                last_valid_poll_ms = now;
                 if !current.restarting {
                     stop_restarting();
                 }
@@ -963,7 +1061,15 @@ fn supervise_channels(
                     backend_pid: snapshot.backend_pid,
                     detail: snapshot.detail.chars().take(1000).collect(),
                 };
-                match write_json(&output.join("helper-status.json"), &status) {
+                let status_path = output.join("helper-status.json");
+                // The installed outbox is opened by the ordinary client.
+                // Keep legacy private control directories on their existing path.
+                let result = if output != channels.input {
+                    write_live_record(&status_path, &status)
+                } else {
+                    write_json(&status_path, &status)
+                };
+                match result {
                     Ok(()) => {
                         if status_write_failed {
                             helper_note(
@@ -1008,6 +1114,17 @@ fn control_error(error: ControlRead) -> String {
 enum ControlRead {
     Io(std::io::Error),
     Invalid(String),
+}
+impl ControlRead {
+    fn diagnostic_code(&self) -> String {
+        match self {
+            Self::Invalid(_) => "invalid".into(),
+            Self::Io(error) if error.kind() == std::io::ErrorKind::NotFound => "missing".into(),
+            Self::Io(error) => error
+                .raw_os_error()
+                .map_or_else(|| "io".into(), |code| format!("io:{code}")),
+        }
+    }
 }
 fn read_json_typed<T: DeserializeOwned>(path: &Path) -> Result<T, ControlRead> {
     let metadata = fs::symlink_metadata(path).map_err(ControlRead::Io)?;
@@ -1066,6 +1183,10 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
     crate::storage::atomic_write(path, &bytes, LIMIT).map_err(|e| e.to_string())
 }
+fn write_live_record(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
+    crate::storage::atomic_write_live_record(path, &bytes, LIMIT).map_err(|e| e.to_string())
+}
 fn now_ms() -> Result<u64, String> {
     ActiveClock.now_ms()
 }
@@ -1074,6 +1195,21 @@ fn live_request(request: &Request, now: u64) -> bool {
         && request.clock_domain == clock::DOMAIN
         && clock::fresh(request.timestamp_ms, now, clock::LEASE_MS)
 }
+fn covers_lease_deadline(request: &Request, deadline: u64, now: u64) -> bool {
+    clock::deadline(request.timestamp_ms, now).is_ok_and(|next| now < next)
+        && (request.timestamp_ms < deadline
+            || request.previous_timestamp_ms.is_some_and(|previous| {
+                // Require a bridge from the last observed lease, with no gap
+                // between the two publications large enough to have expired it.
+                previous >= deadline.saturating_sub(clock::LEASE_MS)
+                    && previous < deadline
+                    && request
+                        .timestamp_ms
+                        .checked_sub(previous)
+                        .is_some_and(|gap| (1..clock::LEASE_MS).contains(&gap))
+            }))
+}
+
 fn matches_control(control: &Cancel, request: &Request) -> bool {
     control.version == clock::PROTOCOL
         && control.clock_domain == clock::DOMAIN
@@ -1129,6 +1265,9 @@ fn launch_task(name: &str, stop: &AtomicBool) -> Result<(), String> {
     use std::os::windows::ffi::OsStringExt;
     let executable =
         PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])).join("schtasks.exe");
+    if stop.load(Ordering::SeqCst) {
+        return Err("Authorized backend task launch cancelled".into());
+    }
     let mut child = Command::new(executable)
         .args(["/Run", "/TN", name])
         .creation_flags(0x0800_0000)
@@ -1415,6 +1554,11 @@ mod tests {
 
         for (case, issued_ms, wake_ms, expected_publications) in [
             ("renewed", 14_800, 15_100, 2),
+            ("overwritten renewal", 14_800, 15_650, 2),
+            ("overwritten gap", 15_000, 15_650, 1),
+            ("overwritten cancelled", 14_800, 15_650, 1),
+            ("overwritten cancel locked", 14_800, 15_650, 1),
+            ("overwritten clock gap", 10_400, 15_650, 1),
             ("stale", 10_000, 15_100, 1),
             ("stale successor", 14_800, 19_800, 1),
             ("at deadline", 15_000, 15_100, 1),
@@ -1464,12 +1608,28 @@ mod tests {
                             renewed.parent.created ^= 1;
                         }
                         write_json(&path, &renewed).unwrap();
-                        if matches!(case, "cancelled" | "cancel locked") {
+                        if case.starts_with("overwritten ") {
+                            clock.active_ms.set(15_400);
+                            assert!(matches!(
+                                refresh_heartbeat_with_clock(&directory, &request, true, &clock),
+                                Heartbeat::Published
+                            ));
+                        }
+                        if matches!(
+                            case,
+                            "cancelled"
+                                | "cancel locked"
+                                | "overwritten cancelled"
+                                | "overwritten cancel locked"
+                        ) {
                             cancel(request.nonce.clone());
                         } else if case == "old cancel" {
                             cancel("old-nonce".into());
                         }
-                        if matches!(case, "owner locked" | "cancel locked") {
+                        if matches!(
+                            case,
+                            "owner locked" | "cancel locked" | "overwritten cancel locked"
+                        ) {
                             let locked = if case == "owner locked" {
                                 &path
                             } else {
@@ -1494,6 +1654,16 @@ mod tests {
             )
             .unwrap();
             drop(blocked_file.into_inner());
+            let expected_detail = match case {
+                "stale" => Some("late_ms=300 poll_ms=5300 owner=age:5300 cancel=missing"),
+                "after deadline" => Some("late_ms=300 poll_ms=5300 owner=age:299 cancel=missing"),
+                "cancel locked" => Some("late_ms=300 poll_ms=5300 owner=age:500 cancel=io:32"),
+                _ => None,
+            };
+            if let Some(expected) = expected_detail {
+                let history = fs::read_to_string(directory.join("backend-events.json")).unwrap();
+                assert!(history.contains(expected), "{case}: {history}");
+            }
             for name in [
                 "owner-request.json",
                 "owner-cancel.json",
@@ -1552,6 +1722,10 @@ mod tests {
         let owner_path = input.join("owner-request.json");
         write_json(&owner_path, &request).unwrap();
         let owner = fs::read(&owner_path).unwrap();
+        let status_path = outbox.join("helper-status.json");
+        fs::write(&status_path, b"{}").unwrap();
+        // Keep the previous status open with Rust's default delete sharing.
+        let mut reader = File::open(&status_path).unwrap();
         let channels = HelperChannels {
             input: &input,
             output: &outbox,
@@ -1574,13 +1748,19 @@ mod tests {
         assert!(!input.join("helper-status.json").exists());
         assert!(!input.join("backend-events.json").exists());
         assert!(!outbox.join("owner-request.json").exists());
-        let status: Status = read_json(&outbox.join("helper-status.json")).unwrap();
-        assert_eq!(status.nonce, request.nonce);
-        fs::remove_file(outbox.join("helper-status.json")).unwrap();
+        let bytes = fs::read(&status_path).unwrap();
+        let mut previous = Vec::new();
+        reader.read_to_end(&mut previous).unwrap();
+        drop(reader);
+        assert_eq!(previous, b"{}");
+        fs::remove_file(&status_path).unwrap();
         fs::remove_file(outbox.join("backend-events.json")).unwrap();
         fs::remove_file(owner_path).unwrap();
         fs::remove_dir(outbox).unwrap();
         fs::remove_dir(input).unwrap();
+        let status: Status = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status.nonce, request.nonce);
+        assert_eq!(status.timestamp_ms, request.timestamp_ms);
     }
     #[cfg(windows)]
     fn sharing_fixture(label: &str) -> (PathBuf, Request, Identity) {
@@ -1597,6 +1777,7 @@ mod tests {
             nonce: label.into(),
             parent: helper.clone(),
             timestamp_ms: now_ms().unwrap(),
+            previous_timestamp_ms: None,
             restarting: true,
         };
         write_json(&directory.join("owner-request.json"), &request).unwrap();
@@ -1762,6 +1943,11 @@ mod tests {
         .unwrap();
         assert_eq!(clock.active_ms.get(), 10_600);
         assert_eq!(clock.polls.get(), 3);
+        let history = fs::read_to_string(directory.join("backend-events.json")).unwrap();
+        assert!(
+            history.contains("late_ms=100 poll_ms=600 owner=io:32 cancel=not-read"),
+            "{history}"
+        );
         drop(reader);
         fs::remove_file(directory.join("owner-request.json")).unwrap();
         let _ = fs::remove_file(directory.join("backend-events.json"));
@@ -1798,6 +1984,23 @@ mod tests {
         assert_eq!(current.nonce, request.nonce);
         assert!(!current.restarting);
         assert!(current.timestamp_ms > request.timestamp_ms);
+
+        // A concurrent helper reader uses the full default sharing mode.
+        let mut reader = fs::OpenOptions::new().read(true).open(&path).unwrap();
+        assert!(matches!(
+            refresh_heartbeat(&directory, &request, true),
+            Heartbeat::Published
+        ));
+        let latest = read_json::<Request>(&path).unwrap();
+        assert!(latest.restarting);
+        assert_eq!(latest.nonce, request.nonce);
+        let mut previous_bytes = Vec::new();
+        reader.read_to_end(&mut previous_bytes).unwrap();
+        let previous: Request = serde_json::from_slice(&previous_bytes).unwrap();
+        assert!(!previous.restarting);
+        assert_eq!(previous.timestamp_ms, current.timestamp_ms);
+        drop(reader);
+
         let reader = fs::OpenOptions::new()
             .read(true)
             .share_mode(0)
@@ -1832,6 +2035,7 @@ mod tests {
             nonce: "new-session".into(),
             parent: parent.clone(),
             timestamp_ms: 10_000,
+            previous_timestamp_ms: None,
             restarting: true,
         };
         let status = Status {
@@ -1955,6 +2159,126 @@ mod tests {
     }
     #[cfg(windows)]
     #[test]
+    fn proxy_renews_heartbeat_while_one_task_launch_is_blocked() {
+        use std::sync::mpsc;
+
+        let (directory, request, _) = sharing_fixture("blocked-task-launch");
+        let control = ProxyControl {
+            client_lock: Arc::new(client_lock(&directory).unwrap()),
+            stop: Arc::new(AtomicBool::new(false)),
+            restarting: Arc::new(AtomicBool::new(true)),
+        };
+        let snapshot = Mutex::new(Snapshot::default());
+        let attempts = Arc::new(AtomicU64::new(0));
+        let (launch_started, started) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        let blocked = Arc::new(Mutex::new(blocked));
+        let poll_until = |predicate: &dyn Fn() -> bool| {
+            let until = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < until {
+                if predicate() {
+                    return true;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            false
+        };
+        let renewed = thread::scope(|scope| {
+            scope.spawn(|| {
+                let attempts = attempts.clone();
+                proxy_loop(
+                    &directory,
+                    &directory,
+                    "fixture",
+                    &request,
+                    &snapshot,
+                    &control,
+                    move |_, _| {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        let _ = launch_started.send(());
+                        let _ = blocked
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(10));
+                        Ok(())
+                    },
+                );
+            });
+            let running = started.recv_timeout(Duration::from_secs(2)).is_ok();
+            let renewed = running
+                && poll_until(&|| {
+                    read_json::<Request>(&directory.join("owner-request.json"))
+                        .is_ok_and(|owner| owner.timestamp_ms > request.timestamp_ms)
+                });
+            if renewed {
+                // Reach the first retry deadline while the first call is still held.
+                thread::sleep(Duration::from_millis(3_200));
+            } else {
+                let _ = release.send(());
+            }
+            control.stop.store(true, Ordering::SeqCst);
+            renewed
+        });
+        drop(control);
+        if renewed {
+            assert!(client_lock(&directory).is_err());
+            release.send(()).unwrap();
+        }
+        assert!(poll_until(&|| client_lock(&directory).is_ok()));
+        fs::remove_file(directory.join("owner-request.json")).unwrap();
+        fs::remove_file(directory.join("backend-client.lock")).unwrap();
+        fs::remove_dir(directory).unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(
+            renewed,
+            "a blocked scheduler launch prevented heartbeat publication"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn task_guard_keeps_status_updates_free_and_rechecks_after_listener_lookup() {
+        let pid = std::process::id();
+        for change in [
+            "refresh",
+            "new generation",
+            "new PID",
+            "not ready",
+            "stale",
+            "stop",
+        ] {
+            let snapshot = Arc::new(Mutex::new(Snapshot {
+                ready_generation: 1,
+                ready: true,
+                backend_pid: Some(pid),
+                timestamp_ms: now_ms().unwrap(),
+                detail: String::new(),
+            }));
+            let stop = Arc::new(AtomicBool::new(false));
+            let during_lookup = snapshot.clone();
+            let cancel = stop.clone();
+            let guard = task_guard_with_owner_query(snapshot, stop, move || {
+                // A slow listener query can overlap the proxy publishing its status.
+                let mut status = during_lookup
+                    .try_lock()
+                    .expect("listener lookup holds proxy status mutex");
+                match change {
+                    "refresh" => status.timestamp_ms = now_ms().unwrap(),
+                    "new generation" => status.ready_generation += 1,
+                    "new PID" => status.backend_pid = Some(pid.wrapping_add(1)),
+                    "not ready" => status.ready = false,
+                    "stale" => status.timestamp_ms = now_ms().unwrap().saturating_sub(FRESH_MS + 1),
+                    "stop" => cancel.store(true, Ordering::SeqCst),
+                    _ => unreachable!(),
+                }
+                Ok(Some(pid))
+            });
+            assert_eq!(guard().is_ok(), change == "refresh", "{change}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn task_guard_rejects_foreign_stale_and_dropped_ownership() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = listener.local_addr().unwrap();
@@ -2010,6 +2334,7 @@ mod tests {
             nonce: "cancelled-owner".into(),
             parent: identity(std::process::id()).unwrap(),
             timestamp_ms: now_ms().unwrap(),
+            previous_timestamp_ms: None,
             restarting: true,
         };
         let path = directory.join("owner-request.json");

@@ -106,6 +106,7 @@ const COLOR_INDEX: i32 = 205;
 const COLOR_EDIT: i32 = 206;
 const PC_ON: i32 = 207;
 const DOOR_ON: i32 = 208;
+const APPLY_CAPTURE: i32 = 209;
 const SCHED_ON: i32 = 401;
 const SCHED_PAUSE: i32 = 402;
 const TIME_PC: i32 = 403;
@@ -695,9 +696,16 @@ impl App {
             "",
             CBS_DROPDOWNLIST as u32 | WS_VSCROLL,
         )?;
-        for effect in Effect::ALL {
+        for &effect in Effect::ALL {
             self.add(EFFECT, effect.label());
         }
+        self.control(
+            parent,
+            APPLY_CAPTURE,
+            "BUTTON",
+            "Применить источник",
+            BS_PUSHBUTTON as u32,
+        )?;
         self.control(
             parent,
             BRIGHT,
@@ -882,7 +890,28 @@ impl App {
             FIRST_LABEL + 1,
             &format!("Яркость · {}%", p.scene.brightness),
         );
-        self.set_text(FIRST_LABEL + 2, &format!("Скорость · {}", p.scene.speed));
+        let clock_label = match p.scene.effect {
+            effect if effect.uses_audio() => Some("Системный звук"),
+            Effect::DayNight => Some("Местное время"),
+            Effect::ThermalTint | Effect::ThermalGauge => Some("Источники температуры"),
+            _ => None,
+        };
+        let label = clock_label.map_or_else(
+            || format!("Скорость · {}", p.scene.speed),
+            |name| format!("Источник · {name}"),
+        );
+        self.set_text(FIRST_LABEL + 2, &label);
+        unsafe {
+            EnableWindow(self.h(SPEED), i32::from(clock_label.is_none()));
+            EnableWindow(
+                self.h(APPLY_CAPTURE),
+                i32::from(
+                    self.native_lighting.is_some()
+                        && p.scene.effect.needs_explicit_capture()
+                        && !self.runtime.read(Runtime::capture_authorized),
+                ),
+            );
+        }
         let rates = rates(p.scene.fps);
         let color_index = unsafe { SendMessageW(self.h(COLOR_INDEX), CB_GETCURSEL, 0, 0) }.max(0);
         unsafe {
@@ -983,6 +1012,7 @@ impl App {
         self.pos(SPEED, r, 318, 280, 28);
         self.pos(PC_ON, r, 522, 280, 28);
         self.pos(DOOR_ON, r, 554, 280, 28);
+        self.pos(APPLY_CAPTURE, r, 589, 280, 30);
         for (i, y) in [142, 220, 294, 368, 440].into_iter().enumerate() {
             self.pos(FIRST_LABEL + i as i32, r, y, 280, 22);
         }
@@ -1858,12 +1888,20 @@ impl App {
             },
         );
     }
-    fn changed_scene(&mut self, scene: Scene) -> Result<(), String> {
-        self.runtime.set_scene(scene)?;
+    fn update_scene(&mut self, scene: Scene, applied: bool) -> Result<(), String> {
+        if applied && self.native_lighting.is_some() {
+            self.runtime
+                .with(|runtime, _| runtime.apply_native_scene(scene))?;
+        } else {
+            self.runtime.set_scene(scene)?;
+        }
         self.dirty = true;
         self.status = "Сцена изменена и ещё не сохранена.".into();
         self.sync();
         Ok(())
+    }
+    fn changed_scene(&mut self, scene: Scene) -> Result<(), String> {
+        self.update_scene(scene, false)
     }
     fn command(&mut self, id: i32, notice: u16) -> Result<(), String> {
         if matches!(
@@ -1947,6 +1985,12 @@ impl App {
                 let (lo, hi) = s.effect.limits();
                 s.speed = s.speed.clamp(lo, hi);
                 self.changed_scene(s)?;
+            }
+            APPLY_CAPTURE
+                if self.page == Page::Scene
+                    && self.runtime.project().scene.effect.needs_explicit_capture() =>
+            {
+                self.update_scene(self.runtime.project().scene.clone(), true)?;
             }
             FPS if notice == CBN_SELCHANGE as u16 => {
                 let index = unsafe { SendMessageW(self.h(FPS), CB_GETCURSEL, 0, 0) };
@@ -2284,7 +2328,22 @@ fn file_dialog(
     filter: &str,
     extension: &str,
 ) -> Result<Option<PathBuf>, String> {
+    file_dialog_named(hwnd, save, filter, extension, "")
+}
+
+fn file_dialog_named(
+    hwnd: HWND,
+    save: bool,
+    filter: &str,
+    extension: &str,
+    initial_name: &str,
+) -> Result<Option<PathBuf>, String> {
     let mut file = [0u16; 32768];
+    let name = wide(initial_name);
+    if name.len() > file.len() {
+        return Err("File name is too long".into());
+    }
+    file[..name.len()].copy_from_slice(&name);
     let filter = wide(filter);
     let mut o = OPENFILENAMEW {
         lStructSize: size_of::<OPENFILENAMEW>() as u32,
@@ -2616,7 +2675,7 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     if msg == WM_CLOSE {
         if state.resident.get() {
             if state.session_action.get() == resident::Action::None
-                && let Err(error) = resident::close_editor(state)
+                && let Err(error) = resident::close_editor(state, true)
             {
                 modern::close_failed(state, &error);
                 resident::report(state, error);
@@ -3387,7 +3446,7 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
         return Ok(());
     }
     if crate::app::installed::session() == Some(crate::app::installed::Session::Autostart)
-        && let Err(error) = resident::close_editor(&state)
+        && let Err(error) = resident::close_editor(&state, false)
     {
         resident::report(&state, error);
     }
@@ -3403,9 +3462,13 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
             app.status = format!("Новый интерфейс недоступен: {error}");
             app.show_page();
         }
-        unsafe {
-            ShowWindow(raw, SW_SHOWNORMAL);
-            UpdateWindow(raw);
+        if crate::app::installed::session() == Some(crate::app::installed::Session::Interactive) {
+            resident::activate_editor_window(raw)?;
+        } else {
+            unsafe {
+                ShowWindow(raw, SW_SHOWNORMAL);
+                UpdateWindow(raw);
+            }
         }
     }
     if !o.selftest {

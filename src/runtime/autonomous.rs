@@ -194,8 +194,30 @@ impl Host {
     pub fn scene(&self) -> &Scene {
         &self.scene
     }
+    #[cfg(windows)]
+    pub(crate) fn set_audio(
+        &mut self,
+        input: Option<(u64, crate::capture::audio_features::AudioFeatures)>,
+    ) {
+        self.core.lock().unwrap_or_else(|e| e.into_inner()).audio = input;
+    }
     pub fn preview(&self) -> &[Rgb] {
         &self.frame.preview
+    }
+    pub(crate) fn set_context(&mut self, input: scene::ContextInput) {
+        self.core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .renderer
+            .set_context(input);
+    }
+    #[cfg(windows)]
+    pub(crate) fn set_reactive(&mut self, input: crate::capture::reactive::Snapshot, now: u64) {
+        self.core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .renderer
+            .set_reactive(input, now);
     }
     /// Latest UI snapshot; the autonomous thread does not borrow UI-owned data.
     pub fn frame(&self, id: &str) -> Option<&[Rgb]> {

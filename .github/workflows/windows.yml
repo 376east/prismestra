@@ -44,6 +44,8 @@ jobs:
         run: |
           node --check src/ui/windows/web/app.js
           node tests/native_ui_ipc.cjs
+      - name: Check the OpenRGB cache contract
+        run: python scripts/test_openrgb_cache.py
 
   software:
     name: Full software checks
@@ -115,11 +117,59 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Select Visual Studio 2022
+        id: msvc
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vsdevcmd = & $vswhere -latest -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find Common7/Tools/VsDevCmd.bat
+          if ($LASTEXITCODE -ne 0 -or -not $vsdevcmd) { throw 'MSVC build tools were not found' }
+          "vsdevcmd=$vsdevcmd" >> $env:GITHUB_OUTPUT
+      - name: Fingerprint the OpenRGB build environment
+        id: openrgb
+        if: github.ref == 'refs/heads/master' && runner.environment == 'github-hosted'
+        continue-on-error: true
+        shell: pwsh
+        env:
+          VSDEVCMD: ${{ steps.msvc.outputs.vsdevcmd }}
+          OPENRGB_INPUTS: ${{ hashFiles('components/openrgb/**', 'scripts/components/**', 'docs/openrgb-component-verification.md', 'scripts/build_windows_candidate.py', 'scripts/openrgb_cache.py', 'scripts/package_installer.py', 'scripts/package_release.py', 'scripts/installer/prerequisites.lock.json', '.gitattributes', '.github/workflows/windows.yml') }}
+        run: |
+          if (!$env:ImageOS -or !$env:ImageVersion -or $env:RUNNER_ARCH -ne 'X64') { throw 'Expected an exact hosted Windows x64 image' }
+          $selected = @{}
+          & $env:ComSpec /c ('call "' + $env:VSDEVCMD + '" -no_logo -arch=x64 -host_arch=x64 >NUL && set') | ForEach-Object {
+            if ($_ -match '^(VCToolsInstallDir|VCToolsVersion|WindowsSdkDir|WindowsSDKVersion)=(.+)$') {
+              $selected[$Matches[1]] = $Matches[2]
+            }
+          }
+          if ($LASTEXITCODE -ne 0 -or $selected.Count -ne 4) { throw 'MSVC or Windows SDK version could not be established' }
+          $compiler = Join-Path $selected.VCToolsInstallDir 'bin/Hostx64/x64'
+          $sdk = Join-Path (Join-Path $selected.WindowsSdkDir 'bin') ($selected.WindowsSDKVersion.TrimEnd('\') + '/x64')
+          $key = python scripts/openrgb_cache.py --inputs $env:OPENRGB_INPUTS --image "$env:ImageOS/${env:ImageVersion}" `
+            --toolchain "$($selected.VCToolsVersion)/$($selected.WindowsSDKVersion)" `
+            --tool vsdevcmd $env:VSDEVCMD --tool cl (Join-Path $compiler 'cl.exe') `
+            --tool link (Join-Path $compiler 'link.exe') --tool lib (Join-Path $compiler 'lib.exe') `
+            --tool rc (Join-Path $sdk 'rc.exe') --tool mt (Join-Path $sdk 'mt.exe') `
+            --tool 7z (Join-Path $env:ProgramFiles '7-Zip/7z.exe') `
+            --tool git (Get-Command git -CommandType Application | Select-Object -First 1).Source `
+            --tool powershell (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe')
+          if ($LASTEXITCODE -ne 0 -or $key -cnotmatch '^openrgb-windows-x64-v1-[0-9a-f]{64}$') {
+            throw 'OpenRGB cache key could not be established'
+          }
+          "key=$key" >> $env:GITHUB_OUTPUT
+      - name: Restore verified OpenRGB component
+        if: steps.openrgb.outputs.key != ''
+        continue-on-error: true
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ runner.temp }}/prismestra-openrgb-cache
+          key: ${{ steps.openrgb.outputs.key }}
       - name: Build the installer and lifecycle inputs
         id: build
         shell: pwsh
         env:
           DISPATCH_VERSION: ${{ inputs.installer_version }}
+          VSDEVCMD: ${{ steps.msvc.outputs.vsdevcmd }}
+          OPENRGB_CACHE_KEY: ${{ steps.openrgb.outputs.key }}
           PRISMESTRA_VC_REDIST_X64_URL: ${{ vars.PRISMESTRA_VC_REDIST_X64_URL }}
           PRISMESTRA_WEBVIEW2_X64_URL: ${{ vars.PRISMESTRA_WEBVIEW2_X64_URL }}
         run: |
@@ -135,18 +185,27 @@ jobs:
           } elseif (-not $version) {
             $version = '0.1.0.8'
           }
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-          $vsdevcmd = & $vswhere -latest -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find Common7/Tools/VsDevCmd.bat
-          if (-not $vsdevcmd) { throw 'MSVC build tools were not found' }
           rustup toolchain install 1.99.1 --profile minimal
           if ($LASTEXITCODE) { throw 'Installing the candidate Rust toolchain failed' }
           $env:RUSTUP_TOOLCHAIN = '1.99.1'
           $output = Join-Path $env:RUNNER_TEMP prismestra-candidate
-          python scripts/build_windows_candidate.py --commit $env:GITHUB_SHA --version $version --vsdevcmd $vsdevcmd --output $output
+          $cacheArgs = @()
+          if ($env:OPENRGB_CACHE_KEY) {
+            $cacheArgs = @('--openrgb-cache', (Join-Path $env:RUNNER_TEMP 'prismestra-openrgb-cache'), '--openrgb-cache-key', $env:OPENRGB_CACHE_KEY)
+          }
+          python scripts/build_windows_candidate.py --commit $env:GITHUB_SHA --version $version --vsdevcmd $env:VSDEVCMD --output $output @cacheArgs
           if ($LASTEXITCODE) { throw 'Building the Windows candidate failed' }
           "candidate=prismestra-compiled-$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_OUTPUT
           "fixtures=prismestra-lifecycle-inputs-$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_OUTPUT
           "sums_sha256=$((Get-FileHash (Join-Path $output 'candidate/SHA256SUMS.txt')).Hash.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "openrgb_cache_ready=$(Test-Path -LiteralPath (Join-Path $output 'openrgb-cache-ready') -PathType Leaf)" >> $env:GITHUB_OUTPUT
+      - name: Save verified OpenRGB component
+        if: steps.build.outputs.openrgb_cache_ready == 'True'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ runner.temp }}/prismestra-openrgb-cache
+          key: ${{ steps.openrgb.outputs.key }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ steps.build.outputs.candidate }}

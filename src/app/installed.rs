@@ -528,7 +528,7 @@ fn empty_document() -> Result<Document, String> {
                 points: vec![],
             },
         },
-        scene: windows::default_scene(),
+        scene: crate::ui::catalog::first_light_scene(),
         schedule: schedule::Config {
             timezone: "UTC".into(),
             ..Default::default()
@@ -538,6 +538,49 @@ fn empty_document() -> Result<Document, String> {
             door: vec![],
         },
     })
+}
+
+#[test]
+fn fresh_installed_scene_lights_single_strip_and_sparse_canvas() {
+    use crate::{devices::Point, runtime::scene::Renderer};
+
+    let scene = empty_document().unwrap().lighting.scene;
+    assert!(scene.speed <= 34 && scene.brightness <= 70);
+    for (width, height, coordinates) in [
+        (1, 1, vec![(0, 0)]),
+        (153, 1, (0..153).map(|x| (x, 0)).collect()),
+        (
+            120,
+            80,
+            vec![(0, 0), (119, 79), (2, 20), (37, 73), (108, 13)],
+        ),
+    ] {
+        let canvas = Canvas {
+            width,
+            height,
+            points: coordinates
+                .into_iter()
+                .enumerate()
+                .map(|(led, (x, y))| Point {
+                    device: "fixture".into(),
+                    led,
+                    x,
+                    y,
+                })
+                .collect(),
+        };
+        let mut renderer = Renderer::new(scene.clone()).unwrap();
+        let first = renderer.step(&canvas).unwrap();
+        let mut last = first.clone();
+        for frame in 0..scene.fps * 5 {
+            assert!(
+                last.iter().all(|c| c.r.max(c.g).max(c.b) >= 48),
+                "{width}×{height}, frame {frame} contains a dim point"
+            );
+            last = renderer.step(&canvas).unwrap();
+        }
+        assert_ne!(first, last, "{width}×{height} should animate");
+    }
 }
 
 #[derive(Deserialize, Serialize)]

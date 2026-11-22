@@ -178,7 +178,19 @@ events.pointerup({});const applyButton={dataset:{action:'apply-document'},disabl
 vm.runInContext('window.prismestraReceive({kind:"error",message:"Invalid port"});window.prismestraReceive(payload)',context);assert.equal(find('#field-0').value,'not-a-number','invalid text retained after backend validation error');assert.equal(find('#field-1').value,'Unfocused text','nonfocused stage retained across snapshot');assert.ok(find('#native-error').innerHTML.includes('Отменить незавершённый ввод'));
 // Choices include the outstanding generic text atomically, then acknowledge only submitted stages.
 const mode=new Node();mode.tagName='SELECT';mode.dataset.field='mode';mode.value='b';events.change({target:mode});assert.equal(commands.at(-1).op,'set_field');assert.equal(commands.at(-1).fields[0].value,'not-a-number');vm.runInContext('window.prismestraReceive({kind:"error",message:"Still invalid"})',context);
-document.activeElement=find('#field-0');vm.runInContext('window.prismestraReceive({kind:"flush",id:500})',context);assert.equal(commands.at(-1).op,'close_ready');assert.equal(commands.at(-1).form_dirty,true,'close handshake reports unblurred form input');vm.runInContext('window.prismestraReceive({kind:"error",message:"Finish forms before closing"})',context);assert.equal(vm.runInContext('stagedDirty()',context),true);
+document.activeElement=find('#field-0');
+const beforeClose=commands.length;
+vm.runInContext('window.prismestraReceive({kind:"flush",id:500})',context);
+assert.equal(commands.length,beforeClose+1,'close sends only the draft receipt and never applies fields');
+assert.equal(commands.at(-1).op,'close_ready');
+assert.equal(commands.at(-1).form_dirty,true,'close handshake reports unblurred form input');
+assert.ok(commands.at(-1).scene,'scene draft accompanies the dirty-form receipt');
+assert.ok(!JSON.stringify(commands.at(-1)).includes(document.activeElement.value),'close receipt excludes staged field values');
+vm.runInContext('window.prismestraReceive({kind:"close_cancelled"})',context);
+assert.equal(vm.runInContext('closing',context),false);
+assert.equal(vm.runInContext('stagedDirty()',context),true,'returning to edits preserves the staged form');
+vm.runInContext('const previousSceneFile=window.sceneFile;window.sceneFile={blockClose:()=>true};window.prismestraReceive({kind:"flush",id:501});window.sceneFile=previousSceneFile',context);
+assert.deepEqual(commands.at(-1),{op:'close_ready',id:501,scene:null,blocked:true},'an active scene-file operation cannot be discarded as a form');
 const discard={dataset:{action:'discard-fields'},disabled:false,hasAttribute:()=>false};events.click({target:{closest:()=>discard}});assert.equal(vm.runInContext('stagedDirty()',context),false);assert.equal(find('#field-0').value,'8080','explicit discard renders backend values');
 // Empty device profiles expose actual native auxiliary Add actions and blank select placeholders.
 const aux={page:'devices',fields:[{id:411,label:'Name',kind:'text',value:'',choices:[],enabled:true},{id:412,label:'Driver',kind:'select',value:'missing',choices:[{label:'First driver',value:'first'}],enabled:true}],actions:[{id:410,label:'Add device',enabled:true}],notes:['No configured devices']};context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeAux:aux,editor:{page:'devices',index:0,targets:[],fields:[],dirty:false}}};vm.runInContext('window.prismestraReceive(payload)',context);assert.ok(find('#main').innerHTML.includes('Add device'));assert.ok(!find('#main').innerHTML.includes('Расширенные настройки'));assert.ok(find('#main').innerHTML.includes('<option value="" disabled selected>Выберите…</option>'));
@@ -301,6 +313,7 @@ console.log('PASS: device cards select by logical identity and the draft dropdow
  receive({kind:'snapshot',state:stateForScope('before','first',1)});
  assert(button.hidden);
  assert(help.hidden);
+ assert.match(mainMarkup,/data-output-status="rgb">Подключение занято другим выходом Prismestra/);
  const beforeSelection=commands.length;
  click();
  assert.equal(commands.length,beforeSelection);
@@ -325,6 +338,7 @@ console.log('PASS: device cards select by logical identity and the draft dropdow
  assert.equal(status.textContent,'Identity changed');
  receive({kind:'status',state:{deviceActivity:{retryScope:'before',retryTickets:{},reasons:{}}}});
  assert(help.hidden);
+ assert.equal(vm.runInContext('deviceStatus(state.devices[0])',context),'Недоступно');
  receive({kind:'snapshot',state:stateForScope('after','next')});
  click();
  assert.equal(status.textContent,'Подключаемся…');
@@ -721,3 +735,114 @@ document.activeElement=appearanceButton;
 receiveDeviceState('snapshot',settingsState);
 assert.equal(document.activeElement,appearanceButton,'An asynchronous return does not steal focus moved by the user');
 console.log('PASS: Settings return focus waits for acknowledgement and respects user focus');
+
+// The provider catalog drives all scene labels and remains practical for a large effect list.
+{
+ const metadata=[{id:'noise_map',name:'Карта шума'},{id:'breathing',name:'Дыхание'},
+  ...Array.from({length:78},(_,i)=>({id:'extra_'+i,name:'Движение '+i}))];
+ metadata.at(-1).name='Край <света>';
+ const extraScene={...scene,effect:metadata.at(-1).id};
+ vm.runInContext('view="library";draft=null;search="";libraryEffect=""',context);
+ receiveDeviceState('snapshot',{...initial,scene:extraScene,effects:metadata,
+  library:[{id:'extra',name:'Край',scene:extraScene},{id:'noise',name:'Шум',scene}]});
+ assert.equal(find('#player-name').textContent,'Край <света>');
+ assert.equal(vm.runInContext('effects.extra_77',context),'Край <света>','the portable scene dialog reads the same labels');
+ assert.match(mainMarkup,/<option value="extra_77"[^>]*>Край &lt;света&gt;<\/option>/);
+ assert.doesNotMatch(mainMarkup,/<option value="breathing"/,'library filter only lists effects present in its scenes');
+ events.change({target:{id:'library-effect',value:'extra_77'}});
+ assert.match(mainMarkup,/data-edit="extra"/);
+ assert.doesNotMatch(mainMarkup,/data-edit="noise"/);
+
+ vm.runInContext('view="editor";draft.speed=1;render()',context);
+ assert.match(mainMarkup,/<label for="scene-effect">Эффект<\/label>/);
+ const effectOptions=Array.from(mainMarkup.matchAll(/<option value="((?:noise_map|breathing|extra_\d+))"/g),match=>match[1]);
+ assert.deepEqual(effectOptions,metadata.map(effect=>effect.id));
+ const select=find('#scene-effect'),advanced=find('#advanced-scene');
+ select.id='scene-effect';select.value='breathing';select.focus();advanced.open=true;
+ const previousMarkup=mainMarkup,beforeChoice=commands.length;
+ events.change({target:select});
+ assert.equal(mainMarkup,previousMarkup,'selection leaves the native picker and stage mounted');
+ assert.equal(document.activeElement,select);
+ assert.equal(commands.length,beforeChoice,'changing the effect is a draft edit');
+ assert.equal(vm.runInContext('draft.speed',context),10,'the effect-specific speed limit applies');
+ const parameters=find('#scene-parameters').innerHTML;
+ assert.match(parameters,/<details id="advanced-scene" open>/);
+ assert.doesNotMatch(parameters,/data-param="noise.frequency"/);
+ vm.runInContext('flushPreview()',context);
+ assert.equal(commands.at(-1).op,'preview_scene');
+ assert.equal(commands.at(-1).scene.effect,'breathing');
+ assert.equal(vm.runInContext('state.scene.effect',context),'extra_77');
+}
+console.log('PASS: 80 effect choices in provider order, shared escaped labels and filtering, focused draft-only effect preview');
+
+{
+ const camera={...scene,effect:'camera_color'};
+ const effects=[{id:'camera_color',name:'Цвет камеры',reactive:'camera',directColor:true}];
+ vm.runInContext('view="editor";draft=null',context);
+ const before=commands.filter(command=>command.op==='apply_scene').length;
+ receiveDeviceState('snapshot',{...initial,scene:camera,draftScene:null,effects,native:true,captureAuthorized:false});
+ assert.equal(find('#footer-apply').disabled,false,'a restored effect can be applied without editing it');
+ assert.equal(commands.filter(command=>command.op==='apply_scene').length,before,'restore cannot apply the input');
+ find('#footer-apply').onclick();
+ assert.equal(commands.at(-1).op,'apply_scene');
+ assert.equal(commands.at(-1).scene.effect,'camera_color');
+ receiveDeviceState('snapshot',{...initial,scene:camera,draftScene:null,effects,native:true,captureAuthorized:true});
+ assert.equal(find('#footer-apply').disabled,true,'an applied unchanged scene needs no second click');
+}
+console.log('PASS: restored capture is inert and can be explicitly applied without editing the effect');
+
+{
+ const entry={id:'night',name:'Ночная',scene:{...scene,brightness:37},preview:{width:1,height:1,colors:[0x123456]}};
+ const libraryState={...initial,library:[entry]};
+ vm.runInContext('view="library";draft=null;search="";libraryEffect=""',context);
+ receiveDeviceState('snapshot',libraryState);
+ assert.match(mainMarkup,/<button[^>]+data-apply="night"[^>]*>Включить сцену<\/button>/);
+ assert.match(mainMarkup,/data-preview="night"/);
+ assert.match(mainMarkup,/data-edit="night"/);
+ const click=(key)=>events.click({target:{closest:()=>({
+  dataset:{[key]:'night'},hasAttribute:name=>name==='data-mutation'&&key!=='preview',
+ })}});
+ const status=find('#scene-activation-night');
+ const devices=find('#scene-devices-night');
+ const before=commands.length;
+ click('preview');
+ assert.equal(find('#library-preview-dialog').open,true);
+ assert.equal(commands.length,before,'preview uses the cached frame and sends no command');
+ assert.equal(viewNow(),'library');
+ click('apply');click('apply');
+ const apply=commands.at(-1);
+ assert.deepEqual(apply,{op:'apply_scene',scene:entry.scene,request:apply.request});
+ assert.deepEqual(commands.slice(before).filter(command=>command.op==='apply_scene'),[apply]);
+ assert.match(status.textContent,/Включаем/);
+ assert.equal(devices.hidden,true);
+ receiveDeviceState('snapshot',{...libraryState,scene:entry.scene});
+ receiveDeviceState('status',{scene:entry.scene,pending:false});
+ assert.match(status.textContent,/Включаем/,'snapshots and unrelated status cannot confirm even the same scene');
+ const reply=(request,result,message)=>vm.runInContext(
+  'window.prismestraReceive('+JSON.stringify({kind:'scene_activation',request,status:result,message})+')',context);
+ reply(apply.request+1,'applied');
+ assert.match(status.textContent,/Включаем/);
+ reply(apply.request,'failed','Устройство недоступно.');
+ assert.match(status.textContent,/Не удалось включить.*Устройство недоступно/);
+ assert.equal(devices.hidden,true);
+ click('apply');
+ const second=commands.at(-1);
+ assert.notEqual(second.request,apply.request);
+ vm.runInContext('window.prismestraReceive({kind:"error",message:"Ошибка другой команды"})',context);
+ assert.equal(find('#native-error').hidden,false);
+ assert.match(find('#native-error').innerHTML,/Ошибка другой команды/);
+ assert.match(status.textContent,/Включаем/,'an unrelated error cannot settle the activation');
+ click('apply');
+ assert.equal(commands.at(-1),second,'an unrelated error cannot unlock another activation');
+ reply(apply.request,'applied');
+ assert.match(status.textContent,/Включаем/);
+ reply(second.request,'applied');
+ assert.equal(status.textContent,'Сцена «Ночная» применена.');
+ assert.equal(find('#native-error').hidden,false,'the scene result does not dismiss the unrelated error');
+ assert.equal(devices.hidden,false);
+ receiveDeviceState('status',{native:false});
+ assert.equal(devices.hidden,true,'hardware status is not offered in preview');
+ assert.equal(viewNow(),'library');
+ assert.equal(vm.runInContext('draft.brightness',context),65,'activation does not replace the editor draft');
+}
+console.log('PASS: scene activation survives an unrelated error, ignores stale replies, and settles only on matching rejection or success');

@@ -133,6 +133,7 @@ impl Local {
             native_capture,
         )?;
         runtime.enable_registered_output_recovery();
+        runtime.enable_native_scene_inputs();
         Ok(())
     }
 }

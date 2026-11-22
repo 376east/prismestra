@@ -67,9 +67,12 @@ enum Command {
         origin: Option<Origin>,
         #[serde(default)]
         form_dirty: bool,
+        #[serde(default)]
+        blocked: bool,
     },
     ApplyScene {
         scene: Scene,
+        request: Option<u32>,
     },
     PreviewScene {
         scene: Scene,
@@ -94,6 +97,9 @@ enum Command {
     Open,
     Save,
     Export,
+    ExportEventSource {
+        format: crate::capture::event_bridge::ExportFormat,
+    },
     Page {
         page: String,
         device: Option<String>,
@@ -144,7 +150,8 @@ pub(super) struct Session {
     alice: super::alice::Session,
     close_request: Option<CloseRequest>,
     close_id: u32,
-    close_ready: bool,
+    close_ready: Option<(bool, bool)>,
+    close_deciding: bool,
     catalog: Catalog,
     catalog_view: BTreeMap<String, Value>,
     built_in_cards: Vec<Value>,
@@ -190,7 +197,8 @@ impl Session {
             built_in_cards,
             close_request: None,
             close_id: 0,
-            close_ready: false,
+            close_ready: None,
+            close_deciding: false,
             catalog,
             catalog_path,
             draft,
@@ -218,7 +226,7 @@ impl Session {
         Ok(result)
     }
     fn persist_draft(&mut self, scene: Scene, origin: Option<Origin>) -> Result<(), String> {
-        self.close_ready = false;
+        self.close_ready = None;
         let draft = Draft::new(scene, origin)?;
         draft.save(&self.draft_path)?;
         self.configure_preview(draft.scene.clone())?;
@@ -254,6 +262,12 @@ fn preview_canvas(width: u32, height: u32) -> crate::devices::Canvas {
 }
 
 fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
+    if entry.scene.effect.uses_audio()
+        || entry.scene.effect.uses_context()
+        || entry.scene.effect.uses_reactive()
+    {
+        return json!({"id":entry.id,"name":entry.name,"scene":entry.scene});
+    }
     let (width, height) = if entry.scene.effect.uses_normalized_canvas() {
         (48, 24)
     } else {
@@ -262,7 +276,12 @@ fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
     let canvas = preview_canvas(width, height);
     let mut colors = Vec::new();
     let mut thumbnail_scene = entry.scene.clone();
-    let steps = if thumbnail_scene.effect == crate::lighting::scene::Effect::Breathing {
+    let steps = if thumbnail_scene.effect.uses_normalized_canvas() {
+        // Sample a representative phase with one render, including brief effects like Lightning.
+        thumbnail_scene.speed = 22;
+        thumbnail_scene.fps = 1;
+        1
+    } else if thumbnail_scene.effect == crate::lighting::scene::Effect::Breathing {
         // A 1.57 radian step samples the first breath near its peak.
         // Only the thumbnail clock changes; the card still stores the original scene.
         thumbnail_scene.speed = 157;
@@ -370,13 +389,15 @@ pub(super) fn prepare_close(state: &State, exit: bool, confirm: bool) -> Result<
         let Some(session) = slot.as_mut() else {
             return Ok(true);
         };
-        if session.close_ready {
-            return Ok(true);
+        if session.close_deciding {
+            return Ok(false);
+        }
+        if let Some(intent) = session.close_ready {
+            return Ok(intent == (exit, confirm));
         }
         if let Some(request) = session.close_request.as_mut() {
-            if exit {
+            if exit && request.confirm == confirm {
                 request.exit = true;
-                request.confirm = confirm;
             }
             if request.started.elapsed() > Duration::from_secs(2) {
                 session.close_request = None;
@@ -404,10 +425,100 @@ pub(super) fn prepare_close(state: &State, exit: bool, confirm: bool) -> Result<
 }
 pub(super) fn close_failed(state: &State, message: &str) {
     if let Some(session) = state.modern_session.borrow_mut().as_mut() {
-        session.close_ready = false;
+        session.close_ready = None;
         session.close_request = None;
     }
     let _ = send(state, &json!({"kind":"error","message":message}));
+}
+
+fn confirm_unapplied_close(hwnd: HWND, exit: bool) -> Result<bool, String> {
+    use windows_sys::Win32::UI::Controls::{
+        TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TDF_ALLOW_DIALOG_CANCELLATION,
+    };
+    use windows_sys::Win32::{
+        Foundation::FreeLibrary,
+        System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW},
+    };
+    const DISCARD: i32 = 100;
+    let title = wide(if exit {
+        "Выход из Prismestra"
+    } else {
+        "Закрытие редактора"
+    });
+    let content = wide("Неприменённые значения настроек будут потеряны.");
+    let keep = wide("Вернуться к правкам");
+    let discard = wide(if exit {
+        "Выйти без применения"
+    } else {
+        "Закрыть без применения"
+    });
+    let buttons = [
+        TASKDIALOG_BUTTON {
+            nButtonID: IDCANCEL,
+            pszButtonText: keep.as_ptr(),
+        },
+        TASKDIALOG_BUTTON {
+            nButtonID: DISCARD,
+            pszButtonText: discard.as_ptr(),
+        },
+    ];
+    let dialog = TASKDIALOGCONFIG {
+        cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
+        hwndParent: hwnd,
+        dwFlags: TDF_ALLOW_DIALOG_CANCELLATION,
+        pszWindowTitle: title.as_ptr(),
+        pszContent: content.as_ptr(),
+        cButtons: buttons.len() as u32,
+        pButtons: buttons.as_ptr(),
+        nDefaultButton: IDCANCEL,
+        ..Default::default()
+    };
+    let mut button = IDCANCEL;
+    // Only the GUI executable has the v6 Common Controls manifest. An eager
+    // import would prevent the ordinary Rust test executable from starting.
+    let status = unsafe {
+        let module = LoadLibraryExW(
+            wide("comctl32.dll").as_ptr(),
+            null_mut(),
+            LOAD_LIBRARY_SEARCH_SYSTEM32,
+        );
+        if module.is_null() {
+            None
+        } else {
+            let result =
+                GetProcAddress(module, c"TaskDialogIndirect".as_ptr().cast()).map(|entry| {
+                    let task_dialog: unsafe extern "system" fn(
+                        *const TASKDIALOGCONFIG,
+                        *mut i32,
+                        *mut i32,
+                        *mut i32,
+                    ) -> i32 = std::mem::transmute(entry);
+                    task_dialog(&dialog, &mut button, null_mut(), null_mut())
+                });
+            FreeLibrary(module);
+            result
+        }
+    };
+    if status.is_none_or(|status| status < 0) {
+        return Err("Не удалось показать подтверждение. Правки сохранены в редакторе.".into());
+    }
+    Ok(button == DISCARD)
+}
+
+fn needs_discard_confirmation(
+    blocked: bool,
+    form_dirty: bool,
+    interactive: bool,
+) -> Result<bool, String> {
+    if blocked {
+        return Err("Сначала завершите действие в открытом диалоге сцены.".into());
+    }
+    if form_dirty && !interactive {
+        return Err(
+            "Завершите ввод или отмените незавершённые значения перед закрытием редактора".into(),
+        );
+    }
+    Ok(form_dirty)
 }
 pub(super) fn close(state: &State) {
     // Drop outside all RefCell borrows: controller.Close may reenter the HWND.
@@ -519,24 +630,35 @@ pub(crate) fn device_activity_for(
     busy: bool,
     context: u64,
 ) -> Value {
+    use crate::app::runtime::OutputFailureReason;
+
     let mut labels = BTreeMap::new();
     let mut reasons = BTreeMap::new();
     let mut tickets = BTreeMap::new();
     for device in &runtime.document().lighting.setup.devices {
         let activity = runtime.output_activity(device);
+        let reason = active
+            .then(|| runtime.output_failure_reason(device, &activity))
+            .flatten();
         let label = if !active && device.enabled {
             "Предпросмотр"
+        } else if matches!(
+            reason,
+            Some(OutputFailureReason::HomeAssistantAccessRequired)
+        ) {
+            "Проверьте доступ Home Assistant"
         } else {
             output_activity_label(&activity)
         };
         labels.insert(&device.id, label);
-        if active {
-            if let Some(reason) = runtime.output_failure_reason(device, &activity) {
-                reasons.insert(&device.id, reason);
-            }
-            if !busy && let Some(ticket) = runtime.openrgb_retry_ticket(&device.id) {
-                tickets.insert(&device.id, retry_output::encode(context, ticket));
-            }
+        if let Some(reason) = reason {
+            reasons.insert(&device.id, reason);
+        }
+        if active
+            && !busy
+            && let Some(ticket) = runtime.openrgb_retry_ticket(&device.id)
+        {
+            tickets.insert(&device.id, retry_output::encode(context, ticket));
         }
     }
     json!({
@@ -589,7 +711,18 @@ fn snapshot(state: &State) -> Result<Value, String> {
         .chain(&session.built_in_cards)
         .collect::<Vec<_>>();
     let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":library,"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
+    let effects = Effect::ALL
+        .iter()
+        .copied()
+        .map(|effect| json!({
+            "id":effect,"name":effect.label(),"audio":effect.uses_audio(),"context":effect.uses_context(),
+            "reactive":effect.reactive_source(),
+            "directColor":matches!(effect, Effect::CameraColor | Effect::CameraMotion | Effect::MediaAmbience)
+        }))
+        .collect::<Vec<_>>();
+    value["state"]["effects"] = json!(effects);
     value["state"]["draftMapRevision"] = json!(draft_map_revision);
+    value["state"]["captureAuthorized"] = json!(app.runtime.read(Runtime::capture_authorized));
     value["state"]["mapConnection"] = map_connection(app);
     let schedule = &app.runtime.project().schedule;
     value["state"]["schedule"] = json!({"enabled":schedule.enabled,"paused":schedule.paused});
@@ -706,8 +839,9 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             scene,
             origin,
             form_dirty,
+            blocked,
         } => {
-            let request = {
+            let (request, ask) = {
                 let mut slot = state.modern_session.borrow_mut();
                 let session = slot.as_mut().ok_or("Нет интерфейса")?;
                 if session
@@ -717,31 +851,47 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                 {
                     return Err("Устаревшее подтверждение закрытия".into());
                 }
-                if let Some(scene) = scene
-                    && let Err(error) = session.persist_draft(scene, origin)
-                {
-                    session.close_request = None;
-                    return Err(error);
+                let request = session.close_request.take().ok_or("Закрытие отменено")?;
+                if let Some(scene) = scene {
+                    session.persist_draft(scene, origin)?;
                 }
-                if form_dirty {
-                    session.close_request = None;
-                    return Err("Завершите ввод или отмените незавершённые значения перед закрытием редактора".into());
-                }
-                session.close_ready = true;
-                session.close_request.take().ok_or("Закрытие отменено")?
+                let ask = needs_discard_confirmation(blocked, form_dirty, request.confirm)?;
+                session.close_deciding = ask;
+                (request, ask)
             };
+            if ask {
+                let discard = confirm_unapplied_close(hwnd, request.exit);
+                let mut sessions = state.modern_session.borrow_mut();
+                let Some(session) = sessions
+                    .as_mut()
+                    .filter(|session| session.close_deciding && session.close_id == id)
+                else {
+                    return Ok(false);
+                };
+                session.close_deciding = false;
+                drop(sessions);
+                if !discard? {
+                    send(state, &json!({"kind":"close_cancelled"}))?;
+                    return Ok(false);
+                }
+            }
+            if let Some(session) = state.modern_session.borrow_mut().as_mut() {
+                session.close_ready = Some((request.exit, request.confirm));
+            }
             if request.exit {
                 let result = resident::request(state, resident::Action::Exit, request.confirm);
                 if result.is_err() || state.session_action.get() == resident::Action::None {
                     if let Some(session) = state.modern_session.borrow_mut().as_mut() {
-                        session.close_ready = false;
+                        session.close_ready = None;
                     }
                     let _ = send(state, &json!({"kind":"close_cancelled"}));
                 }
                 result?;
             } else {
                 unsafe {
-                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    if PostMessageW(hwnd, WM_CLOSE, 0, 0) == 0 {
+                        close_failed(state, "Не удалось закрыть редактор. Повторите попытку.");
+                    }
                 }
             }
             return Ok(false);
@@ -854,6 +1004,53 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             };
             modal_command(hwnd, state, id)?;
         }
+        Command::ExportEventSource { format } => {
+            use crate::capture::event_bridge::ExportFormat;
+            let game = format != ExportFormat::Connection;
+            let (filter, extension, name) = if game {
+                (
+                    "Game State Integration (*.cfg)\0*.cfg\0\0",
+                    "cfg",
+                    "gamestate_integration_prismestra.cfg",
+                )
+            } else {
+                (
+                    "JSON (*.json)\0*.json\0\0",
+                    "json",
+                    "prismestra-local-input.json",
+                )
+            };
+            if let Some(path) = super::file_dialog_named(hwnd, true, filter, extension, name)? {
+                if game {
+                    let valid_name = path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|value| {
+                            value
+                                .to_ascii_lowercase()
+                                .starts_with("gamestate_integration_")
+                        });
+                    let valid_extension = path
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|value| value.eq_ignore_ascii_case("cfg"));
+                    if !valid_name || !valid_extension {
+                        return Err("Имя файла должно иметь вид gamestate_integration_*.cfg".into());
+                    }
+                }
+                let mut slot = state.app.try_borrow_mut().map_err(|_| "Редактор занят")?;
+                let app = slot.as_mut().ok_or("Нет сессии")?;
+                let content = app
+                    .runtime
+                    .read(|runtime| runtime.export_event_source(format))?;
+                crate::storage::atomic_write(&path, content.as_bytes(), 8192)
+                    .map_err(|e| e.to_string())?;
+                if format == ExportFormat::Connection {
+                    app.runtime.read(|runtime| runtime.allow_media_bridge())?;
+                }
+                app.status = "Настройки локального входа экспортированы.".into();
+            }
+        }
         Command::PreviewScene { scene, origin } => {
             let result = state
                 .modern_session
@@ -931,11 +1128,26 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                     stage_native(a, &fields)?;
                     native_forms::set_field(a, id, &value)?;
                 }
-                Command::ApplyScene { scene } => {
+                Command::ApplyScene { scene, request } => {
                     if a.editor_dirty {
                         return Err("Примените или сбросьте параметры устройств".into());
                     }
-                    a.changed_scene(scene)?;
+                    a.update_scene(scene, true)?;
+                    if let Some(request) = request {
+                        let message = if a.native_lighting.is_none() {
+                            Some("Режим предпросмотра.")
+                        } else if !a.runtime.group_on(Target::Pc)
+                            && !a.runtime.group_on(Target::Door)
+                        {
+                            Some("Свет выключен. Включите его в панели воспроизведения.")
+                        } else {
+                            None
+                        };
+                        send(
+                            state,
+                            &json!({"kind":"scene_activation","request":request,"status":"applied","message":message}),
+                        )?;
+                    }
                 }
                 Command::Groups { pc, door } => {
                     a.runtime.set_group(Target::Pc, pc)?;
@@ -1016,6 +1228,21 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
     }
     Ok(true)
 }
+fn scene_activation_request(command: Option<&Command>, raw: &str) -> Option<u32> {
+    match command {
+        Some(Command::ApplyScene { request, .. }) => *request,
+        Some(_) => None,
+        None => {
+            // A valid envelope can still carry an invalid scene.
+            let envelope: Value = serde_json::from_str(raw).ok()?;
+            if envelope.get("op")?.as_str()? != "apply_scene" {
+                return None;
+            }
+            u32::try_from(envelope.get("request")?.as_u64()?).ok()
+        }
+    }
+}
+
 pub(super) fn maintain(state: &State) {
     let messages = match state.webview.try_borrow() {
         Ok(slot) => match slot.as_ref() {
@@ -1033,7 +1260,7 @@ pub(super) fn maintain(state: &State) {
                 .is_some_and(|request| request.started.elapsed() > Duration::from_secs(2))
             {
                 session.close_request = None;
-                session.close_ready = false;
+                session.close_ready = None;
                 true
             } else {
                 false
@@ -1052,14 +1279,21 @@ pub(super) fn maintain(state: &State) {
     }
     let mut snapshot_needed = false;
     for message in messages {
-        let result = serde_json::from_str::<Command>(&message)
+        let command = serde_json::from_str::<Command>(&message);
+        let request = scene_activation_request(command.as_ref().ok(), &message);
+        let result = command
             .map_err(|e| format!("Некорректная команда интерфейса: {e}"))
             .and_then(|c| execute(state, c));
         match result {
             Ok(value) => snapshot_needed |= value,
             Err(message) => {
                 snapshot_needed = true;
-                let _ = send(state, &json!({"kind":"error","message":message}));
+                let reply = if let Some(request) = request {
+                    json!({"kind":"scene_activation","request":request,"status":"failed","message":message})
+                } else {
+                    json!({"kind":"error","message":message})
+                };
+                let _ = send(state, &reply);
             }
         }
     }
@@ -1114,6 +1348,22 @@ pub(super) fn maintain(state: &State) {
         let mut pixels = Vec::new();
         let mut canvas = &session.canvas;
         if let Some(renderer) = session.preview.as_mut() {
+            if renderer.scene().effect.uses_audio() {
+                renderer.set_audio(app.runtime.read(|runtime| runtime.audio_input()));
+            }
+            if renderer.scene().effect.uses_reactive() {
+                renderer.set_reactive(
+                    app.runtime.read(|runtime| runtime.reactive_input()),
+                    crate::clock::monotonic_us(),
+                );
+            }
+            if renderer.scene().effect.uses_context() {
+                let effect = renderer.scene().effect;
+                let input = app.runtime.read(|runtime| {
+                    runtime.scene_context(effect, crate::clock::monotonic_us(), super::wall())
+                });
+                renderer.set_context(input);
+            }
             if renderer.scene().effect.uses_normalized_canvas() {
                 canvas = &session.detailed_canvas;
             }
@@ -1123,6 +1373,15 @@ pub(super) fn maintain(state: &State) {
         }
         let colors = pixels.iter().map(|c| c.rrggbb()).collect::<Vec<_>>();
         let mut value = json!({"kind":"status","state":{"scene":app.runtime.project().scene,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"preview":{"width":canvas.width,"height":canvas.height,"colors":colors}}});
+        if app.runtime.project().scene.effect.uses_audio() {
+            value["state"]["audioError"] = app.runtime.read(|runtime| json!(runtime.audio_error()));
+        }
+        value["state"]["reactiveError"] = if app.runtime.project().scene.effect.uses_reactive() {
+            app.runtime.read(|runtime| json!(runtime.reactive_error()))
+        } else {
+            Value::Null
+        };
+        value["state"]["captureAuthorized"] = json!(app.runtime.read(Runtime::capture_authorized));
         if session.last_native_send.elapsed() >= Duration::from_millis(250) {
             session.last_native_send = Instant::now();
             value["state"]["deviceCandidates"] = json!(device_candidates(app));
@@ -1174,6 +1433,35 @@ pub(super) fn return_to_editor(state: &State) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::lighting::scene::Effect;
+
+    #[test]
+    fn scene_activation_request_survives_a_rejected_scene_payload() {
+        let scene = crate::ui::catalog::plum_dawn().scene;
+        let valid = json!({"op":"apply_scene","scene":scene,"request":42}).to_string();
+        let command = serde_json::from_str::<Command>(&valid).unwrap();
+        assert_eq!(scene_activation_request(Some(&command), &valid), Some(42));
+
+        let invalid = r#"{"op":"apply_scene","scene":false,"request":42}"#;
+        assert!(serde_json::from_str::<Command>(invalid).is_err());
+        assert_eq!(scene_activation_request(None, invalid), Some(42));
+        assert_eq!(
+            scene_activation_request(None, r#"{"op":"preview_scene","request":42}"#),
+            None
+        );
+        assert_eq!(
+            scene_activation_request(None, r#"{"op":"apply_scene","request":"42"}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn only_interactive_close_can_offer_to_discard_fields() {
+        assert_eq!(needs_discard_confirmation(false, false, false), Ok(false));
+        assert_eq!(needs_discard_confirmation(false, false, true), Ok(false));
+        assert_eq!(needs_discard_confirmation(false, true, true), Ok(true));
+        assert!(needs_discard_confirmation(false, true, false).is_err());
+        assert!(needs_discard_confirmation(true, false, true).is_err());
+    }
 
     #[test]
     fn procedural_card_uses_a_dense_canvas_and_preserves_scene_settings() {

@@ -1,9 +1,10 @@
-//! Read-only HID interface arrivals; never opens an endpoint or repairs USB failures.
+//! Read-only HID and Bluetooth radio interface arrivals.
 //!
 //! Register before enumerating existing interfaces, and unregister outside the callback:
 //! <https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_register_notification>
 //! <https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_unregister_notification>
 use std::{
+    collections::BTreeMap,
     ffi::c_void,
     mem::{offset_of, size_of},
     panic::{AssertUnwindSafe, catch_unwind},
@@ -43,6 +44,9 @@ struct Target {
 struct State {
     targets: Vec<Target>,
     staged: Option<Vec<Target>>,
+    // Bluetooth watches the local adapter class, with no initial enumeration.
+    // Each present path records whether its arrival is still pending.
+    radios: Option<BTreeMap<String, bool>>,
 }
 
 fn canonical_targets(paths: Vec<String>) -> Result<Vec<String>, String> {
@@ -107,6 +111,15 @@ impl State {
     }
 
     fn event(&mut self, path: &str, present: bool) {
+        if let Some(radios) = &mut self.radios {
+            let path = path.to_ascii_lowercase();
+            if !present {
+                radios.remove(&path);
+            } else if radios.len() < MAX_TARGETS {
+                radios.entry(path).or_insert(true);
+            }
+            return;
+        }
         for targets in std::iter::once(&mut self.targets).chain(self.staged.iter_mut()) {
             if let Some(target) = targets
                 .iter_mut()
@@ -124,6 +137,16 @@ impl State {
                 target.present = present;
             }
         }
+    }
+
+    fn take_radio_arrival(&mut self) -> bool {
+        let mut arrived = false;
+        if let Some(radios) = &mut self.radios {
+            for pending in radios.values_mut() {
+                arrived |= std::mem::take(pending);
+            }
+        }
+        arrived
     }
 
     fn take_arrivals(&mut self) -> Vec<Arrival> {
@@ -145,7 +168,7 @@ struct Context {
     state: Mutex<State>,
 }
 
-/// Resident HID class registration. Target changes and polling happen on its owner thread.
+/// Resident interface class registration. The owner thread drains the callback queue.
 pub struct Watch {
     // Integer storage permits moving ownership between threads; the OS registration is
     // thread independent, and the stable callback context is protected by its own mutex.
@@ -155,13 +178,34 @@ pub struct Watch {
 
 impl Watch {
     pub fn new() -> Result<Self, String> {
-        let context = Box::<Context>::default();
+        let mut guid = windows_sys::core::GUID::default();
+        unsafe { HidD_GetHidGuid(&mut guid) };
+        Self::register(guid, State::default())
+    }
+
+    pub fn bluetooth_radios() -> Result<Self, String> {
+        // Local Bluetooth radio class (Bthdef.h), independent of remote BLE devices.
+        use windows_sys::Win32::Devices::Bluetooth::GUID_BTHPORT_DEVICE_INTERFACE;
+
+        Self::register(
+            GUID_BTHPORT_DEVICE_INTERFACE,
+            State {
+                radios: Some(BTreeMap::new()),
+                ..State::default()
+            },
+        )
+    }
+
+    fn register(guid: windows_sys::core::GUID, state: State) -> Result<Self, String> {
+        let context = Box::new(Context {
+            state: Mutex::new(state),
+        });
         let mut filter = CM_NOTIFY_FILTER {
             cbSize: size_of::<CM_NOTIFY_FILTER>() as u32,
             FilterType: CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
             ..CM_NOTIFY_FILTER::default()
         };
-        unsafe { HidD_GetHidGuid(&mut filter.u.DeviceInterface.ClassGuid) };
+        filter.u.DeviceInterface.ClassGuid = guid;
         let mut registration = ptr::null_mut();
         // Context already has a stable allocation: callbacks may begin before return.
         let result = unsafe {
@@ -174,7 +218,7 @@ impl Watch {
         };
         if result != CR_SUCCESS {
             return Err(format!(
-                "Register HID interface notifications: CONFIGRET {result}"
+                "Register device interface notifications: CONFIGRET {result}"
             ));
         }
         Ok(Self {
@@ -223,6 +267,16 @@ impl Watch {
             .unwrap_or_else(|e| e.into_inner())
             .take_arrivals()
     }
+
+    pub fn take_radio_arrival(&mut self) -> bool {
+        self.context
+            .as_ref()
+            .expect("live Bluetooth radio watch")
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take_radio_arrival()
+    }
 }
 
 impl Drop for Watch {
@@ -236,7 +290,7 @@ impl Drop for Watch {
                 std::mem::forget(context);
             }
             eprintln!(
-                "Unregister HID interface notifications: CONFIGRET {result}; callback context retained"
+                "Unregister device interface notifications: CONFIGRET {result}; callback context retained"
             );
         }
     }
@@ -301,6 +355,30 @@ unsafe extern "system" fn callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bluetooth_radio_arrival_is_delivered_once_per_presence() {
+        let mut state = State {
+            radios: Some(BTreeMap::new()),
+            ..State::default()
+        };
+        assert!(!state.take_radio_arrival());
+        state.event("radio-A", true);
+        assert!(state.take_radio_arrival());
+        state.event("RADIO-a", true);
+        assert!(!state.take_radio_arrival());
+        state.event("radio-a", false);
+        assert!(!state.take_radio_arrival());
+        state.event("radio-a", true);
+        state.event("radio-b", true);
+        state.event("radio-a", false);
+        assert!(state.take_radio_arrival());
+        state.event("radio-a", true);
+        state.event("radio-a", false);
+        assert!(!state.take_radio_arrival());
+        state.event("radio-a", true);
+        assert!(state.take_radio_arrival());
+    }
 
     fn arrival(path: &str, reappeared: bool) -> Arrival {
         Arrival {

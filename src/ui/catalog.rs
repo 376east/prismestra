@@ -3,7 +3,7 @@ pub(crate) mod draft;
 #[cfg(any(windows, test))]
 mod library;
 #[cfg(windows)]
-pub(crate) use library::built_in;
+pub(crate) use library::{built_in, first_light_scene};
 
 use crate::{
     lighting::scene::Effect,

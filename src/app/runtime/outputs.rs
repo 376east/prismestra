@@ -15,6 +15,7 @@ pub(crate) enum OutputActivity {
 #[serde(rename_all = "camelCase")]
 pub(crate) enum OutputFailureReason {
     EndpointLeaseBusy,
+    HomeAssistantAccessRequired,
 }
 
 pub type RgbOutput = (String, Vec<String>, RgbFactory);
@@ -149,9 +150,16 @@ impl Runtime {
         device: &crate::devices::Device,
         activity: &OutputActivity,
     ) -> Option<OutputFailureReason> {
-        use crate::runtime::output::OutputStartError;
+        use crate::{devices::Driver, runtime::output::OutputStartError};
 
-        (device.driver == crate::devices::Driver::OpenRgb
+        if device.driver == Driver::HomeAssistant
+            && matches!(activity, OutputActivity::Unavailable(_))
+            && self.rgb_requires_action(&device.id)
+        {
+            return Some(OutputFailureReason::HomeAssistantAccessRequired);
+        }
+
+        (device.driver == Driver::OpenRgb
             && !self.managed_backend_ids.contains(&device.id)
             && matches!(
                 activity,
@@ -202,12 +210,21 @@ impl Runtime {
         document: Document,
         outputs: OutputPlan,
     ) -> Result<u64, String> {
+        self.request_output_plan(document, outputs, None)
+    }
+
+    pub(super) fn request_output_plan(
+        &mut self,
+        document: Document,
+        outputs: OutputPlan,
+        startup_managed_ids: Option<BTreeSet<String>>,
+    ) -> Result<u64, String> {
         outputs.validate(&document)?;
         let revision = self
             .output_revision
             .checked_add(1)
             .ok_or("Output revision exhausted")?;
-        self.request_document_to(document, None, Some(outputs))?;
+        self.request_document_to(document, None, Some(outputs), startup_managed_ids)?;
         Ok(revision)
     }
 }

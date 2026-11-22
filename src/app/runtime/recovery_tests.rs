@@ -162,98 +162,101 @@ fn output_activity_keeps_retry_reason_until_the_next_submission() {
     drain(&mut runtime);
 }
 
-#[test]
-fn surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame() {
-    use crate::{
-        lighting::{
-            door::{PIXEL_LEDS, pixel_payload_for_points},
-            scene::Effect,
-        },
-        runtime::adapters::Ble,
-        transport::ble::{self, Control},
-    };
+use crate::{
+    lighting::{
+        door::{PIXEL_LEDS, pixel_payload_for_points},
+        scene::Effect,
+    },
+    runtime::adapters::Ble,
+    transport::ble::{self, Control},
+};
 
-    #[derive(Default)]
-    struct Attempt {
-        probes: usize,
-        packets: Vec<Vec<u8>>,
-        first_frame: Vec<Rgb>,
-        dropped: bool,
+#[derive(Default)]
+struct Attempt {
+    probes: usize,
+    packets: Vec<Vec<u8>>,
+    first_frame: Vec<Rgb>,
+    dropped: bool,
+}
+
+struct E1Link {
+    attempt: usize,
+    inject_reconnect_faults: bool,
+    traces: Arc<Mutex<Vec<Attempt>>>,
+}
+
+impl Drop for E1Link {
+    fn drop(&mut self) {
+        self.traces.lock().unwrap()[self.attempt].dropped = true;
+    }
+}
+
+impl ble::Link for E1Link {
+    fn address(&self) -> Result<u64, String> {
+        Ok(if self.inject_reconnect_faults && self.attempt == 1 {
+            2
+        } else {
+            1
+        })
     }
 
-    struct E1Link {
-        attempt: usize,
-        traces: Arc<Mutex<Vec<Attempt>>>,
+    fn max_pdu(&self) -> Result<u32, String> {
+        Ok(200)
     }
 
-    impl Drop for E1Link {
-        fn drop(&mut self) {
-            self.traces.lock().unwrap()[self.attempt].dropped = true;
-        }
+    fn connected(&self) -> Result<bool, String> {
+        Ok(true)
     }
 
-    impl ble::Link for E1Link {
-        fn address(&self) -> Result<u64, String> {
-            Ok(if self.attempt == 1 { 2 } else { 1 })
-        }
+    fn write(&mut self, _: &[u8], _: &mut dyn Control) -> Result<(), String> {
+        panic!("E1 must not fall back to legacy output");
+    }
 
-        fn max_pdu(&self) -> Result<u32, String> {
-            Ok(200)
-        }
+    fn pixel_capacity(&mut self, _: &mut dyn Control) -> Result<usize, String> {
+        self.traces.lock().unwrap()[self.attempt].probes += 1;
+        let response = if self.inject_reconnect_faults && self.attempt == 2 {
+            br#"{"payload":"ea810100aa0b23240150f00064030000010098ffffffff01000001"}"#
+        } else {
+            br#"{"payload":"ea810100aa0b23240150f00064030000010099ffffffff01000001"}"#
+        };
+        ble::parse_pixel_capacity(response)?.ok_or_else(|| "Missing EA81".into())
+    }
 
-        fn connected(&self) -> Result<bool, String> {
-            Ok(true)
-        }
-
-        fn write(&mut self, _: &[u8], _: &mut dyn Control) -> Result<(), String> {
-            panic!("E1 must not fall back to legacy output");
-        }
-
-        fn pixel_capacity(&mut self, _: &mut dyn Control) -> Result<usize, String> {
-            self.traces.lock().unwrap()[self.attempt].probes += 1;
-            let response = if self.attempt == 2 {
-                br#"{"payload":"ea810100aa0b23240150f00064030000010098ffffffff01000001"}"#
-            } else {
-                br#"{"payload":"ea810100aa0b23240150f00064030000010099ffffffff01000001"}"#
-            };
-            ble::parse_pixel_capacity(response)?.ok_or_else(|| "Missing EA81".into())
-        }
-
-        fn write_e1_pixels(
-            &mut self,
-            colors: &[Rgb],
-            brightness: i32,
-            sequence: u8,
-            control: &mut dyn Control,
-        ) -> Result<(), String> {
-            {
-                let mut traces = self.traces.lock().unwrap();
-                let attempt = &mut traces[self.attempt];
-                if attempt.packets.is_empty() {
-                    attempt.first_frame.extend_from_slice(colors);
-                }
+    fn write_e1_pixels(
+        &mut self,
+        colors: &[Rgb],
+        brightness: i32,
+        sequence: u8,
+        control: &mut dyn Control,
+    ) -> Result<(), String> {
+        {
+            let mut traces = self.traces.lock().unwrap();
+            let attempt = &mut traces[self.attempt];
+            if attempt.packets.is_empty() {
+                attempt.first_frame.extend_from_slice(colors);
             }
-            ble::write_e1_pixel_frame(
-                colors,
-                brightness,
-                sequence,
-                self.max_pdu()?,
-                control,
-                &mut |packet, _| {
-                    let mut traces = self.traces.lock().unwrap();
-                    let packets = &mut traces[self.attempt].packets;
-                    packets.push(packet.to_vec());
-                    if self.attempt == 0 && packets.len() == 2 {
-                        return Err("Fixture disconnected during fragment 2".into());
-                    }
-                    Ok(())
-                },
-            )
         }
+        ble::write_e1_pixel_frame(
+            colors,
+            brightness,
+            sequence,
+            self.max_pdu()?,
+            control,
+            &mut |packet, _| {
+                let mut traces = self.traces.lock().unwrap();
+                let packets = &mut traces[self.attempt].packets;
+                packets.push(packet.to_vec());
+                if self.inject_reconnect_faults && self.attempt == 0 && packets.len() == 2 {
+                    return Err("Fixture disconnected during fragment 2".into());
+                }
+                Ok(())
+            },
+        )
     }
+}
 
+fn surplife_project() -> Project {
     let mut project = runtime().document().lighting.clone();
-    project.setup.devices.truncate(1);
     project.setup.devices[0].driver = Driver::SurplifeE1Pixels;
     project.setup.devices[0].leds = PIXEL_LEDS;
     project.setup.canvas.width = PIXEL_LEDS as u32;
@@ -265,10 +268,23 @@ fn surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame() {
             y: 0,
         })
         .collect();
-    project.groups.pc.clear();
+    project.setup.canvas.width += 1;
+    project.setup.canvas.points.push(Point {
+        device: "b".into(),
+        led: 0,
+        x: PIXEL_LEDS as u32,
+        y: 0,
+    });
+    project.groups.pc.retain(|id| id != "a");
     project.groups.door.push("a".into());
     project.scene.colors.fill(0xff0000);
     project.scene.brightness = 100;
+    project
+}
+
+#[test]
+fn surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame() {
+    let project = surplife_project();
     let mut runtime = Runtime::new(Document::from_lighting(project).unwrap(), None).unwrap();
     let traces = Arc::new(Mutex::new(Vec::<Attempt>::new()));
     let factory_traces = traces.clone();
@@ -286,6 +302,7 @@ fn surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame() {
                 };
                 let link = E1Link {
                     attempt,
+                    inject_reconnect_faults: true,
                     traces: factory_traces.clone(),
                 };
                 Ok(Box::new(Ble::with_e1(link, 1, 83, PIXEL_LEDS, &cancel)?))
@@ -374,6 +391,130 @@ fn surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame() {
         let single = pixel_payload_for_points(std::slice::from_ref(color), 83, 1).unwrap();
         assert_eq!(record, &single[9..], "restored point {index}");
     }
+}
+
+#[test]
+fn surplife_first_light_recovers_after_bluetooth_appears() {
+    surplife_first_light_after_adapter_arrival(false);
+}
+
+#[test]
+fn surplife_adapter_arrival_recovers_after_the_automatic_budget() {
+    surplife_first_light_after_adapter_arrival(true);
+}
+
+fn surplife_first_light_after_adapter_arrival(exhaust_budget: bool) {
+    const NO_ADAPTER: &str = "Windows не обнаружила Bluetooth-адаптер.";
+    let mut runtime =
+        Runtime::new(Document::from_lighting(surplife_project()).unwrap(), None).unwrap();
+    let adapter_present = Arc::new(AtomicBool::new(false));
+    let opens = Arc::new(AtomicUsize::new(0));
+    let traces = Arc::new(Mutex::new(Vec::<Attempt>::new()));
+    runtime
+        .attach_rgb(
+            "a",
+            vec!["ble:1".into()],
+            Arc::new({
+                let adapter_present = adapter_present.clone();
+                let opens = opens.clone();
+                let traces = traces.clone();
+                move |cancel| {
+                    opens.fetch_add(1, Ordering::SeqCst);
+                    if !adapter_present.load(Ordering::SeqCst) {
+                        return Err(NO_ADAPTER.into());
+                    }
+                    let attempt = {
+                        let mut traces = traces.lock().unwrap();
+                        let index = traces.len();
+                        traces.push(Attempt::default());
+                        index
+                    };
+                    let link = E1Link {
+                        attempt,
+                        inject_reconnect_faults: false,
+                        traces: traces.clone(),
+                    };
+                    Ok(Box::new(Ble::with_e1(link, 1, 83, PIXEL_LEDS, &cancel)?))
+                }
+            }),
+        )
+        .unwrap();
+    let independent = Arc::new(Link::default());
+    runtime
+        .attach_rgb("b", vec![], factory(&independent))
+        .unwrap();
+    runtime.enable_registered_output_recovery();
+
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+    let initial = runtime.host.status("a").unwrap();
+    assert_eq!(initial.error.as_deref(), Some(NO_ADAPTER));
+    assert_eq!(initial.submitted, 0);
+    let mut now = 0;
+    tick(&mut runtime, &mut now);
+    wait(|| runtime.host.status("b").unwrap().submitted > 0);
+    let neighbor = runtime.host.status("b").unwrap();
+    assert_eq!(independent.frames.lock().unwrap()[0], [Rgb::new(255, 0, 0)]);
+
+    let mut scene = runtime.document().lighting.scene.clone();
+    scene.colors.fill(0x0000ff);
+    runtime.set_scene(scene).unwrap();
+    tick(&mut runtime, &mut now);
+    wait(|| independent.frames.lock().unwrap().last().unwrap() == &[Rgb::new(0, 0, 255)]);
+    assert!(traces.lock().unwrap().is_empty());
+    assert_eq!(opens.load(Ordering::SeqCst), 1);
+
+    let expected_opens = if exhaust_budget {
+        for (opens_so_far, delay) in [(2, 1_000_000), (3, 5_000_000), (4, 15_000_000)] {
+            now += delay;
+            wait(|| {
+                tick(&mut runtime, &mut now);
+                opens.load(Ordering::SeqCst) == opens_so_far
+                    && runtime.host.status("a").unwrap().phase == Phase::Failed
+                    && runtime.host.output_reaped("a")
+            });
+        }
+        now += 180_000_000;
+        tick(&mut runtime, &mut now);
+        assert_eq!(opens.load(Ordering::SeqCst), 4);
+        // A real arrival can still fail if the saved peripheral is unavailable.
+        runtime.bluetooth_adapter_arrived();
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            opens.load(Ordering::SeqCst) == 5
+                && runtime.host.status("a").unwrap().phase == Phase::Failed
+                && runtime.host.output_reaped("a")
+        });
+        adapter_present.store(true, Ordering::SeqCst);
+        now += 180_000_000;
+        tick(&mut runtime, &mut now);
+        assert_eq!(opens.load(Ordering::SeqCst), 5);
+        runtime.bluetooth_adapter_arrived();
+        6
+    } else {
+        adapter_present.store(true, Ordering::SeqCst);
+        now += 1_000_000;
+        2
+    };
+    working(&mut runtime, "a", &mut now);
+    assert_ne!(
+        runtime.host.status("a").unwrap().generation,
+        initial.generation
+    );
+    let current_neighbor = runtime.host.status("b").unwrap();
+    assert_eq!(current_neighbor.generation, neighbor.generation);
+    assert!(current_neighbor.submitted > neighbor.submitted);
+    assert_eq!(independent.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(opens.load(Ordering::SeqCst), expected_opens);
+    drain(&mut runtime);
+
+    let traces = traces.lock().unwrap();
+    assert_eq!(traces.len(), 1);
+    let restored = &traces[0];
+    assert_eq!(restored.probes, 1);
+    assert_eq!(restored.first_frame, [Rgb::new(0, 0, 255); PIXEL_LEDS]);
+    assert!(restored.packets.len() >= 5);
+    assert_eq!(&restored.packets[0][..4], &[0x40, 0, 0, 0]);
+    assert_eq!(&restored.packets[4][..4], &[0x40, 0, 0x80, 4]);
 }
 
 #[cfg(windows)]
@@ -493,6 +634,177 @@ fn startup_isolates_endpoint_contention_and_retries_the_returned_output() {
     assert_eq!(b.calls.load(Ordering::SeqCst), 1);
     assert_eq!(runtime.host.status("b").unwrap().generation, healthy);
     assert_eq!(a.frames.lock().unwrap().last().unwrap(), &[Rgb::default()]);
+    drain(&mut runtime);
+}
+
+#[cfg(windows)]
+#[test]
+fn first_start_lease_contention_exposes_one_manual_openrgb_retry() {
+    let mut runtime = runtime();
+    let mut document = runtime.document().clone();
+    document.lighting.setup.devices[0].driver = Driver::OpenRgb;
+    let local = crate::app::lighting_outputs::Local {
+        version: 1,
+        devices: [
+            (
+                "a".into(),
+                crate::devices::Binding::OpenRgb {
+                    endpoint: ([127, 0, 0, 207], 40491).into(),
+                    identity: "1".repeat(64),
+                    topology: "2".repeat(64),
+                },
+            ),
+            (
+                "b".into(),
+                crate::devices::Binding::WledDdp {
+                    endpoint: ([127, 0, 0, 207], 40492).into(),
+                    controller: None,
+                },
+            ),
+        ]
+        .into(),
+        monitors: Default::default(),
+        door_brightness: 60,
+    };
+    let state =
+        std::env::temp_dir().join(format!("prismestra-initial-lease-{}", std::process::id()));
+    let mut plan = local.prepare(&document, &state).unwrap();
+    let openrgb = Arc::new(Link::default());
+    let wled = Arc::new(Link::default());
+    plan.rgb[0].2 = factory_for(&openrgb, Driver::OpenRgb);
+    plan.rgb[1].2 = factory(&wled);
+    let held = crate::runtime::output::Lease::acquire(plan.rgb[0].1.clone()).unwrap();
+    runtime
+        .request_startup_outputs_for(&state, None, &local, document.clone(), plan)
+        .unwrap();
+
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    let wled_generation = runtime.host.status("b").unwrap().generation;
+    assert!(runtime.openrgb_retry_ticket("a").is_none());
+    for delay in [1_000_000, 5_000_000, 15_000_000] {
+        assert!(matches!(
+            runtime.output_activity(&document.lighting.setup.devices[0]),
+            OutputActivity::Retrying(_)
+        ));
+        now += delay;
+        tick(&mut runtime, &mut now);
+        tick(&mut runtime, &mut now);
+    }
+    assert!(runtime.host.status("a").is_none());
+    assert_eq!(openrgb.calls.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        runtime.output_activity(&document.lighting.setup.devices[0]),
+        OutputActivity::Unavailable(Some(_))
+    ));
+
+    let activity = crate::ui::windows::device_activity_for(&runtime, true, false, 1);
+    assert_eq!(
+        activity["reasons"],
+        serde_json::json!({"a": "endpointLeaseBusy"})
+    );
+    assert_eq!(activity["retryTickets"].as_object().unwrap().len(), 1);
+    assert!(activity["retryTickets"]["a"].is_string());
+
+    let ticket = runtime
+        .openrgb_retry_ticket("a")
+        .expect("lease failure before the first worker still offers a retry");
+    assert!(!runtime.request_openrgb_retry("b", ticket));
+    assert!(runtime.request_openrgb_retry("a", ticket));
+    assert!(runtime.cancel_openrgb_retry("a", ticket));
+    assert!(!runtime.request_openrgb_retry("a", ticket));
+    let ticket = runtime.openrgb_retry_ticket("a").unwrap();
+    assert!(runtime.request_openrgb_retry("a", ticket));
+    assert!(!runtime.request_openrgb_retry("a", ticket));
+    tick(&mut runtime, &mut now);
+    assert!(matches!(
+        runtime.openrgb_retry_status("a", ticket),
+        OpenRgbRetryStatus::Failed(_)
+    ));
+    assert_eq!(openrgb.calls.load(Ordering::SeqCst), 0);
+
+    let next = runtime
+        .openrgb_retry_ticket("a")
+        .expect("a new one-shot request can retry after releasing the lease");
+    assert_ne!(ticket, next);
+    assert!(!runtime.request_openrgb_retry("a", ticket));
+    drop(held);
+    assert!(runtime.request_openrgb_retry("a", next));
+    working(&mut runtime, "a", &mut now);
+    assert_eq!(
+        runtime.openrgb_retry_status("a", next),
+        OpenRgbRetryStatus::Submitted
+    );
+    assert_eq!(openrgb.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(wled.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        wled_generation
+    );
+    drain(&mut runtime);
+}
+
+#[cfg(windows)]
+#[test]
+fn manual_retry_for_owned_openrgb_preserves_the_guard_and_neighbor() {
+    let mut runtime = runtime();
+    runtime.document.lighting.setup.devices[0].driver = Driver::OpenRgb;
+    let endpoint = ([127, 0, 0, 207], 40495).into();
+    runtime.managed_backend = Some(crate::app::backend_helper::Backend::software_ready(
+        endpoint, 1,
+    ));
+    runtime.managed_backend_ids.insert("a".into());
+    runtime.managed_backend_generation = 1;
+
+    let output = Arc::new(Link::default());
+    let neighbor = Arc::new(Link::default());
+    runtime
+        .attach_rgb("a", vec![], factory_for(&output, Driver::OpenRgb))
+        .unwrap();
+    runtime.enable_output_recovery("a").unwrap();
+    runtime.attach_rgb("b", vec![], factory(&neighbor)).unwrap();
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    let neighbor_generation = runtime.host.status("b").unwrap().generation;
+
+    // Software readiness does not grant writes. Every attempt must use the
+    // original guard, which rejects this synthetic backend as an actual writer.
+    for delay in [1_000_000, 5_000_000, 15_000_000] {
+        wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+        tick(&mut runtime, &mut now);
+        let failed = runtime.host.status("a").unwrap().generation;
+        now += delay;
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            runtime.host.status("a").unwrap().generation != failed
+        });
+    }
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+    tick(&mut runtime, &mut now);
+    let ticket = runtime
+        .openrgb_retry_ticket("a")
+        .expect("owned output can retry");
+    let previous_backend =
+        runtime
+            .managed_backend
+            .replace(crate::app::backend_helper::Backend::software_ready(
+                endpoint, 1,
+            ));
+    assert!(!runtime.request_openrgb_retry("a", ticket));
+    runtime.managed_backend = previous_backend;
+    assert!(runtime.request_openrgb_retry("a", ticket));
+    assert!(!runtime.request_openrgb_retry("a", ticket));
+    let failed = runtime.host.status("a").unwrap().generation;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        let status = runtime.host.status("a").unwrap();
+        status.generation != failed && status.phase == Phase::Failed
+    });
+    assert_eq!(output.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        neighbor_generation
+    );
     drain(&mut runtime);
 }
 
@@ -952,6 +1264,118 @@ fn live_plan_preserves_the_scheduled_scene_step_and_last_frame() {
 #[test]
 fn live_plan_native_discovery_keeps_ready_bindings_when_preparing_fresh_factories() {
     assert_plan_preserves_neighbor(PlanChange::NativeAdd);
+}
+
+#[cfg(windows)]
+#[test]
+fn startup_addition_preserves_exhausted_recovery_for_an_unchanged_rgb_binding() {
+    use crate::{app::lighting_outputs::Local, devices::Binding};
+
+    let mut runtime = runtime();
+    let mut applied = runtime.document().clone();
+    let state = std::env::temp_dir().join(format!(
+        "prismestra-startup-retained-recovery-{}",
+        std::process::id()
+    ));
+    let binding = |port| Binding::WledDdp {
+        endpoint: ([127, 0, 0, 207], port).into(),
+        controller: None,
+    };
+    let previous = Local {
+        version: 1,
+        devices: [("a".into(), binding(40511)), ("b".into(), binding(40512))].into(),
+        monitors: Default::default(),
+        door_brightness: 60,
+    };
+    let failed = Arc::new(Link::default());
+    let healthy = Arc::new(Link::default());
+    let discovered = Arc::new(Link::default());
+    failed.fail_open.store(true, Ordering::SeqCst);
+    let mut initial = previous.prepare(&applied, &state).unwrap();
+    initial.rgb[0].2 = factory(&failed);
+    initial.rgb[1].2 = factory(&healthy);
+    runtime
+        .request_startup_outputs_for(&state, None, &previous, applied.clone(), initial)
+        .unwrap();
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.host.status("a").unwrap().phase == Phase::Failed
+    });
+    tick(&mut runtime, &mut now);
+    for delay in [1_000_000, 5_000_000, 15_000_000] {
+        let generation = runtime.host.status("a").unwrap().generation;
+        now += delay;
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            let status = runtime.host.status("a").unwrap();
+            status.generation != generation && status.phase == Phase::Failed
+        });
+        tick(&mut runtime, &mut now);
+    }
+    let failed_generation = runtime.host.status("a").unwrap().generation;
+    let healthy_generation = runtime.host.status("b").unwrap().generation;
+    assert_eq!(failed.calls.load(Ordering::SeqCst), 4);
+    assert!(!runtime.output_recovery["a"].retry_scheduled());
+    // If discovery renews the exhausted budget, it will now wrongly start A.
+    failed.fail_open.store(false, Ordering::SeqCst);
+
+    let mut added = applied.lighting.setup.devices[1].clone();
+    added.id = "c".into();
+    applied.lighting.setup.devices.push(added);
+    applied.lighting.setup.canvas.width = 3;
+    applied.lighting.setup.canvas.points.push(Point {
+        device: "c".into(),
+        led: 0,
+        x: 2,
+        y: 0,
+    });
+    applied.lighting.groups.pc.push("c".into());
+    let mut local = previous.clone();
+    local.devices.insert("c".into(), binding(40513));
+    let mut candidate = local.prepare(&applied, &state).unwrap();
+    candidate.rgb[0].2 = factory(&failed);
+    candidate.rgb[1].2 = factory(&healthy);
+    candidate.rgb[2].2 = factory(&discovered);
+    runtime
+        .request_startup_outputs_for(&state, Some(&previous), &local, applied, candidate)
+        .unwrap();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime
+            .host
+            .status("c")
+            .is_some_and(|snapshot| snapshot.submitted > 0)
+    });
+    assert_eq!(
+        runtime.host.status("a").unwrap().generation,
+        failed_generation
+    );
+    assert_eq!(runtime.host.status("a").unwrap().phase, Phase::Failed);
+    assert_eq!(failed.calls.load(Ordering::SeqCst), 4);
+    assert!(!runtime.output_recovery["a"].retry_scheduled());
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        healthy_generation
+    );
+    assert_eq!(healthy.calls.load(Ordering::SeqCst), 1);
+
+    // Explicit Apply may still renew recovery for the same binding.
+    runtime.request_outputs(runtime.output_plan()).unwrap();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime
+            .host
+            .status("a")
+            .is_some_and(|snapshot| snapshot.submitted > 0)
+    });
+    assert_eq!(failed.calls.load(Ordering::SeqCst), 5);
+    assert_eq!(
+        runtime.host.status("b").unwrap().generation,
+        healthy_generation
+    );
+    drain(&mut runtime);
 }
 
 #[cfg(windows)]
@@ -1556,13 +1980,18 @@ impl crate::lcd::protocol::ReportTransport for Reports {
 
 const ARRIVAL_LCD_MEDIA: &[u8] = include_bytes!("../../lcd/fixtures/two-frame.apng");
 
-fn arrival_lcd_document(mut document: Document, name: &str) -> (Document, std::path::PathBuf) {
+fn arrival_lcd_document(
+    mut document: Document,
+    name: &str,
+    source: &[u8],
+) -> (Document, std::path::PathBuf) {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("work")
         .join(format!("arrival-lcd-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
     let media = Assets::new(dir.clone())
         .unwrap()
-        .put(ARRIVAL_LCD_MEDIA, 32 * 1024 * 1024)
+        .put(source, crate::lcd::media::MAX_SOURCE)
         .unwrap();
     document.lighting.setup.devices.push(Device {
         id: "lcd".into(),
@@ -1586,7 +2015,8 @@ fn arrival_lcd_document(mut document: Document, name: &str) -> (Document, std::p
 }
 
 fn arrival_lcd_runtime(name: &str, link: Arc<Link>) -> (Runtime, std::path::PathBuf) {
-    let (document, dir) = arrival_lcd_document(runtime().document().clone(), name);
+    let (document, dir) =
+        arrival_lcd_document(runtime().document().clone(), name, ARRIVAL_LCD_MEDIA);
     let mut runtime = Runtime::new(document.clone(), None).unwrap();
     let root = dir.clone();
     let factory: LcdFactory = Arc::new(move |config, _| {
@@ -1651,7 +2081,11 @@ fn remove_lcd_assets(runtime: Runtime, dir: std::path::PathBuf) {
 #[test]
 fn appending_lcd_starts_its_first_frame_without_reopening_existing_rgb() {
     let mut runtime = runtime();
-    let (proposal, assets) = arrival_lcd_document(runtime.document().clone(), "append-to-live");
+    let (proposal, assets) = arrival_lcd_document(
+        runtime.document().clone(),
+        "append-to-live",
+        ARRIVAL_LCD_MEDIA,
+    );
     // Prepare the media before timing the plan commit and the first report.
     let prepared = Arc::new(
         crate::lcd::media::prepare(
@@ -1931,6 +2365,7 @@ fn retry_lcd_after_frame_timeout_restores_the_gif_and_card_without_reopening_rgb
                 .unwrap(),
         ),
         overlay_enabled: true,
+        gauge_style: crate::lcd::overlay::GaugeStyle::default(),
         sources: vec![lcd::OverlaySource {
             key: "gpu".into(),
             label: "GPU".into(),
@@ -2185,6 +2620,96 @@ fn lcd_configuration_epoch_discards_old_arrivals_and_binding() {
     tick(&mut runtime, &mut now);
     assert!(runtime.lcd_arrivals.is_empty());
     assert_eq!(link.calls.load(Ordering::SeqCst), calls);
+    drain(&mut runtime);
+    remove_lcd_assets(runtime, dir);
+}
+
+#[test]
+fn reopened_scene_restores_the_saved_gif_without_restarting_rgb() {
+    use crate::lcd::{media, protocol::validate_jpeg};
+
+    let (document, dir) = arrival_lcd_document(
+        runtime().document().clone(),
+        "reopen-builtin-gif",
+        media::BUILTIN_KALEIDOSCOPE_GIF,
+    );
+    let path = dir.join("scene.json");
+    document.save(&path).unwrap();
+    let mut runtime = Runtime::new(Document::load(&path).unwrap(), None).unwrap();
+    let rgb = Arc::new(Link::default());
+    runtime.attach_rgb("a", vec![], factory(&rgb)).unwrap();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+    let when_absent = runtime.host.status("a").unwrap();
+    assert!(runtime.lcd_status("lcd").is_none());
+    assert_eq!(runtime.document(), &document);
+
+    let lcd = Arc::new(Link {
+        fail_open: AtomicBool::new(true),
+        ..Link::default()
+    });
+    let opened = lcd.clone();
+    let root = dir.clone();
+    runtime
+        .attach_lcd(
+            "lcd",
+            vec!["hid:reopen-builtin-gif".into()],
+            Arc::new(move |config, _| {
+                opened.calls.fetch_add(1, Ordering::SeqCst);
+                if opened.fail_open.load(Ordering::SeqCst) {
+                    return Err("Stand LCD unavailable".into());
+                }
+                Ok((
+                    lcd::Controller::new(config, &Assets::new(root.clone())?)?,
+                    Box::new(Reports(opened.clone())),
+                ))
+            }),
+        )
+        .unwrap();
+    runtime.enable_output_recovery("lcd").unwrap();
+    wait(|| runtime.lcd_status("lcd").unwrap().phase == lcd_worker::Phase::Failed);
+    let failed = runtime.lcd_status("lcd").unwrap();
+    assert_eq!(failed.error.as_deref(), Some("Stand LCD unavailable"));
+    tick(&mut runtime, &mut now);
+    wait(|| runtime.host.status("a").unwrap().submitted > when_absent.submitted);
+    assert_eq!(lcd.calls.load(Ordering::SeqCst), 1);
+    let when_unavailable = runtime.host.status("a").unwrap();
+    assert_eq!(when_unavailable.generation, when_absent.generation);
+
+    lcd.fail_open.store(false, Ordering::SeqCst);
+    now += 1_000_000;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut first_jpeg = None;
+    let recovered = loop {
+        tick(&mut runtime, &mut now);
+        let snapshot = runtime.lcd_status("lcd").unwrap();
+        if snapshot.frames_sent > 0 {
+            if first_jpeg
+                .as_ref()
+                .is_some_and(|first| first != &snapshot.preview)
+            {
+                break snapshot;
+            }
+            if first_jpeg.is_none() {
+                validate_jpeg(&snapshot.preview).unwrap();
+                first_jpeg = Some(snapshot.preview);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Saved GIF did not resume animation"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    validate_jpeg(&recovered.preview).unwrap();
+    assert_ne!(recovered.generation, failed.generation);
+    assert_eq!(lcd.calls.load(Ordering::SeqCst), 2);
+    let after = runtime.host.status("a").unwrap();
+    assert_eq!(after.generation, when_absent.generation);
+    assert!(after.submitted > when_unavailable.submitted);
+    assert_eq!(rgb.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.document(), &document);
+    assert_eq!(Document::load(&path).unwrap(), document);
     drain(&mut runtime);
     remove_lcd_assets(runtime, dir);
 }
@@ -2452,6 +2977,116 @@ fn resume_recovers_a_known_lcd_whose_endpoint_is_still_claimed() {
         runtime.host.status("b").unwrap().generation,
         healthy_generation
     );
+    drain(&mut runtime);
+    remove_lcd_assets(runtime, dir);
+}
+
+#[test]
+fn resume_restores_rgb_while_the_previous_lcd_write_is_still_draining() {
+    use crate::lcd::protocol::ReportTransport;
+    use std::sync::mpsc::{self, Receiver, SyncSender};
+
+    struct HeldReports {
+        reports: Reports,
+        first: Option<(SyncSender<()>, Receiver<()>)>,
+    }
+
+    impl ReportTransport for HeldReports {
+        fn now_ms(&self) -> u64 {
+            self.reports.now_ms()
+        }
+
+        fn write_report(&mut self, data: &[u8; 1025], deadline: u64) -> Result<usize, String> {
+            if let Some((entered, release)) = self.first.take() {
+                entered.send(()).map_err(|error| error.to_string())?;
+                release
+                    .recv_timeout(Duration::from_secs(8))
+                    .map_err(|error| error.to_string())?;
+                return Err("old LCD write completed after suspend".into());
+            }
+            self.reports.write_report(data, deadline)
+        }
+
+        fn read_ack(&mut self, bytes: &mut [u8; 17], deadline: u64) -> Result<usize, String> {
+            self.reports.read_ack(bytes, deadline)
+        }
+    }
+
+    let (document, dir) = arrival_lcd_document(
+        runtime().document().clone(),
+        "resume-held-write",
+        ARRIVAL_LCD_MEDIA,
+    );
+    let mut runtime = Runtime::new(document, None).unwrap();
+    let lcd = Arc::new(Link::default());
+    let rgb = Arc::new(Link::default());
+    let (entered, blocked) = mpsc::sync_channel(1);
+    let (release, finished) = mpsc::channel();
+    let gate = Mutex::new(Some((entered, finished)));
+    let root = dir.clone();
+    let sink = lcd.clone();
+    runtime
+        .attach_lcd(
+            "lcd",
+            vec![],
+            Arc::new(move |config, _| {
+                sink.calls.fetch_add(1, Ordering::SeqCst);
+                Ok((
+                    lcd::Controller::new(config, &Assets::new(root.clone())?)?,
+                    Box::new(HeldReports {
+                        reports: Reports(sink.clone()),
+                        first: gate.lock().unwrap().take(),
+                    }),
+                ))
+            }),
+        )
+        .unwrap();
+    runtime.attach_rgb("b", vec![], factory(&rgb)).unwrap();
+    runtime.enable_registered_output_recovery();
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        blocked.try_recv().is_ok()
+    });
+    let old_lcd = runtime.lcd_status("lcd").unwrap().generation;
+    let old_rgb = runtime.host.status("b").unwrap().generation;
+    runtime.notify_power(true, now).unwrap();
+    runtime.notify_power(false, now).unwrap();
+    now += 7_000_000;
+    tick(&mut runtime, &mut now);
+    assert!(
+        runtime.refresh_started,
+        "a draining LCD blocked independent resume"
+    );
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime
+            .host
+            .status("b")
+            .is_some_and(|snapshot| snapshot.generation != old_rgb && snapshot.submitted > 0)
+    });
+    assert!(!runtime.lcd["lcd"].is_reaped());
+    assert_eq!(runtime.lcd_status("lcd").unwrap().generation, old_lcd);
+    assert_eq!(lcd.calls.load(Ordering::SeqCst), 1);
+    #[cfg(windows)]
+    assert!(matches!(
+        runtime.output_activity(runtime.document().lighting.setup.devices.last().unwrap()),
+        OutputActivity::Retrying(error) if error == "Previous LCD owner is still stopping"
+    ));
+    let new_rgb = runtime.host.status("b").unwrap().generation;
+    release.send(()).unwrap();
+    now += 1_000_000;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime
+            .lcd_status("lcd")
+            .is_some_and(|snapshot| snapshot.generation != old_lcd && snapshot.frames_sent > 0)
+    });
+    assert_eq!(lcd.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(rgb.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(runtime.host.status("b").unwrap().generation, new_rgb);
+    assert_eq!(runtime.power.error(), None);
     drain(&mut runtime);
     remove_lcd_assets(runtime, dir);
 }
