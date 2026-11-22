@@ -690,6 +690,18 @@ mod tests {
                 )?;
                 Ok(app_hash)
             };
+            let config_dir = policy_home.join("config");
+            let configuration = config_dir.join("Configuration.json");
+            let config_bytes = b"{\r\n  \"fixture\": {\"enabled\": false}\r\n}\r\n";
+            let check_configuration = |stage: &str| -> Result<(), String> {
+                if !private_entry(&config_dir)?
+                    || private_entry(&configuration)?
+                    || fs::read(&configuration).map_err(display_error)? != config_bytes
+                {
+                    return Err(format!("Configuration.json was not preserved {stage}."));
+                }
+                Ok(())
+            };
             let mut hashes = Vec::new();
             for payload in [
                 b"First synthetic application.",
@@ -704,6 +716,13 @@ mod tests {
                     || policy.is_none_or(|policy| policy.app_sha256 != app_hash)
                 {
                     return Err("Provisioning did not preserve the previous policy pin.".into());
+                }
+                if hashes.is_empty() {
+                    fs::write(&configuration, config_bytes).map_err(display_error)?;
+                    set_private(&configuration, false, &sid)?;
+                    check_configuration("after seeding the first provision")?;
+                } else {
+                    check_configuration("after upgrade")?;
                 }
                 hashes.push(app_hash);
             }
@@ -729,6 +748,7 @@ mod tests {
             {
                 return Err("Interrupted publication did not preserve the previous policy.".into());
             }
+            check_configuration("after interrupted publication")?;
             drop(lock);
             provision(&sid, &install, &shared, &policy_home)?;
             let (record, policy) = read_policy_state(&sid, &install, &policy_home)?;
@@ -739,6 +759,7 @@ mod tests {
             {
                 return Err("Retry did not publish the pending policy.".into());
             }
+            check_configuration("after retry")?;
             hashes.push(app_hash);
             fs::write(&engine_path, b"tampered").map_err(display_error)?;
             if provision(&sid, &install, &shared, &policy_home).is_ok() {
@@ -748,7 +769,7 @@ mod tests {
             if policy.as_ref().map(|policy| &policy.app_sha256) != hashes.last() {
                 return Err("A failed repair changed the installed policy.".into());
             }
-            Ok(())
+            check_configuration("after rejected repair")
         };
         let result = run();
         // Clean up only the exact, verified synthetic task and its paths.
