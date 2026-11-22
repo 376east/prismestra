@@ -8,24 +8,49 @@ import re
 import shutil
 import tempfile
 
-from components.package_openrgb_component import LICENSES, RECIPES, checked, read_json
+from build_openrgb_component import BUNDLE, REPO
+from component_archive import extract_component
+from components.package_openrgb_component import LICENSES, RECIPES, checked, read_json, safe_name
 from components.verify_openrgb_component import MSVC_RUNTIME, REQUIRED, fingerprint
-from package_installer import extract_component, read_prerequisite_lock
+from package_installer import read_prerequisite_lock
 
 
-BUNDLE = "Prismestra-OpenRGB-component.zip"
 RECEIPT = "openrgb-cache.json"
 READY = "openrgb-cache-ready"
 SHA256 = re.compile(r"[0-9a-f]{64}")
-REPO = Path(__file__).resolve().parent.parent
+KEY_PREFIX = "openrgb-windows-x64-v2-"
+KEY = re.compile(KEY_PREFIX + r"[0-9a-f]{64}")
 
 
-def cache_key(inputs, image, toolchain, tools):
-    if not SHA256.fullmatch(inputs) or not image or not toolchain or not tools:
+def build_input_pins(repo):
+    component = "components/openrgb/"
+    lock, _ = read_json(repo / component / "source-lock.json")
+    assets, _ = read_json(repo / component / "distribution-assets.json")
+    # Include the recipes and notices shipped in the ZIP even if the build does not execute them.
+    paths = [
+        "scripts/build_openrgb_component.py",
+        "scripts/pinned_setup_download.py",
+        "scripts/component_archive.py",
+        "scripts/openrgb_cache.py",
+        "scripts/components/openrgb_cache_key.ps1",
+        "scripts/components/package_openrgb_component.py",
+        "docs/openrgb-component-verification.md",
+        *(f"scripts/components/{name}" for name in RECIPES),
+        *(component + name for name in ("source-lock.json", "dependency-lock.json", "distribution-assets.json")),
+        component + str(safe_name(lock["patch"])),
+        *(component + str(safe_name(row["path"])) for row in assets["files"] if row["path"].startswith("licenses/")),
+    ]
+    return {path: fingerprint(repo / path) for path in paths}
+
+
+def cache_key(repo, image, toolchain, tools):
+    if not image or not toolchain or not tools:
         raise ValueError("OpenRGB cache requires exact source, image and toolchain inputs")
+    _, runtime_floor = read_prerequisite_lock(repo / "scripts/installer/prerequisites.lock.json")
     selected_tools = {name: fingerprint(path) for name, path in tools.items()}
-    data = json.dumps([inputs, image, toolchain, selected_tools], sort_keys=True).encode("utf-8")
-    return "openrgb-windows-x64-v1-" + hashlib.sha256(data).hexdigest()
+    data = json.dumps([build_input_pins(repo), runtime_floor, image, toolchain, selected_tools],
+                      sort_keys=True).encode("utf-8")
+    return KEY_PREFIX + hashlib.sha256(data).hexdigest()
 
 
 def verify_members(manifest, repo):
@@ -90,12 +115,11 @@ def save(cache, key, bundle):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--inputs", required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--toolchain", required=True)
     parser.add_argument("--tool", nargs=2, action="append", required=True, metavar=("NAME", "PATH"))
     args = parser.parse_args()
-    print(cache_key(args.inputs, args.image, args.toolchain,
+    print(cache_key(REPO, args.image, args.toolchain,
                     {name: Path(path) for name, path in args.tool}))
 
 

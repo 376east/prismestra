@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import MagicMock, call, patch
 from urllib.error import HTTPError, URLError
 
-import build_windows_candidate as candidate
+import pinned_setup_download as candidate
 
 
 class PinnedSetupDownloadTests(unittest.TestCase):

@@ -3,9 +3,10 @@
 import hashlib
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import DEFAULT, patch
 from zipfile import ZipFile
 
 import build_windows_candidate as candidate
@@ -23,7 +24,7 @@ class OpenRGBCacheTests(unittest.TestCase):
         self.cache = self.root / "cache"
         self.source = "https://example.com/openrgb"
         self.revision = "a" * 40
-        self.key = "openrgb-windows-x64-v1-" + "0" * 64
+        self.key = cache.KEY_PREFIX + "0" * 64
 
     def write(self, name, data):
         path = self.repo / name
@@ -69,16 +70,61 @@ class OpenRGBCacheTests(unittest.TestCase):
                 archive.writestr(name, data)
         return bundle
 
-    def test_key_changes_with_checked_inputs_image_sdk_and_tool_bytes(self):
+    def key_fixture(self):
+        for path in cache.build_input_pins(cache.REPO):
+            self.write(path, (cache.REPO / path).read_bytes())
+        lock = "scripts/installer/prerequisites.lock.json"
+        self.write(lock, (cache.REPO / lock).read_bytes())
         tool = self.root / "cl.exe"
         tool.write_bytes(b"fixture")
+        return tool
+
+    def test_key_changes_with_image_sdk_and_tool_bytes(self):
+        tool = self.key_fixture()
         tools = {"cl": tool}
-        baseline = cache.cache_key("a" * 64, "win/1", "14.51/26100", tools)
-        for inputs in (("b" * 64, "win/1", "14.51/26100"), ("a" * 64, "win/2", "14.51/26100"),
-                       ("a" * 64, "win/1", "14.51/26101")):
-            self.assertNotEqual(baseline, cache.cache_key(*inputs, tools))
+        baseline = cache.cache_key(self.repo, "win/1", "14.51/26100", tools)
+        for image, toolchain in (("win/2", "14.51/26100"), ("win/1", "14.51/26101")):
+            self.assertNotEqual(baseline, cache.cache_key(self.repo, image, toolchain, tools))
         tool.write_bytes(b"changed")
-        self.assertNotEqual(baseline, cache.cache_key("a" * 64, "win/1", "14.51/26100", tools))
+        self.assertNotEqual(baseline, cache.cache_key(self.repo, "win/1", "14.51/26100", tools))
+
+    def test_key_ignores_general_workflow_packaging_and_other_prerequisite_pins(self):
+        tool = self.key_fixture()
+        files = (".github/workflows/windows.yml", "scripts/build_windows_candidate.py",
+                 "scripts/package_installer.py", "scripts/package_release.py")
+        for path in files:
+            self.write(path, b"before")
+        key = lambda: cache.cache_key(self.repo, "win/1", "14.51/26100", {"cl": tool})
+        baseline = key()
+        for path in files:
+            self.write(path, b"after")
+        lock = "scripts/installer/prerequisites.lock.json"
+        pins = json.loads((self.repo / lock).read_bytes())
+        pins["packages"]["webview2_x64"]["sha256"] = "b" * 64
+        self.write(lock, json.dumps(pins).encode())
+        self.assertEqual(key(), baseline)
+        pins["minimum_vc_runtime"] = "14.50.0.0"
+        self.write(lock, json.dumps(pins).encode())
+        self.assertNotEqual(key(), baseline)
+
+    def test_key_covers_openrgb_sources_pinned_inputs_recipes_and_verifier(self):
+        tool = self.key_fixture()
+        key = lambda: cache.cache_key(self.repo, "win/1", "14.51/26100", {"cl": tool})
+        baseline = key()
+        paths = (
+            "scripts/build_openrgb_component.py", "scripts/pinned_setup_download.py",
+            "scripts/components/openrgb_cache_key.ps1", "scripts/components/build_openrgb.ps1",
+            "scripts/components/test_verify_openrgb_component.py", "scripts/component_archive.py",
+            "components/openrgb/source-lock.json", "components/openrgb/dependency-lock.json",
+            "components/openrgb/distribution-assets.json", "components/openrgb/prismestra-pc.patch",
+            "components/openrgb/licenses/OpenRGB-GPL-2.0.txt", "docs/openrgb-component-verification.md",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                original = (self.repo / path).read_bytes()
+                self.write(path, original + b"\n")
+                self.assertNotEqual(key(), baseline)
+                self.write(path, original)
 
     def test_complete_component_round_trip_and_exact_key(self):
         original = self.make_bundle()
@@ -109,14 +155,33 @@ class OpenRGBCacheTests(unittest.TestCase):
 
     def test_candidate_uses_the_cold_path_for_a_bad_cache(self):
         original = self.make_bundle()
-        cache.save(self.cache, self.key + "wrong", original)
+        cache.save(self.cache, self.key, original)
+        with (self.cache / cache.BUNDLE).open("ab") as stream:
+            stream.write(b"altered")
         with patch.object(candidate, "build_component", return_value=original) as build:
             result = candidate.load_or_build_component(self.root, self.root / "vs.bat", self.cache, self.key)
         self.assertEqual(result, original)
         build.assert_called_once_with(self.root, self.root / "vs.bat")
         receipt = json.loads((self.cache / cache.RECEIPT).read_bytes())
-        self.assertEqual(receipt["key"], self.key + "wrong")
+        self.assertEqual(receipt["key"], self.key)
         self.assertFalse((self.root / cache.READY).exists())
+
+    def test_candidate_passes_the_exact_cli_cache_key_after_fetching_prerequisites(self):
+        output = self.root / "output"
+        vsdevcmd = self.root / "VsDevCmd.bat"
+        vsdevcmd.touch()
+        argv = ["build_windows_candidate.py", "--commit", "a" * 40, "--version", "0.1.0.8",
+                "--output", str(output), "--vsdevcmd", str(vsdevcmd),
+                "--openrgb-cache", str(self.cache), "--openrgb-cache-key", self.key]
+        with (
+            patch.object(sys, "argv", argv),
+            patch("package_release.clean_commit"),
+            patch.multiple(candidate, fetch=DEFAULT, checkout=DEFAULT, run=DEFAULT,
+                           load_or_build_component=DEFAULT, package_candidate=DEFAULT) as stages,
+        ):
+            candidate.main()
+        stages["load_or_build_component"].assert_called_once_with(
+            output.resolve(), vsdevcmd.resolve(), self.cache, self.key)
 
     def test_candidate_only_queues_a_new_cache_after_a_cold_build(self):
         original = self.make_bundle()

@@ -1,7 +1,6 @@
 """Package one clean Windows commit with licenses and offline-buildable source."""
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,6 +9,8 @@ import shutil
 import subprocess
 import sys
 import zipfile
+
+from component_archive import sha256
 
 
 LICENSE_CHOICES = {
@@ -65,11 +66,6 @@ def write_zip(folder, destination):
                 raise ValueError(f"Symlink cannot be packaged: {path.name}")
             if path.is_file():
                 archive.write(path, (Path(folder.name) / path.relative_to(folder)).as_posix())
-
-
-def sha256(path):
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def copy_launch_files(source, binary):
