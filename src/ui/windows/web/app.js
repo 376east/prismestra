@@ -430,13 +430,16 @@ function startupDiscoveryAction() {
 
 function renderDevices(candidates) {
  const firstSetup=state.pending===true && !state.devices.length && candidates.length>0 && !pageHasEdits();
+ const labelCounts=new Map();
+ for(const {label} of state.devices)labelCounts.set(label,(labelCounts.get(label)??0)+1);
  const devices=state.devices.map(d=>{
   const statusId=`device-status-${encodeURIComponent(d.id)}`;
+  const label=labelCounts.get(d.label)>1?`${d.label} (${d.id})`:d.label;
   return `<article class="device">
   <div class="device-symbol">${icon('devices')}</div>
-  <div class="device-info"><h2>${esc(d.label)}</h2><p>${esc(d.driver?.type)} · ${esc(d.role)}</p></div>
+  <div class="device-info"><h2>${esc(label)}</h2><p>${esc(d.driver?.type)} · ${esc(d.role)}</p></div>
   <div class="device-meta"><span>${esc(d.leds)} LED · ${esc(d.rate_hz)} Гц</span><small id="${statusId}" data-output-status="${esc(d.id)}">${esc(deviceStatus(d))}</small></div>
-  <button class="icon-button" data-device-id="${esc(d.id)}" data-mutation aria-disabled="${busy()}" aria-label="Свойства: ${esc(d.label)}" aria-describedby="${statusId}">${icon('edit')}</button>
+  <button class="icon-button" data-device-id="${esc(d.id)}" data-mutation aria-disabled="${busy()}" aria-label="Свойства: ${esc(label)}" aria-describedby="${statusId}">${icon('edit')}</button>
   <div class="device-retry" hidden><span id="${statusId}-retry-help" data-retry-help hidden></span><button class="button" id="${statusId}-retry" data-output-retry="${esc(d.id)}" aria-describedby="${statusId}-retry-help ${statusId}-retry-status" aria-disabled="true" hidden>Повторить подключение</button><span id="${statusId}-retry-status" data-retry-status role="status"></span></div>
  </article>`;
  });
