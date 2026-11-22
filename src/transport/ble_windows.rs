@@ -381,11 +381,15 @@ fn record_pixel_address(addresses: &mut BTreeMap<u64, bool>, address: u64, suppo
 fn scan_pixel_addresses(
     control: &mut dyn Control,
     exclude: &BTreeSet<u64>,
+    radio_present: impl FnOnce() -> Result<bool, String>,
 ) -> Result<BTreeMap<u64, bool>, String> {
     let started = control.now();
     ble::check_wait(control, started)?;
-    if !has_local_radio()? {
-        return Ok(BTreeMap::new());
+    if !radio_present()? {
+        return Err(
+            "Windows не обнаружила Bluetooth-адаптер. Подключите или включите его и повторите поиск."
+                .into(),
+        );
     }
     let _apartment = Apartment::new()?;
     let mut scan = Discovery::passive()?;
@@ -444,7 +448,7 @@ pub(crate) fn discover_pixel_controllers(
     control: &mut dyn ble::Control,
     exclude: &BTreeSet<u64>,
 ) -> Result<Vec<PixelProbe>, String> {
-    let addresses = scan_pixel_addresses(control, exclude)?;
+    let addresses = scan_pixel_addresses(control, exclude, has_local_radio)?;
     probe_pixel_addresses(control, exclude, addresses, |address, budget| {
         WindowsBackend
             .connect(address, budget, &mut |_| {})
@@ -968,6 +972,20 @@ mod tests {
             assert_eq!(d, ble::POLL);
             self.time += d;
         }
+    }
+
+    #[test]
+    fn pixel_discovery_without_adapter_reports_why_scan_could_not_start() {
+        let mut clock = Clock {
+            time: Duration::ZERO,
+            cancel: false,
+        };
+        let result = scan_pixel_addresses(&mut clock, &BTreeSet::new(), || Ok(false));
+        assert_eq!(
+            result.unwrap_err(),
+            "Windows не обнаружила Bluetooth-адаптер. Подключите или включите его и повторите поиск."
+        );
+        assert_eq!(clock.time, Duration::ZERO);
     }
 
     #[test]
