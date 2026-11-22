@@ -21,9 +21,9 @@ In **Devices and properties**, enable the route you want and disable the other o
 
 ## Alice pilot
 
-The WebView2 editor has a foreground Alice pilot under **Settings**. Select **Sign in with Yandex ID** and confirm catalog and lamp access in the system browser. The optional **Remember sign-in on this PC** stores the access token and expiry in Windows Credential Manager. **Load lamps** uses that saved access until it expires. Sign in again to renew expired or revoked access. **Sign out of Alice** clears the local grant. [Yandex OAuth](https://yandex.ru/dev/id/doc/ru/codes/code-url) · [Token revocation](https://yandex.ru/dev/id/doc/ru/tokens/token-invalidate)
+The WebView2 editor has a foreground Alice pilot under **Settings → Office lamp**. On the first visit, sign in with Yandex ID and confirm catalog and lamp access in the system browser. **Remember sign-in on this PC** stores the access token and expiry in Windows Credential Manager. Opening the dialog with a valid saved sign-in loads the catalog automatically. Sign in again when access expires or is revoked. **Sign out of Alice** clears the local grant. [Yandex OAuth](https://yandex.ru/dev/id/doc/ru/codes/code-url) · [Token revocation](https://yandex.ru/dev/id/doc/ru/tokens/token-invalidate)
 
-Select one lamp from the room named «Кабинет». Then choose **Turn on lamp** or set a brightness for an already lit lamp. Opening the catalog and selecting a lamp only read data. Each command consumes the current selection and is sent once. A lost response requires checking the lamp before issuing another command. [Yandex Smart Home API](https://yandex.ru/dev/dialogs/smart-home/doc/ru/concepts/platform-protocol)
+Select one lamp from the room named «Кабинет». Then turn it on or off, or apply a brightness to an already lit lamp. Opening the catalog and selecting a lamp only read data. The selection stays in place between commands. Every explicit command rechecks the selected lamp and is sent once. A lost response requires checking the lamp before issuing another command. [Yandex Smart Home API](https://yandex.ru/dev/dialogs/smart-home/doc/ru/concepts/platform-protocol)
 
 ## Discovery boundaries
 

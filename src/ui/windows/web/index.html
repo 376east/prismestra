@@ -93,13 +93,15 @@
 <script src="output-map.js"></script>
 <dialog id="alice-dialog" aria-labelledby="alice-title">
   <h2 id="alice-title">Алиса · Кабинет</h2>
-  <label class="alice-remember"><input type="checkbox" id="alice-remember"> Запомнить вход на этом ПК</label>
-  <div class="alice-actions">
+  <div id="alice-login" hidden>
+    <label class="alice-remember"><input type="checkbox" id="alice-remember"> Запомнить вход на этом ПК</label>
     <button type="button" class="button" data-action="alice-sign-in">Войти через Яндекс ID</button>
-    <button type="button" class="button" data-action="alice-resume" hidden>Загрузить лампы</button>
+    <p>Яндекс запросит доступ к списку ламп и управлению светом.</p>
+  </div>
+  <div class="alice-actions">
+    <button type="button" class="button" data-action="alice-retry" hidden>Повторить подключение</button>
     <button type="button" class="button" data-action="alice-sign-out" hidden>Выйти из Алисы</button>
   </div>
-  <p>Яндекс запросит чтение каталога и управление. Из Prismestra команда уйдёт только выбранной лампе.</p>
   <p id="alice-status" role="status" aria-live="polite"></p>
   <div id="alice-choice" hidden>
     <label for="alice-lamp">Лампа</label>
@@ -107,8 +109,9 @@
     <label for="alice-brightness">Яркость, %</label>
     <input id="alice-brightness" type="number" min="1" max="100" step="1" value="40">
     <div class="alice-actions">
-      <button type="button" class="button" id="alice-turn-on" data-action="alice-turn-on" disabled>Включить лампу</button>
-      <button type="button" class="button primary" id="alice-apply" data-action="alice-apply" disabled>Установить яркость один раз</button>
+      <button type="button" class="button" id="alice-turn-on" data-action="alice-turn-on" disabled>Включить</button>
+      <button type="button" class="button" id="alice-turn-off" data-action="alice-turn-off" disabled>Выключить</button>
+      <button type="button" class="button primary" id="alice-apply" data-action="alice-apply" disabled>Применить яркость</button>
     </div>
   </div>
   <div class="dialog-actions"><button type="button" class="button" data-action="alice-close">Закрыть</button></div>

@@ -460,7 +460,7 @@ function renderSettings() {
  return heading('Настройки','Настройки локального профиля.')
   + `<div class="settings-sections">
     <section class="parameter-panel"><h2>Диагностика</h2><div class="settings-links">${pageButton('temperatures')}${pageButton('connections')}${pageButton('sources','Источники температур')}</div></section>
-    <section class="parameter-panel"><h2>Алиса</h2><div class="settings-links"><button class="button" data-action="alice-open">Подключить лампу кабинета</button></div></section>
+    <section class="parameter-panel"><h2>Алиса</h2><div class="settings-links"><button class="button" data-action="alice-open">Лампа кабинета</button></div></section>
     <section class="parameter-panel"><h2>Расписание</h2><p class="parameter-note">${schedule}</p><div class="settings-links">${pageButton('schedule','Управлять расписанием')}</div></section>
   </div>`;
 }
@@ -756,9 +756,11 @@ window.prismestraReceive = message => {
   syncControls();
  }
 };
-let aliceTimer, aliceTicket;
+let aliceTimer, aliceState;
+let aliceLamps=[];
 function aliceRequest(action, options={}) {
- send({op:'alice',request:{action,...options}});
+ if(!send({op:'alice',request:{action,...options}}) && action!=='cancel')
+  receiveAlice({error:'Не удалось связаться с Prismestra.'});
 }
 function aliceWait() {
  clearTimeout(aliceTimer);
@@ -766,33 +768,30 @@ function aliceWait() {
 }
 function aliceSelection() {
  const level=$('#alice-brightness');
- const chosen=Boolean(aliceTicket) && $('#alice-lamp').value!=='';
+ const picker=$('#alice-lamp');
+ picker.disabled=level.disabled=Boolean(aliceState?.busy);
+ const chosen=Boolean(aliceState?.ticket) && !aliceState.busy && picker.value!=='';
  $('#alice-turn-on').disabled=!chosen;
+ $('#alice-turn-off').disabled=!chosen;
  $('#alice-apply').disabled=!chosen || !level.value || !level.checkValidity();
 }
 function receiveAlice(message) {
  const dialog=$('#alice-dialog');
  if(!dialog?.open)return;
  clearTimeout(aliceTimer);
- const signIn=dialog.querySelector('[data-action="alice-sign-in"]');
- const resume=dialog.querySelector('[data-action="alice-resume"]');
+ const retry=dialog.querySelector('[data-action="alice-retry"]');
  const signOut=dialog.querySelector('[data-action="alice-sign-out"]');
- const status=$('#alice-status');
- if(message.error){
-  status.textContent=message.error;
-  signIn.disabled=false;
-  resume.disabled=false;
-  signOut.disabled=false;
-  aliceSelection();
-  return;
- }
- const state=message.state;
- status.textContent=state.message;
- signIn.disabled=state.busy;
- resume.hidden=signOut.hidden=!state.saved;
- resume.disabled=signOut.disabled=state.busy;
- if(aliceTicket!==state.ticket){
-  aliceTicket=state.ticket;
+ const state=message.error
+  ? {...(aliceState||{lamps:[],needsLogin:true}),busy:false,message:message.error}
+  : message.state;
+ aliceState=state;
+ $('#alice-status').textContent=state.message;
+ $('#alice-login').hidden=state.busy || !state.needsLogin;
+ retry.hidden=state.busy || !state.saved || state.needsLogin || Boolean(state.ticket);
+ signOut.hidden=!state.saved && !state.ticket;
+ signOut.disabled=state.busy;
+ if(aliceLamps.length!==state.lamps.length || aliceLamps.some((label,index)=>label!==state.lamps[index])){
+  aliceLamps=state.lamps;
   const picker=$('#alice-lamp');
   picker.replaceChildren();
   const placeholder=document.createElement('option');
@@ -805,14 +804,15 @@ function receiveAlice(message) {
    option.textContent=label;
    picker.append(option);
   });
-  $('#alice-choice').hidden=!state.lamps.length;
  }
+ $('#alice-choice').hidden=!state.lamps.length;
  aliceSelection();
  if(state.busy)aliceWait();
 }
 $('#alice-dialog')?.addEventListener('close',()=>{
  clearTimeout(aliceTimer);
- aliceTicket=undefined;
+ aliceState=undefined;
+ $('#alice-lamp').value='';
  $('#alice-choice').hidden=true;
  $('#alice-remember').checked=false;
  aliceRequest('cancel');
@@ -864,26 +864,28 @@ document.addEventListener('click',event=>{
   return;
  }
  switch(b.dataset.action){
- case 'alice-open':$('#alice-dialog').showModal();aliceRequest('open');break;
+ case 'alice-open':
+  $('#alice-dialog').showModal();
+  receiveAlice({state:{busy:true,lamps:[],needsLogin:true,message:'Проверяем вход…'}});
+  aliceRequest('open');
+  break;
  case 'alice-close':$('#alice-dialog').close();break;
  case 'alice-sign-in':
- case 'alice-resume':
+ case 'alice-retry':
  case 'alice-sign-out':
-  document.querySelectorAll('#alice-dialog [data-action="alice-sign-in"],#alice-dialog [data-action="alice-resume"],#alice-dialog [data-action="alice-sign-out"]').forEach(button=>button.disabled=true);
-  $('#alice-choice').hidden=true;
-  aliceTicket=undefined;
-  aliceSelection();
+  if(aliceState?.busy)break;
+  receiveAlice({state:{...aliceState,busy:true,lamps:[]}});
   if(b.dataset.action==='alice-sign-in')aliceRequest('sign_in',{remember:$('#alice-remember').checked});
-  else aliceRequest(b.dataset.action==='alice-resume'?'resume':'sign_out');
+  else aliceRequest(b.dataset.action==='alice-retry'?'open':'sign_out');
   break;
  case 'alice-turn-on':
+ case 'alice-turn-off':
  case 'alice-apply':{
-  const ticket=aliceTicket;
-  if(!ticket||$('#alice-lamp').value==='')break;
+  const ticket=aliceState?.ticket;
+  if(!ticket||aliceState.busy||$('#alice-lamp').value==='')break;
   const lamp=Number($('#alice-lamp').value);
-  aliceTicket=undefined;
-  aliceSelection();
-  if(b.dataset.action==='alice-turn-on')aliceRequest('turn_on',{ticket,lamp});
+  receiveAlice({state:{...aliceState,busy:true}});
+  if(b.dataset.action!=='alice-apply')aliceRequest('power',{ticket,lamp,on:b.dataset.action==='alice-turn-on'});
   else aliceRequest('apply',{ticket,lamp,brightness:Number($('#alice-brightness').value)});
   break;
  }

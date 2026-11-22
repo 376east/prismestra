@@ -897,6 +897,13 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             .as_ref()
             .is_some_and(|app| app.shutdown.active() || app.pending_open.is_some())
         {
+            if matches!(&command, Command::Alice { .. }) {
+                send(
+                    state,
+                    &json!({"kind":"alice","error":"Дождитесь завершения текущей операции."}),
+                )?;
+                return Ok(false);
+            }
             return Err("Дождитесь завершения текущей операции".into());
         }
     }
