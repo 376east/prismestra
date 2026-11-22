@@ -72,8 +72,6 @@ def copy_launch_files(source, binary):
     """Use an explicit allowlist; never copy a workstation's data or bindings."""
     files = {
         "Launch Prismestra.ps1": source / "scripts/portable/Launch Prismestra.ps1",
-        "Open Prismestra.cmd": source / "scripts/portable/Open Prismestra.cmd",
-        "Start saved scene.cmd": source / "scripts/portable/Start saved scene.cmd",
         "Configure OpenRGB.ps1": source / "scripts/portable/Configure OpenRGB.ps1",
         "managed-openrgb.md": source / "docs/managed-openrgb.md",
         "PORTABLE-LAUNCH.md": source / "docs/portable-launch.md",
@@ -207,7 +205,7 @@ def main():
         "Use `--portable --classic-editor` in the shortcut target for the classic editor.\n\n"
         "Closing the editor leaves the session in the tray. "
         "Use its menu to reopen the editor, stop outputs or exit. "
-        "A second launch with the same settings directory shows a tray hint.\n\n"
+        "A second launch from the same package reopens the existing editor.\n\n"
         "Inspect and configure a supported connection before activating hardware. "
         "Keep your existing fan and pump control software.\n\n"
         "Device support and limitations: https://github.com/376east/prismestra/blob/"

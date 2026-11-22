@@ -14,7 +14,7 @@ spec.loader.exec_module(release)
 
 
 class PackageChecks(unittest.TestCase):
-    def test_portable_launch_allowlist_excludes_personal_state_and_hashes_files(self):
+    def test_portable_launch_allowlist_excludes_cmd_wrappers_and_personal_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source, binary = root / "source", root / "binary"
@@ -29,8 +29,8 @@ class PackageChecks(unittest.TestCase):
             (portable / "lighting-local.json").write_text("private bindings", encoding="utf-8")
             (portable / "profile.json").write_text("personal scene", encoding="utf-8")
             hashes = release.copy_launch_files(source, binary)
-            self.assertEqual(set(hashes), {"Launch Prismestra.ps1", "Open Prismestra.cmd",
-                                           "Start saved scene.cmd", "Configure OpenRGB.ps1", "managed-openrgb.md", "PORTABLE-LAUNCH.md"})
+            self.assertEqual(set(hashes), {"Launch Prismestra.ps1", "Configure OpenRGB.ps1",
+                                           "managed-openrgb.md", "PORTABLE-LAUNCH.md"})
             self.assertEqual(set(p.name for p in binary.iterdir()), set(hashes))
             for name, digest in hashes.items():
                 self.assertEqual(digest, release.sha256(binary / name))

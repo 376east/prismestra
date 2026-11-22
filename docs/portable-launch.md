@@ -35,15 +35,8 @@ The package retains the Windows x64, Visual C++ v14 and WebView2 requirements de
 
 Keep the application and its data together when updating. Exit the session first, back up your data, and replace program files while preserving `data`.
 
-## Compatibility with the previous launchers
+## Moving an existing shortcut
 
-From the extracted folder:
+Replace a shortcut to **Open Prismestra.cmd** with one to `Prismestra.exe`. For **Start saved scene.cmd**, add `--portable --start-connected` to the EXE shortcut target. Exit any running session in that folder before switching modes. Keep the existing `data` folder next to the executable.
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Launch Prismestra.ps1" -Check
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Launch Prismestra.ps1" -Connected -Check
-```
-
-The previous launchers remain available while existing tasks are verified. Their `-Check` option reports planned executable and arguments without starting Prismestra or contacting devices. The previous launcher waits up to 15 seconds for native-core startup acknowledgement. Direct portable launch uses the GUI process itself as the entry point.
-
-[Native entry point](../src/ui/windows/portable.rs) · [Startup and validation](../src/ui/windows.rs) · [Previous launcher](../scripts/portable/Launch%20Prismestra.ps1) · [Windows CI](../.github/workflows/windows.yml)
+[Native entry point](../src/ui/windows/portable.rs) · [Startup and validation](../src/ui/windows.rs) · [Windows CI](../.github/workflows/windows.yml)
