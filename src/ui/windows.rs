@@ -75,6 +75,7 @@ const MODAL_COMMANDS: &[i32] = &[
     COLOR_EDIT,
     E_FILE,
     sources::MODULE_SELECT,
+    connections::CONFIGURE_PORTABLE_OPENRGB,
 ];
 const E_TARGET: i32 = 701;
 const E_LIST: i32 = 702;
@@ -545,6 +546,7 @@ struct App {
     status: String,
     path: Option<PathBuf>,
     state_dir: PathBuf,
+    portable_openrgb_setup: bool,
     groups: [bool; 2],
 }
 struct PendingOpen {
@@ -2487,6 +2489,9 @@ fn modal_command(hwnd: HWND, state: &State, id: i32) -> Result<(), String> {
     if id == sources::MODULE_SELECT {
         return sources::module_dialog(hwnd, state);
     }
+    if id == connections::CONFIGURE_PORTABLE_OPENRGB {
+        return portable::initial_openrgb_dialog(hwnd, state);
+    }
     {
         let slot = state.app.try_borrow().map_err(|_| "UI занято")?;
         let a = slot.as_ref().ok_or("UI не создан")?;
@@ -3048,6 +3053,9 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
         o.snapshot = Some(state_dir.join("diagnostics/selftest.png"));
     }
     let resident_mode = o.snapshot.is_none() && !o.selftest;
+    let portable_openrgb_setup = portable_exe
+        .as_deref()
+        .is_some_and(|exe| portable::supports_openrgb_setup(exe).unwrap_or(false));
     let portable_instance = if let Some(exe) = portable_exe {
         let state = state_dir
             .canonicalize()
@@ -3255,6 +3263,7 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
         },
         path: o.project.clone(),
         state_dir,
+        portable_openrgb_setup,
         groups: [true, true],
     };
     let built = app.build(raw).and_then(|_| {

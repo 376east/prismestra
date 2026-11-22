@@ -234,6 +234,19 @@ assert.deepEqual(commands.at(-1),{op:'native_action',id:1811,fields:[{id:101,val
 assert.equal(bindingSaveDisabled(),true,'the save remains locked until the native acknowledgement');
 console.log('PASS: first click saves staged connection text only when the host can accept it');
 
+// First-time portable setup uses the existing native action bridge.
+const portableAction={id:1822,label:'Настроить локальный OpenRGB…',enabled:true};
+context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeForm:{page:'connections',fields:[],actions:[portableAction],notes:[]}}};
+vm.runInContext('formStages.clear();window.prismestraReceive(payload)',context);
+assert.match(find('#main').innerHTML,/data-native-action="1822"[^>]*>Настроить локальный OpenRGB…<\/button>/);
+const portableButton={dataset:{nativeAction:'1822'},disabled:false,hasAttribute:()=>false};
+events.click({target:{closest:()=>portableButton}});
+assert.deepEqual(commands.at(-1),{op:'native_action',id:1822,fields:[],editor_fields:[]});
+context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeForm:{page:'connections',fields:[],actions:[],notes:[]}}};
+vm.runInContext('window.prismestraReceive(payload)',context);
+assert.doesNotMatch(find('#main').innerHTML,/data-native-action="1822"/);
+console.log('PASS: portable OpenRGB setup appears and dispatches through the native action bridge');
+
 // The selected LCD can have a different index from its binding.
 const connectionDevices=['first-lcd','selected-lcd'].map(id=>({
  id,label:'LCD',role:'lcd',driver:{type:'tt_lcd'},leds:0,rate_hz:30,enabled:false

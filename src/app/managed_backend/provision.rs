@@ -25,12 +25,16 @@ pub(crate) fn prepare_state(root: &Path) -> Result<std::path::PathBuf, String> {
     Ok(state)
 }
 
-fn helper_present(state: &Path) -> Result<bool, String> {
-    match fs::symlink_metadata(state.join(HELPER_FILE)) {
+fn entry_present(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
         Err(error) => Err(err(error)),
     }
+}
+
+pub(crate) fn initial_available(state: &Path) -> Result<bool, String> {
+    Ok(!entry_present(&state.join(CONFIG_FILE))? && !entry_present(&state.join(HELPER_FILE))?)
 }
 
 fn image_pin(file: &File) -> Result<String, String> {
@@ -104,7 +108,7 @@ pub(crate) fn configure(
     if previous.as_ref() == Some(&next) {
         return Ok(Outcome::Unchanged);
     }
-    if helper_present(state)? {
+    if entry_present(&state.join(HELPER_FILE))? {
         return Err("Настройка не изменена: сначала согласуйте новый OpenRGB с авторизованной задачей. Ссылка на задачу сохранена.".into());
     }
     if !confirm(
@@ -114,7 +118,7 @@ pub(crate) fn configure(
     ) {
         return Ok(Outcome::Cancelled);
     }
-    if helper_present(state)? || Config::read_saved(state)? != previous {
+    if entry_present(&state.join(HELPER_FILE))? || Config::read_saved(state)? != previous {
         return Err(
             "Настройки OpenRGB изменились во время подтверждения. Повторите попытку.".into(),
         );
@@ -144,12 +148,28 @@ mod tests {
         let state = prepare_state(&root).unwrap();
         let settings = state.join(CONFIG_FILE);
         let helper = state.join(HELPER_FILE);
+        assert!(initial_available(&state).unwrap());
+        fs::write(&helper, b"foreign task reference").unwrap();
+        assert!(!initial_available(&state).unwrap());
+        fs::remove_file(&helper).unwrap();
         fs::write(&sdk, b"synthetic SDK revision one").unwrap();
         let configure = |confirm: fn(bool, &str, SocketAddr) -> bool| {
             super::configure(&state, &sdk, &config, None, confirm)
         };
         assert_eq!(configure(|_, _, _| false).unwrap(), Outcome::Cancelled);
         assert!(!settings.exists());
+        assert!(initial_available(&state).unwrap());
+        let helper_reference = b"{\"version\":1,\"task_name\":\"Synthetic\"}";
+        assert!(
+            super::configure(&state, &sdk, &config, None, |_, _, _| {
+                fs::write(&helper, helper_reference).unwrap();
+                true
+            })
+            .is_err()
+        );
+        assert!(!settings.exists());
+        assert_eq!(fs::read(&helper).unwrap(), helper_reference);
+        fs::remove_file(&helper).unwrap();
         assert_eq!(
             configure(|replace, pin, _| {
                 assert!(!replace);
@@ -160,15 +180,15 @@ mod tests {
             Outcome::Saved
         );
         let original = fs::read(&settings).unwrap();
-        let task = b"{\"version\":1,\"task_name\":\"Synthetic\"}";
-        fs::write(&helper, task).unwrap();
+        assert!(!initial_available(&state).unwrap());
+        fs::write(&helper, helper_reference).unwrap();
         assert_eq!(
             configure(|_, _, _| unreachable!()).unwrap(),
             Outcome::Unchanged
         );
         fs::write(&sdk, b"synthetic SDK revision two").unwrap();
         assert!(configure(|_, _, _| unreachable!()).is_err());
-        assert_eq!(fs::read(&helper).unwrap(), task);
+        assert_eq!(fs::read(&helper).unwrap(), helper_reference);
         assert_eq!(fs::read(&settings).unwrap(), original);
 
         fs::remove_file(&helper).unwrap();
