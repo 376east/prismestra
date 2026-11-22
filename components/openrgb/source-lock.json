@@ -3,7 +3,7 @@
   "repository": "https://github.com/hello-nexus/openrgb-headless",
   "revision": "6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43",
   "patch": "prismestra-pc.patch",
-  "patch_sha256": "ae6b8079a9ac05934867b9019ddbe574ae3b84cab58d4d8872f442f15f998995",
+  "patch_sha256": "fb59982e531fbbe8d9b659ded0247a15546fbdc231050eff253d0a6f4cc9a19c",
   "configuration": [
     "release",
     "prismestra_pc_backend"

@@ -712,11 +712,154 @@ index e20d9f4a141332ea84d7e8c6061dcd2b29b21876..718ee9cd45ac4a62f65d7b8e5e69eb7d
  message("GIT_BRANCH:  "$$GIT_BRANCH)
  message("VERSION_NUM: "$$VERSION_NUM)
  message("VERSION_STR: "$$VERSION_STR)
+diff --git a/ProfileManager.cpp b/ProfileManager.cpp
+index 8158a73a6dcb25663302e97ebedfa0ae4941a875..16c46005abf375508e783e640959c97f15462e09 100644
+--- a/ProfileManager.cpp
++++ b/ProfileManager.cpp
+@@ -12,6 +12,8 @@
+ #include <fstream>
+ #include <iostream>
+ #include <cstring>
++#include <limits>
++#include <utility>
+ #include "filesystem.h"
+ #include "JsonUtils.h"
+ #include "LogManager.h"
+@@ -1303,6 +1305,45 @@ bool ProfileManager::LoadAutoProfile(std::string setting_name)
+     }
+ }
+ 
++static bool ApplyPrismestraZoneSizes(RGBController* saved, RGBController* live)
++{
++    const auto max_int = static_cast<unsigned int>((std::numeric_limits<int>::max)());
++    const unsigned int zone_count = saved->GetZoneCount();
++    if(zone_count != live->GetZoneCount() || zone_count > max_int)
++    {
++        return false;
++    }
++
++    std::vector<std::pair<int, int>> sizes;
++    for(unsigned int zone = 0; zone < zone_count; zone++)
++    {
++        if(!(saved->GetZoneFlags(zone) & ZONE_FLAG_MANUALLY_CONFIGURED_SIZE))
++        {
++            continue;
++        }
++
++        const unsigned int size = saved->GetZoneLEDsCount(zone);
++        const unsigned int min_size = live->GetZoneLEDsMin(zone);
++        const unsigned int max_size = live->GetZoneLEDsMax(zone);
++        if(!(live->GetZoneFlags(zone) & (ZONE_FLAG_MANUALLY_CONFIGURABLE_SIZE | ZONE_FLAG_MANUALLY_CONFIGURABLE_SIZE_EFFECTS_ONLY))
++        || saved->GetZoneName(zone) != live->GetZoneName(zone)
++        || saved->GetZoneType(zone) != live->GetZoneType(zone)
++        || saved->GetZoneLEDsMin(zone) != min_size
++        || saved->GetZoneLEDsMax(zone) != max_size
++        || size < min_size || size > max_size || size > max_int)
++        {
++            return false;
++        }
++        sizes.emplace_back(static_cast<int>(zone), static_cast<int>(size));
++    }
++
++    for(const auto& entry : sizes)
++    {
++        live->ResizeZone(entry.first, entry.second);
++    }
++    return true;
++}
++
+ bool ProfileManager::LoadControllerFromListWithOptions
+     (
+     std::vector<RGBController*>&    profile_controllers,
+@@ -1314,17 +1355,28 @@ bool ProfileManager::LoadControllerFromListWithOptions
+     for(std::size_t temp_index = 0; temp_index < profile_controllers.size(); temp_index++)
+     {
+         RGBController *profile_controller = profile_controllers[temp_index];
++        nlohmann::json configuration_json;
++        bool prismestra_exact_location = false;
++        if(load_configuration && JsonUtils::JsonParse(profile_controller->configuration, configuration_json))
++        {
++            const auto marker = configuration_json.find("prismestra_require_exact_location");
++            prismestra_exact_location = marker != configuration_json.end()
++                                        && marker->is_boolean() && marker->get<bool>();
++        }
+ 
+         /*---------------------------------------------------------*\
+-        | Do not compare location string for HID devices, as the    |
+-        | location string may change between runs as devices are    |
+-        | connected and disconnected. Also do not compare the I2C   |
+-        | bus number, since it is not persistent across reboots     |
+-        | on Linux - strip the I2C number and compare only address. |
++        | Prismestra entries require an exact location. Ordinary   |
++        | entries ignore HID location and the Linux I2C bus number |
++        | because those values can change between runs.            |
+         \*---------------------------------------------------------*/
+         bool location_check;
+ 
+-        if(load_controller->GetLocation().find("HID: ") == 0)
++        if(prismestra_exact_location)
++        {
++            const std::string location = load_controller->GetLocation();
++            location_check = !location.empty() && profile_controller->GetLocation() == location;
++        }
++        else if(load_controller->GetLocation().find("HID: ") == 0)
+         {
+             location_check = true;
+         }
+@@ -1352,8 +1404,9 @@ bool ProfileManager::LoadControllerFromListWithOptions
+         \*-------------------------------------------------*/
+         bool    check_device_name   = true;
+ 
+-        if((load_controller->GetFlags()    & CONTROLLER_FLAG_MANUALLY_CONFIGURED_NAME)
+-        || (profile_controller->GetFlags() & CONTROLLER_FLAG_MANUALLY_CONFIGURED_NAME))
++        if(!prismestra_exact_location
++        && ((load_controller->GetFlags()    & CONTROLLER_FLAG_MANUALLY_CONFIGURED_NAME)
++         || (profile_controller->GetFlags() & CONTROLLER_FLAG_MANUALLY_CONFIGURED_NAME)))
+         {
+             check_device_name = false;
+         }
+@@ -1369,6 +1422,12 @@ bool ProfileManager::LoadControllerFromListWithOptions
+          &&                       (profile_controller->GetSerial()        == load_controller->GetSerial()     )
+          &&                       (location_check                         == true                             ))
+         {
++            // Apply only the validated sizes from Prismestra's generated entry.
++            if(prismestra_exact_location)
++            {
++                return ApplyPrismestraZoneSizes(profile_controller, load_controller);
++            }
++
+             /*---------------------------------------------*\
+             | Update device configuration if requested      |
+             \*---------------------------------------------*/
+@@ -1377,9 +1436,6 @@ bool ProfileManager::LoadControllerFromListWithOptions
+                 /*-----------------------------------------*\
+                 | Load device-specific configuration        |
+                 \*-----------------------------------------*/
+-                nlohmann::json configuration_json;
+-                JsonUtils::JsonParse(profile_controller->configuration, configuration_json);
+-
+                 load_controller->ConfigureDevice(profile_controller->flags, profile_controller->display_name);
+                 load_controller->SetDeviceSpecificConfiguration(configuration_json["configuration"]);
+ 
 diff --git a/ResourceManager.cpp b/ResourceManager.cpp
-index e5b2b4f706df77b04ecb642c03075544a36ffd4f..4a53ae62446eb61f3c8cd97b3cefb4dced6ed592 100644
+index e5b2b4f706df77b04ecb642c03075544a36ffd4f..d9eefb56ce312ee1889502d00d825e6baccb469c 100644
 --- a/ResourceManager.cpp
 +++ b/ResourceManager.cpp
-@@ -1402,6 +1402,7 @@ void ResourceManager::InitializeServer()
+@@ -1284,7 +1284,12 @@ void ResourceManager::Initialize(bool tryConnect, bool detectDevices, bool start
+     | connection so that migrated profiles get uploaded to  |
+     | the server if connected                               |
+     \*-----------------------------------------------------*/
+-    profile_manager->MigrateLegacyProfiles();
++    // The managed lighting-only server reads protected Configuration.json.
++    // Importing sizes.ors would rewrite it and could discard exact HID bindings.
++    if(!lighting_only)
++    {
++        profile_manager->MigrateLegacyProfiles();
++    }
+ 
+     /*-----------------------------------------------------*\
+     | Initialize Saved Client Connections                   |
+@@ -1402,6 +1407,7 @@ void ResourceManager::InitializeServer()
      bool legacy_workaround  = false;
  
      server                  = new NetworkServer();
