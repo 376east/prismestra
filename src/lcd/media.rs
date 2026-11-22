@@ -208,6 +208,20 @@ pub fn load(path: &Path, angle: i32, cancelled: impl Fn() -> bool) -> Result<Med
     prepare(bytes.into(), angle, cancelled)
 }
 
+pub(crate) fn black_background(angle: i32) -> Result<Media, String> {
+    let rotation = rotation(angle)?;
+    let thumbnail = RgbImage::new(480, 480);
+    Ok(Media {
+        frames: vec![Frame {
+            jpeg: encode_jpeg(&thumbnail)?.into(),
+            delay_ms: 100,
+        }],
+        thumbnail,
+        source: Arc::from([]),
+        rotation,
+    })
+}
+
 pub fn prepare(
     source: Arc<[u8]>,
     angle: i32,
