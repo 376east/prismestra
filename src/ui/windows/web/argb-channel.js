@@ -5,6 +5,7 @@ window.argbChannel = (() => {
   const dialog = element('dialog');
   const form = element('form');
   const channel = element('channel');
+  const template = element('template');
   const count = element('count');
   const options = element('options');
   const preview = element('preview');
@@ -13,7 +14,18 @@ window.argbChannel = (() => {
   const status = element('status');
   const save = element('save');
   const close = element('close');
-  let context = null, pending = null, channels = [], request = 0, saved = false;
+  const catalog = [
+    {id:'custom', label:'Точное число LED'},
+    {id:'fan', label:'Универсальный вентилятор', shape:'fan'},
+    {id:'fan-8', label:'Вентилятор · 8 LED', shape:'fan', leds:8},
+    {id:'fan-12', label:'Вентилятор · 12 LED', shape:'fan', leds:12},
+    {id:'strip', label:'Универсальная лента', shape:'strip'},
+    {id:'strip-10', label:'Лента · 10 LED', shape:'strip', leds:10},
+    {id:'strip-30', label:'Лента · 30 LED', shape:'strip', leds:30},
+    {id:'strip-60', label:'Лента · 60 LED', shape:'strip', leds:60},
+  ];
+  let context = null, pending = null, channels = [], request = 0, saved = false, writable = false;
+  let exactCount = '';
 
   const current = () => channels.find(item => item.id === channel.value);
   const bounds = item => {
@@ -23,10 +35,16 @@ window.argbChannel = (() => {
   };
   const validCount = limits => limits && /^\d+$/.test(count.value) &&
     count.valueAsNumber >= limits.min && count.valueAsNumber <= limits.max;
+  const chosenTemplate = () => catalog.find(item => item.id === template.value);
 
   function drawPreview(length) {
     const visible = length > 12 ? 11 : length;
-    const values = Array.from({length:visible}, () => document.createElement('span'));
+    dots.dataset.shape = chosenTemplate()?.shape ?? 'strip';
+    const values = Array.from({length:visible}, (_,index) => {
+      const led = document.createElement('span');
+      led.style.setProperty('--angle', `${index*360/visible}deg`);
+      return led;
+    });
     if (visible < length) {
       const gap = document.createElement('b');
       gap.textContent = '…';
@@ -42,11 +60,14 @@ window.argbChannel = (() => {
     const canPreview = validCount(limits);
     channel.disabled = !!pending || saved || !channels.length;
     options.hidden = !limits;
+    template.disabled = !!pending || saved || !limits;
     count.disabled = !limits;
     count.readOnly = !!pending || saved;
     count.setAttribute('aria-invalid', String(!!limits && !!count.value && !canPreview));
     close.setAttribute('aria-disabled', String(pending?.operation === 'save'));
+    save.hidden = !writable;
     save.setAttribute('aria-disabled', String(!!pending || saved || !canPreview));
+    element('read-only').hidden = !limits || writable;
     preview.hidden = !canPreview;
     if (canPreview) drawPreview(count.valueAsNumber);
   }
@@ -58,12 +79,22 @@ window.argbChannel = (() => {
       count.min = limits.min;
       count.max = limits.max;
       count.value = item.leds >= limits.min && item.leds <= limits.max ? item.leds : '';
+      element('current').textContent = `Сейчас в канале: ${item.leds} LED.`;
+      exactCount = count.value;
+      template.replaceChildren(...catalog.map(item => {
+        const option = document.createElement('option');
+        option.value = item.id;
+        option.textContent = item.label;
+        option.disabled = item.leds !== undefined && (item.leds < limits.min || item.leds > limits.max);
+        return option;
+      }));
+      template.value = 'custom';
       element('range').textContent = `Допустимое число LED: ${limits.min}–${limits.max}.`;
       status.textContent = '';
     } else {
       count.value = '';
       status.textContent = item?.mode === 'autoUnsupported'
-        ? 'Размер зоны определяет контроллер. Ручная настройка для неё недоступна.'
+        ? `Текущий размер: ${item.leds} LED. Ручная настройка для этой зоны недоступна.`
         : 'Выберите канал.';
     }
     render();
@@ -87,6 +118,7 @@ window.argbChannel = (() => {
     if (operation === 'list' && message.status === 'ready') {
       pending = null;
       channels = message.channels;
+      writable = message.writable === true && typeof context.api.save === 'function';
       const placeholder = document.createElement('option');
       placeholder.value = '';
       placeholder.textContent = 'Выберите канал…';
@@ -100,6 +132,7 @@ window.argbChannel = (() => {
       channel.value = '';
       selectChannel();
       if (!channels.length) status.textContent = 'Контроллер не сообщил доступных каналов.';
+      else if (document.activeElement === close) channel.focus({preventScroll:true});
     } else if (operation === 'save' && message.status === 'saved') {
       pending = null;
       saved = true;
@@ -116,7 +149,7 @@ window.argbChannel = (() => {
   function open(device, label, api) {
     context = {device, api};
     channels = [];
-    saved = false;
+    saved = writable = false;
     channel.replaceChildren();
     count.value = '';
     element('label').textContent = label;
@@ -133,11 +166,19 @@ window.argbChannel = (() => {
   }
 
   channel.onchange = selectChannel;
-  count.oninput = render;
+  template.onchange = () => {
+    count.value = chosenTemplate()?.leds ?? exactCount;
+    render();
+  };
+  count.oninput = () => {
+    exactCount = count.value;
+    if (chosenTemplate()?.leds !== undefined) template.value = 'custom';
+    render();
+  };
   form.onsubmit = event => {
     event.preventDefault();
     const item = current();
-    if (pending || saved || !validCount(bounds(item))) return;
+    if (!writable || pending || saved || !validCount(bounds(item))) return;
     start('save', {channel:item.id,leds:count.valueAsNumber});
   };
   save.onclick = event => {
