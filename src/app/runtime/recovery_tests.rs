@@ -162,98 +162,101 @@ fn output_activity_keeps_retry_reason_until_the_next_submission() {
     drain(&mut runtime);
 }
 
-#[test]
-fn surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame() {
-    use crate::{
-        lighting::{
-            door::{PIXEL_LEDS, pixel_payload_for_points},
-            scene::Effect,
-        },
-        runtime::adapters::Ble,
-        transport::ble::{self, Control},
-    };
+use crate::{
+    lighting::{
+        door::{PIXEL_LEDS, pixel_payload_for_points},
+        scene::Effect,
+    },
+    runtime::adapters::Ble,
+    transport::ble::{self, Control},
+};
 
-    #[derive(Default)]
-    struct Attempt {
-        probes: usize,
-        packets: Vec<Vec<u8>>,
-        first_frame: Vec<Rgb>,
-        dropped: bool,
+#[derive(Default)]
+struct Attempt {
+    probes: usize,
+    packets: Vec<Vec<u8>>,
+    first_frame: Vec<Rgb>,
+    dropped: bool,
+}
+
+struct E1Link {
+    attempt: usize,
+    inject_reconnect_faults: bool,
+    traces: Arc<Mutex<Vec<Attempt>>>,
+}
+
+impl Drop for E1Link {
+    fn drop(&mut self) {
+        self.traces.lock().unwrap()[self.attempt].dropped = true;
+    }
+}
+
+impl ble::Link for E1Link {
+    fn address(&self) -> Result<u64, String> {
+        Ok(if self.inject_reconnect_faults && self.attempt == 1 {
+            2
+        } else {
+            1
+        })
     }
 
-    struct E1Link {
-        attempt: usize,
-        traces: Arc<Mutex<Vec<Attempt>>>,
+    fn max_pdu(&self) -> Result<u32, String> {
+        Ok(200)
     }
 
-    impl Drop for E1Link {
-        fn drop(&mut self) {
-            self.traces.lock().unwrap()[self.attempt].dropped = true;
-        }
+    fn connected(&self) -> Result<bool, String> {
+        Ok(true)
     }
 
-    impl ble::Link for E1Link {
-        fn address(&self) -> Result<u64, String> {
-            Ok(if self.attempt == 1 { 2 } else { 1 })
-        }
+    fn write(&mut self, _: &[u8], _: &mut dyn Control) -> Result<(), String> {
+        panic!("E1 must not fall back to legacy output");
+    }
 
-        fn max_pdu(&self) -> Result<u32, String> {
-            Ok(200)
-        }
+    fn pixel_capacity(&mut self, _: &mut dyn Control) -> Result<usize, String> {
+        self.traces.lock().unwrap()[self.attempt].probes += 1;
+        let response = if self.inject_reconnect_faults && self.attempt == 2 {
+            br#"{"payload":"ea810100aa0b23240150f00064030000010098ffffffff01000001"}"#
+        } else {
+            br#"{"payload":"ea810100aa0b23240150f00064030000010099ffffffff01000001"}"#
+        };
+        ble::parse_pixel_capacity(response)?.ok_or_else(|| "Missing EA81".into())
+    }
 
-        fn connected(&self) -> Result<bool, String> {
-            Ok(true)
-        }
-
-        fn write(&mut self, _: &[u8], _: &mut dyn Control) -> Result<(), String> {
-            panic!("E1 must not fall back to legacy output");
-        }
-
-        fn pixel_capacity(&mut self, _: &mut dyn Control) -> Result<usize, String> {
-            self.traces.lock().unwrap()[self.attempt].probes += 1;
-            let response = if self.attempt == 2 {
-                br#"{"payload":"ea810100aa0b23240150f00064030000010098ffffffff01000001"}"#
-            } else {
-                br#"{"payload":"ea810100aa0b23240150f00064030000010099ffffffff01000001"}"#
-            };
-            ble::parse_pixel_capacity(response)?.ok_or_else(|| "Missing EA81".into())
-        }
-
-        fn write_e1_pixels(
-            &mut self,
-            colors: &[Rgb],
-            brightness: i32,
-            sequence: u8,
-            control: &mut dyn Control,
-        ) -> Result<(), String> {
-            {
-                let mut traces = self.traces.lock().unwrap();
-                let attempt = &mut traces[self.attempt];
-                if attempt.packets.is_empty() {
-                    attempt.first_frame.extend_from_slice(colors);
-                }
+    fn write_e1_pixels(
+        &mut self,
+        colors: &[Rgb],
+        brightness: i32,
+        sequence: u8,
+        control: &mut dyn Control,
+    ) -> Result<(), String> {
+        {
+            let mut traces = self.traces.lock().unwrap();
+            let attempt = &mut traces[self.attempt];
+            if attempt.packets.is_empty() {
+                attempt.first_frame.extend_from_slice(colors);
             }
-            ble::write_e1_pixel_frame(
-                colors,
-                brightness,
-                sequence,
-                self.max_pdu()?,
-                control,
-                &mut |packet, _| {
-                    let mut traces = self.traces.lock().unwrap();
-                    let packets = &mut traces[self.attempt].packets;
-                    packets.push(packet.to_vec());
-                    if self.attempt == 0 && packets.len() == 2 {
-                        return Err("Fixture disconnected during fragment 2".into());
-                    }
-                    Ok(())
-                },
-            )
         }
+        ble::write_e1_pixel_frame(
+            colors,
+            brightness,
+            sequence,
+            self.max_pdu()?,
+            control,
+            &mut |packet, _| {
+                let mut traces = self.traces.lock().unwrap();
+                let packets = &mut traces[self.attempt].packets;
+                packets.push(packet.to_vec());
+                if self.inject_reconnect_faults && self.attempt == 0 && packets.len() == 2 {
+                    return Err("Fixture disconnected during fragment 2".into());
+                }
+                Ok(())
+            },
+        )
     }
+}
 
+fn surplife_project() -> Project {
     let mut project = runtime().document().lighting.clone();
-    project.setup.devices.truncate(1);
     project.setup.devices[0].driver = Driver::SurplifeE1Pixels;
     project.setup.devices[0].leds = PIXEL_LEDS;
     project.setup.canvas.width = PIXEL_LEDS as u32;
@@ -265,10 +268,23 @@ fn surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame() {
             y: 0,
         })
         .collect();
-    project.groups.pc.clear();
+    project.setup.canvas.width += 1;
+    project.setup.canvas.points.push(Point {
+        device: "b".into(),
+        led: 0,
+        x: PIXEL_LEDS as u32,
+        y: 0,
+    });
+    project.groups.pc.retain(|id| id != "a");
     project.groups.door.push("a".into());
     project.scene.colors.fill(0xff0000);
     project.scene.brightness = 100;
+    project
+}
+
+#[test]
+fn surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame() {
+    let project = surplife_project();
     let mut runtime = Runtime::new(Document::from_lighting(project).unwrap(), None).unwrap();
     let traces = Arc::new(Mutex::new(Vec::<Attempt>::new()));
     let factory_traces = traces.clone();
@@ -286,6 +302,7 @@ fn surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame() {
                 };
                 let link = E1Link {
                     attempt,
+                    inject_reconnect_faults: true,
                     traces: factory_traces.clone(),
                 };
                 Ok(Box::new(Ble::with_e1(link, 1, 83, PIXEL_LEDS, &cancel)?))
@@ -374,6 +391,91 @@ fn surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame() {
         let single = pixel_payload_for_points(std::slice::from_ref(color), 83, 1).unwrap();
         assert_eq!(record, &single[9..], "restored point {index}");
     }
+}
+
+#[test]
+fn surplife_first_light_recovers_after_bluetooth_appears() {
+    const NO_ADAPTER: &str = "Windows не обнаружила Bluetooth-адаптер.";
+    let mut runtime =
+        Runtime::new(Document::from_lighting(surplife_project()).unwrap(), None).unwrap();
+    let adapter_present = Arc::new(AtomicBool::new(false));
+    let opens = Arc::new(AtomicUsize::new(0));
+    let traces = Arc::new(Mutex::new(Vec::<Attempt>::new()));
+    runtime
+        .attach_rgb(
+            "a",
+            vec!["ble:1".into()],
+            Arc::new({
+                let adapter_present = adapter_present.clone();
+                let opens = opens.clone();
+                let traces = traces.clone();
+                move |cancel| {
+                    opens.fetch_add(1, Ordering::SeqCst);
+                    if !adapter_present.load(Ordering::SeqCst) {
+                        return Err(NO_ADAPTER.into());
+                    }
+                    let attempt = {
+                        let mut traces = traces.lock().unwrap();
+                        let index = traces.len();
+                        traces.push(Attempt::default());
+                        index
+                    };
+                    let link = E1Link {
+                        attempt,
+                        inject_reconnect_faults: false,
+                        traces: traces.clone(),
+                    };
+                    Ok(Box::new(Ble::with_e1(link, 1, 83, PIXEL_LEDS, &cancel)?))
+                }
+            }),
+        )
+        .unwrap();
+    let independent = Arc::new(Link::default());
+    runtime
+        .attach_rgb("b", vec![], factory(&independent))
+        .unwrap();
+    runtime.enable_registered_output_recovery();
+
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+    let initial = runtime.host.status("a").unwrap();
+    assert_eq!(initial.error.as_deref(), Some(NO_ADAPTER));
+    assert_eq!(initial.submitted, 0);
+    let mut now = 0;
+    tick(&mut runtime, &mut now);
+    wait(|| runtime.host.status("b").unwrap().submitted > 0);
+    let neighbor = runtime.host.status("b").unwrap();
+    assert_eq!(independent.frames.lock().unwrap()[0], [Rgb::new(255, 0, 0)]);
+
+    let mut scene = runtime.document().lighting.scene.clone();
+    scene.colors.fill(0x0000ff);
+    runtime.set_scene(scene).unwrap();
+    tick(&mut runtime, &mut now);
+    wait(|| independent.frames.lock().unwrap().last().unwrap() == &[Rgb::new(0, 0, 255)]);
+    assert!(traces.lock().unwrap().is_empty());
+    assert_eq!(opens.load(Ordering::SeqCst), 1);
+
+    adapter_present.store(true, Ordering::SeqCst);
+    now += 1_000_000;
+    working(&mut runtime, "a", &mut now);
+    assert_ne!(
+        runtime.host.status("a").unwrap().generation,
+        initial.generation
+    );
+    let current_neighbor = runtime.host.status("b").unwrap();
+    assert_eq!(current_neighbor.generation, neighbor.generation);
+    assert!(current_neighbor.submitted > neighbor.submitted);
+    assert_eq!(independent.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(opens.load(Ordering::SeqCst), 2);
+    drain(&mut runtime);
+
+    let traces = traces.lock().unwrap();
+    assert_eq!(traces.len(), 1);
+    let restored = &traces[0];
+    assert_eq!(restored.probes, 1);
+    assert_eq!(restored.first_frame, [Rgb::new(0, 0, 255); PIXEL_LEDS]);
+    assert!(restored.packets.len() >= 5);
+    assert_eq!(&restored.packets[0][..4], &[0x40, 0, 0, 0]);
+    assert_eq!(&restored.packets[4][..4], &[0x40, 0, 0x80, 4]);
 }
 
 #[cfg(windows)]
