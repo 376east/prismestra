@@ -161,6 +161,7 @@ const CARD_FRAME_INTERVAL: Duration = Duration::from_millis(125);
 struct CardMotion {
     id: String,
     renderer: crate::runtime::scene::Renderer,
+    frame: u64,
 }
 
 pub(super) struct Session {
@@ -296,11 +297,14 @@ impl Session {
             self.card_motion = Some(CardMotion {
                 id: id.into(),
                 renderer: crate::runtime::scene::Renderer::new(scene).ok()?,
+                frame: 0,
             });
         }
         let motion = self.card_motion.as_mut().filter(|motion| motion.id == id)?;
         self.card_last_frame = Some(now);
+        feed_card_demo_audio(&mut motion.renderer, motion.frame);
         let pixels = motion.renderer.step(&self.card_canvas).ok()?;
+        motion.frame += 1;
         let colors = pixels
             .into_iter()
             .map(|pixel| pixel.rrggbb())
@@ -328,14 +332,44 @@ fn preview_canvas(width: u32, height: u32) -> crate::devices::Canvas {
 }
 
 fn card_can_move(scene: &Scene) -> bool {
-    !(scene.effect.uses_audio() || scene.effect.uses_context() || scene.effect.uses_reactive())
+    !(scene.effect.uses_context() || scene.effect.uses_reactive())
+}
+
+fn feed_card_demo_audio(renderer: &mut crate::runtime::scene::Renderer, frame: u64) {
+    use crate::capture::audio_features::AudioFeatures;
+    if !renderer.scene().effect.uses_audio() {
+        return;
+    }
+    // Prime the spectrum history for a readable poster without rendering extra pixels.
+    let first = if frame == 0 { 0 } else { frame + 31 };
+    for sample in first..=frame + 31 {
+        let phase = (sample % 16) as f32 * std::f32::consts::TAU / 16.0;
+        let beat = (0.5 + 0.5 * (phase * 2.0).cos()).powi(3);
+        let amplitude = 0.35 + 0.45 * beat;
+        renderer.set_audio(Some((
+            sample + 1,
+            AudioFeatures {
+                rms: amplitude * 0.65,
+                peak: amplitude,
+                beat,
+                bands: std::array::from_fn(|bin| {
+                    let wave = 0.5 + 0.5 * (bin as f32 * 0.68 - phase).cos();
+                    (0.14 + 0.66 * wave) * (1.0 - bin as f32 * 0.039)
+                }),
+                waveform: std::array::from_fn(|point| {
+                    (point as f32 * 0.24 + phase).sin() * amplitude
+                }),
+            },
+        )));
+    }
 }
 
 fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
     if !card_can_move(&entry.scene) {
         return json!({"id":entry.id,"name":entry.name,"scene":entry.scene});
     }
-    let (width, height) = if entry.scene.effect.uses_normalized_canvas() {
+    let audio_demo = entry.scene.effect.uses_audio();
+    let (width, height) = if audio_demo || entry.scene.effect.uses_normalized_canvas() {
         (48, 24)
     } else {
         (24, 12)
@@ -343,7 +377,9 @@ fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
     let canvas = preview_canvas(width, height);
     let mut colors = Vec::new();
     let mut thumbnail_scene = entry.scene.clone();
-    let steps = if thumbnail_scene.effect.uses_normalized_canvas() {
+    let steps = if audio_demo {
+        1
+    } else if thumbnail_scene.effect.uses_normalized_canvas() {
         // Sample a representative phase with one render, including brief effects like Lightning.
         thumbnail_scene.speed = 22;
         thumbnail_scene.fps = 1;
@@ -358,13 +394,14 @@ fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
         8
     };
     if let Ok(mut renderer) = crate::runtime::scene::Renderer::new(thumbnail_scene) {
+        feed_card_demo_audio(&mut renderer, 0);
         for _ in 0..steps {
             if let Ok(frame) = renderer.step(&canvas) {
                 colors = frame.iter().map(|c| c.rrggbb()).collect::<Vec<_>>();
             }
         }
     }
-    json!({"id":entry.id,"name":entry.name,"scene":entry.scene,"preview":{"width":width,"height":height,"colors":colors}})
+    json!({"id":entry.id,"name":entry.name,"scene":entry.scene,"audioDemo":audio_demo,"preview":{"width":width,"height":height,"colors":colors}})
 }
 fn assets(path: &str) -> Option<(&'static str, &'static [u8])> {
     Some(match path {
@@ -1523,6 +1560,38 @@ pub(super) fn return_to_editor(state: &State) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audio_cards_show_distinct_demo_posters_and_motion() {
+        let canvas = super::preview_canvas(48, 24);
+        let mut posters = Vec::new();
+        for id in [
+            "audio-level",
+            "audio-spectrum",
+            "audio-waveform",
+            "audio-beat-zones",
+            "audio-spectrogram",
+        ] {
+            let entry = crate::ui::catalog::built_in()
+                .into_iter()
+                .find(|entry| entry.id == format!("builtin:{id}"))
+                .unwrap();
+            let card = super::scene_card(&entry);
+            assert_eq!(card["audioDemo"], true);
+            let colors = card["preview"]["colors"].as_array().unwrap();
+            assert_eq!(colors.len(), 48 * 24);
+            assert!(
+                colors.iter().any(|pixel| pixel.as_u64().unwrap() > 0),
+                "{id}"
+            );
+            assert!(!posters.contains(colors), "{id}");
+            posters.push(colors.clone());
+            let mut renderer = crate::runtime::scene::Renderer::new(entry.scene).unwrap();
+            super::feed_card_demo_audio(&mut renderer, 0);
+            let first = renderer.step(&canvas).unwrap();
+            super::feed_card_demo_audio(&mut renderer, 1);
+            assert_ne!(first, renderer.step(&canvas).unwrap(), "{id}");
+        }
+    }
     use super::*;
     use crate::lighting::scene::Effect;
 

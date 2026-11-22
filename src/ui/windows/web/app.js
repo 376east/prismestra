@@ -264,7 +264,7 @@ function renderLibrary() {
     ${item.preview?`<canvas data-library-preview="${esc(item.id)}" aria-hidden="true"></canvas>`:palette(item.scene)}
     <span class="scene-preview-label">Предпросмотр</span>
    </button></div>
-   <div class="scene-body"><div class="scene-title"><h2>${esc(item.name)}</h2><small class="muted">${item.builtIn?'Шаблон · ':''}${esc(effectLabel(item.scene.effect))}</small></div>
+   <div class="scene-body"><div class="scene-title"><h2>${esc(item.name)}</h2><small class="muted">${item.builtIn?'Шаблон · ':''}${esc(effectLabel(item.scene.effect))}${item.audioDemo?' · Тестовый сигнал':''}</small></div>
     <div class="card-actions"><button class="button primary" data-apply="${esc(item.id)}" aria-label="Включить сцену: ${esc(item.name)}" aria-disabled="${!!busy()}" data-mutation>Включить сцену</button>
      <button class="icon-button" data-edit="${esc(item.id)}" aria-label="Редактировать: ${esc(item.name)}" title="Редактировать" data-mutation ${disabled()}>${icon('edit')}</button>
      ${item.builtIn?'':`<button class="icon-button" data-remove="${esc(item.id)}" aria-label="Удалить: ${esc(item.name)}" data-mutation ${disabled()}>${icon('trash')}</button>`}
@@ -625,7 +625,7 @@ function openEntry(entry) {
  $('#draft-stay').focus();
 }
 function previewLibraryEntry(entry) {
- $('#library-preview-title').textContent=entry.name;
+ $('#library-preview-title').textContent=entry.audioDemo?entry.name+' · Тестовый сигнал':entry.name;
  $('#library-preview-art').innerHTML=entry.preview?'<canvas aria-hidden="true"></canvas>':palette(entry.scene);
  if(entry.preview)paintPixels($('#library-preview-art canvas'),entry.preview);
  $('#library-preview-dialog').showModal();
