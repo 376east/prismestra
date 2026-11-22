@@ -1839,13 +1839,18 @@ impl crate::lcd::protocol::ReportTransport for Reports {
 
 const ARRIVAL_LCD_MEDIA: &[u8] = include_bytes!("../../lcd/fixtures/two-frame.apng");
 
-fn arrival_lcd_document(mut document: Document, name: &str) -> (Document, std::path::PathBuf) {
+fn arrival_lcd_document(
+    mut document: Document,
+    name: &str,
+    source: &[u8],
+) -> (Document, std::path::PathBuf) {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("work")
         .join(format!("arrival-lcd-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
     let media = Assets::new(dir.clone())
         .unwrap()
-        .put(ARRIVAL_LCD_MEDIA, 32 * 1024 * 1024)
+        .put(source, crate::lcd::media::MAX_SOURCE)
         .unwrap();
     document.lighting.setup.devices.push(Device {
         id: "lcd".into(),
@@ -1869,7 +1874,8 @@ fn arrival_lcd_document(mut document: Document, name: &str) -> (Document, std::p
 }
 
 fn arrival_lcd_runtime(name: &str, link: Arc<Link>) -> (Runtime, std::path::PathBuf) {
-    let (document, dir) = arrival_lcd_document(runtime().document().clone(), name);
+    let (document, dir) =
+        arrival_lcd_document(runtime().document().clone(), name, ARRIVAL_LCD_MEDIA);
     let mut runtime = Runtime::new(document.clone(), None).unwrap();
     let root = dir.clone();
     let factory: LcdFactory = Arc::new(move |config, _| {
@@ -1934,7 +1940,11 @@ fn remove_lcd_assets(runtime: Runtime, dir: std::path::PathBuf) {
 #[test]
 fn appending_lcd_starts_its_first_frame_without_reopening_existing_rgb() {
     let mut runtime = runtime();
-    let (proposal, assets) = arrival_lcd_document(runtime.document().clone(), "append-to-live");
+    let (proposal, assets) = arrival_lcd_document(
+        runtime.document().clone(),
+        "append-to-live",
+        ARRIVAL_LCD_MEDIA,
+    );
     // Prepare the media before timing the plan commit and the first report.
     let prepared = Arc::new(
         crate::lcd::media::prepare(
@@ -2474,6 +2484,96 @@ fn lcd_configuration_epoch_discards_old_arrivals_and_binding() {
 }
 
 #[test]
+fn reopened_scene_restores_the_saved_gif_without_restarting_rgb() {
+    use crate::lcd::{media, protocol::validate_jpeg};
+
+    let (document, dir) = arrival_lcd_document(
+        runtime().document().clone(),
+        "reopen-builtin-gif",
+        media::BUILTIN_KALEIDOSCOPE_GIF,
+    );
+    let path = dir.join("scene.json");
+    document.save(&path).unwrap();
+    let mut runtime = Runtime::new(Document::load(&path).unwrap(), None).unwrap();
+    let rgb = Arc::new(Link::default());
+    runtime.attach_rgb("a", vec![], factory(&rgb)).unwrap();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+    let when_absent = runtime.host.status("a").unwrap();
+    assert!(runtime.lcd_status("lcd").is_none());
+    assert_eq!(runtime.document(), &document);
+
+    let lcd = Arc::new(Link {
+        fail_open: AtomicBool::new(true),
+        ..Link::default()
+    });
+    let opened = lcd.clone();
+    let root = dir.clone();
+    runtime
+        .attach_lcd(
+            "lcd",
+            vec!["hid:reopen-builtin-gif".into()],
+            Arc::new(move |config, _| {
+                opened.calls.fetch_add(1, Ordering::SeqCst);
+                if opened.fail_open.load(Ordering::SeqCst) {
+                    return Err("Stand LCD unavailable".into());
+                }
+                Ok((
+                    lcd::Controller::new(config, &Assets::new(root.clone())?)?,
+                    Box::new(Reports(opened.clone())),
+                ))
+            }),
+        )
+        .unwrap();
+    runtime.enable_output_recovery("lcd").unwrap();
+    wait(|| runtime.lcd_status("lcd").unwrap().phase == lcd_worker::Phase::Failed);
+    let failed = runtime.lcd_status("lcd").unwrap();
+    assert_eq!(failed.error.as_deref(), Some("Stand LCD unavailable"));
+    tick(&mut runtime, &mut now);
+    wait(|| runtime.host.status("a").unwrap().submitted > when_absent.submitted);
+    assert_eq!(lcd.calls.load(Ordering::SeqCst), 1);
+    let when_unavailable = runtime.host.status("a").unwrap();
+    assert_eq!(when_unavailable.generation, when_absent.generation);
+
+    lcd.fail_open.store(false, Ordering::SeqCst);
+    now += 1_000_000;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut first_jpeg = None;
+    let recovered = loop {
+        tick(&mut runtime, &mut now);
+        let snapshot = runtime.lcd_status("lcd").unwrap();
+        if snapshot.frames_sent > 0 {
+            if first_jpeg
+                .as_ref()
+                .is_some_and(|first| first != &snapshot.preview)
+            {
+                break snapshot;
+            }
+            if first_jpeg.is_none() {
+                validate_jpeg(&snapshot.preview).unwrap();
+                first_jpeg = Some(snapshot.preview);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Saved GIF did not resume animation"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    validate_jpeg(&recovered.preview).unwrap();
+    assert_ne!(recovered.generation, failed.generation);
+    assert_eq!(lcd.calls.load(Ordering::SeqCst), 2);
+    let after = runtime.host.status("a").unwrap();
+    assert_eq!(after.generation, when_absent.generation);
+    assert!(after.submitted > when_unavailable.submitted);
+    assert_eq!(rgb.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.document(), &document);
+    assert_eq!(Document::load(&path).unwrap(), document);
+    drain(&mut runtime);
+    remove_lcd_assets(runtime, dir);
+}
+
+#[test]
 fn recovery_lcd_reopens_after_real_frame_and_republishes_current_off() {
     let mut runtime = runtime();
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2771,7 +2871,11 @@ fn resume_restores_rgb_while_the_previous_lcd_write_is_still_draining() {
         }
     }
 
-    let (document, dir) = arrival_lcd_document(runtime().document().clone(), "resume-held-write");
+    let (document, dir) = arrival_lcd_document(
+        runtime().document().clone(),
+        "resume-held-write",
+        ARRIVAL_LCD_MEDIA,
+    );
     let mut runtime = Runtime::new(document, None).unwrap();
     let lcd = Arc::new(Link::default());
     let rgb = Arc::new(Link::default());
