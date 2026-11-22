@@ -372,6 +372,7 @@ impl Stand {
             routes: vec![ambient::Route {
                 device: "ambient".into(),
                 source: "screen".into(),
+                scene_edges: false,
                 enabled: true,
                 zone: Zone::linear(150, false, Mode::ScreenCopy).unwrap(),
                 processing: Settings::default(),
@@ -1476,6 +1477,70 @@ fn resume_without_suspend_drains_old_owner_and_duplicate_resume_keeps_refresh_ge
     let outputs = runtime.output_plan();
     runtime.request_outputs_for(document, outputs).unwrap();
 }
+#[test]
+fn scene_edges_source_roundtrips_and_renders_without_monitor_capture() {
+    use crate::ui::{Page, editor::Editor};
+
+    let stand = Stand::new();
+    let mut editor = Editor {
+        document: stand.document.clone(),
+        page: Page::Ambient,
+        index: 0,
+    };
+    let source = editor
+        .fields()
+        .into_iter()
+        .find(|f| f.key == "source")
+        .unwrap();
+    let (_, value) = source
+        .choices
+        .iter()
+        .find(|(label, _)| label == "Края общей сцены")
+        .unwrap();
+    editor.set("source", value).unwrap();
+    let path = stand.root.join("scene-edges.json");
+    editor.document.save(&path).unwrap();
+    editor.document = Document::load(&path).unwrap();
+    assert_eq!(
+        editor
+            .fields()
+            .into_iter()
+            .find(|f| f.key == "source")
+            .unwrap()
+            .value,
+        *value
+    );
+    let mut runtime = Runtime::new(editor.document.clone(), None).unwrap();
+    runtime
+        .attach_capture(Arc::new(|_| panic!("scene edges must not start capture")))
+        .unwrap();
+    assert!(runtime.capture_status().is_none());
+    runtime.tick(now(), wall()).unwrap();
+    let frame = runtime.host().frame("ambient").unwrap();
+    assert_eq!(frame.len(), 150);
+    assert_eq!(frame[0], runtime.host().frame("body").unwrap()[0]);
+    assert!(frame.iter().any(|color| *color != Rgb::default()));
+    assert_eq!(
+        runtime.host().preview().len(),
+        stand.document.lighting.setup.canvas.points.len()
+    );
+    let mut changed = runtime.document().lighting.scene.clone();
+    changed.brightness = 0;
+    runtime.set_scene(changed).unwrap();
+    runtime.tick(now(), wall()).unwrap();
+    assert!(
+        runtime
+            .host()
+            .frame("ambient")
+            .unwrap()
+            .iter()
+            .all(|color| *color == Rgb::default())
+    );
+
+    editor.set("source", "screen").unwrap();
+    assert_eq!(editor.document.ambient, stand.document.ambient);
+}
+
 #[test]
 fn terminal_capture_invalidation_removes_old_host_color() {
     use std::sync::atomic::AtomicBool;

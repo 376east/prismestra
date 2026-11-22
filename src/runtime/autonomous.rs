@@ -138,6 +138,12 @@ impl Host {
             autonomous: false,
         })
     }
+    pub(crate) fn set_scene_canvas(&mut self, canvas: Option<crate::devices::Canvas>) {
+        self.core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .scene_canvas = canvas;
+    }
     /// Explicit real-clock mode. Deterministic/manual callers remain thread-free by default.
     pub fn enable_autonomous(&mut self) -> Result<(), String> {
         if self

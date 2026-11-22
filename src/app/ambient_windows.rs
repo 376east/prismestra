@@ -21,7 +21,7 @@ pub struct Bindings {
 impl Bindings {
     pub fn validate(&self, config: &ambient::Config) -> Result<(), String> {
         self.validate_partial(config)?;
-        for route in config.routes.iter().filter(|r| r.enabled) {
+        for route in config.routes.iter().filter(|r| r.enabled && !r.scene_edges) {
             if !self.monitors.iter().any(|m| m.source == route.source) {
                 return Err("Enabled ambient route has no local monitor binding".into());
             }

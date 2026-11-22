@@ -314,10 +314,11 @@ impl Runtime {
         schedule.configure(document.lighting.schedule.clone(), &mut |ledger| {
             store.persist(desired, ledger)
         })?;
-        let host = Host::new(
+        let mut host = Host::new(
             document.lighting.setup.clone(),
             document.lighting.scene.clone(),
         )?;
+        host.set_scene_canvas(document.ambient.render_canvas(&document.lighting.setup));
         let point_targets = Self::point_targets(&document);
         let colors = vec![Rgb::default(); document.lighting.setup.canvas.points.len()];
         let mut value = Self {
@@ -966,6 +967,7 @@ impl Runtime {
                         document.lighting.setup.clone(),
                         document.lighting.scene.clone(),
                     )?;
+                    host.set_scene_canvas(document.ambient.render_canvas(&document.lighting.setup));
                     for d in &document.lighting.setup.devices {
                         if d.role != Role::Lcd {
                             let target = if document.lighting.groups.door.contains(&d.id) {
@@ -1530,6 +1532,10 @@ impl Runtime {
         {
             return Err("Previous capture owner is still draining".into());
         }
+        if self.document.ambient.scene_edges_without_capture() {
+            self.capture_factory = Some(factory);
+            return Ok(());
+        }
         let generation = self.next_generation()?;
         let f = factory.clone();
         self.capture = Some(capture_worker::Worker::start(
@@ -1548,7 +1554,13 @@ impl Runtime {
     }
     fn clear_capture_intent(&mut self) -> Result<(), String> {
         self.host.clear_external_feed();
-        for route in &self.document.ambient.routes {
+        for route in self
+            .document
+            .ambient
+            .routes
+            .iter()
+            .filter(|route| !route.scene_edges)
+        {
             self.host.set_external(
                 &route.device,
                 vec![crate::lighting::color::Rgb::default(); route.zone.leds],
@@ -1746,7 +1758,9 @@ impl Runtime {
         // owner that is still stopping is deferred to its own recovery.
         self.restart_registered_rgb(None, retry_action_required)?;
         self.restart_registered_lcd(None)?;
-        if let Some(f) = self.capture_factory.clone() {
+        if !self.document.ambient.scene_edges_without_capture()
+            && let Some(f) = self.capture_factory.clone()
+        {
             let generation = self.next_generation()?;
             self.capture = Some(capture_worker::Worker::start(
                 generation,

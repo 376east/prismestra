@@ -10,6 +10,8 @@ Device topology, output groups, LCD media, screen capture and temperature routes
 
 **Scene File** opens a separate composition preview in the library or scene editor. It starts with a copy of the current draft effect. You can add color layers, set layer opacity, choose a region for one logical LCD and choose the ordered edges for one logical strip. **Open File** restores the composition from a scene JSON file. **Save File** writes the composition and the logical assignments. The preview draws the LCD and strip from the same composed frame. Use the existing library for named RGB scenes and the profile for physical output. Source: [scene files](../src/app/scene_file.rs), [preview](../src/app/scene_file/preview.rs).
 
+In **Screen**, choose **Scene edges** as the strip source to follow the active RGB scene. LEDs sample the perimeter clockwise from the top left. The existing reverse setting flips the order. The profile keeps the selected source and retains the monitor settings for switching back. A strip using scene edges does not need a local monitor binding. [Routing and geometry](../src/app/ambient.rs)
+
 Closing the editor first requests the latest RGB draft and waits for its atomic save. An error or timeout cancels closing instead of discarding changes. Unsaved device/connection/source forms still require Apply or Revert. The resident session's Stop and Exit paths remain distinct. Source: [close handshake](../src/ui/windows/modern.rs), [resident session](../src/ui/windows/resident.rs).
 
 ## ARGB channels

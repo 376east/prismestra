@@ -81,6 +81,7 @@ impl Worker {
         let routes = config
             .routes
             .iter()
+            .filter(|r| !r.scene_edges)
             .map(|r| {
                 let source = config.sources.iter().find(|s| s.key == r.source).unwrap();
                 (
@@ -469,6 +470,7 @@ mod tests {
             routes: vec![ambient::Route {
                 device: "strip".into(),
                 source: "monitor".into(),
+                scene_edges: false,
                 enabled: true,
                 zone: Zone::linear(2, false, Mode::ScreenCopy).unwrap(),
                 processing: Settings::default(),
