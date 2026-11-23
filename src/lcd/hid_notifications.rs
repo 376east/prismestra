@@ -1,4 +1,4 @@
-//! Read-only HID and Bluetooth radio interface arrivals.
+//! Read-only HID interface changes and Bluetooth radio arrivals.
 //!
 //! Register before enumerating existing interfaces, and unregister outside the callback:
 //! <https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_register_notification>
@@ -35,6 +35,7 @@ struct Target {
     present: bool,
     pending: bool,
     departed: bool,
+    pending_removal: bool,
     pending_reappeared: bool,
     // Existing targets and callbacks win over the initial metadata snapshot.
     observed_event: bool,
@@ -85,6 +86,7 @@ impl State {
                             present: false,
                             pending: false,
                             departed: false,
+                            pending_removal: false,
                             pending_reappeared: false,
                             observed_event: false,
                         }
@@ -127,6 +129,7 @@ impl State {
             {
                 target.observed_event = true;
                 if !present {
+                    target.pending_removal |= !target.departed;
                     target.pending = false;
                     target.pending_reappeared = false;
                 } else if !target.present {
@@ -160,6 +163,17 @@ impl State {
             }
         }
         arrivals
+    }
+
+    fn take_changes(&mut self) -> (Vec<String>, Vec<Arrival>) {
+        let removals = self
+            .targets
+            .iter_mut()
+            .filter_map(|target| {
+                std::mem::take(&mut target.pending_removal).then(|| target.path.clone())
+            })
+            .collect();
+        (removals, self.take_arrivals())
     }
 }
 
@@ -257,15 +271,16 @@ impl Watch {
             .finish(snapshot)
     }
 
-    /// Coalesces each target's absent -> present transitions until consumed.
-    pub fn take_arrivals(&mut self) -> Vec<Arrival> {
+    /// Drain removals before arrivals, including when a target returned before
+    /// the owner serviced the removal. Take both under the same callback lock.
+    pub fn take_changes(&mut self) -> (Vec<String>, Vec<Arrival>) {
         self.context
             .as_ref()
             .expect("live HID watch")
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take_arrivals()
+            .take_changes()
     }
 
     pub fn take_radio_arrival(&mut self) -> bool {
@@ -416,13 +431,16 @@ mod tests {
     fn repeated_transitions_coalesce_without_losing_rearrival() {
         let mut state = State::default();
         targets(&mut state, &["a"], &["a"]);
-        state.take_arrivals();
+        assert_eq!(state.take_changes(), (vec![], vec![arrival("a", false)]));
         for _ in 0..5 {
             state.event("a", false);
             state.event("a", true);
         }
-        assert_eq!(state.take_arrivals(), [arrival("a", true)]);
-        assert!(state.take_arrivals().is_empty());
+        assert_eq!(
+            state.take_changes(),
+            (vec!["a".into()], vec![arrival("a", true)])
+        );
+        assert_eq!(state.take_changes(), (vec![], vec![]));
     }
 
     #[test]
@@ -430,7 +448,7 @@ mod tests {
         let mut state = State::default();
         targets(&mut state, &["bound"], &["bound"]);
         state.event("bound", false);
-        assert!(state.take_arrivals().is_empty());
+        assert_eq!(state.take_changes(), (vec!["bound".into()], vec![]));
 
         state.event("BOUND", true);
         state.event("bound", false);
@@ -586,7 +604,7 @@ mod tests {
     fn native_registration_and_unregister_without_device_access() {
         let mut watch = Watch::new().expect("register read-only HID class notifications");
         watch.set_targets(Vec::new()).unwrap();
-        assert!(watch.take_arrivals().is_empty());
+        assert_eq!(watch.take_changes(), (vec![], vec![]));
         drop(watch);
     }
 }
