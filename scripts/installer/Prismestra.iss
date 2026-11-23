@@ -65,6 +65,7 @@ var
   VcRuntimeRestartRequired: Boolean;
 #ifndef LifecycleTest
   WebViewProbeExtracted: Boolean;
+  LegacyStartupPermissionsDeferred: Boolean;
 #endif
 
 function InstallPath: String;
@@ -345,12 +346,10 @@ begin
   end;
   Code := LegacyStartup('Disable', SID);
   { Exact exit codes from the hash-verified helper. Its JSON remains in the log. }
-  if (Code = 20) or (Code = 21) then begin
-    Log('Profile imported; previous sign-in tasks kept because Task Scheduler permissions could not be verified.');
-    if not WizardSilent then
-      SuppressibleMsgBox('Your Prismestra profile was imported. Setup kept your previous sign-in tasks enabled because it could not verify Task Scheduler permissions.',
-        mbInformation, MB_OK, IDOK);
-  end else if Code <> 0 then
+  LegacyStartupPermissionsDeferred := (Code = 20) or (Code = 21);
+  if LegacyStartupPermissionsDeferred then
+    Log('Profile imported. Setup kept the old Prismestra sign-in tasks enabled because it could not verify Task Scheduler permissions.')
+  else if Code <> 0 then
     Log('Legacy startup migration was deferred; previous startup definitions were preserved.');
 end;
 #endif
@@ -454,6 +453,14 @@ begin
   if (Step = ssDone) and not WizardSilent and not RebootRequired and
     WizardIsTaskSelected('launch') and not RunOriginalInstalledCommand('--setup-launch-installed') then
     Log('Prismestra start deferred. Open it from the Start menu under your ordinary account.');
+#ifndef LifecycleTest
+  if (Step = ssDone) and not WizardSilent and LegacyStartupPermissionsDeferred then
+    SuppressibleMsgBox(
+      'Your Prismestra profile was imported. Setup kept the old Prismestra sign-in tasks enabled because it could not verify Task Scheduler permissions.' +
+      #13#10#13#10 +
+      'In Task Scheduler, review only the entries whose actions reference the folder where you ran the previous version of Prismestra. See the Setup log for the exact reason.',
+      mbInformation, MB_OK, IDOK);
+#endif
 end;
 
 procedure RemoveOwnedStartup;

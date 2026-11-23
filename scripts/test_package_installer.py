@@ -307,10 +307,21 @@ exit 0
         self.assertRegex(
             legacy,
             r"Code := LegacyStartup\('Disable', SID\);\s*(?:\{[^}]*\}\s*)?"
-            r"if \(Code = 20\) or \(Code = 21\) then begin\s*Log\([^\n]*\);"
-            r"\s*if not WizardSilent then\s*SuppressibleMsgBox\(",
+            r"LegacyStartupPermissionsDeferred := \(Code = 20\) or \(Code = 21\);"
+            r"\s*if LegacyStartupPermissionsDeferred then\s*Log\(",
         )
         self.assertEqual(source.count("RetireLegacyStartup"), 2)
+        self.assertEqual(source.count("SuppressibleMsgBox("), 1)
+        finish = source.split("if (Step = ssDone)", 1)[1].split("procedure RemoveOwnedStartup;", 1)[0]
+        self.assertRegex(
+            finish,
+            r"if \(Step = ssDone\) and not WizardSilent and LegacyStartupPermissionsDeferred then"
+            r"\s*SuppressibleMsgBox\(",
+        )
+        self.assertLess(finish.index("--setup-launch-installed"), finish.index("SuppressibleMsgBox("))
+        self.assertIn("old Prismestra sign-in tasks", finish)
+        self.assertIn("entries whose actions reference the folder", finish)
+        self.assertIn("See the Setup log", finish)
 
     @unittest.skipUnless(os.name == "nt", "Requires the x64 Windows Rust toolchain")
     def test_builds_webview_probe_without_a_redistributable_and_checks_versions(self):
