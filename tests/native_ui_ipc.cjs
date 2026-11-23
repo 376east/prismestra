@@ -590,6 +590,27 @@ console.log('PASS: candidate identity, applied precedence, metadata replacement,
  console.log('PASS: one rescan from an empty profile; late candidate becomes an applied device');
 }
 {
+ const empty={...foundState,pending:false,devices:[],draftDevices:[],deviceCandidates:[],startupDiscoveryRetry:false};
+ const summary=find('#startup-empty-search');
+ vm.runInContext('view="library";pendingView=null',context);
+ receiveDeviceState('snapshot',empty);
+ assert.equal(summary.hidden,true);
+ receiveDeviceState('status',{startupEmptySearchResult:'continuing',startupDiscoveryRetry:true});
+ assert.equal(summary.hidden,false);
+ assert.match(summary.textContent,/пока не найдены.*продолжится в фоне/);
+ receiveDeviceState('status',{startupDiscoveryRetry:false});
+ assert.equal(summary.hidden,false,'a later scan keeps the first result visible');
+ vm.runInContext('view="devices";pendingView=null',context);
+ receiveDeviceState('snapshot',{...empty,startupEmptySearchResult:'continuing'});
+ assert.equal(summary.hidden,false);
+ receiveDeviceState('status',{deviceCandidates:[foundLcd],pending:true});
+ assert.equal(summary.hidden,true,'the late proposal replaces the empty result during auto-apply');
+ receiveDeviceState('snapshot',{...empty,startupEmptySearchResult:'complete',startupDiscoveryRetry:true});
+ assert.equal(summary.hidden,false);
+ assert.match(summary.textContent,/Автопоиск завершён.*не найдены/);
+ console.log('PASS: a provisional empty result persists between scans and yields to a late candidate or completion');
+}
+{
  const applied={...foundRgb,leds:1};
  const partial={...initial,devices:[applied],draftDevices:[applied],startupDiscoveryRetry:false,
   nativeAux:{page:'devices',fields:[{id:714,label:'Тип',kind:'select',enabled:true,value:'openrgb',choices:[]}],actions:[],notes:[]},

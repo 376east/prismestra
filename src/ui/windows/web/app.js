@@ -254,6 +254,14 @@ function syncControls(keepRetryFocus) {
  syncOutputRetries(keepRetryFocus);
  const discoveryHelp=$('#startup-discovery-help');
  if(discoveryHelp)discoveryHelp.hidden=state?.startupDiscoveryUnknownController!==true;
+ const emptySearch=$('#startup-empty-search');
+ if(emptySearch){
+  const result=!state?.devices.length&&!state?.deviceCandidates?.length ? state?.startupEmptySearchResult : null;
+  const message=result==='continuing'?'Поддерживаемые устройства пока не найдены. Автопоиск продолжится в фоне.'
+   :result==='complete'?'Автопоиск завершён. Поддерживаемые устройства не найдены.':'';
+  emptySearch.hidden=!message;
+  if(emptySearch.textContent!==message)emptySearch.textContent=message;
+ }
  $('#save-status').textContent=busy()&&state?'Выполняется…':state?.dirty?'Профиль изменён':'Локальный профиль';
  if(draft){$('#master-brightness').value=draft.brightness;$('#master-value').textContent=draft.brightness+'%';}
  const status=$('.scene-status');if(status)status.textContent=changed()?'Изменения ещё не применены':sourceNeedsApply()?'Для источника нужно применить сцену':'Эта версия применена';
@@ -302,7 +310,7 @@ function renderLibrary() {
   ? 'В профиле только LCD. Фон и показания температуры настраиваются отдельно от RGB-сцен.'
   : 'Сцены сохраняют параметры RGB. Устройства и LCD сохраняются в профиле.';
  const outputAction=lcdOnly?pageButton('lcd','Настроить LCD',true):startupDiscoveryAction();
- return heading('Сцены',description,outputAction+action(icon('plus')+' Новая сцена','new',!lcdOnly&&!state.startupDiscoveryRetry))+`
+ return heading('Сцены',description,outputAction+action(icon('plus')+' Новая сцена','new',!lcdOnly&&!state.startupDiscoveryRetry))+startupSearchSummary+`
   <div class="toolbar">
    <select id="library-effect" aria-label="Тип эффекта"><option value="">Все эффекты</option>${options}</select>
    <output class="muted" aria-live="polite">Показано ${Math.min(libraryLimit,list.length)} из ${list.length}</output>
@@ -534,6 +542,7 @@ function outputPageAvailable(page) {
 function startupDiscoveryAction() {
  return state.startupDiscoveryRetry ? action('Найти устройства','retry-startup-discovery',true) : '';
 }
+const startupSearchSummary='<p id="startup-empty-search" class="device-summary" role="status" aria-atomic="true" hidden></p>';
 
 function renderDevices(candidates) {
  const firstSetup=state.pending===true && !state.devices.length && candidates.length>0 && !pageHasEdits();
@@ -566,6 +575,7 @@ function renderDevices(candidates) {
   ? (candidates.length===1?'Prismestra добавляет найденное устройство в профиль.':'Prismestra добавляет найденные устройства в профиль.')
   : 'Изменения действуют после «Применить». Профиль сохраняется отдельно.';
  return heading('Устройства',description,shortcuts)
+  + startupSearchSummary
   + '<p id="startup-discovery-help" class="device-summary" hidden>OpenRGB не определил тип одного из устройств. Проверьте, есть ли подходящий тип в «Добавить устройство». После применения можно настроить привязку в «Подключениях».</p>'
   + `<div class="device-list">${entries}</div>`
   + (firstSetup?'':`<div id="device-properties" style="margin-top:24px">${nativeProperties()}</div>`);

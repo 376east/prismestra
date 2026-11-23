@@ -52,6 +52,7 @@ pub(super) struct Startup {
     reported_phase: &'static str,
     discovery_issues: Vec<String>,
     unknown_openrgb_controller: bool,
+    completed_empty_pass: bool,
     enabled: bool,
     initialized: bool,
     handover: Option<JoinHandle<Result<(), String>>>,
@@ -78,6 +79,7 @@ impl Startup {
             reported_phase: "",
             discovery_issues: Vec::new(),
             unknown_openrgb_controller: false,
+            completed_empty_pass: false,
             enabled,
             initialized: false,
             handover: None,
@@ -138,6 +140,7 @@ impl Startup {
             self.attempts = 0;
             self.search_limit = 1;
             self.next = now;
+            self.completed_empty_pass = false;
         }
         self.enabled = true;
         self.phase = "discovering";
@@ -158,6 +161,21 @@ impl Startup {
             self.attempts += 1;
         }
         self.phase = "discovering";
+    }
+
+    fn record_search_result(&mut self, empty: bool, now: Instant) {
+        self.phase = "discovered";
+        self.completed_empty_pass = empty;
+        self.schedule_next_search(now);
+    }
+
+    fn empty_search_result(&self) -> Option<&'static str> {
+        match self.phase {
+            "complete" => Some("complete"),
+            "discovered" if self.attempts >= self.search_limit => Some("complete"),
+            _ if self.enabled && self.completed_empty_pass => Some("continuing"),
+            _ => None,
+        }
     }
 
     fn schedule_next_search(&mut self, now: Instant) {
@@ -182,6 +200,16 @@ impl Startup {
 }
 
 impl App {
+    pub(super) fn startup_empty_search_result(&self) -> Option<&'static str> {
+        if self.path != self.first_run.path
+            || self.context_revision != self.first_run.context
+            || !self.runtime.document().lighting.setup.devices.is_empty()
+        {
+            return None;
+        }
+        self.first_run.empty_search_result()
+    }
+
     pub(super) fn startup_discovery_unknown_controller(&self) -> bool {
         self.first_run.unknown_openrgb_controller
             && self.path == self.first_run.path
@@ -488,8 +516,8 @@ impl App {
                     self.status = "Ищу остальные поддерживаемые устройства…".into();
                     return Ok(true);
                 }
-                self.first_run.phase = "discovered";
-                self.status = if self.runtime.document().lighting.setup.devices.is_empty() {
+                let empty = self.runtime.document().lighting.setup.devices.is_empty();
+                self.status = if empty {
                     format!(
                         "Поддерживаемые устройства пока не найдены. {}",
                         plan.issues.join("; ")
@@ -499,7 +527,7 @@ impl App {
                 } else {
                     format!("Поиск устройств: {}", plan.issues.join("; "))
                 };
-                self.first_run.schedule_next_search(Instant::now());
+                self.first_run.record_search_result(empty, Instant::now());
                 return Ok(true);
             }
             let outputs = plan.local.prepare(&plan.document, &self.asset_root)?;
@@ -583,6 +611,42 @@ mod tests {
     use crate::devices::Driver;
 
     #[test]
+    fn empty_result_is_visible_before_the_automatic_search_finishes() {
+        let mut startup = Startup::new(true);
+        startup.initialized = true;
+        let start = startup.next;
+        // Model the empty SDK inventory window, without sleeping or opening adapters.
+        let probe_time = Duration::from_secs(6);
+        let mut pass_start = start;
+
+        assert_eq!(startup.empty_search_result(), None);
+        for attempt in 1..=STARTUP_SEARCHES {
+            assert!(startup.search_due(pass_start));
+            startup.record_search_started();
+            assert_eq!(startup.attempts, attempt);
+            assert_eq!(
+                startup.empty_search_result(),
+                (attempt > 1).then_some("continuing"),
+                "a later in-flight pass keeps the earlier empty observation"
+            );
+            let finished = pass_start + probe_time;
+            startup.record_search_result(true, finished);
+            if attempt < STARTUP_SEARCHES {
+                assert_eq!(startup.empty_search_result(), Some("continuing"));
+                assert!(startup.can_retry_search(finished));
+                assert!(!startup.complete_search());
+                pass_start = finished + STARTUP_SEARCH_INTERVAL;
+                assert!(!startup.search_due(pass_start - Duration::from_millis(1)));
+            } else {
+                assert_eq!(startup.empty_search_result(), Some("complete"));
+                assert!(startup.complete_search());
+                assert!(startup.can_retry_search(finished));
+                assert_eq!(finished - start, Duration::from_secs(78));
+            }
+        }
+    }
+
+    #[test]
     fn early_click_is_admitted_when_the_automatic_pass_is_due_but_has_not_started() {
         let (_fixture, profile, _, _) = crate::app::installed::tests::fresh_profile();
         let document = Document::load(&profile).unwrap();
@@ -626,14 +690,14 @@ mod tests {
         let first_finished = startup.next + Duration::from_secs(6);
         startup.initialized = true;
         startup.record_search_started();
-        startup.phase = "discovered";
-        startup.schedule_next_search(first_finished);
+        startup.record_search_result(true, first_finished);
         let second_automatic = first_finished + Duration::from_secs(30);
 
         assert!(startup.can_retry_search(first_finished));
         assert!(startup.can_retry_search(second_automatic));
         assert!(!startup.search_due(second_automatic - Duration::from_millis(1)));
         startup.retry_search(&document, &profile, 1, first_finished);
+        assert_eq!(startup.empty_search_result(), Some("continuing"));
         assert!(!startup.can_retry_search(first_finished));
         assert!(startup.search_due(first_finished));
         startup.record_search_started();
