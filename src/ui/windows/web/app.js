@@ -232,7 +232,7 @@ function syncControls(keepRetryFocus) {
  const runtimeDetail=$('#native-runtime-detail');if(runtimeDetail)runtimeDetail.textContent=state?.detail||'';
  if(sceneActivation)syncSceneActivation(sceneActivation.id,sceneActivation);
  const editorLamp=$('#editor-lamp-status');
- if(editorLamp)editorLamp.textContent=sceneActivation?.editor && sceneActivation.id===selectedId ? sceneActivation.message : '';
+ if(editorLamp)editorLamp.textContent=sceneActivation?.editor && sceneActivation.id===selectedId && same(sceneActivation.scene,draft) ? sceneActivationMessage(sceneActivation) : '';
  const audioSource=$('#scene-audio-source');
  if(audioSource)audioSource.textContent=state?.native
   ? state.audioError&&audioEffects.has(state.scene.effect)?'Системный звук недоступен. Повторяю подключение.'
@@ -776,13 +776,29 @@ function activateLibraryEntry(entry,editor=false) {
  if(!entry.builtIn)command.id=entry.id;
  if(!send(command))return;
  if(sceneActivation)syncSceneActivation(sceneActivation.id,null);
- sceneActivation={request,id:entry.id,name:entry.name,editor,pending:true,message:`Включаем «${entry.name}»…`};
+ sceneActivation={request,id:entry.id,name:entry.name,scene:entry.scene,binding:entry.aliceLamp,editor,pending:true,message:`Включаем «${entry.name}»…`};
  syncControls();
+}
+function sceneActivationMessage(result) {
+ return result?.lampMessage ? result.message+' '+result.lampMessage : result?.message||'';
+}
+function clearSceneLamp(id) {
+ if(!sceneActivation?.binding || sceneActivation.id!==id)return false;
+ sceneActivation.binding=null;
+ sceneActivation.lampMessage='';
+ return true;
+}
+function reconcileSceneLamp() {
+ if(!sceneActivation?.binding)return;
+ const {id,name,scene,binding,applied}=sceneActivation;
+ const entry=state.library.find(item=>item.id===id);
+ if(!state.native || !entry || entry.name!==name || !same(entry.scene,scene) || !same(entry.aliceLamp,binding) ||
+    (applied && !same(state.scene,scene)))clearSceneLamp(id);
 }
 function syncSceneActivation(id,result) {
  const key=CSS.escape(id);
  const status=$('#scene-activation-'+key);
- const message=result?.message||'';
+ const message=sceneActivationMessage(result);
  if(status&&status.textContent!==message)status.textContent=message;
  const devices=$('#scene-devices-'+key);
  if(devices)devices.hidden=!(result?.applied&&state?.native);
@@ -794,13 +810,12 @@ function receiveSceneActivation({request,status,message,lamp}) {
  else return;
  sceneActivation.pending=false;
  sceneActivation.applied=status==='applied';
- sceneActivation.localMessage=sceneActivation.message;
- if(lamp)sceneActivation.message+=' '+lamp;
+ if(sceneActivation.applied&&sceneActivation.binding)sceneActivation.lampMessage=lamp;
  syncControls();
 }
 function receiveSceneLamp({request,message}) {
- if(sceneActivation?.request!==request||!sceneActivation.applied)return;
- sceneActivation.message=sceneActivation.localMessage+' '+message;
+ if(sceneActivation?.request!==request||!sceneActivation.applied||!sceneActivation.binding)return;
+ sceneActivation.lampMessage=message;
  syncControls();
 }
 function applyEditorScene() {
@@ -857,6 +872,7 @@ window.prismestraReceive = message => {
    const acknowledged=awaitingCommandAck;awaitingCommandAck=false;completeStageAck();
    if(retryScope()!==message.state.deviceActivity?.retryScope)outputRetries.clear();
    state=message.state;
+   reconcileSceneLamp();
    sceneActivationRequest=Math.max(sceneActivationRequest,state.lastSceneApplyRequest??0);
    if(Array.isArray(state.effects)){
     effects=Object.create(null);
@@ -909,6 +925,7 @@ window.prismestraReceive = message => {
    const nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));
    if(message.state.deviceActivity&&retryScope()!==message.state.deviceActivity.retryScope)outputRetries.clear();
    Object.assign(state,message.state);
+   reconcileSceneLamp();
    reconcileRetryActivity(message.state.deviceActivity);
    if(state.pending||Object.hasOwn(message.state,'mapConnection'))window.outputMap?.update(state);
    followActiveScene();
@@ -966,6 +983,7 @@ function configureAliceBinding(selection) {
  aliceSelection();
 }
 function receiveAliceBinding({id,error}) {
+ if(!error&&clearSceneLamp(id))syncControls();
  if(!aliceScene||aliceScene.id!==id)return;
  aliceBindingPending=false;
  if(error){$('#alice-status').textContent=error;aliceSelection();return;}

@@ -1115,7 +1115,56 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
  find('#footer-apply').onclick();
  assert.equal(commands.at(-1).id,light.id,'ordinary editor Apply uses the same saved scene identity');
  const editorApply=commands.at(-1);
- bridge({kind:'scene_activation',request:editorApply.request,status:'applied'});
+ const confirmLamp=request=>bridge({kind:'scene_lamp',request,message:'Яндекс подтвердил команду лампе.'});
+ const acceptScene=request=>bridge({kind:'scene_activation',request,status:'applied',lamp:'Применяем яркость лампы сцены…'});
+ const lampStatus=find('#scene-activation-lamp-scene');
+ const editorStatus=find('#editor-lamp-status');
+ acceptScene(editorApply.request);
+ confirmLamp(editorApply.request);
+ assert.match(editorStatus.textContent,/Яндекс подтвердил/);
+ const edited={...light,scene:{...scene,brightness:58}};
+ receiveDeviceState('snapshot',{...withLibrary,library:[edited,plain]});
+ assert.doesNotMatch(lampStatus.textContent,/Яндекс подтвердил/,'editing a saved scene invalidates the old lamp confirmation');
+ assert.doesNotMatch(editorStatus.textContent,/Яндекс подтвердил/);
+ confirmLamp(editorApply.request);
+ assert.doesNotMatch(lampStatus.textContent,/Яндекс подтвердил/,'late confirmation cannot revive an earlier revision');
+
+ vm.runInContext('view="library"',context);
+ receiveDeviceState('snapshot',{...withLibrary,library:[bound,plain]});
+ click({apply:light.id});
+ const beforeRemoval=commands.at(-1);
+ acceptScene(beforeRemoval.request);
+ confirmLamp(beforeRemoval.request);
+ assert.match(lampStatus.textContent,/Яндекс подтвердил/);
+ bridge({kind:'alice_binding',id:plain.id});
+ bridge({kind:'alice_binding',id:light.id,error:'Не удалось сохранить'});
+ assert.match(lampStatus.textContent,/Яндекс подтвердил/,'an unrelated or failed binding save leaves the receipt intact');
+ bridge({kind:'alice_binding',id:light.id}); // Native success can arrive after the dialog closed.
+ assert.doesNotMatch(lampStatus.textContent,/Яндекс подтвердил/,'successful binding change clears the result before the next snapshot');
+ confirmLamp(beforeRemoval.request);
+ receiveDeviceState('snapshot',withLibrary);
+ assert.match(mainMarkup,/data-alice-scene="lamp-scene"[^>]*>Добавить лампу/);
+ assert.doesNotMatch(lampStatus.textContent,/Яндекс подтвердил/,'unbinding and late confirmation leave the lamp status clear');
+
+ receiveDeviceState('snapshot',{...withLibrary,library:[bound,plain]});
+ confirmLamp(beforeRemoval.request);
+ assert.doesNotMatch(lampStatus.textContent,/Яндекс подтвердил/,'restoring an identical binding does not revive a receipt');
+ click({apply:light.id});
+ const beforeReplacement=commands.at(-1);
+ acceptScene(beforeReplacement.request);
+ receiveDeviceState('snapshot',{...withLibrary,library:[{...bound,aliceLamp:{...bound.aliceLamp,brightness:22}},plain]});
+ confirmLamp(beforeReplacement.request);
+ assert.doesNotMatch(lampStatus.textContent,/Яндекс подтвердил/,'late result does not belong to the replacement binding');
+
+ receiveDeviceState('snapshot',{...withLibrary,library:[bound,plain]});
+ click({apply:light.id});
+ const beforeSwitch=commands.at(-1);
+ acceptScene(beforeSwitch.request);
+ confirmLamp(beforeSwitch.request);
+ receiveDeviceState('status',{scene:plain.scene});
+ assert.doesNotMatch(lampStatus.textContent,/Яндекс подтвердил/,'an external scene switch clears the confirmation');
+ confirmLamp(beforeSwitch.request);
+ assert.doesNotMatch(lampStatus.textContent,/Яндекс подтвердил/);
 }
 console.log('PASS: scene lamp binding IPC, restart snapshot, ordinary Apply, duplicate guard, preview and asynchronous lamp result');
 
