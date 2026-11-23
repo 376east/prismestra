@@ -1371,4 +1371,45 @@ async function checkOutputStatusCopy() {
 }
 console.log('PASS: scene placement uses the device draft and guards navigation and profile save until apply or revert');
 }
-checkOutputStatusCopy().catch(error=>{console.error(error);process.exitCode=1;});
+function checkEnglishStartupPreview() {
+ document.documentElement={lang:'ru'};
+ document.activeElement=null;
+ const preview=vm.createContext({
+  document,window:{addEventListener:(name,fn)=>events[name]=fn,
+   ipc:{postMessage:value=>commands.push(JSON.parse(value))},location:{protocol:'file:',search:'?lang=en'}},
+  requestAnimationFrame:fn=>rafQueue.push(fn),CSS:{escape:value=>value},URLSearchParams,
+  structuredClone,setTimeout:()=>1,clearTimeout(){},console
+ });
+ vm.runInContext(source,preview);
+ const receive=(kind,state)=> {
+  preview.payload={kind,state};
+  vm.runInContext('window.prismestraReceive(payload)',preview);
+ };
+ assert.equal(document.documentElement.lang,'en');
+ assert.match(mainMarkup,/Connecting to Prismestra/);
+ receive('snapshot',{...initial,startupStatus:'searching',status:'Ищу устройства'});
+ assert.match(find('nav').innerHTML,/data-view="devices"[^>]*aria-label="Devices"/);
+ assert.match(mainMarkup,/<h1>Scenes<\/h1>/);
+ assert.match(find('#player-status').textContent,/Looking for supported devices/);
+ events.click({target:{closest:()=>({dataset:{view:'devices'}})}});
+ assert.deepEqual(commands.at(-1),{op:'page',page:'devices'});
+ receive('snapshot',{...initial,editor:{page:'devices',index:0,targets:[],fields:[]},
+  startupStatus:'empty',startupDiscoveryRetry:true,startupEmptySearchResult:'continuing'});
+ assert.match(mainMarkup,/<h1>Devices<\/h1>/);
+ assert.match(mainMarkup,/data-action="retry-startup-discovery"[^>]*>Find devices/);
+ assert.match(find('#startup-empty-search').textContent,/continue in the background/);
+ const retry={dataset:{action:'retry-startup-discovery'},hasAttribute:()=>true};
+ events.click({target:{closest:()=>retry}});
+ assert.deepEqual(commands.at(-1),{op:'retry_startup_discovery'});
+ preview.payload={kind:'error',code:'startupDiscoveryRetry',message:'Сбой <details>'};
+ vm.runInContext('window.prismestraReceive(payload)',preview);
+ assert.match(find('#native-error').innerHTML,/Could not start device search.*Technical details.*Сбой &lt;details&gt;/);
+ assert.doesNotMatch(find('#native-error').innerHTML,/data-action="retry-document"/);
+ receive('status',{startupStatus:'failed',status:'Сбой SDK'});
+ assert.match(find('#player-status').textContent,/Automatic setup could not finish/);
+ assert.equal(find('#player-status').title,'Сбой SDK');
+ receive('status',{startupStatus:null,status:'Сцена сохранена'});
+ assert.equal(find('#player-status').textContent,'Сцена сохранена','unscoped native statuses keep their own text');
+ console.log('PASS: English browser preview translates navigation and startup IPC with original command IDs');
+}
+checkOutputStatusCopy().then(checkEnglishStartupPreview).catch(error=>{console.error(error);process.exitCode=1;});
