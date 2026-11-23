@@ -527,6 +527,7 @@ struct App {
     detail: String,
     was_pending: bool,
     context_revision: u64,
+    profile_revision: u64,
     lcd_image: Vec<u8>,
     lcd_image_size: (u32, u32),
     lcd_frame: (u64, u64),
@@ -2085,6 +2086,7 @@ impl App {
             self.sources.release_lighting();
             self.runtime = Client::new(runtime, self.runtime.background())?;
             self.context_revision = self.context_revision.wrapping_add(1);
+            self.profile_revision = self.profile_revision.wrapping_add(1);
             if portable {
                 // Keep the local binding file for explicit Apply, but never
                 // attach its outputs to a document opened from an archive.
@@ -3264,6 +3266,7 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
         detail: String::new(),
         was_pending: false,
         context_revision: 1,
+        profile_revision: 1,
         lcd_image: vec![],
         lcd_image_size: (0, 0),
         lcd_frame: (0, 0),

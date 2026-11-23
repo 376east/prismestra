@@ -1,7 +1,7 @@
 //! Foreground Alice control. Only explicit commands can write to a lamp.
 use crate::credentials_windows as credentials;
 use crate::transport::winhttp_get::{self, Proxy, Request};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -26,6 +26,9 @@ const RANGE: &str = "devices.capabilities.range";
 const ON: &str = "devices.capabilities.on_off";
 const SIGN_IN_AGAIN: &str = "Доступ к Алисе истёк или отозван. Войдите через Яндекс ID заново.";
 const ACCESS_DENIED: &str = "Яндекс отклонил доступ. Войдите заново и проверьте права на лампу.";
+
+mod bindings;
+pub(super) use bindings::{Binding, Bindings, ManualApply};
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -55,16 +58,8 @@ enum Change {
     Power(bool),
 }
 
-impl Change {
-    fn capability(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Brightness(_) => (RANGE, "brightness"),
-            Self::Power(_) => (ON, "on"),
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Lamp {
     household: String,
     room: String,
@@ -100,6 +95,9 @@ pub(super) struct Session {
     remember_pending: bool,
     saved: bool,
     needs_login: bool,
+    keep_for_scenes: bool,
+    scene_request: Option<u32>,
+    scene_result: Option<(u32, String)>,
 }
 
 impl Session {
@@ -111,8 +109,12 @@ impl Session {
             Action::Status => {}
             Action::Open => self.open_saved()?,
             Action::Cancel => {
-                self.job = None;
-                self.grant = None;
+                if self.scene_request.is_none() {
+                    self.job = None;
+                }
+                if !self.keep_for_scenes {
+                    self.grant = None;
+                }
                 self.message.clear();
                 self.remember_pending = false;
                 self.needs_login = false;
@@ -129,6 +131,7 @@ impl Session {
                     return Err("Дождитесь завершения операции Алисы.".into());
                 }
                 self.grant = None;
+                self.keep_for_scenes = false;
                 let attempt = Attempt::new()?;
                 let listener =
                     TcpListener::bind(HOST).map_err(|_| "Порт входа Алисы 45183 занят.")?;
@@ -179,6 +182,114 @@ impl Session {
         }))
     }
 
+    pub(super) fn keep_for_scenes(&mut self) {
+        self.keep_for_scenes = true;
+    }
+
+    #[cfg(test)]
+    pub(super) fn synthetic_login(&mut self) {
+        self.grant = Some(Grant {
+            token: "fixture-token".into(),
+            ticket: "fixture-ticket".into(),
+            expires: Instant::now() + Duration::from_secs(60),
+            valid_until: None,
+            lamps: lamps(&tests::fixture()).unwrap(),
+        });
+    }
+
+    pub(super) fn binding(
+        &mut self,
+        ticket: &str,
+        index: usize,
+        brightness: u8,
+        allow_power_on: bool,
+    ) -> Result<Binding, String> {
+        self.poll();
+        if self.job.is_some() {
+            return Err("Дождитесь завершения операции Алисы.".into());
+        }
+        if !(1..=100).contains(&brightness) {
+            return Err("Укажите яркость от 1 до 100%.".into());
+        }
+        let lamp = self
+            .grant
+            .as_ref()
+            .filter(|grant| grant.ticket == ticket)
+            .and_then(|grant| grant.lamps.get(index))
+            .cloned()
+            .ok_or("Сначала войдите и выберите лампу заново.")?;
+        Ok(Binding::new(lamp, brightness, allow_power_on))
+    }
+
+    pub(super) fn apply_bound(&mut self, request: u32, binding: Binding) -> Result<(), String> {
+        self.apply_bound_with(
+            request,
+            binding,
+            || {
+                credentials::read_alice()
+                    .map_err(|_| "Не удалось прочитать сохранённый вход Алисы.".into())
+            },
+            api,
+        )
+    }
+
+    pub(super) fn apply_bound_with(
+        &mut self,
+        request: u32,
+        binding: Binding,
+        read_saved: impl FnOnce() -> Result<Option<String>, String> + Send + 'static,
+        mut transport: impl FnMut(&str, &str, Option<&[u8]>, &AtomicBool) -> Result<Value, String>
+        + Send
+        + 'static,
+    ) -> Result<(), String> {
+        // The editor drains each result before accepting another lamp operation.
+        if self.job.is_some() || self.scene_result.is_some() {
+            return Err("Дождитесь завершения операции Алисы и примените сцену заново.".into());
+        }
+        let token = self
+            .grant
+            .as_ref()
+            .filter(|grant| Instant::now() < grant.expires)
+            .map(|grant| grant.token.clone());
+        self.start(
+            "Применяем яркость лампы сцены…",
+            "Яндекс подтвердил команду лампе.",
+            move |cancel| {
+                let saved;
+                let token = if let Some(token) = token.as_deref() {
+                    token
+                } else {
+                    saved = read_saved()?.ok_or("Для лампы сцены войдите через Яндекс ID.")?;
+                    parse_saved(&saved, unix_now()?)?.1
+                };
+                apply_binding(&binding, |path, data| {
+                    if cancel.load(Ordering::Acquire) {
+                        return Err("Команда лампе отменена.".into());
+                    }
+                    transport(path, token, data, cancel)
+                })?;
+                Ok(None)
+            },
+        )?;
+        self.scene_request = Some(request);
+        Ok(())
+    }
+
+    pub(super) fn take_scene_result(&mut self) -> Option<(u32, String)> {
+        if self.scene_request.is_some() {
+            self.poll();
+        }
+        self.scene_result.take()
+    }
+
+    pub(super) fn cancel_scene(&mut self) {
+        if self.scene_request.take().is_some() {
+            self.job = None;
+            self.message.clear();
+        }
+        self.scene_result = None;
+    }
+
     fn open_saved(&mut self) -> Result<(), String> {
         self.open_saved_with(
             || {
@@ -216,10 +327,16 @@ impl Session {
         )
     }
 
-    fn sign_out_with(&mut self, delete: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    pub(super) fn sign_out_with(
+        &mut self,
+        delete: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
         delete()?;
         self.job = None;
         self.grant = None;
+        self.keep_for_scenes = false;
+        self.scene_request = None;
+        self.scene_result = None;
         self.remember_pending = false;
         self.saved = false;
         self.needs_login = true;
@@ -346,6 +463,9 @@ impl Session {
                 }
                 self.message = error;
             }
+        }
+        if let Some(request) = self.scene_request.take() {
+            self.scene_result = Some((request, self.message.clone()));
         }
     }
 }
@@ -735,6 +855,7 @@ fn command(
     data: &Value,
     catalog_caps: &[Value],
     change: Change,
+    allow_power_on: bool,
 ) -> Result<Value, String> {
     if data["status"] != "ok"
         || data["id"] != lamp.id
@@ -766,7 +887,7 @@ fn command(
                 "state":{"instance":"on","value":requested}}]}]}));
         }
     };
-    if !on {
+    if !on && !allow_power_on {
         return Err("Сначала включите выбранную лампу.".into());
     }
     let mut ranges = caps.iter().filter(|value| brightness(value));
@@ -794,17 +915,57 @@ fn command(
     {
         return Err("Выбранная яркость не соответствует диапазону лампы.".into());
     }
-    Ok(json!({"devices":[{"id":lamp.id,"actions":[{"type":RANGE,
-        "state":{"instance":"brightness","value":value,"relative":false}}]}]}))
+    let mut actions = Vec::new();
+    if !on {
+        actions.push(json!({"type":ON,"state":{"instance":"on","value":true}}));
+    }
+    actions.push(
+        json!({"type":RANGE,"state":{"instance":"brightness","value":value,"relative":false}}),
+    );
+    Ok(json!({"devices":[{"id":lamp.id,"actions":actions}]}))
 }
 
 fn apply_with(
     selected: &Lamp,
     change: Change,
+    request: impl FnMut(&str, Option<&[u8]>) -> Result<Value, String>,
+) -> Result<(), String> {
+    apply_payload_with(selected, request, |data, caps| {
+        command(selected, data, caps, change, false)
+    })
+}
+
+fn apply_binding(
+    binding: &Binding,
+    request: impl FnMut(&str, Option<&[u8]>) -> Result<Value, String>,
+) -> Result<(), String> {
+    if !(1..=100).contains(&binding.brightness) {
+        return Err("Укажите яркость от 1 до 100%.".into());
+    }
+    apply_payload_with(&binding.lamp, request, |data, caps| {
+        command(
+            &binding.lamp,
+            data,
+            caps,
+            Change::Brightness(binding.brightness),
+            binding.allow_power_on,
+        )
+    })
+}
+
+fn apply_payload_with(
+    selected: &Lamp,
     mut request: impl FnMut(&str, Option<&[u8]>) -> Result<Value, String>,
+    assemble: impl FnOnce(&Value, &[Value]) -> Result<Value, String>,
 ) -> Result<(), String> {
     let catalog = request("/v1.0/user/info", None)?;
-    if catalog["status"] != "ok" || !lamps(&catalog)?.iter().any(|lamp| lamp == selected) {
+    if catalog["status"] != "ok"
+        || !lamps(&catalog)?.iter().any(|lamp| {
+            lamp.id == selected.id
+                && lamp.room == selected.room
+                && lamp.household == selected.household
+        })
+    {
         return Err(
             "Назначение лампы изменилось. Закройте и снова откройте настройки Алисы.".into(),
         );
@@ -815,31 +976,50 @@ fn apply_with(
         .and_then(|device| device["capabilities"].as_array())
         .ok_or("Яндекс не вернул умения выбранной лампы.")?;
     let data = request(&format!("/v1.0/devices/{}", encode(&selected.id)), None)?;
-    let body = serde_json::to_vec(&command(selected, &data, caps, change)?)
-        .map_err(|_| "Некорректная команда Алисы.")?;
+    let payload = assemble(&data, caps)?;
+    let actions = match payload["devices"].as_array().map(Vec::as_slice) {
+        Some([device]) if device["id"] == selected.id => device["actions"]
+            .as_array()
+            .filter(|actions| !actions.is_empty()),
+        _ => None,
+    }
+    .ok_or("Некорректная команда Алисы.")?;
+    let body = serde_json::to_vec(&payload).map_err(|_| "Некорректная команда Алисы.")?;
     let result = request("/v1.0/devices/actions", Some(&body)).map_err(|error| {
         format!("{error} Результат команды не подтверждён. Автоматического повтора не будет.")
     })?;
-    let (kind, instance) = change.capability();
-    if result["status"] == "ok"
-        && result["devices"].as_array().is_some_and(|devices| {
-            matches!(devices.as_slice(), [device] if device["id"] == selected.id
-            && device["capabilities"].as_array().is_some_and(|caps| matches!(caps.as_slice(),
-                [cap] if cap["type"] == kind && cap["state"]["instance"] == instance
-                    && cap["state"]["action_result"]["status"] == "DONE")))
-        })
-    {
+    if confirms(&result, &selected.id, actions) {
         Ok(())
     } else {
         Err("Яндекс не подтвердил команду. Автоматического повтора не будет.".into())
     }
 }
 
+fn confirms(result: &Value, id: &str, actions: &[Value]) -> bool {
+    result["status"] == "ok"
+        && result["devices"].as_array().is_some_and(|devices| {
+            matches!(devices.as_slice(), [device] if device["id"] == id
+            && device["capabilities"].as_array().is_some_and(|caps| {
+                caps.len() == actions.len() && actions.iter().all(|action| {
+                    caps.iter().filter(|cap| cap["type"] == action["type"]
+                        && cap["state"]["instance"] == action["state"]["instance"]
+                        && cap["state"]["action_result"]["status"] == "DONE").count() == 1
+                })
+            }))
+        })
+}
+
+#[cfg(test)]
+mod scene_apply_slice;
+
+#[cfg(test)]
+pub(super) use tests::fixture as lamp_fixture;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn fixture() -> Value {
+    pub(in crate::ui::windows) fn fixture() -> Value {
         json!({"status":"ok","rooms":[
             {"id":"r","household_id":"h","name":"Кабинет"},
             {"id":"neighbor","household_id":"h","name":"Кухня"}],
