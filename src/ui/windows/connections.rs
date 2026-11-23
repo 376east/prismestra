@@ -102,7 +102,7 @@ impl LayoutReview {
 
 enum LayoutDecision {
     Ready(Vec<LayoutChange>),
-    Confirm(LayoutReview),
+    Confirm(Box<LayoutReview>),
 }
 
 fn layout_decision(
@@ -144,11 +144,11 @@ fn layout_decision(
             );
         }
     } else if !changes.is_empty() {
-        return Ok(LayoutDecision::Confirm(LayoutReview {
+        return Ok(LayoutDecision::Confirm(Box::new(LayoutReview {
             context,
             document: document.clone(),
             changes,
-        }));
+        })));
     }
     Ok(LayoutDecision::Ready(changes))
 }
@@ -1186,7 +1186,7 @@ impl App {
         &mut self,
         revert: bool,
         approved: Option<&LayoutReview>,
-    ) -> Result<Option<LayoutReview>, String> {
+    ) -> Result<Option<Box<LayoutReview>>, String> {
         if self.page != Page::Connections
             || self.shutdown.active()
             || self.connections.pending.is_some()
