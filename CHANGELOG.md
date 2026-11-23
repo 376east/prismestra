@@ -2,6 +2,13 @@
 
 For downloads, see [GitHub Releases](https://github.com/376east/prismestra/releases). For physical device coverage, see the [compatibility table](docs/compatibility.md).
 
+## Unreleased
+
+- The interface defaults to English. Choose Russian in Settings to use it on future launches. [Language settings](https://github.com/376east/prismestra/pull/240)
+- **Apply scene** updates the active scene. **Save to library** stores a version for later. The editor confirms each action separately. [Scene actions](https://github.com/376east/prismestra/pull/240)
+- A saved scene can also set the brightness of a linked Alice lamp. Using Alice requires a separate Yandex ID sign-in under **Settings → Lamp controls**. [Alice lamp controls](https://github.com/376east/prismestra/pull/162) · [Scene lamp binding](https://github.com/376east/prismestra/pull/221)
+- The first OpenRGB scan gives the bundled backend more time to respond if it times out before reporting any controllers. [Initial OpenRGB scan](https://github.com/376east/prismestra/pull/241)
+
 ## Preview 10 (0.1.0.10) · 2026-11-23
 
 ### Discovery, scenes and outputs
