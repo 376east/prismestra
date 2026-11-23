@@ -72,8 +72,19 @@ impl Bindings {
         &self,
         entry: &crate::ui::catalog::Entry,
     ) -> Option<&Binding> {
+        self.lookup(entry)
+            .and_then(|(binding, current)| current.then_some(binding))
+    }
+
+    pub(in crate::ui::windows) fn lookup(
+        &self,
+        entry: &crate::ui::catalog::Entry,
+    ) -> Option<(&Binding, bool)> {
         let binding = self.scenes.get(&entry.id)?;
-        (revision(entry).ok().as_deref() == Some(&binding.scene_revision)).then_some(binding)
+        Some((
+            binding,
+            revision(entry).ok().as_deref() == Some(&binding.scene_revision),
+        ))
     }
 
     pub(in crate::ui::windows) fn set(

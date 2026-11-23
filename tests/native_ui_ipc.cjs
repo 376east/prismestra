@@ -1063,7 +1063,7 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
 {
  const light={id:'lamp-scene',name:'Кабинет',scene};
  const plain={id:'plain-scene',name:'Обычная',scene:{...scene,brightness:70}};
- const withLibrary={...initial,library:[light,plain]};
+ const withLibrary={...initial,library:[light,plain],profileRevision:'1'};
  const bridge=message=>{context.aliceReply=message;vm.runInContext('window.prismestraReceive(aliceReply)',context);};
  const click=dataset=>events.click({target:{closest:()=>({dataset,hasAttribute:()=>false})}});
  const dialog=find('#alice-dialog');
@@ -1122,7 +1122,7 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
  acceptScene(editorApply.request);
  confirmLamp(editorApply.request);
  assert.match(editorStatus.textContent,/Яндекс подтвердил/);
- const edited={...light,scene:{...scene,brightness:58}};
+ const edited={...light,scene:{...scene,brightness:58},aliceLampStale:true};
  receiveDeviceState('snapshot',{...withLibrary,library:[edited,plain]});
  assert.doesNotMatch(lampStatus.textContent,/Яндекс подтвердил/,'editing a saved scene invalidates the old lamp confirmation');
  assert.doesNotMatch(editorStatus.textContent,/Яндекс подтвердил/);
@@ -1165,6 +1165,56 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
  assert.doesNotMatch(lampStatus.textContent,/Яндекс подтвердил/,'an external scene switch clears the confirmation');
  confirmLamp(beforeSwitch.request);
  assert.doesNotMatch(lampStatus.textContent,/Яндекс подтвердил/);
+
+ receiveDeviceState('snapshot',{...withLibrary,library:[bound,plain]});
+ click({apply:light.id});
+ const beforeProfile=commands.at(-1);
+ acceptScene(beforeProfile.request);
+ confirmLamp(beforeProfile.request);
+ assert.match(lampStatus.textContent,/Яндекс подтвердил/);
+ receiveDeviceState('snapshot',{...withLibrary,library:[bound,plain],profileRevision:'2'});
+ assert.doesNotMatch(lampStatus.textContent,/Яндекс подтвердил/,'opening a profile with identical RGB clears the old confirmation');
+ confirmLamp(beforeProfile.request);
+ assert.doesNotMatch(lampStatus.textContent,/Яндекс подтвердил/,'late reply from the previous profile is ignored');
+ click({apply:light.id});
+ const afterProfile=commands.at(-1);
+ acceptScene(afterProfile.request);
+ confirmLamp(afterProfile.request);
+ assert.match(lampStatus.textContent,/Яндекс подтвердил/,'the new profile accepts its own receipt');
+
+ const staleState={...withLibrary,library:[edited,plain],profileRevision:'2'};
+ receiveDeviceState('snapshot',staleState);
+ assert.match(mainMarkup,/data-alice-scene="lamp-scene"[^>]*>Привязка лампы устарела/);
+ const beforeStale=commands.length;
+ click({aliceScene:light.id});
+ assert.equal(find('#alice-unbind').hidden,false);
+ assert.equal(find('#alice-reconfigure').hidden,false);
+ assert.equal(find('#alice-allow-power').checked,false);
+ assert.equal(commands.length,beforeStale,'opening a stale binding does not contact Alice');
+ bridge({kind:'alice',state:{busy:false,needsLogin:false,lamps:['Старый список'],ticket:'old-ticket',message:'Выберите лампу'}});
+ assert.equal(find('#alice-choice').hidden,true,'an old picker reply cannot reopen selection before explicit reconnect');
+ click({action:'alice-unbind'});
+ assert.deepEqual(commands.slice(beforeStale),[{op:'configure_scene_lamp',id:light.id,selection:null}]);
+ bridge({kind:'alice_binding',id:light.id});
+ receiveDeviceState('snapshot',{...staleState,library:[{...edited,aliceLampStale:false},plain]});
+ click({apply:light.id});
+ const localApply=commands.at(-1);
+ assert.deepEqual(localApply,{op:'apply_scene',id:light.id,scene:edited.scene,request:localApply.request});
+ bridge({kind:'scene_activation',request:localApply.request,status:'applied'});
+ assert.match(lampStatus.textContent,/Сцена «Кабинет» применена/);
+ assert.doesNotMatch(lampStatus.textContent,/ламп/i);
+
+ receiveDeviceState('snapshot',staleState);
+ click({aliceScene:light.id});
+ click({action:'alice-reconfigure'});
+ assert.deepEqual(commands.at(-1),{op:'alice',request:{action:'open'}});
+ bridge({kind:'alice',state:{busy:false,needsLogin:false,lamps:['Настольная'],ticket:'new-fixture-ticket',message:'Выберите лампу'}});
+ assert.equal(find('#alice-bind').disabled,true,'a fresh lamp choice is required');
+ find('#alice-lamp').value='0';
+ find('#alice-brightness').value='35';
+ click({action:'alice-bind'});
+ assert.deepEqual(commands.at(-1),{op:'configure_scene_lamp',id:light.id,selection:{ticket:'new-fixture-ticket',lamp:0,brightness:35,allow_power_on:false}});
+ bridge({kind:'alice_binding',id:light.id});
 }
 console.log('PASS: scene lamp binding IPC, restart snapshot, ordinary Apply, duplicate guard, preview and asynchronous lamp result');
 

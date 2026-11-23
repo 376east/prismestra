@@ -204,6 +204,7 @@ struct CloseReady {
 
 pub(super) struct Session {
     alice: super::alice::Session,
+    scene_lamp_profile: Option<u64>,
     alice_bindings: Result<super::alice::Bindings, String>,
     manual_apply: super::alice::ManualApply,
     close_request: Option<CloseRequest>,
@@ -261,6 +262,7 @@ impl Session {
             .collect();
         let mut result = Self {
             alice: Default::default(),
+            scene_lamp_profile: None,
             alice_bindings: super::alice::Bindings::load(state_dir),
             manual_apply: Default::default(),
             catalog_view,
@@ -343,6 +345,11 @@ impl Session {
             self.alice.keep_for_scenes();
         }
         Ok(())
+    }
+
+    fn take_scene_lamp_result(&mut self, profile_revision: u64) -> Option<(u32, String)> {
+        let result = self.alice.take_scene_result()?;
+        (self.scene_lamp_profile.take() == Some(profile_revision)).then_some(result)
     }
 
     fn persist_draft(&mut self, scene: Scene, origin: Option<Origin>) -> Result<(), String> {
@@ -980,10 +987,12 @@ fn snapshot(state: &State) -> Result<Value, String> {
         .filter_map(|entry| {
             let card = session.catalog_view.get(&entry.id)?;
             let mut card = card.clone();
-            if let Some(binding) = session.alice_bindings.as_ref().ok()
-                .and_then(|bindings| bindings.get(entry))
-            {
-                card["aliceLamp"] = json!({"label":binding.label(),"brightness":binding.brightness,"allowPowerOn":binding.allow_power_on});
+            match session.alice_bindings.as_ref().ok().and_then(|bindings| bindings.lookup(entry)) {
+                Some((binding, true)) => {
+                    card["aliceLamp"] = json!({"label":binding.label(),"brightness":binding.brightness,"allowPowerOn":binding.allow_power_on});
+                }
+                Some((_, false)) => card["aliceLampStale"] = json!(true),
+                None => {}
             }
             Some(card)
         })
@@ -994,6 +1003,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
     value["state"]["startupDiscoveryUnknownController"] =
         json!(app.startup_discovery_unknown_controller());
     value["state"]["lastSceneApplyRequest"] = json!(session.manual_apply.last());
+    value["state"]["profileRevision"] = json!(app.profile_revision.to_string());
     let effects = Effect::ALL
         .iter()
         .copied()
@@ -1557,7 +1567,10 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                         let lamp = match binding {
                             Ok(Some(binding)) => {
                                 match session.alice.apply_bound(request, binding) {
-                                    Ok(()) => Some("Применяем яркость лампы сцены…".to_owned()),
+                                    Ok(()) => {
+                                        session.scene_lamp_profile = Some(a.profile_revision);
+                                        Some("Применяем яркость лампы сцены…".to_owned())
+                                    }
                                     Err(error) => Some(error),
                                 }
                             }
@@ -1792,17 +1805,7 @@ pub(super) fn maintain(state: &State) {
     retry_output::maintain(state);
     argb_channels::maintain(state);
     argb_channels::save::maintain(state);
-    let lamp_result = state
-        .modern_session
-        .borrow_mut()
-        .as_mut()
-        .and_then(|session| session.alice.take_scene_result());
-    if let Some((request, message)) = lamp_result {
-        let _ = send(
-            state,
-            &json!({"kind":"scene_lamp","request":request,"message":message}),
-        );
-    }
+    let mut lamp_result = None;
     if let (Ok(slot), Ok(mut sessions)) = (
         state.app.try_borrow(),
         state.modern_session.try_borrow_mut(),
@@ -1819,6 +1822,7 @@ pub(super) fn maintain(state: &State) {
         session.context = app.context_revision;
         session.pending = pending;
         session.configuration_error = error;
+        lamp_result = session.take_scene_lamp_result(app.profile_revision);
     }
     if snapshot_needed {
         match snapshot(state) {
@@ -1829,6 +1833,12 @@ pub(super) fn maintain(state: &State) {
                 let _ = send(state, &json!({"kind":"error","message":message}));
             }
         }
+    }
+    if let Some((request, message)) = lamp_result {
+        let _ = send(
+            state,
+            &json!({"kind":"scene_lamp","request":request,"message":message}),
+        );
     }
     let value = (|| -> Result<Option<Value>, String> {
         let mut sessions = state
@@ -1882,7 +1892,7 @@ pub(super) fn maintain(state: &State) {
         } else {
             None
         };
-        let mut value = json!({"kind":"status","state":{"scene":app.runtime.project().scene,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error())}});
+        let mut value = json!({"kind":"status","state":{"scene":app.runtime.project().scene,"profileRevision":app.profile_revision.to_string(),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error())}});
         if let Some(preview) = preview {
             value["state"]["preview"] = preview;
         }
@@ -2173,9 +2183,10 @@ mod tests {
             received.recv_timeout(Duration::from_secs(2)),
             Err(mpsc::RecvTimeoutError::Disconnected)
         ));
+        editor.scene_lamp_profile = Some(1);
         let deadline = Instant::now() + Duration::from_secs(2);
         let (request, message) = loop {
-            if let Some(result) = editor.alice.take_scene_result() {
+            if let Some(result) = editor.take_scene_lamp_result(1) {
                 break result;
             }
             assert!(Instant::now() < deadline, "confirmed scene lamp reply");
@@ -2183,7 +2194,45 @@ mod tests {
         };
         assert_eq!(request, 4);
         assert!(message.contains("подтвердил"));
-        assert!(editor.alice.take_scene_result().is_none());
+        assert!(editor.take_scene_lamp_result(1).is_none());
+
+        let entry = editor
+            .catalog
+            .entries
+            .iter()
+            .find(|entry| entry.id == "current")
+            .unwrap();
+        let binding = editor
+            .alice_bindings
+            .as_ref()
+            .unwrap()
+            .get(entry)
+            .unwrap()
+            .clone();
+        let (finish, in_flight) = mpsc::channel();
+        editor
+            .alice
+            .apply_bound_with(5, binding, move |_, _, _| {
+                in_flight
+                    .recv_timeout(Duration::from_secs(2))
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        editor.scene_lamp_profile = Some(1);
+        assert!(editor.take_scene_lamp_result(2).is_none());
+        finish.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while editor.scene_lamp_profile.is_some() {
+            assert!(
+                editor.take_scene_lamp_result(2).is_none(),
+                "old profile reply must be discarded"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "old profile reply must be drained"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let mut edited = scene.clone();
         edited.brightness = 32;
         editor
@@ -2217,7 +2266,25 @@ mod tests {
             ),
             Ok(ManualScene::Applied(Ok(None)))
         ));
+        let entry = editor
+            .catalog
+            .entries
+            .iter()
+            .find(|entry| entry.id == "current")
+            .unwrap();
+        assert!(matches!(
+            editor.alice_bindings.as_ref().unwrap().lookup(entry),
+            Some((_, false))
+        ));
+        editor.alice = Default::default();
         editor.configure_scene_lamp("current", None).unwrap();
+        assert_eq!(
+            editor
+                .alice
+                .handle(super::super::alice::Action::Status)
+                .unwrap()["busy"],
+            false
+        );
         let mut editor = Session::load(&dir, &scene).unwrap();
         assert!(matches!(
             apply_manual_scene(&mut editor, Some(1), Some("current"), edited, true, local),

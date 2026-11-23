@@ -296,7 +296,7 @@ function renderLibrary() {
      <button class="icon-button" data-edit="${esc(item.id)}" aria-label="Редактировать: ${esc(item.name)}" title="Редактировать" data-mutation ${disabled()}>${icon('edit')}</button>
      ${item.builtIn?'':`<button class="icon-button" data-remove="${esc(item.id)}" aria-label="Удалить: ${esc(item.name)}" data-mutation ${disabled()}>${icon('trash')}</button>`}
     </div>
-    ${item.builtIn||!state.native?'':`<button class="button" data-alice-scene="${esc(item.id)}" data-mutation ${disabled()}>${item.aliceLamp?'Лампа · '+esc(item.aliceLamp.label):'Добавить лампу'}</button>`}
+    ${item.builtIn||(!state.native&&!item.aliceLampStale)?'':`<button class="button" data-alice-scene="${esc(item.id)}" data-mutation ${disabled()}>${item.aliceLampStale?'Привязка лампы устарела':item.aliceLamp?'Лампа · '+esc(item.aliceLamp.label):'Добавить лампу'}</button>`}
     <div id="scene-activation-${esc(item.id)}" class="scene-activation-status" role="status" aria-atomic="true"></div>
     <button id="scene-devices-${esc(item.id)}" class="button scene-devices" data-view="devices" hidden>Проверить устройства</button>
    </div>
@@ -776,7 +776,7 @@ function activateLibraryEntry(entry,editor=false) {
  if(!entry.builtIn)command.id=entry.id;
  if(!send(command))return;
  if(sceneActivation)syncSceneActivation(sceneActivation.id,null);
- sceneActivation={request,id:entry.id,name:entry.name,scene:entry.scene,binding:entry.aliceLamp,editor,pending:true,message:`Включаем «${entry.name}»…`};
+ sceneActivation={request,id:entry.id,name:entry.name,scene:entry.scene,binding:entry.aliceLamp,profileRevision:state.profileRevision,editor,pending:true,message:`Включаем «${entry.name}»…`};
  syncControls();
 }
 function sceneActivationMessage(result) {
@@ -790,9 +790,9 @@ function clearSceneLamp(id) {
 }
 function reconcileSceneLamp() {
  if(!sceneActivation?.binding)return;
- const {id,name,scene,binding,applied}=sceneActivation;
+ const {id,name,scene,binding,profileRevision,applied}=sceneActivation;
  const entry=state.library.find(item=>item.id===id);
- if(!state.native || !entry || entry.name!==name || !same(entry.scene,scene) || !same(entry.aliceLamp,binding) ||
+ if(profileRevision!==state.profileRevision || !state.native || !entry || entry.name!==name || !same(entry.scene,scene) || !same(entry.aliceLamp,binding) ||
     (applied && !same(state.scene,scene)))clearSceneLamp(id);
 }
 function syncSceneActivation(id,result) {
@@ -848,7 +848,7 @@ function nameDialog(mode) {
 window.prismestraReceive = message => {
  try {
   if(typeof message==='string')message=JSON.parse(message);
-  if(message.kind==='alice'){receiveAlice(message);return;}
+  if(message.kind==='alice'){if(alicePickerStarted)receiveAlice(message);return;}
   if(message.kind==='alice_binding'){receiveAliceBinding(message);return;}
   if(message.kind==='scene_lamp'){receiveSceneLamp(message);return;}
   if(message.kind==='output_preview'){window.outputMap?.receive(message);return;}
@@ -939,7 +939,7 @@ window.prismestraReceive = message => {
   syncControls();
  }
 };
-let aliceTimer, aliceState, aliceScene, aliceBindingPending=false;
+let aliceTimer, aliceState, aliceScene, aliceBindingPending=false, alicePickerStarted=false;
 let aliceLamps=[];
 function aliceRequest(action, options={}) {
  if(!send({op:'alice',request:{action,...options}}) && action!=='cancel')
@@ -963,16 +963,27 @@ function aliceSelection() {
 function openAlice(scene) {
  aliceScene=scene;
  aliceBindingPending=false;
+ alicePickerStarted=false;
  $('#alice-title').textContent=scene ? 'Лампа сцены «'+scene.name+'»' : 'Алиса · Кабинет';
  const binding=scene?.aliceLamp;
- $('#alice-bound-lamp').textContent=binding ? 'Выбрана лампа «'+binding.label+'».' : '';
- $('#alice-bound-lamp').hidden=!binding;
- $('#alice-unbind').hidden=!binding;
+ const stale=scene?.aliceLampStale;
+ $('#alice-bound-lamp').textContent=stale ? 'Сцена изменилась. Лампа не будет участвовать, пока вы заново не сохраните привязку.' : binding ? 'Выбрана лампа «'+binding.label+'».' : '';
+ $('#alice-bound-lamp').hidden=!binding&&!stale;
+ $('#alice-unbind').hidden=!binding&&!stale;
+ $('#alice-reconfigure').hidden=!stale||!state.native;
  $('#alice-direct-actions').hidden=Boolean(scene);
  $('#alice-scene-actions').hidden=!scene;
+ $('#alice-lamp').value='';
  $('#alice-brightness').value=String(binding?.brightness??40);
  $('#alice-allow-power').checked=binding?.allowPowerOn??false;
  $('#alice-dialog').showModal();
+ if(stale)receiveAlice({state:{busy:false,lamps:[],needsLogin:false,message:''}});
+ else startAlicePicker();
+}
+function startAlicePicker() {
+ if(alicePickerStarted)return;
+ alicePickerStarted=true;
+ $('#alice-reconfigure').hidden=true;
  receiveAlice({state:{busy:true,lamps:[],needsLogin:true,message:'Проверяем вход…'}});
  aliceRequest('open');
 }
@@ -1031,7 +1042,8 @@ $('#alice-dialog')?.addEventListener('close',()=>{
  $('#alice-lamp').value='';
  $('#alice-choice').hidden=true;
  $('#alice-remember').checked=false;
- aliceRequest('cancel');
+ if(alicePickerStarted)aliceRequest('cancel');
+ alicePickerStarted=false;
 });
 $('#alice-lamp')?.addEventListener('change',aliceSelection);
 $('#alice-brightness')?.addEventListener('input',aliceSelection);
@@ -1084,6 +1096,7 @@ document.addEventListener('click',event=>{
  case 'copy-output-status':void copyOutputStatus(b.dataset.copyOutput);break;
  case 'alice-open':openAlice();break;
  case 'alice-close':$('#alice-dialog').close();break;
+ case 'alice-reconfigure':if(aliceScene?.aliceLampStale&&state.native)startAlicePicker();break;
  case 'alice-sign-in':
  case 'alice-retry':
  case 'alice-sign-out':
