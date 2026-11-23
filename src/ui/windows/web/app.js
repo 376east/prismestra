@@ -272,6 +272,7 @@ function searchText(text) {
  return text.normalize('NFC').toLowerCase().replaceAll('ё','е');
 }
 function renderLibrary() {
+ const lcdOnly=state.devices.length>0&&state.devices.every(device=>device.role==='lcd');
  const words=searchText(search).match(/[\p{L}\p{N}]+/gu)??[];
  const available=new Set(state.library.map(item=>item.scene.effect));
  const list=state.library.filter(item=>{
@@ -297,7 +298,11 @@ function renderLibrary() {
     <button id="scene-devices-${esc(item.id)}" class="button scene-devices" data-view="devices" hidden>Проверить устройства</button>
    </div>
   </article>`).join('');
- return heading('Сцены','Сцены сохраняют параметры RGB. Устройства и LCD сохраняются в профиле.',startupDiscoveryAction()+action(icon('plus')+' Новая сцена','new',!state.startupDiscoveryRetry))+`
+ const description=lcdOnly
+  ? 'В профиле только LCD. Фон и показания температуры настраиваются отдельно от RGB-сцен.'
+  : 'Сцены сохраняют параметры RGB. Устройства и LCD сохраняются в профиле.';
+ const outputAction=lcdOnly?pageButton('lcd','Настроить LCD',true):startupDiscoveryAction();
+ return heading('Сцены',description,outputAction+action(icon('plus')+' Новая сцена','new',!lcdOnly&&!state.startupDiscoveryRetry))+`
   <div class="toolbar">
    <select id="library-effect" aria-label="Тип эффекта"><option value="">Все эффекты</option>${options}</select>
    <output class="muted" aria-live="polite">Показано ${Math.min(libraryLimit,list.length)} из ${list.length}</output>
@@ -518,8 +523,8 @@ function announceDeviceDiscovery(candidates) {
    : `Найдено устройств: ${newCandidates.length}.`;
  }
 }
-function pageButton(page, label=pages[page]) {
- return `<button class="button" data-view="${page}">${label}</button>`;
+function pageButton(page, label=pages[page], primary=false) {
+ return `<button class="button${primary?' primary':''}" data-view="${page}">${label}</button>`;
 }
 
 function outputPageAvailable(page) {

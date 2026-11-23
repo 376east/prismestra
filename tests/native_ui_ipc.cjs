@@ -876,6 +876,22 @@ assert.deepEqual(commands.at(-1), {op:'page',page:'schedule'});
 assert.ok(find('nav').innerHTML.includes('data-view="settings" class="active"'));
 console.log('PASS: hidden output links, discovery access, configured offline routes, removal fallback, settings and schedule');
 
+{
+ vm.runInContext('formStages.clear();view="library";pendingView=null',context);
+ const lcdOnly=navFixture([navLcd]);
+ receiveDeviceState('snapshot',lcdOnly);
+ assert.match(mainMarkup,/В профиле только LCD.*отдельно от RGB-сцен/);
+ assert.match(mainMarkup,/<button class="button primary" data-view="lcd">Настроить LCD<\/button>/);
+ openView('lcd');
+ assert.deepEqual(commands.at(-1),{op:'page',page:'lcd'});
+ receiveDeviceState('snapshot',navFixture([navLcd],{editor:{page:'lcd',index:0,targets:['LCD'],fields:[],dirty:false}}));
+ assert.equal(viewNow(),'lcd');
+ openView('library');
+ receiveDeviceState('snapshot',navFixture([navLcd,navAmbient]));
+ assert.doesNotMatch(mainMarkup,/В профиле только LCD|data-view="lcd">Настроить LCD/);
+ console.log('PASS: an LCD-only profile offers its settings from the startup library');
+}
+
 vm.runInContext('formStages.clear();view="devices";pendingView=null', context);
 receiveDeviceState('snapshot', navFixture([], {status:'Ищу поддерживаемые устройства…'}));
 assert.ok(find('#player-status').textContent.includes('Ищу поддерживаемые устройства'));
