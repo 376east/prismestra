@@ -209,17 +209,30 @@ fn restore(
     if !unchanged_definition(&current, before) {
         return Err("definition or access control changed".into());
     }
-    if !current.enabled {
+    let change = if current.enabled {
+        Ok(())
+    } else {
         if prove_source(&current).as_ref() != Some(&entry.hint) {
             return Err("pinned legacy source changed".into());
         }
-        store.change(&current, true).1?;
+        match store.change(&current, true) {
+            (false, Err(error)) => return Err(error),
+            (_, outcome) => outcome,
+        }
+    };
+    // The setter may report an error after changing the registered task.
+    let verification = store.read(&before.name).and_then(|after| {
+        if after.enabled && unchanged_definition(&after, before) {
+            Ok(())
+        } else {
+            Err("could not verify restored task".into())
+        }
+    });
+    if verification.is_ok() {
+        return Ok(());
     }
-    let after = store.read(&before.name)?;
-    if !after.enabled || !unchanged_definition(&after, before) {
-        return Err("could not verify restored task".into());
-    }
-    Ok(())
+    change?;
+    verification
 }
 
 #[cfg(test)]
@@ -317,9 +330,17 @@ mod tests {
         assert!(recognize(&valid, SID, &shell(), |_| None).is_none());
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum RestoreFailure {
+        BeforeWrite,
+        AfterWrite,
+        AfterWriteWithChangedAcl,
+    }
+
     struct Fixture {
         tasks: RefCell<BTreeMap<String, Task>>,
         edit_during_failure: bool,
+        restore_failure: Option<RestoreFailure>,
         writes: RefCell<Vec<(String, bool)>>,
     }
 
@@ -339,7 +360,25 @@ mod tests {
                 .push((snapshot.name.clone(), enable));
             let mut tasks = self.tasks.borrow_mut();
             let current = tasks.get_mut(&snapshot.name).unwrap();
+            if enable && self.restore_failure == Some(RestoreFailure::BeforeWrite) {
+                return (
+                    true,
+                    Err("simulated restore failure before mutation".into()),
+                );
+            }
             current.enabled = enable;
+            if enable {
+                match self.restore_failure {
+                    Some(RestoreFailure::AfterWriteWithChangedAcl) => {
+                        current.security = "different ACL".into();
+                        return (true, Err("simulated restore failure after mutation".into()));
+                    }
+                    Some(RestoreFailure::AfterWrite) => {
+                        return (true, Err("simulated restore failure after mutation".into()));
+                    }
+                    _ => {}
+                }
+            }
             if snapshot.name == "second" && !enable {
                 if self.edit_during_failure {
                     tasks.get_mut("first").unwrap().security = "different ACL".into();
@@ -366,6 +405,7 @@ mod tests {
                         .collect(),
                 ),
                 edit_during_failure: changed,
+                restore_failure: None,
                 writes: RefCell::new(Vec::new()),
             };
             let error = disable(
@@ -395,6 +435,62 @@ mod tests {
     }
 
     #[test]
+    fn rollback_verifies_the_enabled_state_even_when_the_restore_setter_fails() {
+        let owned = [OwnedTask {
+            task: task("second"),
+            hint: hint(),
+        }];
+        for failure in [
+            RestoreFailure::AfterWrite,
+            RestoreFailure::BeforeWrite,
+            RestoreFailure::AfterWriteWithChangedAcl,
+        ] {
+            let fixture = Fixture {
+                tasks: RefCell::new(
+                    ["second", "foreign"]
+                        .into_iter()
+                        .map(|name| (name.into(), task(name)))
+                        .collect(),
+                ),
+                edit_during_failure: false,
+                restore_failure: Some(failure),
+                writes: RefCell::new(Vec::new()),
+            };
+            let report = disable(
+                &fixture,
+                &owned,
+                |_| Some(hint()),
+                || true,
+                Path::new("safe.json"),
+            )
+            .unwrap_err();
+            let restored = failure == RestoreFailure::AfterWrite;
+            let current = fixture.read("second").unwrap();
+            assert_eq!(current.enabled, failure != RestoreFailure::BeforeWrite);
+            assert_eq!(
+                unchanged_definition(&current, &owned[0].task),
+                failure != RestoreFailure::AfterWriteWithChangedAcl
+            );
+            assert_eq!(
+                report.contains("Previous enabled states verified"),
+                restored
+            );
+            assert_eq!(report.contains("Rollback needs attention"), !restored);
+            assert!(report.contains("simulated failure after mutation"));
+            assert_eq!(
+                report.contains("simulated restore failure before mutation"),
+                failure == RestoreFailure::BeforeWrite
+            );
+            assert!(report.contains("safe.json"));
+            assert_eq!(fixture.read("foreign").unwrap(), task("foreign"));
+            assert_eq!(
+                *fixture.writes.borrow(),
+                [("second".into(), false), ("second".into(), true)]
+            );
+        }
+    }
+
+    #[test]
     fn rollout_preserves_a_changed_launcher_and_requires_a_current_import() {
         let owned = ["first", "second"].map(|name| OwnedTask {
             task: task(name),
@@ -408,6 +504,7 @@ mod tests {
                     .collect(),
             ),
             edit_during_failure: false,
+            restore_failure: None,
             writes: RefCell::new(Vec::new()),
         };
         let _ = disable(
