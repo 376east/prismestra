@@ -299,6 +299,19 @@ exit 0
         self.assertLess(retirement.index("--setup-prepare-installed"), retirement.index("LegacyStartup('Disable'"))
         self.assertIn("RunManagedPolicy('--uninstall'", source)
 
+    def test_setup_notifies_only_interactive_verified_legacy_deferrals(self):
+        source = (installer.ROOT / "installer/Prismestra.iss").read_text(encoding="utf-8")
+        legacy = source.split("function LegacyStartup(", 1)[1].split("#endif", 1)[0]
+        self.assertIn("if Action = 'Disable' then Args := Args + ' --setup-outcome';", legacy)
+        self.assertIn("GetSHA256OfFile(Tool) = '{#LegacyStartupToolSha256}'", legacy)
+        self.assertRegex(
+            legacy,
+            r"Code := LegacyStartup\('Disable', SID\);\s*(?:\{[^}]*\}\s*)?"
+            r"if \(Code = 20\) or \(Code = 21\) then begin\s*Log\([^\n]*\);"
+            r"\s*if not WizardSilent then\s*SuppressibleMsgBox\(",
+        )
+        self.assertEqual(source.count("RetireLegacyStartup"), 2)
+
     @unittest.skipUnless(os.name == "nt", "Requires the x64 Windows Rust toolchain")
     def test_builds_webview_probe_without_a_redistributable_and_checks_versions(self):
         probe_hash = installer.stage_webview_probe(self.root)

@@ -305,28 +305,33 @@ begin
     Log('Managed PC task unavailable; retained ownership intent for safe cleanup.');
 end;
 
-function LegacyStartup(const Action, SID: String): Boolean;
+function LegacyStartup(const Action, SID: String): Integer;
 var
-  Tool: String;
+  Tool, Args: String;
   Code: Integer;
 begin
   Tool := InstallPath + '\Prismestra-Legacy-Startup.exe';
-  Result := ValidSID(SID) and GuardInstall('Check') and FileExists(Tool) and
+  Args := Action + ' ' + SID;
+  if Action = 'Disable' then Args := Args + ' --setup-outcome';
+  Result := -1;
+  if ValidSID(SID) and GuardInstall('Check') and FileExists(Tool) and
     (GetSHA256OfFile(Tool) = '{#LegacyStartupToolSha256}') and
-    ExecAndLogOutput(Tool, Action + ' ' + SID, ExpandConstant('{sys}'), SW_HIDE,
-      ewWaitUntilTerminated, Code, nil) and (Code = 0);
+    ExecAndLogOutput(Tool, Args, ExpandConstant('{sys}'), SW_HIDE,
+      ewWaitUntilTerminated, Code, nil) then
+    Result := Code;
 end;
 
 procedure RetireLegacyStartup;
 var
   SID: String;
+  Code: Integer;
 begin
   SID := CurrentSID;
   if not ProbeOriginalUser(SID) then begin
     Log('Legacy startup migration requires matching original and elevated user identities.');
     Exit;
   end;
-  if not LegacyStartup('Prepare', SID) then begin
+  if LegacyStartup('Prepare', SID) <> 0 then begin
     Log('Legacy startup source could not be prepared; previous startup entries kept.');
     Exit;
   end;
@@ -338,7 +343,14 @@ begin
     Log('Legacy profile could not be prepared as the original ordinary user; previous startup entries kept.');
     Exit;
   end;
-  if not LegacyStartup('Disable', SID) then
+  Code := LegacyStartup('Disable', SID);
+  { Exact exit codes from the hash-verified helper. Its JSON remains in the log. }
+  if (Code = 20) or (Code = 21) then begin
+    Log('Profile imported; previous sign-in tasks kept because Task Scheduler permissions could not be verified.');
+    if not WizardSilent then
+      SuppressibleMsgBox('Your Prismestra profile was imported. Setup kept your previous sign-in tasks enabled because it could not verify Task Scheduler permissions.',
+        mbInformation, MB_OK, IDOK);
+  end else if Code <> 0 then
     Log('Legacy startup migration was deferred; previous startup definitions were preserved.');
 end;
 #endif
