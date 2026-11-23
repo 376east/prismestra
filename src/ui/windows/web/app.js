@@ -13,8 +13,18 @@ let directEffects = new Set();
 const titleFromId = id => id.replace(/[_-]/g,' ').replace(/^./,letter=>letter.toUpperCase())
  .replace(/\b(cpu|lcd|rgb|led|ansi|cs2|wled)\b/gi,word=>word.toUpperCase());
 const effectLabel = id => effects[id] ?? id;
-const sceneLabel = entry => english && entry.builtIn && entry.id.startsWith('builtin:')
- ? titleFromId(entry.id.slice('builtin:'.length)) : entry.name;
+const seededSceneNames = new Map([
+ ['current',['Моя сцена','Current scene']],
+ ['noise',['Мягкий свет','Soft light','noise_map']],
+ ['breathing',['Дыхание','Breathing','breathing']],
+ ['rainbow',['Радуга','Rainbow','rainbow_wave']],
+]);
+function sceneLabel(entry) {
+ if(!english)return entry.name;
+ if(entry.builtIn&&entry.id.startsWith('builtin:'))return titleFromId(entry.id.slice('builtin:'.length));
+ const seed=seededSceneNames.get(entry.id);
+ return seed&&entry.name===seed[0]&&(!seed[2]||entry.scene?.effect===seed[2])?seed[1]:entry.name;
+}
 const effectOption = (id, selected) => `<option value="${esc(id)}" ${id===selected?'selected':''}>${esc(effectLabel(id))}</option>`;
 const fixtureLanguage=window.location?.protocol==='file:'?new URLSearchParams(window.location.search).get('lang'):null;
 const uiLanguage=(window.prismestraLanguage??fixtureLanguage)==='en'?'en':'ru';
@@ -48,7 +58,50 @@ const englishRuntimeStatus=new Map([
  ['Повторная проверка подключений…','Checking connections again…'],
  ['Открытие профиля: ожидаю завершения текущих операций…','Waiting for active operations before opening the profile…'],
  ['Файл добавлен в профиль. Нажмите «Применить».','File added to the profile. Select Apply.'],
+ ['Связь добавлена выключенной. Настройте её и нажмите «Применить».','Route added in the off state. Configure it, then select Apply.'],
+ ['LCD добавлен выключенным. Выберите фон или настройте панель температур.','LCD added in the off state. Choose a background or configure the temperature panel.'],
+ ['Связь удалена в черновике; устройство выключено, источник сохранён.','Route removed from the draft. The output is off and the source is kept.'],
+ ['Захват выбранного экрана запрошен; проверьте статус источника.','Capture requested for the selected screen. Check the source status.'],
+ ['Включён синтетический кадр. Рабочий стол не захватывается.','The test pattern is active. Desktop capture is off.'],
+ ['Параметры обновлены. Проверяйте статусы передачи устройств.','Settings updated. Check device output status.'],
+ ['Параметры обновлены на программном стенде.','Settings updated in the software test environment.'],
 ]);
+const outputDetails=new Map([
+ ['Добавьте ленту в «Устройствах» и выберите назначение «От экрана».','Add a lighting device in Devices and select Screen lighting as its output mode.'],
+ ['Источник здесь логический. Предпросмотр получает только явно включённый тестовый кадр.','This source is a profile reference. The preview shows a test frame when you explicitly request it.'],
+ ['Сохранён старый маршрут Home Assistant. Чтобы вернуть свет в сцены, откройте «Устройства», выберите «Общий холст» и снова включите свет.','This Home Assistant light uses an older screen-lighting route. To use it in scenes, open Devices, select Shared canvas, then turn the light back on.'],
+ ['Добавьте TT LCD кнопкой ниже, затем выберите анимацию.','Add a TT LCD below, then choose a background or animation.'],
+ ['Анимация и панель температур. Передача выполняется в памяти, без доступа к помпе.','Configure display media and the temperature panel. The preview runs in memory.'],
+]);
+const outputErrors=new Map([
+ ['Выберите устройство','Select an output.'],
+ ['Выберите устройство экранной подсветки','Select a screen lighting output.'],
+ ['Выберите связь с экраном','Select a screen lighting route.'],
+ ['Выберите источник экрана','Select a capture source.'],
+ ['Выберите существующий источник экрана','Select an existing capture source.'],
+ ['Неизвестный источник','This capture source is unknown.'],
+ ['Нет источника','This route has no capture source.'],
+ ['Устройство уже связано с экраном','This output already has a screen lighting route.'],
+ ['Уже есть 16 источников. Выберите существующий.','There are already 16 sources. Select an existing source.'],
+ ['Для Home Assistant доступны сцены через «Общий холст».','Use Shared canvas to include Home Assistant lights in scenes.'],
+ ['Выберите LCD','Select an LCD.'],
+ ['Для LCD выберите фон или включите панель температур.','Choose an LCD background or enable the temperature panel.'],
+ ['LCD отсутствует в схеме','This LCD is missing from the profile.'],
+ ['Выберите режим','Select a lighting mode.'],
+ ['Выберите файл кнопкой или известный параметр','Use Choose to select a file, or select a supported setting.'],
+ ['Введите X и Y через запятую.','Enter X and Y separated by a comma.'],
+ ['Неизвестный вид показаний','Select a temperature gauge style.'],
+ ['Выберите температурный источник.','Select a temperature source.'],
+ ['Температурный источник отсутствует в профиле.','This temperature source is missing from the profile.'],
+ ['Достигнут предел показателей LCD.','The LCD has reached its temperature source limit.'],
+ ['Выберите хотя бы один показатель для панели температур.','Select at least one reading for the temperature panel.'],
+ ['Показатель: имя=подпись','Use key=label for each reading.'],
+]);
+function outputDetail(text) {
+ if(!english||!outputPage(view))return text;
+ if(text.startsWith('Предпросмотр недоступен: '))return 'LCD preview unavailable. Check the device connection.';
+ return outputDetails.get(text)??text;
+}
 const settingsPages = ['temperatures','connections','sources','schedule'];
 const devicePresetField = 714;
 const glyphs = {
@@ -69,6 +122,7 @@ const glyphs = {
 glyphs.settings='<path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="2" fill="var(--ui-sidebar)"/><circle cx="15" cy="12" r="2" fill="var(--ui-sidebar)"/><circle cx="10" cy="18" r="2" fill="var(--ui-sidebar)"/>';
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${glyphs[name] ?? ''}</svg>`;
 let state = null, draft = null, draftOrigin = null, draftName = ui('Текущая сцена','Current scene'), selectedId = null, draftSwitchId = null;
+let draftDisplayName = draftName;
 let view = 'library', search = '', previewTimer = null, frame = null, commandPending = false, error = '', dialogMode = 'new', dialogReturn = null, savedSceneRequest = null, previewQueued = false, closing = false, nativeAwaitingAck = false, pendingView = null, advancedOpen = false, submittedStages = [], pointerGesture = false, keyGesture = false, composing = false, renderQueued = false, awaitingCommandAck = false, errorIsCommand = false;
 const formStages = new Map();
 const libraryPageSize = 24;
@@ -242,7 +296,7 @@ function showError(message,fromCommand=false,{detail='',retrySearch=false,allowR
  box.innerHTML=`<button class="icon-button" data-action="dismiss-error" aria-label="${ui('Закрыть сообщение','Dismiss message')}">×</button><p>${esc(error)}</p>${stagedDirty()?`<button class="button" data-action="discard-fields">${ui('Отменить незавершённый ввод','Discard unfinished input')}</button>`:''}${recovery}${details}`;
 }
 function showRuntimeError(message,fromCommand=false) {
- if(english)showError('Prismestra could not complete the operation.',fromCommand,{detail:message});
+ if(english)showError((outputPage(view)&&outputErrors.get(message))||'Prismestra could not complete the operation.',fromCommand,{detail:message});
  else showError(message,fromCommand);
 }
 function send(command, mutation=false) {
@@ -279,10 +333,16 @@ function syncControls(keepRetryFocus) {
  const playerStatus=$('#player-status');
  const runtimeStatus=state?.status==='Сцена изменена и ещё не сохранена.'?'':state?.status;
  playerStatus.textContent=startupStatus||(runtimeStatus&&ui(runtimeStatus,
-  englishRuntimeStatus.get(runtimeStatus)??(state.pending?'Working…':'See profile status in Devices')))
+  englishRuntimeStatus.get(runtimeStatus)??(outputPage(view)&&runtimeStatus.startsWith('Не удалось применить:')
+   ?'Could not apply the output settings.':state.pending?'Working…':'See profile status in Devices')))
   ||(state?'':ui('Подключение к приложению…','Connecting to the app…'));
- playerStatus.title=english||startupStatus?runtimeStatus||'':'';
- const runtimeDetail=$('#native-runtime-detail');if(runtimeDetail)runtimeDetail.textContent=state?.detail||'';
+ playerStatus.title=(english||startupStatus)&&!(outputPage(view)&&englishRuntimeStatus.has(runtimeStatus))?runtimeStatus||'':'';
+ const runtimeDetail=$('#native-runtime-detail');
+ if(runtimeDetail){
+  const detail=state?.detail||'';
+  runtimeDetail.textContent=outputDetail(detail);
+  if(english&&outputPage(view))runtimeDetail.title=detail.startsWith('Предпросмотр недоступен: ')?detail:'';
+ }
  const diagnostics=$('#native-runtime-diagnostics');if(diagnostics)diagnostics.hidden=!state?.detail;
  if(sceneActivation?.id)syncSceneActivation(sceneActivation.id,sceneActivation);
  const editorLamp=$('#editor-lamp-status');
@@ -458,7 +518,7 @@ function reorderPalette(actionCode) {
 function renderScene() {
  const effectIds=Object.keys(effects);
  if(!Object.hasOwn(effects,draft.effect))effectIds.unshift(draft.effect);
- return heading(draftName,ui('Применение обновляет активную сцену. Сохранение записывает версию в библиотеку.','Apply updates the active scene. Save keeps a version in your library.'),action(ui('Сохранить в библиотеку','Save to library'),'save-scene')+action(ui('Создать копию','Make a copy'),'clone')+(selectedId?action(ui('Переименовать','Rename'),'rename'):'')+action(ui('Применить сцену','Apply scene'),'apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status" role="status" aria-atomic="true"></p><p id="editor-lamp-status" class="scene-activation-status" role="status"></p><div class="editor-layout"><section class="preview-panel" aria-label="${ui('Предпросмотр','Preview')}"><div class="stage"><canvas id="stage" aria-label="${ui('Предпросмотр сцены из движка Prismestra','Prismestra engine scene preview')}"></canvas><div class="stage-bar"><span class="stage-chip">${ui('Предпросмотр','Preview')}</span></div><div class="stage-caption">${ui('Кадр движка · черновик','Engine frame · draft')}</div>${renderPlacementObjects()}</div>${renderPlacementControls()}<p class="preview-description">${ui('Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.','Preview leaves lighting unchanged. RGB and LCD outputs are enabled separately.')}</p><div class="native-field"><label for="scene-effect">${ui('Эффект','Effect')}</label><select id="scene-effect" data-mutation ${disabled()}>${effectIds.map(id=>effectOption(id,draft.effect)).join('')}</select></div><div class="parameter-panel" style="margin-top:20px"><h2>${ui('Выходы','Outputs')}</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> ${ui('Основной свет · RGB и LCD','Primary lighting · RGB and LCD')}</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> ${ui('Дополнительный свет','Secondary lighting')}</label><button class="button" data-view="devices">${ui('Устройства и свойства','Devices and properties')}</button></div></section><aside class="parameter-panel" id="scene-parameters" aria-label="${ui('Параметры сцены','Scene parameters')}">${sceneParameters()}</aside></div>`;
+ return heading(draftDisplayName,ui('Применение обновляет активную сцену. Сохранение записывает версию в библиотеку.','Apply updates the active scene. Save keeps a version in your library.'),action(ui('Сохранить в библиотеку','Save to library'),'save-scene')+action(ui('Создать копию','Make a copy'),'clone')+(selectedId?action(ui('Переименовать','Rename'),'rename'):'')+action(ui('Применить сцену','Apply scene'),'apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status" role="status" aria-atomic="true"></p><p id="editor-lamp-status" class="scene-activation-status" role="status"></p><div class="editor-layout"><section class="preview-panel" aria-label="${ui('Предпросмотр','Preview')}"><div class="stage"><canvas id="stage" aria-label="${ui('Предпросмотр сцены из движка Prismestra','Prismestra engine scene preview')}"></canvas><div class="stage-bar"><span class="stage-chip">${ui('Предпросмотр','Preview')}</span></div><div class="stage-caption">${ui('Кадр движка · черновик','Engine frame · draft')}</div>${renderPlacementObjects()}</div>${renderPlacementControls()}<p class="preview-description">${ui('Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.','Preview leaves lighting unchanged. RGB and LCD outputs are enabled separately.')}</p><div class="native-field"><label for="scene-effect">${ui('Эффект','Effect')}</label><select id="scene-effect" data-mutation ${disabled()}>${effectIds.map(id=>effectOption(id,draft.effect)).join('')}</select></div><div class="parameter-panel" style="margin-top:20px"><h2>${ui('Выходы','Outputs')}</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> ${ui('Основной свет · RGB и LCD','Primary lighting · RGB and LCD')}</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> ${ui('Дополнительный свет','Secondary lighting')}</label><button class="button" data-view="devices">${ui('Устройства и свойства','Devices and properties')}</button></div></section><aside class="parameter-panel" id="scene-parameters" aria-label="${ui('Параметры сцены','Scene parameters')}">${sceneParameters()}</aside></div>`;
 }
 function placementLabel(object,objects) {
  return objects.some(other=>other.id!==object.id&&other.label===object.label)
@@ -556,6 +616,74 @@ function deviceFieldHint(field) {
  }
  return deviceFieldHints.get(field.key)??field.hint;
 }
+const outputFieldText = {
+ lcd: {
+  enabled:['Playback','Choose a background or enable the temperature panel.'],
+  media:['LCD background','Choose an image or animation up to 32 MiB. Clear this field for temperatures on a black background.'],
+  rotation:['Rotation, °','Rotates the display while keeping the temperature panel readable.'],
+  overlay:['Temperature panel','Readings appear while they are current.'],
+  gauge_style:['Gauge style','The scale, bar and flame change with the temperature.'],
+  card_position:['Card position','Enter X (0–292) and Y (0–404), separated by a comma. Leave blank for the default position.'],
+  font:['Panel font','Choose a TTF or OTF file up to 8 MiB. The built-in font is used by default.'],
+  interval:['Reading rotation interval, s','2–60 seconds.'],
+  sources:['Readings and labels','Add a temperature source in Temperatures first.'],
+  add_source:['Add a reading','Adds the selected source to the draft. Edit its display label in the list above.'],
+ },
+ ambient: {
+  enabled:['Enabled','Turns the route and its lighting output on or off in the profile.'],
+  source:['Source','Scene edges run clockwise from the top left and work without display capture.'],
+  mode:['Mode','Match screen colors or use one average color.'],
+  output_rate:['Output rate, Hz','1–144 Hz. The limit depends on the device.'],
+  capture_rate:['Capture rate, Hz','1–144 Hz. Shared by outputs using this source.'],
+  brightness:['Brightness, %','0–100%.'],
+  smoothness:['Smoothing, %','0–100%. Higher values slow down color changes.'],
+  reverse:['Reverse direction','Mirrors the horizontal LED mapping.'],
+  gamma:['Gamma','0.1–4.'],
+  saturation:['Saturation','0–3. Use 1 for the original saturation.'],
+  kelvin:['White point, K','2000–10000 K. Use 6500 K for neutral white.'],
+  gain_r:['Red channel','Multiplier from 0 to 2.'],
+  gain_g:['Green channel','Multiplier from 0 to 2.'],
+  gain_b:['Blue channel','Multiplier from 0 to 2.'],
+  temperature:['Warm / cool','−100 to 100.'],
+  tint:['Tint','−100 to 100.'],
+  blur:['Blur','0–10.'],
+  borders:['Detect black bars','Automatically excludes persistent black edges.'],
+  threshold:['Black threshold, %','0–100%.'],
+  stable:['Frames to confirm bars','1–200 frames.'],
+  unknown:['Frames to reset bars','1–2000 frames when the image is entirely black.'],
+  crop:['Crop','Enter x, y, width and height. Leave blank for the full screen. Shared by outputs using this source.'],
+  stale:['Turn off after signal loss, ms','100–60000 ms. Clears the previous frame when the signal is lost.'],
+ },
+};
+const outputChoiceText=new Map([
+ ['enabled:true','Yes'],['enabled:false','No'],['overlay:true','Yes'],['overlay:false','No'],
+ ['reverse:true','Yes'],['reverse:false','No'],['borders:true','Yes'],['borders:false','No'],
+ ['gauge_style:reading','Number and icon'],['gauge_style:arc','Arc gauge'],
+ ['gauge_style:bar','Bar gauge'],['gauge_style:flame','Flame height'],
+ ['source:@scene_edges','Scene edges'],['mode:screen_copy','Match screen colors'],['mode:average','Average color'],
+]);
+const sourceChoicePlaceholder=new Map([
+ ['Достигнут предел показателей','Reading limit reached'],
+ ['Все источники добавлены','All sources added'],
+ ['Выберите источник…','Choose a source…'],
+]);
+function outputField(page,field) {
+ const strings=english&&outputFieldText[page]?.[field.key];
+ if(!strings)return field;
+ const [label,defaultHint]=strings;
+ const example=page==='lcd'&&field.key==='sources'&&field.hint?.match(/«([^»]+)»\.$/)?.[1];
+ const hint=example?`Enter the source key, then its LCD label. Separate readings with semicolons. Example for this profile: “${example}”.`:defaultHint;
+ let value=field.value;
+ if(page==='lcd'&&field.file&&(field.key==='media'||field.key==='font')){
+  value=value==='Встроенный'?'Built-in':value?.replace(/^Выбран · (?=[0-9a-f]{8}$)/,'Selected · ');
+ }
+ const choices=field.choices?.map(choice=>({
+  ...choice,
+  label:(field.key==='add_source'&&choice.value===''?sourceChoicePlaceholder.get(choice.label):
+   outputChoiceText.get(field.key+':'+choice.value))??choice.label,
+ }));
+ return {...field,label,hint,value,choices};
+}
 function nativeProperties() {
  const editor=state.editor;
  if(!editor || editor.page!==view)return state.nativeAux?.page===view?renderNativeForm(state.nativeAux):`<div class="native-wait">${ui('Настройки загружаются…','Loading settings…')}</div>`;
@@ -565,7 +693,7 @@ function nativeProperties() {
   ? `<button class="button" data-view="connections" data-connection-device="${esc(editor.deviceId)}" data-mutation ${disabled()}>${ui('Открыть подключение устройства','Open device connection')}</button>` : '';
  const copy=view==='devices'&&repair
   ? `<button class="button" data-action="copy-output-status" data-copy-output="${esc(editor.deviceId)}">${ui('Скопировать статус','Copy status')}</button><span id="output-copy-result" class="muted" role="status"></span>` : '';
- return `<section class="native-properties"><div class="native-inline"><label for="native-target">${ui('Объект','Item')}</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${view==='devices'&&editor.index>=editor.targets.length?`<option value="" disabled selected>${ui('Выберите устройство…','Choose a device…')}</option>`:''}${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select>${repair}${argb}${copy}</div><div class="parameter-panel">${english?`<details id="native-runtime-diagnostics" ${state.detail?'':'hidden'}><summary>Technical details</summary><p id="native-runtime-detail">${esc(state.detail||'')}</p></details>`:`<p class="parameter-note" id="native-runtime-detail"${view==='devices'?'':' role="status"'}>${esc(state.detail||'')}</p>`}<div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(english&&view==='devices'?deviceFieldLabels.get(field.key)??field.label:field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(english&&view==='devices'?deviceFieldChoices.get(field.key+':'+choice.value)??choice.label:choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>${ui('Выбрать…','Choose…')}</button>`:''}</div>`}${field.hint?`<small>${esc(deviceFieldHint(field))}</small>`:''}</div>`).join('')||`<p class="muted">${ui('Параметров объекта нет.','No settings for this item.')}</p>`}</div><div class="native-property-actions">${action(ui('Применить','Apply'),'apply-document',true,'data-needs-change="document"')}${action(ui('Отменить изменения','Discard changes'),'revert-document')}${action(ui('Повторить','Retry'),'retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
+ return `<section class="native-properties"><div class="native-inline"><label for="native-target">${ui('Объект','Item')}</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${view==='devices'&&editor.index>=editor.targets.length?`<option value="" disabled selected>${ui('Выберите устройство…','Choose a device…')}</option>`:''}${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select>${repair}${argb}${copy}</div><div class="parameter-panel">${english&&!outputPage(view)?`<details id="native-runtime-diagnostics" ${state.detail?'':'hidden'}><summary>Technical details</summary><p id="native-runtime-detail">${esc(state.detail||'')}</p></details>`:`<p class="parameter-note" id="native-runtime-detail"${view==='devices'?'':' role="status"'}>${esc(outputDetail(state.detail||''))}</p>`}<div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(english&&view==='devices'?deviceFieldLabels.get(field.key)??field.label:field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(english&&view==='devices'?deviceFieldChoices.get(field.key+':'+choice.value)??choice.label:choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>${ui('Выбрать…','Choose…')}</button>`:''}</div>`}${field.hint?`<small>${esc(deviceFieldHint(field))}</small>`:''}</div>`).join('')||`<p class="muted">${ui('Параметров объекта нет.','No settings for this item.')}</p>`}</div><div class="native-property-actions">${action(ui('Применить','Apply'),'apply-document',true,'data-needs-change="document"')}${action(ui('Отменить изменения','Discard changes'),'revert-document')}${action(ui('Повторить','Retry'),'retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
 }
 const deviceStatus=device=>outputStatusLabel(rawDeviceStatus(device));
 function rawDeviceStatus(device) {
@@ -869,10 +997,11 @@ function changeView(next, source) {
  } else settingsOpener=null;
  if(next==='editor')requestPreview();
 }
-function setDraftOrigin(origin) {
+function setDraftOrigin(origin,displayName) {
  draftOrigin=origin?{id:origin.id,name:origin.name,scene:clone(origin.scene)}:null;
  selectedId=origin?.id??null;
  draftName=origin?origin.name??ui('Текущая сцена','Current scene'):ui('Восстановленный черновик','Recovered draft');
+ draftDisplayName=displayName??(origin?.id?sceneLabel(origin):draftName);
 }
 function followActiveScene() {
  if(!closing&&draftOrigin?.name===null&&!unsavedDraft()&&!same(draft,state.scene)){
@@ -890,7 +1019,7 @@ function checkDraftOrigin() {
 function loadEntry(entry, message=null) {
  editorSceneResult=message?{scene:entry.scene,message}:null;
  draft=clone(entry.scene);
- setDraftOrigin({id:entry.builtIn?null:entry.id,name:entry.name,scene:entry.scene});
+ setDraftOrigin({id:entry.builtIn?null:entry.id,name:entry.name,scene:entry.scene},sceneLabel(entry));
  if(view==='editor')render();else changeView('editor');
  requestPreview();
  flushPreview();
@@ -899,7 +1028,7 @@ function openEntry(entry) {
  if(entry.id===selectedId){changeView('editor');return;}
  if(!unsavedDraft()){loadEntry(entry);return;}
  draftSwitchId=entry.id;
- $('#draft-switch-description').textContent=ui(`Сохранить изменения в сцене «${draftName}» перед открытием «${entry.name}»?`,`Save changes to “${draftName}” before opening “${sceneLabel(entry)}”?`);
+ $('#draft-switch-description').textContent=ui(`Сохранить изменения в сцене «${draftName}» перед открытием «${entry.name}»?`,`Save changes to “${draftDisplayName}” before opening “${sceneLabel(entry)}”?`);
  $('#draft-switch').showModal();
  $('#draft-stay').focus();
 }
@@ -1084,6 +1213,10 @@ window.prismestraReceive = message => {
    const acknowledged=awaitingCommandAck;awaitingCommandAck=false;completeStageAck();
    if(retryScope()!==message.state.deviceActivity?.retryScope)outputRetries.clear();
    state=message.state;
+   if(english&&state.editor&&outputPage(state.editor.page)){
+    const editor=state.editor;
+    state={...state,editor:{...editor,fields:editor.fields.map(field=>outputField(editor.page,field))}};
+   }
    reconcileSceneLamp();
    sceneActivationRequest=Math.max(sceneActivationRequest,state.lastSceneApplyRequest??0);
    if(Array.isArray(state.effects)){

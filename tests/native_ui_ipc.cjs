@@ -1764,7 +1764,72 @@ function checkEnglishApplicationLanguage() {
  vm.runInContext('window.prismestraReceive(payload)',preview);
  assert.match(find('#scene-activation-'+sample.id).textContent,/applied.*No active RGB outputs/);
  checkSearchRetryRecovery(preview,'Retry search');
+ checkOutputPageLanguage(preview,true);
+ checkOutputPageLanguage(context,false);
  console.log('PASS: English native bootstrap, scenes, device status and application language persistence IPC');
  console.log('PASS: rejected discovery retries only discovery in Russian and English; other errors retain document recovery');
+}
+function checkOutputPageLanguage(target,isEnglish) {
+ const receive=(kind,payload)=>{
+  target.payload=kind==='error'?{kind,message:payload}:{kind,state:payload};
+  vm.runInContext('window.prismestraReceive(payload)',target);
+ };
+ const selectPage=page=>vm.runInContext(`formStages.clear();pendingView=null;search="";libraryEffect="";view="${page}"`,target);
+ const lcd={id:'lcd-lab',label:'Помпа <Lab>',role:'lcd',driver:{type:'tt_lcd'},leds:0,enabled:true};
+ const screen={id:'screen-lab',label:'Лента',role:'ambient',driver:{type:'wled_ddp'},leds:8,enabled:true};
+ const base={...initial,devices:[lcd,screen],library:[]};
+ const sourcesHint='Слева ключ из раздела «Температуры», справа подпись на LCD. Разделяйте показатели точкой с запятой. В этом профиле можно ввести «ram=RAM; gpu=GPU».';
+ const selectedFont={key:'font',label:'Шрифт панели',value:'Выбран · 12345678',hint:'Шрифт по умолчанию',file:true,choices:[]};
+ selectPage('lcd');
+ receive('snapshot',{...base,detail:'Анимация и панель температур. Передача выполняется в памяти, без доступа к помпе.',
+  editor:{page:'lcd',index:0,deviceId:lcd.id,targets:[lcd.label],dirty:false,fields:[
+   selectedFont,{key:'sources',label:'Показатели и подписи',value:'ram=Память <Lab>',hint:sourcesHint,choices:[]},
+   {key:'add_source',label:'Добавить показатель',value:'',hint:'Выбор добавит показатель в черновик.',choices:[
+    {label:'Выберите источник…',value:''},{label:'gpu',value:'gpu'}]},
+  ]}});
+ assert.match(mainMarkup,isEnglish?/Panel font.*Selected · 12345678.*Readings and labels.*ram=RAM; gpu=GPU.*Choose a source…/s:
+  /Шрифт панели.*Выбран · 12345678.*Показатели и подписи.*ram=RAM; gpu=GPU.*Выберите источник…/s);
+ assert.match(mainMarkup,/Помпа &lt;Lab&gt;.*ram=Память &lt;Lab&gt;/s);
+ const field=find('#field-0');
+ events.input({target:field});
+ assert.equal(vm.runInContext('currentGenericStages().length',target),0,'display-only font text is not staged');
+ const source=new Node();
+ source.tagName='SELECT';
+ source.dataset.field='add_source';
+ source.value='gpu';
+ events.change({target:source});
+ assert.deepEqual(commands.at(-1),{op:'set_field',key:'add_source',value:'gpu',fields:[]});
+ receive('error','Выберите хотя бы один показатель для панели температур.');
+ assert.match(find('#native-error').innerHTML,isEnglish?/Select at least one reading/:/Выберите хотя бы один показатель/);
+ const diagnostic='Предпросмотр недоступен: ошибка HID';
+ receive('status',{detail:diagnostic});
+ assert.equal(find('#native-runtime-detail').textContent,isEnglish?'LCD preview unavailable. Check the device connection.':diagnostic);
+ if(isEnglish)assert.equal(find('#native-runtime-detail').title,diagnostic);
+
+ selectPage('ambient');
+ receive('snapshot',{...base,editor:{page:'ambient',index:0,deviceId:screen.id,targets:[screen.label],dirty:false,
+  fields:[{key:'source',label:'Источник',value:'@scene_edges',choices:[
+   {label:'desk-right',value:'desk-right'},{label:'Края общей сцены',value:'@scene_edges'}]}]}});
+ assert.match(mainMarkup,isEnglish?/Source.*value="desk-right"[^>]*>desk-right.*value="@scene_edges" selected>Scene edges/s:
+  /Источник.*value="desk-right"[^>]*>desk-right.*value="@scene_edges" selected>Края общей сцены/s);
+ receive('status',{status:'Захват выбранного экрана запрошен; проверьте статус источника.'});
+ assert.match(find('#player-status').textContent,isEnglish?/Capture requested/:/Захват выбранного экрана/);
+
+ const seeded=[['current','Моя сцена','noise_map'],['noise','Мягкий свет','noise_map'],
+  ['rainbow','Радуга','rainbow_wave'],['breathing','Дыхание','breathing']];
+ const library=seeded.map(([id,name,effect])=>({id,name,scene:{...scene,effect}}));
+ library.push({id:'scene-1',name:'Мягкий свет',scene},{id:'scene-2',name:'Моя сцена',scene});
+ selectPage('library');
+ receive('snapshot',{...base,library});
+ const translate=name=>isEnglish?name[0]:name[1];
+ for(const names of [['Current scene','Моя сцена'],['Soft light','Мягкий свет'],['Rainbow','Радуга'],['Breathing','Дыхание']]){
+  assert.ok(mainMarkup.includes('<h2>'+translate(names)+'</h2>'));
+ }
+ assert.match(mainMarkup,/data-preview="scene-1"[^>]+Мягкий свет/);
+ assert.match(mainMarkup,/data-preview="scene-2"[^>]+Моя сцена/);
+ vm.runInContext('loadEntry(state.library[1]);view="editor";render()',target);
+ assert.ok(mainMarkup.includes('<h1>'+translate(['Soft light','Мягкий свет'])+'</h1>'));
+ assert.equal(vm.runInContext('draftOrigin.name',target),'Мягкий свет');
+ console.log(`PASS: ${isEnglish?'English':'Russian'} LCD and screen lighting presentation, unchanged IPC values and seeded scene labels`);
 }
 checkOutputStatusCopy().then(checkEnglishApplicationLanguage).catch(error=>{console.error(error);process.exitCode=1;});
