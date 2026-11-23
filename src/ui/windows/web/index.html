@@ -12,7 +12,7 @@
 
 <dialog id="scene-file-dialog" aria-labelledby="scene-file-title">
   <h2 id="scene-file-title">Переносимая сцена</h2>
-  <p id="scene-file-scope">В файл входят название, размер холста, слои и назначения LCD и ленты. Привязки и данные устройств остаются в профиле. Открытый файл показывается в предпросмотре.</p>
+  <p id="scene-file-scope">В файл входят название, размер холста, слои и назначения дисплея и ленты. Привязки и данные устройств остаются в профиле. Открытый файл показывается в предпросмотре.</p>
   <div class="scene-file-actions">
     <button class="button" id="scene-file-open">Открыть файл…</button>
     <button class="button primary" id="scene-file-save" aria-describedby="scene-file-scope">Сохранить файл…</button>
@@ -26,15 +26,15 @@
           <div id="scene-file-outline" aria-hidden="true" hidden></div>
         </div>
         <div class="scene-file-output-preview">
-          <div><h3>LCD</h3><canvas id="scene-file-lcd" aria-label="Область LCD" hidden></canvas><p id="scene-file-lcd-note"></p></div>
+          <div><h3>Дисплей устройства</h3><canvas id="scene-file-lcd" aria-label="Область дисплея" hidden></canvas><p id="scene-file-lcd-note"></p></div>
           <div><h3>Лента</h3><canvas id="scene-file-strip" aria-label="Цвета кромок" hidden></canvas><p id="scene-file-strip-note"></p></div>
         </div>
-        <button type="button" class="button" id="scene-file-lcd-layout-toggle" aria-expanded="false" aria-controls="scene-file-lcd-layout" hidden>GIF и температура</button>
+        <button type="button" class="button" id="scene-file-lcd-layout-toggle" aria-expanded="false" aria-controls="scene-file-lcd-layout" hidden>Демо оформления дисплея</button>
         <div id="scene-file-lcd-layout" hidden>
-          <p>Эскиз Prismestra Player · 51 °C, тестовое значение</p>
+          <p id="scene-file-lcd-demo-note">Встроенная анимация и условная температура. Данные датчиков здесь не используются.</p>
           <div id="scene-file-lcd-layout-stage">
-            <canvas id="scene-file-lcd-layout-canvas" aria-label="Предпросмотр GIF и температуры"></canvas>
-            <button type="button" id="scene-file-lcd-layout-card" aria-label="Температурная карточка. Перемещение стрелками" aria-describedby="scene-file-lcd-layout-status"></button>
+            <canvas id="scene-file-lcd-layout-canvas" aria-label="Демонстрационный кадр дисплея" aria-describedby="scene-file-lcd-demo-note"></canvas>
+            <button type="button" id="scene-file-lcd-layout-card" aria-label="Демонстрационная карточка температуры. Перемещение стрелками" aria-describedby="scene-file-lcd-demo-note scene-file-lcd-layout-status"></button>
           </div>
           <p id="scene-file-lcd-layout-status" role="status"></p>
           <p>Позиция действует до закрытия эскиза.</p>
@@ -46,7 +46,7 @@
         <div id="scene-file-layers"></div>
         <button class="button" id="scene-file-add-color">Добавить цвет</button>
         <h3>Выходы</h3>
-        <label for="scene-file-lcd-mode">LCD</label>
+        <label for="scene-file-lcd-mode">Дисплей устройства</label>
         <select id="scene-file-lcd-mode"><option value="off">Выключен</option><option value="full">Весь холст</option><option value="crop">Область холста</option></select>
         <div class="scene-file-region" id="scene-file-region" hidden>
           <label>Слева, % <input id="scene-file-x" type="number" min="0" max="99.99" step="0.01"></label>
