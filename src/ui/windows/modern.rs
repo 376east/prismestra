@@ -938,6 +938,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
     value["state"]["captureAuthorized"] = json!(app.runtime.read(Runtime::capture_authorized));
     value["state"]["mapConnection"] = map_connection(app);
     value["state"]["argbDevice"] = json!(argb_channels::available(app));
+    value["state"]["unconfiguredArgb"] = json!(app.startup_unconfigured_argb());
     let schedule = &app.runtime.project().schedule;
     value["state"]["schedule"] = json!({"enabled":schedule.enabled,"paused":schedule.paused});
     Ok(value)
@@ -1705,6 +1706,7 @@ pub(super) fn maintain(state: &State) {
                     json!(app.startup_discovery_unknown_controller());
                 value["state"]["deviceActivity"] = device_activity(app);
                 value["state"]["argbDevice"] = json!(argb_channels::available(app));
+                value["state"]["unconfiguredArgb"] = json!(app.startup_unconfigured_argb());
             }
             value["state"]["mapConnection"] = map_connection(app);
             if let Some(form) = native_forms::snapshot(app) {

@@ -1167,6 +1167,38 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
 console.log('PASS: managed ARGB editor routes typed inventory/save IPC and correlated save errors');
 
 {
+ const controller={label:'<Controller 0/0>',channels:[{id:'0',label:'Header A',mode:'manual',leds:0,min:1,max:64},{id:'1',label:'Header B',mode:'manual',leds:0,min:1,max:120}]};
+ vm.runInContext('view="devices";pendingView=null',context);
+ receiveDeviceState('snapshot',{...initial,devices:[],draftDevices:[],argbDevice:null});
+ for(const id of ['channel','template','dots']){
+  const field=find(`#argb-${id}`);
+  field.replaceChildren=(...children)=>{field.children=children;};
+ }
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'..','src','ui','windows','web','argb-channel.js'),'utf8'),context);
+ receiveDeviceState('status',{unconfiguredArgb:[controller]});
+ assert.match(mainMarkup,/&lt;Controller 0\/0&gt;/);
+ assert.match(mainMarkup,/id="preview-argb-0"/);
+ assert.doesNotMatch(mainMarkup,/data-output-status|id="open-argb"/);
+ const before=commands.length;
+ events.click({target:{closest:()=>({dataset:{action:'preview-argb',argbIndex:'0'},hasAttribute:()=>false})}});
+ assert.equal(find('#argb-dialog').open,true);
+ assert.equal(find('#argb-label').textContent,controller.label);
+ const channel=find('#argb-channel');
+ assert.deepEqual(channel.children.slice(1).map(item=>item.textContent),['Header A','Header B']);
+ channel.value='1';
+ channel.onchange();
+ assert.equal(find('#argb-count').max,120);
+ assert.equal(find('#argb-count').value,'');
+ assert.equal(find('#argb-save').hidden,true);
+ find('#argb-form').onsubmit({preventDefault(){}});
+ assert.equal(commands.length,before,'the unbound preview sends no IPC');
+ find('#argb-close').onclick();
+ receiveDeviceState('status',{unconfiguredArgb:[]});
+ assert.doesNotMatch(mainMarkup,/id="preview-argb-0"/);
+}
+console.log('PASS: an unconfigured ARGB controller opens a local preview without a binding or IPC');
+
+{
  restoreDraft(draftState);
  const submitNew=()=>{
   evaluate('nameDialog("new")');

@@ -84,6 +84,9 @@ impl Scan {
             match probe.join() {
                 Ok(Ok(inventory)) => {
                     self.inventory.controllers.extend(inventory.controllers);
+                    self.inventory
+                        .unconfigured_argb
+                        .extend(inventory.unconfigured_argb);
                     self.inventory.lcd_paths.extend(inventory.lcd_paths);
                     self.inventory.ble_pixels.extend(inventory.ble_pixels);
                     self.inventory.issues.extend(inventory.issues);
@@ -222,6 +225,7 @@ fn cancelled() -> String {
 #[derive(Clone, Default)]
 pub(crate) struct Discovery {
     controllers: Vec<ControllerInfo>,
+    pub(crate) unconfigured_argb: Vec<crate::transport::openrgb::UnconfiguredArgb>,
     lcd_paths: Vec<String>,
     ble_pixels: Vec<(u64, usize)>,
     issues: Vec<String>,
@@ -331,6 +335,7 @@ fn discover_rgb(
             .filter_map(|c| c.controller)
             .collect(),
         issues: inventory.issues,
+        unconfigured_argb: inventory.unconfigured_argb,
         ..Default::default()
     })
 }
@@ -495,6 +500,7 @@ fn assemble(
         lcd_paths,
         ble_pixels,
         mut issues,
+        ..
     } = inventory;
     let initial_devices = document.lighting.setup.devices.len();
     let mut ids: BTreeSet<_> = document

@@ -22,6 +22,7 @@ pub struct Inventory {
     pub target: Target,
     pub candidates: Vec<Candidate>,
     pub issues: Vec<String>,
+    pub(crate) unconfigured_argb: Vec<crate::transport::openrgb::UnconfiguredArgb>,
 }
 impl Inventory {
     pub fn empty(target: Target) -> Self {
@@ -29,6 +30,7 @@ impl Inventory {
             target,
             candidates: vec![],
             issues: vec![],
+            unconfigured_argb: vec![],
         }
     }
     #[cfg(windows)]
@@ -294,6 +296,13 @@ pub fn openrgb_factory(endpoint: std::net::SocketAddr) -> Factory {
             };
             if controller.kind.eq_ignore_ascii_case("virtual") {
                 inventory.issues.push(format!("{name}: виртуальный контроллер исключён, чтобы не дублировать физические выходы."));
+                continue;
+            }
+            if let Some(preview) = &entry.unconfigured_argb {
+                inventory.unconfigured_argb.push(preview.clone());
+                inventory
+                    .issues
+                    .push(format!("{name}: в ручных каналах ARGB ещё нет LED."));
                 continue;
             }
             if controller.leds == 0 || !controller.supports_direct {
