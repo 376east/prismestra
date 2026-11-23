@@ -14,6 +14,7 @@ enum Source {
 struct Approval<'a> {
     scene_id: &'a str,
     lamp: &'a Lamp,
+    brightness: u8,
     allow_power_on: bool,
 }
 
@@ -35,7 +36,6 @@ impl SceneApply {
         source: Source,
         scene_id: &str,
         approval: Option<&Approval<'_>>,
-        brightness: u8,
         authorize: impl FnOnce() -> Result<(), String>,
         apply_local: impl FnOnce() -> Result<(), String>,
         request: impl FnMut(&str, Option<&[u8]>) -> Result<Value, String>,
@@ -51,7 +51,7 @@ impl SceneApply {
         let Some(approval) = approval.filter(|approval| scene_id == approval.scene_id) else {
             return Ok(Outcome::LocalOnly);
         };
-        if !(1..=100).contains(&brightness) {
+        if !(1..=100).contains(&approval.brightness) {
             return Ok(Outcome::Lamp(Err(
                 "Яркость лампы вне диапазона пилота.".into()
             )));
@@ -62,7 +62,7 @@ impl SceneApply {
                     approval.lamp,
                     data,
                     caps,
-                    Change::Brightness(brightness),
+                    Change::Brightness(approval.brightness),
                     approval.allow_power_on,
                 )
             })
@@ -82,6 +82,7 @@ fn ordinary_apply_checks_local_success_and_exact_approval_before_any_network() {
     let approval = Approval {
         scene_id: "scene-1",
         lamp,
+        brightness: 40,
         allow_power_on: false,
     };
     let mut dispatcher = SceneApply::default();
@@ -96,7 +97,6 @@ fn ordinary_apply_checks_local_success_and_exact_approval_before_any_network() {
                 source,
                 "scene-1",
                 Some(&approval),
-                40,
                 || unreachable!(),
                 || unreachable!(),
                 |_, _| unreachable!()
@@ -110,7 +110,6 @@ fn ordinary_apply_checks_local_success_and_exact_approval_before_any_network() {
                 manual(serial),
                 scene,
                 approved,
-                40,
                 || unreachable!(),
                 local,
                 |_, _| unreachable!()
@@ -124,7 +123,6 @@ fn ordinary_apply_checks_local_success_and_exact_approval_before_any_network() {
             manual(3),
             "scene-1",
             Some(&approval),
-            40,
             || unreachable!(),
             || Err("local apply failed".into()),
             |_, _| unreachable!()
@@ -136,7 +134,6 @@ fn ordinary_apply_checks_local_success_and_exact_approval_before_any_network() {
             manual(3),
             "scene-1",
             Some(&approval),
-            40,
             || unreachable!(),
             || unreachable!(),
             |_, _| unreachable!()
@@ -148,7 +145,6 @@ fn ordinary_apply_checks_local_success_and_exact_approval_before_any_network() {
             manual(4),
             "scene-1",
             Some(&approval),
-            40,
             || Err("access expired".into()),
             local,
             |_, _| unreachable!()
@@ -161,7 +157,6 @@ fn ordinary_apply_checks_local_success_and_exact_approval_before_any_network() {
             manual(4),
             "scene-1",
             Some(&approval),
-            40,
             || unreachable!(),
             || unreachable!(),
             |_, _| unreachable!()
@@ -187,12 +182,13 @@ fn one_id_and_one_post_for_success_or_ambiguous_reply_no_post_before_preflight()
         let approval = Approval {
             scene_id: "scene-1",
             lamp,
+            brightness: 40,
             allow_power_on: power,
         };
         let mut dispatcher = SceneApply::default();
         let locally_applied = Cell::new(false);
         let mut posts = 0;
-        let outcome = dispatcher.apply(manual(1), "scene-1", Some(&approval), 40, || Ok(()),
+        let outcome = dispatcher.apply(manual(1), "scene-1", Some(&approval), || Ok(()),
             || { locally_applied.set(true); Ok(()) }, |path, body| {
             assert!(locally_applied.get());
             match path {
@@ -236,7 +232,6 @@ fn one_id_and_one_post_for_success_or_ambiguous_reply_no_post_before_preflight()
                 manual(1),
                 "scene-1",
                 Some(&approval),
-                40,
                 || unreachable!(),
                 || unreachable!(),
                 |_, _| unreachable!()
