@@ -55,15 +55,6 @@ enum Change {
     Power(bool),
 }
 
-impl Change {
-    fn capability(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Brightness(_) => (RANGE, "brightness"),
-            Self::Power(_) => (ON, "on"),
-        }
-    }
-}
-
 #[derive(Clone, PartialEq, Eq)]
 struct Lamp {
     household: String,
@@ -715,6 +706,7 @@ fn command(
     data: &Value,
     catalog_caps: &[Value],
     change: Change,
+    allow_power_on: bool,
 ) -> Result<Value, String> {
     if data["status"] != "ok"
         || data["id"] != lamp.id
@@ -746,7 +738,7 @@ fn command(
                 "state":{"instance":"on","value":requested}}]}]}));
         }
     };
-    if !on {
+    if !on && !allow_power_on {
         return Err("Сначала включите выбранную лампу.".into());
     }
     let mut ranges = caps.iter().filter(|value| brightness(value));
@@ -774,14 +766,30 @@ fn command(
     {
         return Err("Выбранная яркость не соответствует диапазону лампы.".into());
     }
-    Ok(json!({"devices":[{"id":lamp.id,"actions":[{"type":RANGE,
-        "state":{"instance":"brightness","value":value,"relative":false}}]}]}))
+    let mut actions = Vec::new();
+    if !on {
+        actions.push(json!({"type":ON,"state":{"instance":"on","value":true}}));
+    }
+    actions.push(
+        json!({"type":RANGE,"state":{"instance":"brightness","value":value,"relative":false}}),
+    );
+    Ok(json!({"devices":[{"id":lamp.id,"actions":actions}]}))
 }
 
 fn apply_with(
     selected: &Lamp,
     change: Change,
+    request: impl FnMut(&str, Option<&[u8]>) -> Result<Value, String>,
+) -> Result<(), String> {
+    apply_payload_with(selected, request, |data, caps| {
+        command(selected, data, caps, change, false)
+    })
+}
+
+fn apply_payload_with(
+    selected: &Lamp,
     mut request: impl FnMut(&str, Option<&[u8]>) -> Result<Value, String>,
+    assemble: impl FnOnce(&Value, &[Value]) -> Result<Value, String>,
 ) -> Result<(), String> {
     let catalog = request("/v1.0/user/info", None)?;
     if catalog["status"] != "ok" || !lamps(&catalog)?.iter().any(|lamp| lamp == selected) {
@@ -795,31 +803,47 @@ fn apply_with(
         .and_then(|device| device["capabilities"].as_array())
         .ok_or("Яндекс не вернул умения выбранной лампы.")?;
     let data = request(&format!("/v1.0/devices/{}", encode(&selected.id)), None)?;
-    let body = serde_json::to_vec(&command(selected, &data, caps, change)?)
-        .map_err(|_| "Некорректная команда Алисы.")?;
+    let payload = assemble(&data, caps)?;
+    let actions = match payload["devices"].as_array().map(Vec::as_slice) {
+        Some([device]) if device["id"] == selected.id => device["actions"]
+            .as_array()
+            .filter(|actions| !actions.is_empty()),
+        _ => None,
+    }
+    .ok_or("Некорректная команда Алисы.")?;
+    let body = serde_json::to_vec(&payload).map_err(|_| "Некорректная команда Алисы.")?;
     let result = request("/v1.0/devices/actions", Some(&body)).map_err(|error| {
         format!("{error} Результат команды не подтверждён. Автоматического повтора не будет.")
     })?;
-    let (kind, instance) = change.capability();
-    if result["status"] == "ok"
-        && result["devices"].as_array().is_some_and(|devices| {
-            matches!(devices.as_slice(), [device] if device["id"] == selected.id
-            && device["capabilities"].as_array().is_some_and(|caps| matches!(caps.as_slice(),
-                [cap] if cap["type"] == kind && cap["state"]["instance"] == instance
-                    && cap["state"]["action_result"]["status"] == "DONE")))
-        })
-    {
+    if confirms(&result, &selected.id, actions) {
         Ok(())
     } else {
         Err("Яндекс не подтвердил команду. Автоматического повтора не будет.".into())
     }
 }
 
+fn confirms(result: &Value, id: &str, actions: &[Value]) -> bool {
+    result["status"] == "ok"
+        && result["devices"].as_array().is_some_and(|devices| {
+            matches!(devices.as_slice(), [device] if device["id"] == id
+            && device["capabilities"].as_array().is_some_and(|caps| {
+                caps.len() == actions.len() && actions.iter().all(|action| {
+                    caps.iter().filter(|cap| cap["type"] == action["type"]
+                        && cap["state"]["instance"] == action["state"]["instance"]
+                        && cap["state"]["action_result"]["status"] == "DONE").count() == 1
+                })
+            }))
+        })
+}
+
+#[cfg(test)]
+mod scene_apply_slice;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn fixture() -> Value {
+    pub(super) fn fixture() -> Value {
         json!({"status":"ok","rooms":[
             {"id":"r","household_id":"h","name":"Кабинет"},
             {"id":"neighbor","household_id":"h","name":"Кухня"}],
