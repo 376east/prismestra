@@ -45,6 +45,7 @@ const englishRuntimeStatus=new Map([
  ['Параметр изменён. Нажмите «Применить».','A setting changed. Select Apply.'],
  ['Проверка и применение параметров…','Checking and applying settings…'],
  ['Изменения параметров отменены.','Changes discarded.'],
+ ['Изменения расписания отменены.','Schedule changes discarded.'],
  ['Повторная проверка подключений…','Checking connections again…'],
  ['Открытие профиля: ожидаю завершения текущих операций…','Waiting for active operations before opening the profile…'],
  ['Файл добавлен в профиль. Нажмите «Применить».','File added to the profile. Select Apply.'],
@@ -396,10 +397,10 @@ function sceneSourceControls() {
   const cadence=['game_resources','game_round','weather_scene'].includes(draft.effect)?range('speed',ui('Скорость','Speed'),1,100):'';
   return '<p class="muted" id="scene-reactive-source"></p>'+exportButtons+cadence;
  }
- if(draft.effect==='day_night')return '<p class="muted">Источник — местное время с часовым поясом из расписания.</p>';
- if(draft.effect==='thermal_tint'||draft.effect==='thermal_gauge')return '<p class="muted">Источник — самая высокая свежая температура из настроенных источников.</p>';
+ if(draft.effect==='day_night')return `<p class="muted">${ui('Источник — местное время с часовым поясом из расписания.','Uses local time in the schedule time zone.')}</p>`;
+ if(draft.effect==='thermal_tint'||draft.effect==='thermal_gauge')return `<p class="muted">${ui('Источник — самая высокая свежая температура из настроенных источников.','Uses the highest recent temperature from the configured sources.')}</p>`;
  const speed=range('speed',ui('Скорость','Speed'),draft.effect==='breathing'?10:1,draft.effect==='breathing'?200:100);
- return draft.effect==='cpu_pulse'?'<p class="muted">Источник — загрузка CPU в подключённом профиле.</p>'+speed:speed;
+ return draft.effect==='cpu_pulse'?`<p class="muted">${ui('Источник — загрузка CPU в подключённом профиле.','Uses CPU load from the connected profile.')}</p>`+speed:speed;
 }
 let palettePosition=0;
 function paletteIndex() {return Math.min(palettePosition,draft.colors.length-1);}
@@ -465,7 +466,7 @@ function renderPlacementControls() {
  const objects=state.canvasPlacement?.objects;
  if(!objects?.length)return '';
  if(!placementOpen)return action(ui('Разместить RGB','Position RGB devices'),'open-placement',false,'id="open-placement"');
- const picker=objects.length>1&&state.draftMapRevision ? `<label class="native-field placement-picker" for="placement-picker">RGB-устройство
+ const picker=objects.length>1&&state.draftMapRevision ? `<label class="native-field placement-picker" for="placement-picker">${ui('RGB-устройство','RGB device')}
   <select id="placement-picker">${objects.map(object=>`<option value="${esc(object.id)}" ${object.id===placementSelection?'selected':''}>${esc(placementLabel(object,objects))}</option>`).join('')}</select>
  </label><button type="button" id="focus-placement" class="button" data-action="focus-placement">${ui('К метке','Go to marker')}</button>` : '';
  return `<div class="placement-actions" aria-label="${ui('Раскладка RGB','RGB layout')}">
@@ -1082,7 +1083,7 @@ function receiveAlice(message) {
   picker.replaceChildren();
   const placeholder=document.createElement('option');
   placeholder.value='';
-  placeholder.textContent='Выберите лампу';
+  placeholder.textContent=ui('Выберите лампу','Choose a light');
   picker.append(placeholder);
   state.lamps.forEach((label,index)=>{
    const option=document.createElement('option');

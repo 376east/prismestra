@@ -88,19 +88,32 @@ fn text(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buffer[..(len.max(0) as usize).min(MAX_TEXT)])
 }
 
-fn schedule_label(id: i32) -> Option<&'static str> {
+pub(super) fn schedule_label(id: i32) -> Option<ShellText> {
     match id {
-        SCHED_ON => Some("Включить расписание"),
-        TIME_PC => Some("Основной свет"),
-        TIME_DOOR => Some("Дополнительный свет"),
-        APPLY_SCHED => Some("Применить расписание"),
+        SCHED_ON => Some(ShellText::EnableSchedule),
+        SCHED_PAUSE => Some(ShellText::PauseSchedule),
+        TIME_PC => Some(ShellText::PrimaryLighting),
+        TIME_DOOR => Some(ShellText::SecondaryLighting),
+        TIME_OFF => Some(ShellText::LightsOffTime),
+        TIMEZONE => Some(ShellText::TimeZone),
+        APPLY_SCHED => Some(ShellText::ApplySchedule),
+        REVERT_SCHEDULE => Some(ShellText::DiscardChanges),
         _ => None,
     }
 }
 
-fn label(app: &App, id: i32, hwnd: HWND, kind: Kind) -> String {
+fn label(app: &App, id: i32, hwnd: HWND, kind: Kind, language: Language) -> String {
     if let Some(label) = schedule_label(id) {
-        return label.into();
+        return label.get(language).into();
+    }
+    if app.page == Page::Devices && language == Language::En {
+        match id {
+            E_ADD => return "Add device".into(),
+            E_REMOVE => return "Remove device".into(),
+            E_PRESET => return "Device family".into(),
+            E_LED_COUNT => return "LED count".into(),
+            _ => {}
+        }
     }
     if kind == Kind::Action || kind == Kind::Checkbox {
         return text(hwnd);
@@ -125,8 +138,6 @@ fn label(app: &App, id: i32, hwnd: HWND, kind: Kind) -> String {
     match id {
         1100 => "Раздел датчиков",
         1101 => "Датчик или результат поиска",
-        TIME_OFF => "Выключение подсветки",
-        TIMEZONE => "Часовой пояс",
         E_PRESET => "Семейство",
         E_LED_COUNT => "Число LED",
         E_ROUTE_DEVICE => "Устройство подсветки",
@@ -160,7 +171,7 @@ fn choices(hwnd: HWND) -> Vec<Value> {
     }).collect()
 }
 
-pub(super) fn snapshot(app: &App) -> Option<Value> {
+pub(super) fn snapshot(app: &App, language: Language) -> Option<Value> {
     let (page, ids) = match app.page {
         Page::Connections => (
             "connections",
@@ -170,7 +181,7 @@ pub(super) fn snapshot(app: &App) -> Option<Value> {
         Page::Schedule => ("schedule", 401..=407),
         _ => return None,
     };
-    let mut form = form_snapshot(app, page, ids);
+    let mut form = form_snapshot(app, page, ids, language);
     if let Some(notice) = app.portable_helper_notice() {
         form["notice"] = json!(notice);
     }
@@ -181,13 +192,22 @@ pub(super) fn snapshot(app: &App) -> Option<Value> {
             .as_array_mut()
             .expect("form action array")
             .push(json!({
-                "id":REVERT_SCHEDULE,"label":"Отменить изменения","enabled":dirty
+                "id":REVERT_SCHEDULE,"label":ShellText::DiscardChanges.get(language),"enabled":dirty
             }));
     }
     Some(form)
 }
 
-pub(super) fn aux_snapshot(app: &App) -> Option<Value> {
+pub(super) fn english_device_preset_label(id: &str) -> Option<&'static str> {
+    match id {
+        "home-assistant-light" => Some("Home Assistant · light"),
+        "door20" => Some("Surplife BLE · 20 groups"),
+        "surplife-e1" => Some("Surplife E1 · addressable LEDs"),
+        _ => None,
+    }
+}
+
+pub(super) fn aux_snapshot(app: &App, language: Language) -> Option<Value> {
     let page = match app.page {
         Page::Devices => "devices",
         Page::Ambient => "ambient",
@@ -207,6 +227,7 @@ pub(super) fn aux_snapshot(app: &App) -> Option<Value> {
             E_ROUTE_DEVICE,
             E_ROUTE_SOURCE,
         ],
+        language,
     ))
 }
 
@@ -243,7 +264,12 @@ fn enabled(app: &App, id: i32, hwnd: HWND) -> bool {
         && (id != E_LED_COUNT || selected_fixed_led_count(app).is_none())
 }
 
-fn form_snapshot(app: &App, page: &str, ids: impl IntoIterator<Item = i32>) -> Value {
+fn form_snapshot(
+    app: &App,
+    page: &str,
+    ids: impl IntoIterator<Item = i32>,
+    language: Language,
+) -> Value {
     let mut fields = Vec::new();
     let mut actions = Vec::new();
     let mut notes = Vec::new();
@@ -258,7 +284,8 @@ fn form_snapshot(app: &App, page: &str, ids: impl IntoIterator<Item = i32>) -> V
                 notes.push(note);
             }
         } else if kind == Kind::Action {
-            let mut action = json!({"id":id,"label":label(app,id,hwnd,kind),"enabled":enabled});
+            let mut action =
+                json!({"id":id,"label":label(app,id,hwnd,kind,language),"enabled":enabled});
             if id == connections::SAVE_BINDING && app.can_stage_connection_save() {
                 action["accepts_staged_text"] = json!(true);
             }
@@ -300,11 +327,25 @@ fn form_snapshot(app: &App, page: &str, ids: impl IntoIterator<Item = i32>) -> V
                 _ => "select",
             };
             let options = if kind == Kind::Select {
-                choices(hwnd)
+                let mut options = choices(hwnd);
+                if id == E_PRESET && language == Language::En {
+                    let presets = crate::app::device_setup::catalog();
+                    for choice in &mut options {
+                        let label = choice["value"]
+                            .as_str()
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .and_then(|index| presets.get(index))
+                            .and_then(|preset| english_device_preset_label(preset.id));
+                        if let Some(label) = label {
+                            choice["label"] = json!(label);
+                        }
+                    }
+                }
+                options
             } else {
                 Vec::new()
             };
-            fields.push(json!({"id":id,"label":label(app,id,hwnd,kind),"kind":kind_name,"value":value,"choices":options,"enabled":enabled}));
+            fields.push(json!({"id":id,"label":label(app,id,hwnd,kind,language),"kind":kind_name,"value":value,"choices":options,"enabled":enabled}));
         }
     }
     json!({"page":page,"fields":fields,"actions":actions,"notes":notes})
@@ -521,10 +562,20 @@ mod tests {
             assert_eq!(fixed_led_count(preset), None, "{id}");
             assert!(preset.device_with_leds("new-device", 12).is_ok());
         }
-        assert_eq!(schedule_label(SCHED_ON), Some("Включить расписание"));
-        assert_eq!(schedule_label(TIME_PC), Some("Основной свет"));
-        assert_eq!(schedule_label(TIME_DOOR), Some("Дополнительный свет"));
-        assert_eq!(schedule_label(APPLY_SCHED), Some("Применить расписание"));
+        for (id, en, ru) in [
+            (SCHED_ON, "Enable schedule", "Включить расписание"),
+            (SCHED_PAUSE, "Pause schedule", "Приостановить расписание"),
+            (TIME_PC, "Primary lighting", "Основной свет"),
+            (TIME_DOOR, "Secondary lighting", "Дополнительный свет"),
+            (TIME_OFF, "Turn lights off", "Выключение подсветки"),
+            (TIMEZONE, "Time zone", "Часовой пояс"),
+            (APPLY_SCHED, "Apply schedule", "Применить расписание"),
+            (REVERT_SCHEDULE, "Discard changes", "Отменить изменения"),
+        ] {
+            let label = schedule_label(id).unwrap();
+            assert_eq!(label.get(Language::En), en);
+            assert_eq!(label.get(Language::Ru), ru);
+        }
     }
 
     #[test]

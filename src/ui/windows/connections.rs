@@ -38,6 +38,7 @@ const ACTIVE_STATUS: i32 = 1820;
 const SAVE_KEY: i32 = 1821;
 pub(super) const CONFIGURE_PORTABLE_OPENRGB: i32 = 1822;
 const PORTABLE_HELPER_NOTE: i32 = 1823;
+const PORTABLE_HELPER_MESSAGE_EN: &str = "The OpenRGB task pins the executable. Ask an administrator to verify the replacement and update the pin, then confirm it with --reauthorize-portable-openrgb. See managed-openrgb.md.";
 const PORTABLE_HELPER_MESSAGE: &str = "Настройки OpenRGB закреплены за задачей. Для смены EXE попросите администратора проверить новый файл и обновить пин в задаче. Затем подтвердите файл через --reauthorize-portable-openrgb. Инструкция в managed-openrgb.md.";
 type PlanFactory = std::sync::Arc<
     dyn Fn(
@@ -312,12 +313,13 @@ impl App {
     }
 
     pub(super) fn build_connections(&mut self, parent: HWND) -> Result<(), String> {
+        let language = self.language;
         self.control(parent, ACTIVE_STATUS, "STATIC", "", 0)?;
         self.control(
             parent,
             TARGET_LABEL,
             "STATIC",
-            "Устройство или источник экрана",
+            language.text("Устройство или источник экрана", "Device or screen source"),
             0,
         )?;
         self.control(
@@ -331,10 +333,16 @@ impl App {
             parent,
             SCAN,
             "BUTTON",
-            "Найти устройства",
+            language.text("Найти устройства", "Find devices"),
             BS_PUSHBUTTON as u32,
         )?;
-        self.control(parent, RESULT_LABEL, "STATIC", "Результаты поиска", 0)?;
+        self.control(
+            parent,
+            RESULT_LABEL,
+            "STATIC",
+            language.text("Результаты поиска", "Search results"),
+            0,
+        )?;
         self.control(
             parent,
             LIST,
@@ -343,9 +351,21 @@ impl App {
             LBS_NOTIFY as u32 | WS_VSCROLL | WS_BORDER,
         )?;
         for (label, field, text) in [
-            (ENDPOINT_LABEL, ENDPOINT, "Подключение"),
-            (IDENTITY_LABEL, IDENTITY, "Дополнительно"),
-            (SERIAL_LABEL, SERIAL, "ID контроллера (HEX)"),
+            (
+                ENDPOINT_LABEL,
+                ENDPOINT,
+                language.text("Подключение", "Connection"),
+            ),
+            (
+                IDENTITY_LABEL,
+                IDENTITY,
+                language.text("Дополнительно", "Additional settings"),
+            ),
+            (
+                SERIAL_LABEL,
+                SERIAL,
+                language.text("ID контроллера (HEX)", "Controller ID (hex)"),
+            ),
         ] {
             self.control(parent, label, "STATIC", text, 0)?;
             self.control(parent, field, "EDIT", "", WS_BORDER | ES_AUTOHSCROLL as u32)?;
@@ -354,18 +374,33 @@ impl App {
             }
         }
         for (id, label) in [
-            (SAVE_KEY, "Сохранить ключ"),
-            (SAVE_BINDING, "Сохранить"),
-            (RESET_BINDING, "Отменить правки"),
-            (REMOVE, "Удалить привязку"),
-            (PRUNE, "Убрать отсутствующие"),
-            (APPLY_OUTPUTS, "Применить"),
-            (REVERT_OUTPUTS, "Вернуть"),
-            (CONFIGURE_PORTABLE_OPENRGB, "Настроить локальный OpenRGB…"),
+            (SAVE_KEY, language.text("Сохранить ключ", "Save key")),
+            (SAVE_BINDING, language.text("Сохранить", "Save")),
+            (
+                RESET_BINDING,
+                language.text("Отменить правки", "Discard changes"),
+            ),
+            (REMOVE, language.text("Удалить привязку", "Remove binding")),
+            (
+                PRUNE,
+                language.text("Убрать отсутствующие", "Remove unused bindings"),
+            ),
+            (APPLY_OUTPUTS, language.text("Применить", "Apply")),
+            (REVERT_OUTPUTS, language.text("Вернуть", "Revert")),
+            (
+                CONFIGURE_PORTABLE_OPENRGB,
+                language.text("Настроить локальный OpenRGB…", "Set up local OpenRGB…"),
+            ),
         ] {
             self.control(parent, id, "BUTTON", label, BS_PUSHBUTTON as u32)?;
         }
-        self.control(parent, PATH_LABEL, "STATIC", "Локальный файл", 0)?;
+        self.control(
+            parent,
+            PATH_LABEL,
+            "STATIC",
+            language.text("Локальный файл", "Local file"),
+            0,
+        )?;
         self.control(
             parent,
             PATH,
@@ -384,7 +419,7 @@ impl App {
             parent,
             PORTABLE_HELPER_NOTE,
             "STATIC",
-            PORTABLE_HELPER_MESSAGE,
+            language.text(PORTABLE_HELPER_MESSAGE, PORTABLE_HELPER_MESSAGE_EN),
             0,
         )?;
         Ok(())
@@ -394,7 +429,10 @@ impl App {
             && self.portable_openrgb_setup
             && crate::app::managed_backend::provision::helper_reference_present(&self.state_dir)
                 .unwrap_or(false))
-        .then_some(PORTABLE_HELPER_MESSAGE)
+        .then_some(
+            self.language
+                .text(PORTABLE_HELPER_MESSAGE, PORTABLE_HELPER_MESSAGE_EN),
+        )
     }
 
     pub(super) fn connection_visible(&self, id: i32) -> bool {
@@ -586,15 +624,19 @@ impl App {
                 0,
             );
         }
+        let language = self.language;
         self.set_text(
             SERIAL_LABEL,
             if self.connections.home_assistant() {
-                "Новый ключ (пусто = сохранённый)"
+                language.text(
+                    "Новый ключ (пусто = сохранённый)",
+                    "New key (leave empty to use the saved key)",
+                )
             } else {
                 if self.connections.wled() {
-                    "HTTP WLED (пусто = порт 80)"
+                    language.text("HTTP WLED (пусто = порт 80)", "WLED HTTP (default port 80)")
                 } else {
-                    "ID контроллера (HEX)"
+                    language.text("ID контроллера (HEX)", "Controller ID (hex)")
                 }
             },
         );
@@ -618,25 +660,41 @@ impl App {
         let label = match self.connections.current() {
             Some(BindingTarget::Monitor(_)) => r"Экран Windows (например, \\.\DISPLAY1)",
             Some(BindingTarget::Device(d)) => match d.driver {
-                crate::devices::Driver::HomeAssistant => "Адрес Home Assistant (http://IP:8123)",
-                crate::devices::Driver::OpenRgb => "SDK-сервер OpenRGB",
-                crate::devices::Driver::WledDdp => "IP:порт WLED DDP (обычно 4048)",
-                crate::devices::Driver::DoorBle | crate::devices::Driver::SurplifeE1Pixels => {
-                    "MAC Bluetooth-контроллера"
+                crate::devices::Driver::HomeAssistant => language.text(
+                    "Адрес Home Assistant (http://IP:8123)",
+                    "Home Assistant address (http://IP:8123)",
+                ),
+                crate::devices::Driver::OpenRgb => {
+                    language.text("SDK-сервер OpenRGB", "OpenRGB SDK server")
                 }
-                crate::devices::Driver::EneDram => "Проверенный модуль PawnIO",
-                crate::devices::Driver::SkydimoSerial { .. } => "COM-порт контроллера",
-                _ => "Путь интерфейса HID",
+                crate::devices::Driver::WledDdp => language.text(
+                    "IP:порт WLED DDP (обычно 4048)",
+                    "WLED DDP IP:port (usually 4048)",
+                ),
+                crate::devices::Driver::DoorBle | crate::devices::Driver::SurplifeE1Pixels => {
+                    language.text(
+                        "MAC Bluetooth-контроллера",
+                        "Bluetooth controller MAC address",
+                    )
+                }
+                crate::devices::Driver::EneDram => {
+                    language.text("Проверенный модуль PawnIO", "Verified PawnIO module")
+                }
+                crate::devices::Driver::SkydimoSerial { .. } => {
+                    language.text("COM-порт контроллера", "Controller COM port")
+                }
+                _ => language.text("Путь интерфейса HID", "HID interface path"),
             },
-            None => "Подключение",
+            None => language.text("Подключение", "Connection"),
         };
         self.set_text(ENDPOINT_LABEL, label);
-        self.set_text(IDENTITY_LABEL,if self.connections.home_assistant(){"Светильник (light.office)"}else if self.connections.wled(){"Идентичность WLED (из поиска)"}else if matches!(self.connections.current(),Some(BindingTarget::Device(d)) if matches!(d.driver,crate::devices::Driver::EneDram)){"Адрес RAM (0x70..0x76)"}else{"USB instance (из метаданных)"});
+        self.set_text(IDENTITY_LABEL,if self.connections.home_assistant(){language.text("Светильник (light.office)", "Light entity (light.example)")}else if self.connections.wled(){language.text("Идентичность WLED (из поиска)", "WLED identity (from discovery)")}else if matches!(self.connections.current(),Some(BindingTarget::Device(d)) if matches!(d.driver,crate::devices::Driver::EneDram)){language.text("Адрес RAM (0x70..0x76)", "RAM address (0x70–0x76)")}else{language.text("USB instance (из метаданных)", "USB instance (from metadata)")});
         self.refresh_connections();
         self.connections_layout(self.width, self.height);
         self.show_page();
     }
     pub(super) fn refresh_connections(&self) {
+        let language = self.language;
         self.set_text(PATH, &self.connections.path.to_string_lossy());
         let n = self.connections.workspace.as_ref().map_or(0, |w| {
             w.orphan_ids(self.runtime.document()).len()
@@ -658,56 +716,84 @@ impl App {
         let note = if !self.connections.scan.is_idle() {
             if matches!(self.connections.current(),Some(BindingTarget::Device(d)) if d.driver == crate::devices::Driver::SurplifeE1Pixels)
             {
-                "Проверка Surplife: подключение по BLE и чтение возможностей; цвет и конфигурация не меняются.".into()
+                language.text("Проверка Surplife: подключение по BLE и чтение возможностей; цвет и конфигурация не меняются.", "Checking Surplife capabilities over Bluetooth. Lighting and configuration are unchanged.").into()
             } else {
-                "Поиск устройств… RGB-команды не отправляются.".into()
+                language
+                    .text(
+                        "Поиск устройств… RGB-команды не отправляются.",
+                        "Looking for devices. No RGB commands are sent.",
+                    )
+                    .into()
             }
         } else if self.connections.targets.is_empty() {
-            format!(
-                "Сначала добавьте устройство на вкладке «Устройства» или источник экрана. Привязок удалённых источников: {n}."
-            )
+            match language {
+                Language::En => {
+                    format!("Add a device in Devices or add a screen source. Unused bindings: {n}.")
+                }
+                Language::Ru => format!(
+                    "Сначала добавьте устройство на вкладке «Устройства» или источник экрана. Привязок удалённых источников: {n}."
+                ),
+            }
         } else if self.connections.current().is_none() {
-            "Выберите устройство или источник экрана.".into()
+            language
+                .text(
+                    "Выберите устройство или источник экрана.",
+                    "Choose a device or screen source.",
+                )
+                .into()
         } else if let Some(inventory) = &self.connections.inventory {
-            format!(
-                "Найдено: {}. Выберите результат, сохраните привязку и нажмите «Применить». {}",
-                inventory.candidates.len(),
-                inventory.issues.join(" ")
-            )
+            let count = inventory.candidates.len();
+            let issues = inventory.issues.join(" ");
+            match language {
+                Language::En => format!(
+                    "Found: {count}. Select a result, save the binding, then select Apply. {issues}"
+                ),
+                Language::Ru => format!(
+                    "Найдено: {count}. Выберите результат, сохраните привязку и нажмите «Применить». {issues}"
+                ),
+            }
         } else {
             let hint = match self.connections.current() {
                 Some(BindingTarget::Device(d)) => match d.driver {
                     crate::devices::Driver::HomeAssistant => {
-                        "Пустой адрес: найти сервер в сети. Затем сохраните ключ и найдите светильник. Вывод до 1 Гц."
+                        language.text("Пустой адрес: найти сервер в сети. Затем сохраните ключ и найдите светильник. Вывод до 1 Гц.", "Leave the address empty to discover a server. Save the key, then find the light. Output runs at up to 1 Hz.")
                     }
                     crate::devices::Driver::OpenRgb => {
-                        "Поиск читает SDK; «Применить» включает Direct."
+                        language.text("Поиск читает SDK; «Применить» включает Direct.", "Discovery reads the SDK. Apply enables Direct mode.")
                     }
                     crate::devices::Driver::WledDdp => {
-                        "Пустой адрес: найти WLED в сети. Можно указать IP:4048 вручную. Поиск читает число LED и идентичность."
+                        language.text("Пустой адрес: найти WLED в сети. Можно указать IP:4048 вручную. Поиск читает число LED и идентичность.", "Leave the address empty to discover WLED, or enter IP:4048. Discovery reads the LED count and identity.")
                     }
                     crate::devices::Driver::DoorBle | crate::devices::Driver::SurplifeE1Pixels => {
-                        "Укажите MAC-адрес ленты. Автоматический поиск для этого протокола не поддерживается."
+                        language.text("Укажите MAC-адрес ленты. Автоматический поиск для этого протокола не поддерживается.", "Enter the strip MAC address. This protocol requires manual setup.")
                     }
                     crate::devices::Driver::EneDram => {
-                        "Укажите проверенный модуль доступа и адрес. Сканирование шины здесь не выполняется."
+                        language.text("Укажите проверенный модуль доступа и адрес. Сканирование шины здесь не выполняется.", "Enter the verified access module and address. This screen does not scan the bus.")
                     }
                     crate::devices::Driver::SkydimoSerial { .. } => {
-                        "Поиск показывает USB-порты CH340, но не подтверждает модель ленты. Укажите также известный HEX ID контроллера."
+                        language.text("Поиск показывает USB-порты CH340, но не подтверждает модель ленты. Укажите также известный HEX ID контроллера.", "Discovery lists CH340 USB ports. Also enter the known controller ID in hex to identify the strip model.")
                     }
                     _ => {
-                        "Найдите устройство и выберите результат или укажите известный путь вручную."
+                        language.text("Найдите устройство и выберите результат или укажите известный путь вручную.", "Find the device and select the result, or enter its path.")
                     }
                 },
-                _ => "Найдите монитор и выберите его из списка.",
+                _ => language.text("Найдите монитор и выберите его из списка.", "Find the monitor and select it from the list."),
             };
-            format!(
-                "{hint} Сохранение не переключает работающие устройства. Привязок удалённых источников: {n}."
-            )
+            match language {
+                Language::En => {
+                    format!("{hint} Saving does not switch active outputs. Unused bindings: {n}.")
+                }
+                Language::Ru => format!(
+                    "{hint} Сохранение не переключает работающие устройства. Привязок удалённых источников: {n}."
+                ),
+            }
         };
         self.set_text(NOTE, &note);
         let active = if self.connections.pending.is_some() {
-            "Сейчас: меняются подключения подсветки."
+            language.text(
+                "Сейчас: меняются подключения подсветки.",
+                "Updating lighting connections…",
+            )
         } else if let Some(local) = &self.native_lighting {
             let same = self.connections.workspace.as_ref().is_some_and(|saved| {
                 match self.connections.current() {
@@ -733,12 +819,18 @@ impl App {
                 }
             });
             if same {
-                "Сейчас: аппаратный набор. Выбранная привязка совпадает с сохранённой."
+                language.text(
+                    "Сейчас: аппаратный набор. Выбранная привязка совпадает с сохранённой.",
+                    "Hardware output is active. The selected binding matches the saved binding.",
+                )
             } else {
-                "Сейчас: аппаратный набор. Сохранённая привязка отличается от применённой."
+                language.text("Сейчас: аппаратный набор. Сохранённая привязка отличается от применённой.", "Hardware output is active. The saved binding differs from the applied binding.")
             }
         } else {
-            "Сейчас: программный предпросмотр; физические выходы не подключены."
+            language.text(
+                "Сейчас: программный предпросмотр; физические выходы не подключены.",
+                "Preview mode. Physical outputs are disconnected.",
+            )
         };
         let backend = self
             .runtime
@@ -755,17 +847,17 @@ impl App {
         self.set_text(
             APPLY_OUTPUTS,
             if switching {
-                "Повторить"
+                language.text("Повторить", "Retry")
             } else {
-                "Применить"
+                language.text("Применить", "Apply")
             },
         );
         self.set_text(
             RESET_BINDING,
             if switching {
-                "Отменить"
+                language.text("Отменить", "Cancel")
             } else {
-                "Отменить правки"
+                language.text("Отменить правки", "Discard changes")
             },
         );
         let target = self.connections.current().is_some();

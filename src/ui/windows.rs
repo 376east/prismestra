@@ -518,6 +518,7 @@ impl Drop for Bitmap {
     }
 }
 struct App {
+    language: Language,
     web_mode: bool,
     first_run: first_run::Startup,
     connections: connections::Editor,
@@ -790,10 +791,10 @@ impl App {
             parent,
             SCHED_ON,
             "BUTTON",
-            if self.native_lighting.is_some() {
-                "Включить расписание подсветки"
-            } else {
-                "Включить расписание предпросмотра"
+            match (language, self.native_lighting.is_some()) {
+                (Language::En, _) => ShellText::EnableSchedule.get(language),
+                (Language::Ru, true) => "Включить расписание подсветки",
+                (Language::Ru, false) => "Включить расписание предпросмотра",
             },
             BS_AUTOCHECKBOX as u32,
         )?;
@@ -801,7 +802,7 @@ impl App {
             parent,
             SCHED_PAUSE,
             "BUTTON",
-            "Приостановить расписание",
+            ShellText::PauseSchedule.get(language),
             BS_AUTOCHECKBOX as u32,
         )?;
         for (id, text) in [
@@ -816,10 +817,10 @@ impl App {
             parent,
             APPLY_SCHED,
             "BUTTON",
-            if self.native_lighting.is_some() {
-                "Применить к устройствам"
-            } else {
-                "Применить к предпросмотру"
+            match (language, self.native_lighting.is_some()) {
+                (Language::En, _) => ShellText::ApplySchedule.get(language),
+                (Language::Ru, true) => "Применить к устройствам",
+                (Language::Ru, false) => "Применить к предпросмотру",
             },
             BS_PUSHBUTTON as u32,
         )?;
@@ -829,10 +830,22 @@ impl App {
             "Скорость",
             "Частота",
             "Цвет палитры",
-            "ПК включается",
-            "Лента включается",
-            "Всё выключается",
-            "Часовой пояс",
+            if language == Language::En {
+                "Primary lighting on"
+            } else {
+                "ПК включается"
+            },
+            if language == Language::En {
+                "Secondary lighting on"
+            } else {
+                "Лента включается"
+            },
+            if language == Language::En {
+                "All lights off"
+            } else {
+                "Всё выключается"
+            },
+            ShellText::TimeZone.get(language),
         ]
         .into_iter()
         .enumerate()
@@ -3297,6 +3310,7 @@ fn run_inner_with_language(
     state.editor_window.set(raw);
     let window = Window(state.editor_window.clone());
     let mut app = App {
+        language: state.language,
         web_mode: false,
         first_run: first_run::Startup::new(
             resident_mode && crate::app::installed::session().is_some(),

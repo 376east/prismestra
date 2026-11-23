@@ -490,14 +490,20 @@ pub(super) fn open(state: &State) -> Result<(), String> {
     // WebView initialization pumps COM/Win32 messages. No App borrow is held here.
     #[cfg(debug_assertions)]
     let _ = std::fs::write(state_dir.join("webview-stage.txt"), "initializing");
-    let shell = web_shell::WebShell::new(hwnd, &state.webview_user_data, &state_dir, assets)
-        .inspect_err(|_error| {
-            #[cfg(debug_assertions)]
-            let _ = std::fs::write(
-                state_dir.join("webview-stage.txt"),
-                format!("failed: {_error}"),
-            );
-        })?;
+    let shell = web_shell::WebShell::new(
+        hwnd,
+        &state.webview_user_data,
+        &state_dir,
+        assets,
+        state.language,
+    )
+    .inspect_err(|_error| {
+        #[cfg(debug_assertions)]
+        let _ = std::fs::write(
+            state_dir.join("webview-stage.txt"),
+            format!("failed: {_error}"),
+        );
+    })?;
     // WebView creation pumps Win32 messages, including a pending editor close.
     if state.editor_window.get() != hwnd {
         return Err("Окно было закрыто при открытии редактора".into());
@@ -911,7 +917,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
     let mut session = state.modern_session.borrow_mut();
     let session = session.as_mut().ok_or("Нет интерфейса")?;
     let draft_map_revision = session.draft_map.observe(draft_map_input(app));
-    let editor=app.editor.as_ref().map(|e|json!({"page":page_name(e.page),"index":e.index,"deviceId":e.selected_connection_device(),"targets":super::super::editor::Editor::targets(&e.document,e.page),"fields":e.fields().iter().map(|f|json!({"key":f.key,"label":f.label,"value":f.value,"hint":f.hint,"file":f.file,"choices":f.choices.iter().map(|(label,value)|json!({"label":if f.key=="group"{match value.as_str(){"pc"=>"Основной свет","door"=>"Дополнительный свет",_=>label.as_str()}}else{label.as_str()},"value":value})).collect::<Vec<_>>()})).collect::<Vec<_>>(),"dirty":app.editor_dirty}));
+    let editor=app.editor.as_ref().map(|e|json!({"page":page_name(e.page),"index":e.index,"deviceId":e.selected_connection_device(),"targets":super::super::editor::Editor::targets(&e.document,e.page),"fields":e.fields().iter().map(|f|json!({"key":f.key,"label":f.label,"value":f.value,"hint":f.hint,"file":f.file,"choices":f.choices.iter().map(|(label,value)|json!({"label":if f.key=="preset" && state.language==Language::En {native_forms::english_device_preset_label(value).unwrap_or(label)}else if f.key=="group"{match value.as_str(){"pc"=>"Основной свет","door"=>"Дополнительный свет",_=>label.as_str()}}else{label.as_str()},"value":value})).collect::<Vec<_>>()})).collect::<Vec<_>>(),"dirty":app.editor_dirty}));
     let library = session
         .catalog
         .entries
@@ -919,7 +925,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
         .filter_map(|entry| session.catalog_view.get(&entry.id))
         .chain(&session.built_in_cards)
         .collect::<Vec<_>>();
-    let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":library,"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
+    let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":library,"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app, state.language),"nativeAux":native_forms::aux_snapshot(app, state.language),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
     value["state"]["preferredUiLanguage"] = json!(locale::Language::load(&app.state_dir));
     value["state"]["startupDiscoveryRetry"] = json!(app.can_retry_startup_discovery());
     value["state"]["startupEmptySearchResult"] = json!(app.startup_empty_search_result());
@@ -1730,7 +1736,7 @@ pub(super) fn maintain(state: &State) {
                 value["state"]["unconfiguredArgb"] = json!(app.startup_unconfigured_argb());
             }
             value["state"]["mapConnection"] = map_connection(app);
-            if let Some(form) = native_forms::snapshot(app) {
+            if let Some(form) = native_forms::snapshot(app, state.language) {
                 value["state"]["nativeForm"] = form;
             }
         }

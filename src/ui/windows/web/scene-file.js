@@ -27,6 +27,11 @@ window.sceneFile = (() => {
   let cardPosition = {x:146,y:300};
   let cardDrag = null;
 
+  function showFileError(node, summary, detail) {
+    node.textContent = ui(detail,summary);
+    node.title = english ? detail : '';
+  }
+
   function hasUnsaved() {
     return file !== null && JSON.stringify(file) !== JSON.stringify(baseline);
   }
@@ -70,13 +75,13 @@ window.sceneFile = (() => {
     const item = document.createElement('div');
     item.className = 'scene-file-layer';
     const title = document.createElement('p');
-    const named = layer.content.type === 'color' ? 'Цвет' : effects[layer.content.settings.effect];
+    const named = layer.content.type === 'color' ? ui('Цвет','Color') : effects[layer.content.settings.effect];
     title.textContent = named;
     item.append(title);
     if (layer.content.type === 'color') {
       const color = document.createElement('input');
       color.type = 'color';
-      color.setAttribute('aria-label','Цвет слоя ' + (index + 1));
+      color.setAttribute('aria-label',ui('Цвет слоя ','Layer color ') + (index + 1));
       color.value = '#' + layer.content.rgb.toString(16).padStart(6,'0');
       color.oninput = () => {
         layer.content.rgb = parseInt(color.value.slice(1),16);
@@ -89,7 +94,7 @@ window.sceneFile = (() => {
     opacity.min = '0';
     opacity.max = '100';
     opacity.value = layer.opacity;
-    opacity.setAttribute('aria-label','Непрозрачность слоя ' + (index + 1));
+    opacity.setAttribute('aria-label',ui('Непрозрачность слоя ','Layer opacity ') + (index + 1));
     opacity.oninput = () => {
       layer.opacity = Number(opacity.value);
       changed();
@@ -98,8 +103,8 @@ window.sceneFile = (() => {
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'button';
-    remove.textContent = 'Убрать';
-    remove.setAttribute('aria-label','Убрать слой ' + (index + 1));
+    remove.textContent = ui('Убрать','Remove');
+    remove.setAttribute('aria-label',ui('Убрать слой ','Remove layer ') + (index + 1));
     remove.disabled = file.layers.length < 2;
     remove.onclick = () => {
       file.layers.splice(index,1);
@@ -128,8 +133,8 @@ window.sceneFile = (() => {
     for (const edge of edges) edge.checked = strip?.edges.includes(edge.value) ?? false;
     byId('reverse').checked = strip?.reverse ?? false;
     byId('reverse').disabled = !strip;
-    byId('lcd-note').textContent = lcd ? 'Логический выход: '+lcd.target : 'Выход выключен';
-    byId('strip-note').textContent = strip ? 'Логический выход: '+strip.target : 'Кромки не выбраны';
+    byId('lcd-note').textContent = lcd ? ui('Логический выход: ','Logical output: ')+lcd.target : ui('Выход выключен','Output off');
+    byId('strip-note').textContent = strip ? ui('Логический выход: ','Logical output: ')+strip.target : ui('Кромки не выбраны','No edges selected');
     drawOutline();
   }
 
@@ -159,7 +164,8 @@ window.sceneFile = (() => {
   function changed() {
     previewRequest = null;
     clearTimeout(previewTimer);
-    status.textContent = validDraft() ? '' : 'Проверьте название и границы области LCD.';
+    status.title = '';
+    status.textContent = validDraft() ? '' : ui('Проверьте название и границы области LCD.','Check the scene name and the LCD region.');
     drawOutline();
     syncButtons();
     if (validDraft()) previewTimer = setTimeout(refresh,100);
@@ -169,21 +175,22 @@ window.sceneFile = (() => {
     if (pending) return;
     const request = send(type,args);
     if (request === null) {
-      status.textContent = 'Не удалось связаться с редактором.';
+      status.textContent = ui('Не удалось связаться с редактором.','Could not contact the editor.');
       return;
     }
     pending = {type,request};
     status.textContent = '';
+    status.title = '';
     syncButtons();
   }
 
   function canLeave() {
     if (pending) {
-      status.textContent = 'Дождитесь завершения операции с файлом.';
+      status.textContent = ui('Дождитесь завершения операции с файлом.','Wait for the file operation to finish.');
       return false;
     }
     if (!hasUnsaved()) return true;
-    status.textContent = 'Сохраните файл или отмените правки.';
+    status.textContent = ui('Сохраните файл или отмените правки.','Save the file or discard your changes.');
     return false;
   }
 
@@ -201,7 +208,7 @@ window.sceneFile = (() => {
     if (!dialog.open) return;
     if (message.kind === 'scene_file_lcd_frame') {
       if (!lcdLayout.hidden && message.request === layoutRequest) {
-        if (message.error) lcdStatus.textContent = message.error;
+        if (message.error) showFileError(lcdStatus,'Could not render the LCD preview.',message.error);
         else setCanvas('lcd-layout-canvas',message.frame);
       }
       return;
@@ -213,7 +220,7 @@ window.sceneFile = (() => {
     const data = message.data;
     if (message.request === pending?.request) {
       pending = null;
-      if (message.error) status.textContent = message.error;
+      if (message.error) showFileError(status,'Could not complete the scene file operation.',message.error);
       else if (data?.document) {
         stopLcdLayout();
         file = data.document;
@@ -223,12 +230,12 @@ window.sceneFile = (() => {
         showFrame(data.frame);
       } else if (data?.saved) {
         baseline = copy(file);
-        status.textContent = 'Файл сцены сохранён.';
+        status.textContent = ui('Файл сцены сохранён.','Scene file saved.');
       }
       syncButtons();
       if (previewRequest === null) refresh();
     } else if (message.request === previewRequest) {
-      if (message.error) status.textContent = message.error;
+      if (message.error) showFileError(status,'Could not complete the scene file operation.',message.error);
       else if (data?.frame) showFrame(data.frame);
     }
   }
@@ -258,6 +265,7 @@ window.sceneFile = (() => {
   function paintCardPosition() {
     lcdCard.style.left = cardPosition.x / 4.8 + '%';
     lcdCard.style.top = cardPosition.y / 4.8 + '%';
+    lcdStatus.title = '';
     lcdStatus.textContent = `X ${cardPosition.x} · Y ${cardPosition.y}`;
   }
 
@@ -266,7 +274,7 @@ window.sceneFile = (() => {
     if (layoutAnimation === null) layoutAnimation = setTimeout(() => {
       layoutAnimation = null;
       layoutRequest = send('lcd_layout',cardPosition);
-      if (layoutRequest === null) lcdStatus.textContent = 'Не удалось открыть предпросмотр LCD.';
+      if (layoutRequest === null) lcdStatus.textContent = ui('Не удалось открыть предпросмотр LCD.','Could not open the LCD preview.');
       else sentLayout = {request:layoutRequest,...cardPosition};
     }, 32);
   }

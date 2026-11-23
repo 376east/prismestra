@@ -99,6 +99,7 @@ impl WebShell {
         user_data: &UserDataFolder,
         state_dir: &Path,
         assets: Assets,
+        language: super::locale::Language,
     ) -> Result<Self, String> {
         if hwnd.is_null() {
             return Err("WebView parent HWND is null".into());
@@ -132,9 +133,7 @@ impl WebShell {
             browser_failed: Rc::new(Cell::new(false)),
             _apartment: apartment,
         };
-        shell
-            .configure(assets, super::locale::Language::load(state_dir))
-            .map_err(error)?;
+        shell.configure(assets, language).map_err(error)?;
         Ok(shell)
     }
 

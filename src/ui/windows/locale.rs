@@ -11,9 +11,8 @@ const MAX_BYTES: usize = 64;
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(super) enum Language {
-    En,
-    // Preserve the shipping default until the native and WebView routes are covered.
     #[default]
+    En,
     Ru,
 }
 
@@ -34,6 +33,13 @@ impl Language {
             &serde_json::to_vec(&self)?,
             MAX_BYTES,
         )
+    }
+
+    pub(super) fn text(self, ru: &'static str, en: &'static str) -> &'static str {
+        match self {
+            Self::En => en,
+            Self::Ru => ru,
+        }
     }
 
     pub(super) fn tag(self) -> &'static str {
@@ -57,17 +63,17 @@ mod tests {
         ));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.as_path();
-        assert_eq!(Language::load(path), Language::default());
+        assert_eq!(Language::load(path), Language::En);
         let profile = path.join("profile.json");
         std::fs::write(&profile, b"existing profile").unwrap();
 
-        for language in [Language::En, Language::Ru] {
+        for language in [Language::Ru, Language::En, Language::Ru] {
             language.save(path).unwrap();
             assert_eq!(Language::load(path), language);
         }
         assert_eq!(std::fs::read(profile).unwrap(), b"existing profile");
         std::fs::write(path.join(FILE), br#""unsupported""#).unwrap();
-        assert_eq!(Language::load(path), Language::default());
+        assert_eq!(Language::load(path), Language::En);
         std::fs::remove_file(path.join(FILE)).unwrap();
         std::fs::remove_file(path.join("profile.json")).unwrap();
         std::fs::remove_dir(path).unwrap();

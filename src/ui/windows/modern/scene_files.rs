@@ -1,4 +1,4 @@
-use super::{HWND, State, send};
+use super::{HWND, ShellText, State, send};
 use crate::{
     app::scene_file::{SceneFile, preview::Preview},
     runtime::scene::Scene,
@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 mod lcd_draft;
 pub(super) use lcd_draft::Layout;
 
-const FILTER: &str = "Сцена Prismestra (*.json)\0*.json\0\0";
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Deserialize)]
@@ -58,6 +57,7 @@ pub(super) fn execute(
     request: u32,
     operation: Operation,
 ) -> Result<(), String> {
+    let filter = ShellText::SceneFileFilter.get(state.language);
     let result = (|| {
         if !matches!(&operation, Operation::Stop | Operation::StopLcdLayout) {
             let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
@@ -76,22 +76,19 @@ pub(super) fn execute(
                     let canvas = &app.runtime.document().lighting.setup.canvas;
                     (canvas.width, canvas.height)
                 };
-                prepare(
-                    state,
-                    request,
-                    SceneFile::from_effect(scene, width, height)?,
-                    true,
-                )
+                let mut file = SceneFile::from_effect(scene, width, height)?;
+                file.name = ShellText::NewScene.get(state.language).into();
+                prepare(state, request, file, true)
             }
             Operation::Open => {
-                let Some(path) = super::super::file_dialog(hwnd, false, FILTER, "json")? else {
+                let Some(path) = super::super::file_dialog(hwnd, false, filter, "json")? else {
                     return Ok(json!({"cancelled":true}));
                 };
                 prepare(state, request, SceneFile::load(&path)?, true)
             }
             Operation::Save { file } => {
                 file.validate()?;
-                let Some(path) = super::super::file_dialog(hwnd, true, FILTER, "json")? else {
+                let Some(path) = super::super::file_dialog(hwnd, true, filter, "json")? else {
                     return Ok(json!({"cancelled":true}));
                 };
                 file.save(&path)?;

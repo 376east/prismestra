@@ -721,7 +721,7 @@ mapNode('native-target').after = (...buttons) => {
  for (const button of buttons) mapNodes.set(button.id, button);
 };
 const mapWindow = {};
-vm.runInNewContext(outputMapSource, {window: mapWindow, document: mapDocument});
+vm.runInNewContext(outputMapSource, {window: mapWindow, document: mapDocument, ui: ru=>ru, english:false});
 const map = mapWindow.outputMap;
 const strip = {id: 'strip', role: 'canvas', leds: 1};
 const other = {...strip, id: 'other'};

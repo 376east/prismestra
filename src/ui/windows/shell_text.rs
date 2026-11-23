@@ -53,6 +53,16 @@ shell_text! {
     ScreenLighting => "Screen lighting", "Подсветка экрана";
     Temperatures => "Temperatures", "Температуры";
     Sensors => "Sensors", "Датчики";
+    EnableSchedule => "Enable schedule", "Включить расписание";
+    PauseSchedule => "Pause schedule", "Приостановить расписание";
+    PrimaryLighting => "Primary lighting", "Основной свет";
+    SecondaryLighting => "Secondary lighting", "Дополнительный свет";
+    LightsOffTime => "Turn lights off", "Выключение подсветки";
+    TimeZone => "Time zone", "Часовой пояс";
+    ApplySchedule => "Apply schedule", "Применить расписание";
+    DiscardChanges => "Discard changes", "Отменить изменения";
+    NewScene => "New scene", "Новая сцена";
+    SceneFileFilter => "Prismestra scene (*.json)\0*.json\0\0", "Сцена Prismestra (*.json)\0*.json\0\0";
     OpenProfile => "Open…", "Открыть…";
     SaveProfile => "Save…", "Сохранить…";
     ExportZip => "Export ZIP…", "Экспорт ZIP…";
