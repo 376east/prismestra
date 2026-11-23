@@ -263,7 +263,7 @@ function syncControls(keepRetryFocus) {
  document.querySelectorAll('[data-mutation]').forEach(node=>{
   const disabled=controlDisabled(node);
   // Keep the row focusable across the command acknowledgement and list updates.
-  if(node.dataset.deviceId!==undefined||node.dataset.apply!==undefined)node.setAttribute('aria-disabled',String(disabled));
+  if(node.dataset.deviceId!==undefined||node.dataset.apply!==undefined||node.id==='ui-language')node.setAttribute('aria-disabled',String(disabled));
   else node.disabled=disabled;
  });
  document.querySelectorAll('[data-native-control]').forEach(node=>node.disabled=nativeControlDisabled(node));
@@ -700,7 +700,7 @@ function renderSettings() {
  const language=preference==='en'||preference==='ru' ? `<section class="parameter-panel">
    <h2>${ui('Язык приложения','Application language')}</h2>
    <div class="native-field"><label for="ui-language">${ui('Язык','Language')}</label>
-   <select id="ui-language" data-mutation ${disabled()} aria-describedby="ui-language-status">
+   <select id="ui-language" data-mutation aria-disabled="${!!busy()}" aria-describedby="ui-language-status">
     <option value="en" lang="en" ${preference==='en'?'selected':''}>English</option>
     <option value="ru" lang="ru" ${preference==='ru'?'selected':''}>Русский</option>
    </select></div>
@@ -1220,8 +1220,12 @@ document.addEventListener('input',event=>{
 document.addEventListener('change',event=>{
  const input=event.target;
  if(input.id==='ui-language'){
-  if(view!=='settings'||!['en','ru'].includes(input.value)||input.value===state?.preferredUiLanguage)return;
-  if(!send({op:'set_ui_language',language:input.value},true))input.value=state.preferredUiLanguage;
+  if(view!=='settings'||!state)return;
+  if(busy()||!['en','ru'].includes(input.value)){
+   input.value=state.preferredUiLanguage;
+   return;
+  }
+  if(input.value!==state.preferredUiLanguage && !send({op:'set_ui_language',language:input.value},true))input.value=state.preferredUiLanguage;
   return;
  }
  if(input.id==='placement-picker'){placementSelection=input.value;return;}
