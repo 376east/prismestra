@@ -15,6 +15,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::{self, TryRecvError},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -285,6 +286,7 @@ impl Proxy {
                         restarting: restart,
                     },
                     launch_task,
+                    read_status,
                 );
             })
             .map_err(|e| e.to_string())?;
@@ -339,9 +341,44 @@ fn proxy_loop(
     output: &Mutex<Snapshot>,
     control: &ProxyControl,
     launcher: impl Fn(&str, &AtomicBool) -> Result<(), String> + Clone + Send + 'static,
+    status_reader: impl Fn(&Path, bool) -> Result<Option<Status>, String> + Send + 'static,
 ) {
     let stop = &control.stop;
     let restarting = &control.restarting;
+    let status_path = status_dir.join("helper-status.json");
+    let installed = status_dir != directory;
+    let (poll_status, poll_requests) = mpsc::sync_channel::<()>(1);
+    let (status_result, status_results) = mpsc::sync_channel(1);
+    let reader_stop = stop.clone();
+    let reader_lock = control.client_lock.clone();
+    // Keep at most one reader across owner epochs, even if a filesystem call
+    // outlives shutdown. The reader has no authority to publish or launch.
+    let reader = thread::Builder::new()
+        .name("backend-helper-status".into())
+        .spawn(move || {
+            let _lock = reader_lock;
+            while poll_requests.recv().is_ok() && !reader_stop.load(Ordering::SeqCst) {
+                if status_result
+                    .send(status_reader(&status_path, installed))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    let reader = match reader {
+        Ok(reader) => reader,
+        Err(error) => {
+            stop.store(true, Ordering::SeqCst);
+            let mut snapshot = output.lock().unwrap_or_else(|p| p.into_inner());
+            snapshot.ready = false;
+            snapshot.detail = format!("Could not start backend status reader: {error}");
+            return;
+        }
+    };
+    // Both channels start empty and the reader cannot disconnect before it
+    // receives that first request.
+    let _ = poll_status.try_send(());
     let mut attempts = VecDeque::new();
     let mut next_attempt = Instant::now();
     let mut generation = 0u64;
@@ -378,12 +415,34 @@ fn proxy_loop(
                 failure_detail = result.err().unwrap_or_default();
             }
         }
-        let status_path = status_dir.join("helper-status.json");
-        let installed = status_dir != directory;
-        let (status, outbox_error) = match read_status(&status_path, installed) {
-            Ok(status) => (status, None),
-            Err(error) => (None, Some(error)),
+        let status = match status_results.try_recv() {
+            Ok(status) => status,
+            Err(TryRecvError::Disconnected) => break,
+            Err(TryRecvError::Empty) => {
+                let Ok(now) = now_ms() else { break };
+                let mut snapshot = output.lock().unwrap_or_else(|p| p.into_inner());
+                if snapshot.ready && !clock::fresh(snapshot.timestamp_ms, now, FRESH_MS) {
+                    snapshot.ready = false;
+                    snapshot.backend_pid = None;
+                    snapshot.detail = "Waiting for fresh backend helper status".into();
+                }
+                drop(snapshot);
+                thread::sleep(POLL);
+                continue;
+            }
         };
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        let (status, outbox_error) =
+            match read_json_typed::<Request>(&directory.join("owner-request.json")) {
+                Ok(current) if same_owner_request(&current, request) => match status {
+                    Ok(status) => (status, None),
+                    Err(error) => (None, Some(error)),
+                },
+                Ok(_) | Err(ControlRead::Invalid(_)) => break,
+                Err(ControlRead::Io(error)) => (None, Some(error.to_string())),
+            };
         // Read the clock after the file: a concurrent status publication must
         // not appear to carry a future tick relative to a pre-read observation.
         let now = match now_ms() {
@@ -470,9 +529,17 @@ fn proxy_loop(
             snapshot.detail = failure_detail.clone();
         }
         *output.lock().unwrap_or_else(|p| p.into_inner()) = snapshot;
+        if poll_status.try_send(()).is_err() {
+            break;
+        }
         thread::sleep(POLL);
     }
     stop.store(true, Ordering::SeqCst);
+    drop(poll_status);
+    drop(status_results);
+    if reader.is_finished() {
+        let _ = reader.join();
+    }
     let mut snapshot = output.lock().unwrap_or_else(|p| p.into_inner());
     snapshot.ready = false;
     snapshot.detail = "Backend helper client ownership ended".into();
@@ -2463,6 +2530,7 @@ mod tests {
                         let _ = launch.send(());
                         Ok(())
                     },
+                    read_status,
                 );
             });
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -2547,6 +2615,7 @@ mod tests {
                             .recv_timeout(Duration::from_secs(10));
                         Ok(())
                     },
+                    read_status,
                 );
             });
             let running = started.recv_timeout(Duration::from_secs(2)).is_ok();
@@ -2578,6 +2647,205 @@ mod tests {
             renewed,
             "a blocked scheduler launch prevented heartbeat publication"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn proxy_renews_heartbeat_while_installed_status_read_is_blocked() {
+        use std::{cell::Cell, sync::mpsc};
+
+        let (directory, request, _) = sharing_fixture("blocked-installed-status");
+        let outbox = directory.join("outbox");
+        fs::create_dir(&outbox).unwrap();
+        let owner_path = directory.join("owner-request.json");
+        let control = ProxyControl {
+            client_lock: Arc::new(client_lock(&directory).unwrap()),
+            stop: Arc::new(AtomicBool::new(false)),
+            restarting: Arc::new(AtomicBool::new(true)),
+        };
+        let snapshot = Mutex::new(Snapshot::default());
+        let (entered, reading) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        let (samples, advanced_while_blocked, resumed, held_ms) = thread::scope(|scope| {
+            let control_ref = &control;
+            let directory_ref = &directory;
+            let outbox_ref = &outbox;
+            let expected_path = outbox.join("helper-status.json");
+            let request_ref = &request;
+            let snapshot_ref = &snapshot;
+            scope.spawn(move || {
+                let first_read = Cell::new(true);
+                proxy_loop(
+                    directory_ref,
+                    outbox_ref,
+                    "fixture",
+                    request_ref,
+                    snapshot_ref,
+                    control_ref,
+                    |_, _| panic!("unavailable outbox must not launch a task"),
+                    move |path, installed| {
+                        assert!(installed);
+                        assert_eq!(path, expected_path);
+                        if first_read.replace(false) {
+                            entered.send(()).unwrap();
+                            blocked.recv_timeout(Duration::from_secs(10)).unwrap();
+                        }
+                        Err("fixture outbox unavailable".into())
+                    },
+                );
+            });
+            reading.recv_timeout(Duration::from_secs(2)).unwrap();
+            let start = Instant::now();
+            let mut samples = 0;
+            let mut advanced = false;
+            let same_owner_timestamp = || {
+                read_json::<Request>(&owner_path).ok().map(|record| {
+                    assert!(same_owner_request(&record, &request));
+                    record.timestamp_ms
+                })
+            };
+            while start.elapsed() < Duration::from_millis(clock::LEASE_MS + 200) {
+                if let Some(timestamp) = same_owner_timestamp() {
+                    samples += 1;
+                    if timestamp > request.timestamp_ms
+                        && start.elapsed().as_millis() <= u128::from(clock::LEASE_MS)
+                    {
+                        advanced = true;
+                    }
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            let held_ms = start.elapsed().as_millis();
+            let before_release = same_owner_timestamp();
+            release.send(()).unwrap();
+            let recovery_deadline = Instant::now() + Duration::from_secs(3);
+            let resumed = loop {
+                if same_owner_timestamp()
+                    .zip(before_release)
+                    .is_some_and(|(tick, prior)| tick > prior)
+                {
+                    break true;
+                }
+                if Instant::now() >= recovery_deadline {
+                    break false;
+                }
+                thread::sleep(Duration::from_millis(20));
+            };
+            control.stop.store(true, Ordering::SeqCst);
+            (samples, advanced, resumed, held_ms)
+        });
+        drop(control);
+        fs::remove_file(owner_path).unwrap();
+        fs::remove_file(directory.join("backend-client.lock")).unwrap();
+        fs::remove_dir(outbox).unwrap();
+        fs::remove_dir(directory).unwrap();
+        eprintln!(
+            "status read held {held_ms} ms, owner samples={samples}, renewed within lease={advanced_while_blocked}, resumed after release={resumed}"
+        );
+        assert!(
+            samples >= 2 && resumed,
+            "independent observer and recovery control"
+        );
+        assert!(
+            advanced_while_blocked,
+            "a blocked installed status read prevented heartbeat publication"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pending_status_read_cannot_launch_after_pause_cancel_or_owner_change() {
+        use std::{cell::Cell, sync::mpsc};
+
+        for change in ["pause", "cancel", "owner change"] {
+            let (directory, request, _) = sharing_fixture("pending-status-control");
+            let outbox = directory.join("outbox");
+            let owner_path = directory.join("owner-request.json");
+            let control = ProxyControl {
+                client_lock: Arc::new(client_lock(&directory).unwrap()),
+                stop: Arc::new(AtomicBool::new(false)),
+                restarting: Arc::new(AtomicBool::new(true)),
+            };
+            let snapshot = Mutex::new(Snapshot::default());
+            let (entered, reading) = mpsc::channel();
+            let (release, blocked) = mpsc::channel();
+            let (launch, attempts) = mpsc::channel();
+            let (ended, exits) = mpsc::channel();
+            thread::scope(|scope| {
+                let directory = &directory;
+                let request = &request;
+                let control = &control;
+                scope.spawn(move || {
+                    let first_read = Cell::new(true);
+                    proxy_loop(
+                        directory,
+                        &outbox,
+                        "fixture",
+                        request,
+                        &snapshot,
+                        control,
+                        move |_, _| {
+                            let _ = launch.send(());
+                            Ok(())
+                        },
+                        move |_, _| {
+                            if first_read.replace(false) {
+                                entered.send(()).unwrap();
+                                blocked.recv_timeout(Duration::from_secs(8)).unwrap();
+                                Ok(None)
+                            } else {
+                                entered.send(()).unwrap();
+                                Err("fixture outbox unavailable".into())
+                            }
+                        },
+                    );
+                    ended.send(()).unwrap();
+                });
+                reading.recv_timeout(Duration::from_secs(2)).unwrap();
+                assert_eq!(
+                    reading.recv_timeout(POLL * 2),
+                    Err(mpsc::RecvTimeoutError::Timeout),
+                    "new status reads must wait for the pending one"
+                );
+                match change {
+                    "pause" => control.restarting.store(false, Ordering::SeqCst),
+                    "cancel" => {
+                        control.stop.store(true, Ordering::SeqCst);
+                        exits.recv_timeout(Duration::from_secs(2)).unwrap();
+                        // The owner loop has stopped while read is still blocked.
+                        // Its worker retains the lease, so a second reader cannot start.
+                        assert_eq!(Arc::strong_count(&control.client_lock), 2);
+                        assert!(client_lock(directory).is_err());
+                    }
+                    "owner change" => {
+                        let mut replacement = request.clone();
+                        replacement.nonce.push_str("-new");
+                        write_json(&owner_path, &replacement).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                release.send(()).unwrap();
+                if change == "pause" {
+                    // Await consumption of the delayed absent status. A pause
+                    // must suppress launch even after the read has finished.
+                    reading.recv_timeout(Duration::from_secs(2)).unwrap();
+                    control.stop.store(true, Ordering::SeqCst);
+                }
+                if change != "cancel" {
+                    exits.recv_timeout(Duration::from_secs(2)).unwrap();
+                }
+                assert!(attempts.try_recv().is_err(), "{change} allowed a launch");
+            });
+            drop(control);
+            let until = Instant::now() + Duration::from_secs(2);
+            while client_lock(&directory).is_err() {
+                assert!(Instant::now() < until, "status reader retained the lease");
+                thread::sleep(Duration::from_millis(10));
+            }
+            fs::remove_file(owner_path).unwrap();
+            fs::remove_file(directory.join("backend-client.lock")).unwrap();
+            fs::remove_dir(directory).unwrap();
+        }
     }
 
     #[cfg(windows)]
