@@ -35,6 +35,7 @@ struct NativeValue {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
     Snapshot,
+    RetryStartupDiscovery,
     Alice {
         request: super::alice::Action,
     },
@@ -83,6 +84,9 @@ enum Command {
         scene: Scene,
         origin: Option<Origin>,
     },
+    EditorPreviewVisible {
+        visible: bool,
+    },
     CardPreview {
         id: String,
         request: u32,
@@ -119,6 +123,12 @@ enum Command {
     },
     SelectDevice {
         id: String,
+    },
+    MoveCanvasDevice {
+        device: String,
+        revision: String,
+        dx: i32,
+        dy: i32,
     },
     RetryOutput {
         id: String,
@@ -161,6 +171,7 @@ const CARD_FRAME_INTERVAL: Duration = Duration::from_millis(125);
 struct CardMotion {
     id: String,
     renderer: crate::runtime::scene::Renderer,
+    frame: u64,
 }
 
 pub(super) struct Session {
@@ -181,6 +192,7 @@ pub(super) struct Session {
     portable_preview: Option<scene_files::Running>,
     lcd_layout_preview: Option<scene_files::Layout>,
     preview: Option<crate::runtime::scene::Renderer>,
+    editor_preview_visible: bool,
     canvas: crate::devices::Canvas,
     detailed_canvas: crate::devices::Canvas,
     last_send: Instant,
@@ -230,6 +242,7 @@ impl Session {
             portable_preview: None,
             lcd_layout_preview: None,
             preview: None,
+            editor_preview_visible: false,
             canvas: preview_canvas(36, 18),
             detailed_canvas: preview_canvas(96, 48),
             last_send: Instant::now(),
@@ -296,11 +309,14 @@ impl Session {
             self.card_motion = Some(CardMotion {
                 id: id.into(),
                 renderer: crate::runtime::scene::Renderer::new(scene).ok()?,
+                frame: 0,
             });
         }
         let motion = self.card_motion.as_mut().filter(|motion| motion.id == id)?;
         self.card_last_frame = Some(now);
+        feed_card_demo_audio(&mut motion.renderer, motion.frame);
         let pixels = motion.renderer.step(&self.card_canvas).ok()?;
+        motion.frame += 1;
         let colors = pixels
             .into_iter()
             .map(|pixel| pixel.rrggbb())
@@ -328,14 +344,44 @@ fn preview_canvas(width: u32, height: u32) -> crate::devices::Canvas {
 }
 
 fn card_can_move(scene: &Scene) -> bool {
-    !(scene.effect.uses_audio() || scene.effect.uses_context() || scene.effect.uses_reactive())
+    !(scene.effect.uses_context() || scene.effect.uses_reactive())
+}
+
+fn feed_card_demo_audio(renderer: &mut crate::runtime::scene::Renderer, frame: u64) {
+    use crate::capture::audio_features::AudioFeatures;
+    if !renderer.scene().effect.uses_audio() {
+        return;
+    }
+    // Prime the spectrum history for a readable poster without rendering extra pixels.
+    let first = if frame == 0 { 0 } else { frame + 31 };
+    for sample in first..=frame + 31 {
+        let phase = (sample % 16) as f32 * std::f32::consts::TAU / 16.0;
+        let beat = (0.5 + 0.5 * (phase * 2.0).cos()).powi(3);
+        let amplitude = 0.35 + 0.45 * beat;
+        renderer.set_audio(Some((
+            sample + 1,
+            AudioFeatures {
+                rms: amplitude * 0.65,
+                peak: amplitude,
+                beat,
+                bands: std::array::from_fn(|bin| {
+                    let wave = 0.5 + 0.5 * (bin as f32 * 0.68 - phase).cos();
+                    (0.14 + 0.66 * wave) * (1.0 - bin as f32 * 0.039)
+                }),
+                waveform: std::array::from_fn(|point| {
+                    (point as f32 * 0.24 + phase).sin() * amplitude
+                }),
+            },
+        )));
+    }
 }
 
 fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
     if !card_can_move(&entry.scene) {
         return json!({"id":entry.id,"name":entry.name,"scene":entry.scene});
     }
-    let (width, height) = if entry.scene.effect.uses_normalized_canvas() {
+    let audio_demo = entry.scene.effect.uses_audio();
+    let (width, height) = if audio_demo || entry.scene.effect.uses_normalized_canvas() {
         (48, 24)
     } else {
         (24, 12)
@@ -343,7 +389,9 @@ fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
     let canvas = preview_canvas(width, height);
     let mut colors = Vec::new();
     let mut thumbnail_scene = entry.scene.clone();
-    let steps = if thumbnail_scene.effect.uses_normalized_canvas() {
+    let steps = if audio_demo {
+        1
+    } else if thumbnail_scene.effect.uses_normalized_canvas() {
         // Sample a representative phase with one render, including brief effects like Lightning.
         thumbnail_scene.speed = 22;
         thumbnail_scene.fps = 1;
@@ -358,13 +406,14 @@ fn scene_card(entry: &crate::ui::catalog::Entry) -> Value {
         8
     };
     if let Ok(mut renderer) = crate::runtime::scene::Renderer::new(thumbnail_scene) {
+        feed_card_demo_audio(&mut renderer, 0);
         for _ in 0..steps {
             if let Ok(frame) = renderer.step(&canvas) {
                 colors = frame.iter().map(|c| c.rrggbb()).collect::<Vec<_>>();
             }
         }
     }
-    json!({"id":entry.id,"name":entry.name,"scene":entry.scene,"preview":{"width":width,"height":height,"colors":colors}})
+    json!({"id":entry.id,"name":entry.name,"scene":entry.scene,"audioDemo":audio_demo,"preview":{"width":width,"height":height,"colors":colors}})
 }
 fn assets(path: &str) -> Option<(&'static str, &'static [u8])> {
     Some(match path {
@@ -701,10 +750,11 @@ pub(crate) fn device_activity_for(
     busy: bool,
     context: u64,
 ) -> Value {
-    use crate::app::runtime::OutputFailureReason;
+    use crate::app::runtime::{OutputActivity, OutputFailureReason};
 
     let mut labels = BTreeMap::new();
     let mut reasons = BTreeMap::new();
+    let mut frames_sent = BTreeMap::new();
     let mut tickets = BTreeMap::new();
     for device in &runtime.document().lighting.setup.devices {
         let activity = runtime.output_activity(device);
@@ -722,6 +772,9 @@ pub(crate) fn device_activity_for(
             output_activity_label(&activity)
         };
         labels.insert(&device.id, label);
+        if active && let OutputActivity::Sent(count) = &activity {
+            frames_sent.insert(&device.id, count.to_string());
+        }
         if let Some(reason) = reason {
             reasons.insert(&device.id, reason);
         }
@@ -735,6 +788,7 @@ pub(crate) fn device_activity_for(
     json!({
         "labels": labels,
         "reasons": reasons,
+        "framesSent": frames_sent,
         "retryScope": context.to_string(),
         "retryTickets": tickets,
     })
@@ -753,6 +807,31 @@ fn draft_map_input(app: &App) -> Option<(u64, &crate::devices::Setup, &Scene)> {
 }
 fn selected_map_device(app: &App) -> Option<&str> {
     app.editor.as_ref()?.selected_device_id()
+}
+
+fn canvas_placement(setup: &crate::devices::Setup) -> Value {
+    let mut bounds = std::collections::BTreeMap::new();
+    for p in &setup.canvas.points {
+        let bounds = bounds
+            .entry(p.device.as_str())
+            .or_insert([p.x, p.y, p.x, p.y]);
+        *bounds = [
+            bounds[0].min(p.x),
+            bounds[1].min(p.y),
+            bounds[2].max(p.x),
+            bounds[3].max(p.y),
+        ];
+    }
+    let objects = setup
+        .devices
+        .iter()
+        .filter_map(|device| {
+            let bounds = bounds.get(device.id.as_str())?;
+            (device.role == crate::devices::Role::Canvas)
+                .then(|| json!({"id":device.id,"label":device.label,"bounds":bounds}))
+        })
+        .collect::<Vec<_>>();
+    json!({"width":setup.canvas.width,"height":setup.canvas.height,"objects":objects})
 }
 
 fn map_connection(app: &App) -> Value {
@@ -782,6 +861,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
         .chain(&session.built_in_cards)
         .collect::<Vec<_>>();
     let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":library,"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
+    value["state"]["startupDiscoveryRetry"] = json!(app.can_retry_startup_discovery());
     let effects = Effect::ALL
         .iter()
         .copied()
@@ -793,6 +873,11 @@ fn snapshot(state: &State) -> Result<Value, String> {
         .collect::<Vec<_>>();
     value["state"]["effects"] = json!(effects);
     value["state"]["draftMapRevision"] = json!(draft_map_revision);
+    let placement_setup = draft_map_input(app).map_or_else(
+        || &app.runtime.document().lighting.setup,
+        |(_, setup, _)| setup,
+    );
+    value["state"]["canvasPlacement"] = canvas_placement(placement_setup);
     value["state"]["captureAuthorized"] = json!(app.runtime.read(Runtime::capture_authorized));
     value["state"]["mapConnection"] = map_connection(app);
     value["state"]["argbDevice"] = json!(argb_channels::available(app));
@@ -884,6 +969,7 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
         Command::Snapshot
             | Command::PreviewOutput { .. }
             | Command::PreviewScene { .. }
+            | Command::EditorPreviewVisible { .. }
             | Command::CardPreview { .. }
             | Command::CloseReady { .. }
             | Command::Alice {
@@ -999,6 +1085,12 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             if let Some(session) = state.modern_session.borrow_mut().as_mut() {
                 session.snapshot_requested = true;
             }
+        }
+        Command::RetryStartupDiscovery => {
+            let mut slot = state.app.try_borrow_mut().map_err(|_| "Редактор занят")?;
+            slot.as_mut()
+                .ok_or("Нет сессии")?
+                .retry_startup_discovery()?;
         }
         Command::PreviewOutput {
             request,
@@ -1148,6 +1240,12 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                 state,
                 &json!({"kind":"card_preview","id":id,"request":request,"frame":frame}),
             )?;
+            return Ok(false);
+        }
+        Command::EditorPreviewVisible { visible } => {
+            if let Some(session) = state.modern_session.borrow_mut().as_mut() {
+                session.editor_preview_visible = visible;
+            }
             return Ok(false);
         }
         Command::PreviewScene { scene, origin } => {
@@ -1300,6 +1398,35 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                         .select_device(&id)?;
                     a.refresh_editor(true);
                 }
+                Command::MoveCanvasDevice {
+                    device,
+                    revision,
+                    dx,
+                    dy,
+                } => {
+                    if busy(a) {
+                        return Err("Дождитесь завершения операции".into());
+                    }
+                    let mut session = state.modern_session.borrow_mut();
+                    let session = session.as_mut().ok_or("Нет интерфейса")?;
+                    let current = session.draft_map.observe(draft_map_input(a));
+                    if current.as_deref() != Some(&revision) {
+                        return Err("Раскладка изменилась. Повторите перемещение.".into());
+                    }
+                    let editor = a.editor.as_mut().ok_or("Нет черновика устройств")?;
+                    let document = crate::app::device_setup::translate_canvas_device(
+                        &editor.document,
+                        &device,
+                        dx,
+                        dy,
+                    )?;
+                    if dx != 0 || dy != 0 {
+                        editor.document = document;
+                        a.editor_dirty = true;
+                        a.dirty = true;
+                        a.refresh_editor(false);
+                    }
+                }
                 Command::SetField {
                     key,
                     value,
@@ -1445,9 +1572,11 @@ pub(super) fn maintain(state: &State) {
         }
         let frames = (session.last_send.elapsed().as_millis() / 50).min(1000) as u32;
         session.last_send += Duration::from_millis(u64::from(frames) * 50);
-        let mut pixels = Vec::new();
-        let mut canvas = &session.canvas;
-        if let Some(renderer) = session.preview.as_mut() {
+        let preview = if session.editor_preview_visible
+            && let Some(renderer) = session.preview.as_mut()
+        {
+            let mut pixels = Vec::new();
+            let mut canvas = &session.canvas;
             if renderer.scene().effect.uses_audio() {
                 renderer.set_audio(app.runtime.read(|runtime| runtime.audio_input()));
             }
@@ -1470,9 +1599,15 @@ pub(super) fn maintain(state: &State) {
             for _ in 0..frames.clamp(1, 8) {
                 pixels = renderer.step(canvas)?;
             }
+            let colors = pixels.iter().map(|c| c.rrggbb()).collect::<Vec<_>>();
+            Some(json!({"width":canvas.width,"height":canvas.height,"colors":colors}))
+        } else {
+            None
+        };
+        let mut value = json!({"kind":"status","state":{"scene":app.runtime.project().scene,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error())}});
+        if let Some(preview) = preview {
+            value["state"]["preview"] = preview;
         }
-        let colors = pixels.iter().map(|c| c.rrggbb()).collect::<Vec<_>>();
-        let mut value = json!({"kind":"status","state":{"scene":app.runtime.project().scene,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"preview":{"width":canvas.width,"height":canvas.height,"colors":colors}}});
         if app.runtime.project().scene.effect.uses_audio() {
             value["state"]["audioError"] = app.runtime.read(|runtime| json!(runtime.audio_error()));
         }
@@ -1485,6 +1620,7 @@ pub(super) fn maintain(state: &State) {
         if session.last_native_send.elapsed() >= Duration::from_millis(250) {
             session.last_native_send = Instant::now();
             value["state"]["deviceCandidates"] = json!(device_candidates(app));
+            value["state"]["startupDiscoveryRetry"] = json!(app.can_retry_startup_discovery());
             if app.page == Page::Devices {
                 value["state"]["deviceActivity"] = device_activity(app);
                 value["state"]["argbDevice"] = json!(argb_channels::available(app));
@@ -1532,6 +1668,57 @@ pub(super) fn return_to_editor(state: &State) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn canvas_device_move_requires_explicit_id_revision_and_integer_delta() {
+        use super::Command;
+        let valid = r#"{"op":"move_canvas_device","device":"left","revision":"7","dx":-1,"dy":0}"#;
+        assert!(
+            matches!(serde_json::from_str::<Command>(valid).unwrap(), Command::MoveCanvasDevice {
+            device, revision, dx: -1, dy: 0
+        } if device == "left" && revision == "7")
+        );
+        for invalid in [
+            valid.replace(",\"device\":\"left\"", ""),
+            valid.replace(",\"revision\":\"7\"", ""),
+            valid.replace("-1", "1.5"),
+            valid.replace("-1", "2147483648"),
+        ] {
+            assert!(serde_json::from_str::<Command>(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn audio_cards_show_distinct_demo_posters_and_motion() {
+        let canvas = super::preview_canvas(48, 24);
+        let mut posters = Vec::new();
+        for id in [
+            "audio-level",
+            "audio-spectrum",
+            "audio-waveform",
+            "audio-beat-zones",
+            "audio-spectrogram",
+        ] {
+            let entry = crate::ui::catalog::built_in()
+                .into_iter()
+                .find(|entry| entry.id == format!("builtin:{id}"))
+                .unwrap();
+            let card = super::scene_card(&entry);
+            assert_eq!(card["audioDemo"], true);
+            let colors = card["preview"]["colors"].as_array().unwrap();
+            assert_eq!(colors.len(), 48 * 24);
+            assert!(
+                colors.iter().any(|pixel| pixel.as_u64().unwrap() > 0),
+                "{id}"
+            );
+            assert!(!posters.contains(colors), "{id}");
+            posters.push(colors.clone());
+            let mut renderer = crate::runtime::scene::Renderer::new(entry.scene).unwrap();
+            super::feed_card_demo_audio(&mut renderer, 0);
+            let first = renderer.step(&canvas).unwrap();
+            super::feed_card_demo_audio(&mut renderer, 1);
+            assert_ne!(first, renderer.step(&canvas).unwrap(), "{id}");
+        }
+    }
     use super::*;
     use crate::lighting::scene::Effect;
 

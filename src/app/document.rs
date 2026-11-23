@@ -77,7 +77,7 @@ impl Document {
                 .iter()
                 .any(|l| l.device == d.id && l.config.enabled)
             {
-                return Err("Enabled LCD has no enabled media configuration".into());
+                return Err("Enabled LCD has no enabled playback configuration".into());
             }
         }
         Ok(())

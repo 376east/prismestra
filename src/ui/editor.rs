@@ -10,27 +10,29 @@ use crate::{
     capture::ambient::Mode,
     lighting::ambient::Rect,
 };
+use std::borrow::Cow;
+const SCENE_EDGES: &str = "@scene_edges";
 #[derive(Clone, Debug)]
 pub struct Field {
     pub key: &'static str,
     pub label: &'static str,
     pub value: String,
     pub choices: Vec<(String, String)>,
-    pub hint: &'static str,
+    pub hint: Cow<'static, str>,
     pub file: bool,
 }
 fn field(
     key: &'static str,
     label: &'static str,
     value: impl ToString,
-    hint: &'static str,
+    hint: impl Into<Cow<'static, str>>,
 ) -> Field {
     Field {
         key,
         label,
         value: value.to_string(),
         choices: vec![],
-        hint,
+        hint: hint.into(),
         file: false,
     }
 }
@@ -447,6 +449,7 @@ impl Editor {
         next.ambient.routes.push(ambient::Route {
             device: device.into(),
             source,
+            scene_edges: false,
             enabled: false,
             zone: crate::capture::ambient::Zone::linear(d.leds, false, Mode::ScreenCopy)?,
             processing: Default::default(),
@@ -730,8 +733,12 @@ impl Editor {
         let mut source = field(
             "source",
             "Источник",
-            &r.source,
-            "Общий источник изображения для этого устройства.",
+            if r.scene_edges {
+                SCENE_EDGES
+            } else {
+                &r.source
+            },
+            "Края общей сцены идут от верхнего левого угла по часовой стрелке. Этот источник работает без захвата монитора.",
         );
         source.choices = self
             .document
@@ -740,6 +747,9 @@ impl Editor {
             .iter()
             .map(|s| (s.key.clone(), s.key.clone()))
             .collect();
+        source
+            .choices
+            .push(("Края общей сцены".into(), SCENE_EDGES.into()));
         let mut mode = field(
             "mode",
             "Режим",
@@ -763,7 +773,7 @@ impl Editor {
             .find(|d| d.id == r.device)
             .unwrap()
             .rate_hz;
-        vec![
+        let mut fields = vec![
             boolean(
                 "enabled",
                 "Включено",
@@ -891,7 +901,11 @@ impl Editor {
                 s.stale_after_ms,
                 "От 100 до 60000. Старый кадр не остаётся навсегда.",
             ),
-        ]
+        ];
+        if r.scene_edges {
+            fields.retain(|f| matches!(f.key, "enabled" | "source" | "output_rate" | "reverse"));
+        }
+        fields
     }
     fn lcd_fields(&self) -> Vec<Field> {
         let Some(entry) = self.document.lcd.get(self.index) else {
@@ -900,12 +914,12 @@ impl Editor {
         let c = &entry.config;
         let mut media = field(
             "media",
-            "Анимация",
+            "Фон LCD",
             c.media
                 .as_ref()
-                .map(|id| format!("Выбрана · {}", &id.as_str()[..8]))
-                .unwrap_or_else(|| "Не выбрана".into()),
-            "Выберите локальную анимацию или изображение, не более 32 МиБ.",
+                .map(|id| format!("Выбран · {}", &id.as_str()[..8]))
+                .unwrap_or_default(),
+            "Изображение или анимация до 32 МиБ. Очистите поле, чтобы оставить температуру на чёрном фоне.",
         );
         media.file = true;
         let mut font = field(
@@ -914,8 +928,8 @@ impl Editor {
             c.font
                 .as_ref()
                 .map(|id| format!("Выбран · {}", &id.as_str()[..8]))
-                .unwrap_or_else(|| "Не выбран".into()),
-            "Локальный файл TTF/OTF до 8 МиБ. Для GIF без панели шрифт не нужен.",
+                .unwrap_or_else(|| "Встроенный".into()),
+            "Можно выбрать TTF/OTF до 8 МиБ. По умолчанию используется встроенный шрифт.",
         );
         font.file = true;
         let mut rotation = field(
@@ -944,12 +958,27 @@ impl Editor {
             .into_iter()
             .map(|(_, key, label)| (label.into(), key.into()))
             .collect();
-        vec![
+        let sources = &self.document.temperatures.sources;
+        let source_hint: Cow<'static, str> = if sources.is_empty() {
+            "Сначала добавьте источник в разделе «Температуры».".into()
+        } else {
+            let example = sources
+                .iter()
+                .take(2)
+                .map(|source| format!("{}={}", source.key, source.key.to_ascii_uppercase()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!(
+                "Слева ключ из раздела «Температуры», справа подпись на LCD. Разделяйте показатели точкой с запятой. В этом профиле можно ввести «{example}»."
+            )
+            .into()
+        };
+        let mut fields = vec![
             boolean(
                 "enabled",
                 "Воспроизводить",
                 c.enabled,
-                "Для включения нужна анимация.",
+                "Выберите фон или включите панель температур.",
             ),
             media,
             rotation,
@@ -975,9 +1004,34 @@ impl Editor {
                     .map(|s| format!("{}={}", s.key, s.label))
                     .collect::<Vec<_>>()
                     .join("; "),
-                "Пример: cpu=CPU; gpu=GPU; ram=RAM; liquid=Liquid. Источники настраиваются на странице температур.",
+                source_hint,
             ),
-        ]
+        ];
+        if !sources.is_empty() {
+            let mut add = field(
+                "add_source",
+                "Добавить показатель",
+                "",
+                "Выбор добавит показатель в черновик. Подпись можно изменить в списке выше.",
+            );
+            let available = sources
+                .iter()
+                .filter(|source| !c.sources.iter().any(|entry| entry.key == source.key));
+            let placeholder = if c.sources.len() >= lcd::MAX_SOURCES {
+                "Достигнут предел показателей"
+            } else if available.clone().next().is_none() {
+                "Все источники добавлены"
+            } else {
+                "Выберите источник…"
+            };
+            add.choices.push((placeholder.into(), String::new()));
+            if c.sources.len() < lcd::MAX_SOURCES {
+                add.choices
+                    .extend(available.map(|source| (source.key.clone(), source.key.clone())));
+            }
+            fields.push(add);
+        }
+        fields
     }
     fn temperature_fields(&self) -> Vec<Field> {
         let Some(s) = self.document.temperatures.sources.get(self.index) else {
@@ -1045,10 +1099,15 @@ impl Editor {
             return Ok(());
         }
         if key == "source" {
+            if value == SCENE_EDGES {
+                r.scene_edges = true;
+                return Ok(());
+            }
             if !self.document.ambient.sources.iter().any(|s| s.key == value) {
                 return Err("Неизвестный источник".into());
             }
             r.source = value.into();
+            r.scene_edges = false;
             return Ok(());
         }
         let s = self
@@ -1121,6 +1180,7 @@ impl Editor {
             }
             "rotation" => c.rotation = parse(value)?,
             "overlay" => c.overlay_enabled = boolean_value(value)?,
+            "media" if value.trim().is_empty() => c.media = None,
             "gauge_style" => {
                 c.gauge_style = crate::lcd::overlay::GaugeStyle::OPTIONS
                     .into_iter()
@@ -1129,6 +1189,29 @@ impl Editor {
                     .0;
             }
             "interval" => c.interval_seconds = parse(value)?,
+            "add_source" => {
+                if value.is_empty() {
+                    return Err("Выберите температурный источник.".into());
+                }
+                if !self
+                    .document
+                    .temperatures
+                    .sources
+                    .iter()
+                    .any(|source| source.key == value)
+                {
+                    return Err("Температурный источник отсутствует в профиле.".into());
+                }
+                if !c.sources.iter().any(|source| source.key == value) {
+                    if c.sources.len() >= lcd::MAX_SOURCES {
+                        return Err("Достигнут предел показателей LCD.".into());
+                    }
+                    c.sources.push(lcd::OverlaySource {
+                        key: value.into(),
+                        label: value.to_ascii_uppercase(),
+                    });
+                }
+            }
             "sources" => {
                 let sources = value
                     .split(';')
@@ -1297,6 +1380,7 @@ mod tests {
                 routes: vec![ambient::Route {
                     device: "screen".into(),
                     source: "main".into(),
+                    scene_edges: false,
                     enabled: true,
                     zone: Zone::linear(2, false, Mode::ScreenCopy).unwrap(),
                     processing: Settings::default(),
@@ -1597,6 +1681,120 @@ mod tests {
         assert!(editor.document.lcd[0].config.media.is_none());
         editor.set("enabled", "false").unwrap();
         editor.document.validate().unwrap();
+    }
+
+    #[test]
+    fn lcd_source_hint_uses_profile_keys_and_multiple_assignments_round_trip() {
+        let current = document();
+        let mut editor = Editor {
+            document: current.clone(),
+            page: Page::Lcd,
+            index: 0,
+        };
+        let source_hint = |editor: &Editor| {
+            editor
+                .fields()
+                .into_iter()
+                .find(|field| field.key == "sources")
+                .unwrap()
+                .hint
+        };
+        assert!(source_hint(&editor).contains("«a=A; b=B»"));
+        assert!(!source_hint(&editor).contains("cpu=CPU"));
+
+        editor.set("enabled", "true").unwrap();
+        editor.set("overlay", "true").unwrap();
+        editor.set("sources", "b=GPU; a=CPU").unwrap();
+        let saved = editor.merged(&current).unwrap().encode().unwrap();
+        let reopened = Document::decode(&saved).unwrap();
+        let labels: Vec<_> = reopened.lcd[0]
+            .config
+            .sources
+            .iter()
+            .map(|source| (source.key.as_str(), source.label.as_str()))
+            .collect();
+        assert_eq!(labels, [("b", "GPU"), ("a", "CPU")]);
+
+        editor.set("sources", "").unwrap();
+        assert_eq!(
+            editor.merged(&current).unwrap_err(),
+            "Выберите хотя бы один показатель для панели температур."
+        );
+        editor.document.temperatures.sources.clear();
+        assert_eq!(
+            source_hint(&editor),
+            "Сначала добавьте источник в разделе «Температуры»."
+        );
+    }
+
+    #[test]
+    fn lcd_source_choice_appends_once_and_preserves_manual_assignments() {
+        let current = document();
+        let mut editor = Editor {
+            document: current.clone(),
+            page: Page::Lcd,
+            index: 0,
+        };
+        let choices = |editor: &Editor| {
+            editor
+                .fields()
+                .into_iter()
+                .find(|field| field.key == "add_source")
+                .unwrap()
+                .choices
+        };
+        assert_eq!(
+            choices(&editor),
+            [
+                ("Выберите источник…".into(), "".into()),
+                ("a".into(), "a".into()),
+                ("b".into(), "b".into()),
+            ]
+        );
+        editor.set("enabled", "true").unwrap();
+        editor.set("overlay", "true").unwrap();
+        editor.set("sources", "ram=Память; a=Процессор").unwrap();
+        editor.set("add_source", "b").unwrap();
+        editor.set("add_source", "b").unwrap();
+        assert!(editor.set("add_source", "missing").is_err());
+        assert!(editor.set("add_source", "").is_err());
+        assert_eq!(
+            choices(&editor),
+            [("Все источники добавлены".into(), "".into())]
+        );
+        let reopened =
+            Document::decode(&editor.merged(&current).unwrap().encode().unwrap()).unwrap();
+        let assignments: Vec<_> = reopened.lcd[0]
+            .config
+            .sources
+            .iter()
+            .map(|source| (source.key.as_str(), source.label.as_str()))
+            .collect();
+        assert_eq!(
+            assignments,
+            [("ram", "Память"), ("a", "Процессор"), ("b", "B")]
+        );
+    }
+
+    #[test]
+    fn lcd_editor_clears_the_background_and_keeps_temperature_enabled() {
+        let mut editor = Editor {
+            document: document(),
+            page: Page::Lcd,
+            index: 0,
+        };
+        editor.document.lcd[0].config.media =
+            Some(crate::app::assets::AssetId::try_from("a".repeat(64)).unwrap());
+        editor.set("enabled", "true").unwrap();
+        assert!(editor.set("media", "C:/file.png").is_err());
+        editor.set("media", "").unwrap();
+        assert!(editor.document.validate().is_err());
+        editor.set("overlay", "true").unwrap();
+        let reopened = Document::decode(&editor.document.encode().unwrap()).unwrap();
+        let config = &reopened.lcd[0].config;
+        assert!(config.enabled && config.overlay_enabled);
+        assert_eq!(config.sources[0].key, "ram");
+        assert!(reopened.assets().is_empty());
     }
     #[cfg(windows)]
     #[test]

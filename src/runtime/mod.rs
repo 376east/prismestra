@@ -51,6 +51,7 @@ struct FrameView {
 }
 struct Core {
     setup: std::sync::Arc<Setup>,
+    scene_canvas: Option<crate::devices::Canvas>,
     renderer: Renderer,
     #[cfg(windows)]
     audio: Option<(u64, crate::capture::audio_features::AudioFeatures)>,
@@ -64,7 +65,7 @@ struct Core {
     generation: u64,
     sequence: u64,
     last_us: Option<u64>,
-    muted: BTreeMap<String, bool>,
+    muted_since: BTreeMap<String, u64>,
     requested: BTreeMap<String, Ticket>,
 }
 impl Core {
@@ -73,6 +74,7 @@ impl Core {
         let renderer = Renderer::new(scene)?;
         Ok(Self {
             setup: std::sync::Arc::new(setup),
+            scene_canvas: None,
             renderer,
             #[cfg(windows)]
             audio: None,
@@ -86,7 +88,7 @@ impl Core {
             generation: 0,
             sequence: 0,
             last_us: None,
-            muted: BTreeMap::new(),
+            muted_since: BTreeMap::new(),
             requested: BTreeMap::new(),
         })
     }
@@ -109,13 +111,14 @@ impl Core {
             return Err("Stop and drain RGB outputs before replacing devices".into());
         }
         self.setup = std::sync::Arc::new(setup);
+        self.scene_canvas = None;
         self.outputs.clear();
         self.endpoint_leases.clear();
         self.cadences.clear();
         self.frame = Default::default();
         self.external.clear();
         self.feed = None;
-        self.muted.clear();
+        self.muted_since.clear();
         self.requested.clear();
 
         self.scene_cadence = Cadence::default();
@@ -188,7 +191,13 @@ impl Core {
         {
             return Err("Unknown RGB device".into());
         }
-        self.muted.insert(id.to_owned(), off);
+        if off {
+            self.muted_since
+                .entry(id.to_owned())
+                .or_insert(self.sequence);
+        } else {
+            self.muted_since.remove(id);
+        }
         self.cadences.remove(id);
         Ok(())
     }
@@ -298,18 +307,31 @@ impl Core {
             #[cfg(windows)]
             self.renderer
                 .set_audio(crate::capture::recent_audio(self.audio, now_us));
-            let preview = self
-                .renderer
-                .step_after_skips(&self.setup.canvas, skipped)?;
+            let canvas = self.scene_canvas.as_ref().unwrap_or(&self.setup.canvas);
+            let mut preview = self.renderer.step_after_skips(canvas, skipped)?;
             let mut frames = BTreeMap::new();
             for device in self.setup.devices.iter().filter(|d| d.role == Role::Canvas) {
                 frames.insert(device.id.clone(), vec![Rgb::default(); device.leds]);
             }
-            for (point, color) in self.setup.canvas.points.iter().zip(&preview) {
+            for point in canvas.points[self.setup.canvas.points.len()..]
+                .iter()
+                .filter(|p| p.led == 0)
+            {
+                let leds = self
+                    .setup
+                    .devices
+                    .iter()
+                    .find(|d| d.id == point.device)
+                    .unwrap()
+                    .leds;
+                frames.insert(point.device.clone(), vec![Rgb::default(); leds]);
+            }
+            for (point, color) in canvas.points.iter().zip(&preview) {
                 frames
                     .get_mut(&point.device)
                     .ok_or("Canvas device disappeared")?[point.led] = *color;
             }
+            preview.truncate(self.setup.canvas.points.len());
             self.frame = std::sync::Arc::new(FrameView { preview, frames });
         }
         let mut accepted = 0;
@@ -325,12 +347,14 @@ impl Core {
             if output.is_reaped() {
                 continue;
             }
-            let source = if device.role == Role::Ambient {
-                self.external.get(&device.id).map(|v| v.as_ref())
-            } else {
-                self.frame.frames.get(&device.id).map(|v| v.as_slice())
-            };
-            let off = self.muted.get(&device.id) == Some(&true);
+            let source = self
+                .frame
+                .frames
+                .get(&device.id)
+                .map(Vec::as_slice)
+                .or_else(|| self.external.get(&device.id).map(|v| v.as_ref()));
+            let muted_since = self.muted_since.get(&device.id).copied();
+            let off = muted_since.is_some();
             if device.role == Role::Canvas && !off && source.is_none() {
                 continue;
             }
@@ -372,7 +396,7 @@ impl Core {
                 generation: output.snapshot().generation,
                 sequence,
             };
-            if output.submit(ticket, colors)? {
+            if output.submit_frame(ticket, colors, muted_since)? {
                 self.sequence = sequence;
                 self.requested.insert(device.id.clone(), ticket);
                 accepted += 1;

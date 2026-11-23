@@ -138,6 +138,12 @@ impl Host {
             autonomous: false,
         })
     }
+    pub(crate) fn set_scene_canvas(&mut self, canvas: Option<crate::devices::Canvas>) {
+        self.core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .scene_canvas = canvas;
+    }
     /// Explicit real-clock mode. Deterministic/manual callers remain thread-free by default.
     pub fn enable_autonomous(&mut self) -> Result<(), String> {
         if self
@@ -235,6 +241,15 @@ impl Host {
             .unwrap_or_else(|e| e.into_inner())
             .status(id)
     }
+    #[cfg(windows)]
+    pub(crate) fn mute_submitted(&self, id: &str, status: &Snapshot) -> bool {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.muted_since.get(id).is_some_and(|since| {
+            status.last_submitted.is_some_and(|ticket| {
+                ticket.generation == status.generation && ticket.sequence > *since
+            })
+        })
+    }
     pub fn configure_scene(&mut self, scene: Scene) -> Result<(), String> {
         self.core
             .lock()
@@ -288,16 +303,22 @@ impl Host {
             core.endpoint_leases.remove(id);
             core.cadences.remove(id);
             core.requested.remove(id);
-            core.muted.remove(id);
+            core.muted_since.remove(id);
             core.external.remove(id);
         }
         let Core {
-            muted: current_muted,
+            muted_since,
             cadences,
+            sequence,
             ..
         } = &mut *core;
-        let previous_muted = std::mem::replace(current_muted, muted);
-        cadences.retain(|id, _| previous_muted.get(id) == current_muted.get(id));
+        cadences.retain(|id, _| muted_since.contains_key(id) == (muted.get(id) == Some(&true)));
+        muted_since.retain(|id, _| muted.get(id) == Some(&true));
+        for (id, off) in muted {
+            if off {
+                muted_since.entry(id).or_insert(*sequence);
+            }
+        }
         // Keep the last complete frames of surviving owners until the next
         // scheduled scene step. A new owner needs a frame from the new layout.
         let frames: BTreeMap<_, _> = core

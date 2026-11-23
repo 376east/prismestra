@@ -7,6 +7,9 @@ use crate::app::{
 use crate::devices::{Device, Role};
 use std::{thread::JoinHandle, time::Duration};
 
+const STARTUP_SEARCHES: u8 = 3;
+const STARTUP_SEARCH_INTERVAL: Duration = Duration::from_secs(30);
+
 #[derive(serde::Serialize)]
 pub(super) struct DeviceCandidate<'a> {
     id: &'a str,
@@ -58,6 +61,10 @@ pub(super) struct Startup {
     path: Option<PathBuf>,
     context: u64,
     attempts: u8,
+    search_limit: u8,
+    manual_between_passes: bool,
+    manual_started_since_automatic: bool,
+    early_manual_starts: u64,
     next: Instant,
 }
 
@@ -79,6 +86,10 @@ impl Startup {
             path: None,
             context: 0,
             attempts: 0,
+            search_limit: STARTUP_SEARCHES,
+            manual_between_passes: false,
+            manual_started_since_automatic: false,
+            early_manual_starts: 0,
             next: Instant::now(),
         }
     }
@@ -98,9 +109,105 @@ impl Startup {
     pub(super) fn configuring(&self) -> bool {
         self.applying.is_some() || self.restoring.is_some()
     }
+
+    fn can_retry_search(&self, now: Instant) -> bool {
+        // A click can win while the worker is still idle, even if the automatic
+        // pass is due. Once a manual pass has run, let the due automatic pass go next.
+        self.installed
+            && self.initialized
+            && (self.phase == "complete"
+                || (self.phase == "discovered"
+                    && self.attempts < self.search_limit
+                    && (now < self.next || !self.manual_started_since_automatic)))
+            && !self.configuring()
+            && self.drained()
+    }
+
+    fn retry_search(&mut self, document: &Document, path: &Path, context: u64, now: Instant) {
+        self.expected = Some(document.clone());
+        self.path = Some(path.to_path_buf());
+        self.context = context;
+        if self.phase == "discovered" {
+            // A user-requested pass can use the idle time without consuming the
+            // next automatic pass or moving its original deadline.
+            self.manual_between_passes = true;
+        } else {
+            self.attempts = 0;
+            self.search_limit = 1;
+            self.next = now;
+        }
+        self.enabled = true;
+        self.phase = "discovering";
+        self.discovery_issues.clear();
+    }
+
+    fn search_due(&self, now: Instant) -> bool {
+        self.manual_between_passes || now >= self.next
+    }
+
+    fn record_search_started(&mut self) {
+        if self.manual_between_passes {
+            self.manual_started_since_automatic = true;
+            self.early_manual_starts = self.early_manual_starts.saturating_add(1);
+        } else {
+            self.manual_started_since_automatic = false;
+            self.attempts += 1;
+        }
+        self.phase = "discovering";
+    }
+
+    fn schedule_next_search(&mut self, now: Instant) {
+        if self.manual_between_passes {
+            // A progressive result can be applied before the other probes finish.
+            if self.worker.is_idle() {
+                self.manual_between_passes = false;
+            }
+        } else {
+            self.next = now + STARTUP_SEARCH_INTERVAL;
+        }
+    }
+
+    fn complete_search(&mut self) -> bool {
+        if self.attempts < self.search_limit || !self.worker.is_idle() {
+            return false;
+        }
+        self.enabled = false;
+        self.phase = "complete";
+        true
+    }
 }
 
 impl App {
+    pub(super) fn can_retry_startup_discovery(&self) -> bool {
+        self.first_run.can_retry_search(Instant::now())
+            && self.runtime.document().lighting.setup.devices.is_empty()
+            && self.path.is_some()
+            && self.path == self.first_run.path
+            && self.native_lighting.is_some()
+            && !self.shutdown.active()
+            && !self.dirty
+            && !self.editor_dirty
+            && self.pending_open.is_none()
+            && !self.runtime.pending_configuration()
+            && !self.connection_switching()
+            && self.guard_connections_close().is_ok()
+            && self.connections.scan.is_idle()
+    }
+
+    pub(super) fn retry_startup_discovery(&mut self) -> Result<(), String> {
+        if !self.can_retry_startup_discovery() {
+            return Err("Повторный поиск сейчас недоступен.".into());
+        }
+        self.first_run.retry_search(
+            self.runtime.document(),
+            self.path.as_deref().ok_or("Нет пути профиля")?,
+            self.context_revision,
+            Instant::now(),
+        );
+        self.status = "Ищу поддерживаемые устройства…".into();
+        Ok(())
+    }
+
     fn pending_plan_matches(&self, pending: &Applying) -> bool {
         self.path.as_ref() == Some(&pending.path)
             && self.context_revision == pending.context
@@ -146,6 +253,7 @@ impl App {
             let report = serde_json::to_vec_pretty(&serde_json::json!({
                 "version": 1, "phase": self.first_run.phase,
                 "attempt": self.first_run.attempts,
+                "early_manual_starts": self.first_run.early_manual_starts,
                 "native_outputs": self.native_lighting.is_some(),
                 "devices": self.runtime.document().lighting.setup.devices.len(),
                 "discovery_issues": self.first_run.discovery_issues,
@@ -357,7 +465,7 @@ impl App {
                     format!(" {}", applied.plan.issues.join("; "))
                 }
             );
-            self.first_run.next = Instant::now() + Duration::from_secs(30);
+            self.first_run.schedule_next_search(Instant::now());
             return Ok(true);
         }
         if let Some(result) = self.first_run.worker.poll() {
@@ -380,7 +488,7 @@ impl App {
                 } else {
                     format!("Поиск устройств: {}", plan.issues.join("; "))
                 };
-                self.first_run.next = Instant::now() + Duration::from_secs(30);
+                self.first_run.schedule_next_search(Instant::now());
                 return Ok(true);
             }
             let outputs = plan.local.prepare(&plan.document, &self.asset_root)?;
@@ -424,18 +532,19 @@ impl App {
             )?;
             return Ok(false);
         }
-        if !self.first_run.worker.is_idle() || Instant::now() < self.first_run.next {
+        if !self.first_run.worker.is_idle() {
             return Ok(false);
         }
-        if self.first_run.attempts >= 3 {
-            self.first_run.enabled = false;
-            self.first_run.phase = "complete";
+        if self.first_run.complete_search() {
             self.status = format!(
                 "Автопоиск завершён. Устройств на карте: {}. {}",
                 self.runtime.document().lighting.setup.devices.len(),
                 self.first_run.discovery_issues.join("; ")
             );
             return Ok(true);
+        }
+        if !self.first_run.search_due(Instant::now()) {
+            return Ok(false);
         }
         let local = self
             .native_lighting
@@ -451,8 +560,7 @@ impl App {
         self.first_run
             .worker
             .start(endpoint, guard, local, progressive)?;
-        self.first_run.attempts += 1;
-        self.first_run.phase = "discovering";
+        self.first_run.record_search_started();
         self.status = "Ищу поддерживаемые устройства. Сцена включится автоматически…".into();
         Ok(true)
     }
@@ -462,6 +570,115 @@ impl App {
 mod tests {
     use super::*;
     use crate::devices::Driver;
+
+    #[test]
+    fn early_click_is_admitted_when_the_automatic_pass_is_due_but_has_not_started() {
+        let (_fixture, profile, _, _) = crate::app::installed::tests::fresh_profile();
+        let document = Document::load(&profile).unwrap();
+        let mut startup = Startup::new(true);
+        startup.initialized = true;
+        startup.record_search_started();
+        startup.phase = "discovered";
+        startup.schedule_next_search(startup.next);
+        let click = startup.next + Duration::from_millis(1);
+        let scheduled = startup.next;
+        assert!(startup.search_due(click));
+        assert!(startup.can_retry_search(click));
+        startup.retry_search(&document, &profile, 1, click);
+        assert_eq!(startup.early_manual_starts, 0, "queued is not started");
+        assert!(!startup.can_retry_search(click), "no second manual command");
+        startup.record_search_started();
+        assert_eq!((startup.attempts, startup.early_manual_starts), (1, 1));
+
+        let finished = click + Duration::from_secs(6);
+        startup.phase = "discovered";
+        startup.schedule_next_search(finished);
+        assert_eq!(startup.next, scheduled);
+        assert!(startup.search_due(finished));
+        assert!(
+            !startup.can_retry_search(finished),
+            "let the due automatic pass run"
+        );
+        startup.record_search_started();
+        assert_eq!((startup.attempts, startup.early_manual_starts), (2, 1));
+        assert!(
+            !startup.can_retry_search(finished),
+            "automatic pass already started"
+        );
+    }
+
+    #[test]
+    fn empty_first_scan_offers_manual_search_before_the_next_automatic_pass() {
+        let (_fixture, profile, _, _) = crate::app::installed::tests::fresh_profile();
+        let document = Document::load(&profile).unwrap();
+        let mut startup = Startup::new(true);
+        let first_finished = startup.next + Duration::from_secs(6);
+        startup.initialized = true;
+        startup.record_search_started();
+        startup.phase = "discovered";
+        startup.schedule_next_search(first_finished);
+        let second_automatic = first_finished + Duration::from_secs(30);
+
+        assert!(startup.can_retry_search(first_finished));
+        assert!(startup.can_retry_search(second_automatic));
+        assert!(!startup.search_due(second_automatic - Duration::from_millis(1)));
+        startup.retry_search(&document, &profile, 1, first_finished);
+        assert!(!startup.can_retry_search(first_finished));
+        assert!(startup.search_due(first_finished));
+        startup.record_search_started();
+        assert_eq!(startup.attempts, 1);
+        let manual_finished = first_finished + Duration::from_secs(6);
+        startup.phase = "discovered";
+        startup.schedule_next_search(manual_finished);
+        assert!(startup.can_retry_search(manual_finished));
+        assert!(!startup.search_due(second_automatic - Duration::from_millis(1)));
+        assert!(startup.search_due(second_automatic));
+        assert!(!startup.can_retry_search(second_automatic));
+
+        startup.record_search_started();
+        assert_eq!(startup.attempts, 2);
+        let second_finished = second_automatic + Duration::from_secs(6);
+        startup.schedule_next_search(second_finished);
+        let third_automatic = second_finished + Duration::from_secs(30);
+        assert!(!startup.search_due(third_automatic - Duration::from_millis(1)));
+        assert!(startup.search_due(third_automatic));
+        startup.record_search_started();
+        assert_eq!(
+            startup.early_manual_starts, 1,
+            "automatic passes keep the receipt"
+        );
+        assert!(startup.complete_search());
+        assert!(startup.can_retry_search(third_automatic + Duration::from_secs(6)));
+    }
+
+    #[test]
+    fn empty_startup_search_can_be_rearmed_for_one_pass_without_handover() {
+        let (_fixture, profile, _, _) = crate::app::installed::tests::fresh_profile();
+        let document = Document::load(&profile).unwrap();
+        let mut startup = Startup::new(true);
+        let now = startup.next;
+        assert!(!startup.can_retry_search(now));
+        startup.initialized = true;
+        startup.attempts = STARTUP_SEARCHES;
+        assert!(startup.complete_search());
+        assert!(startup.can_retry_search(now));
+
+        startup.retry_search(&document, &profile, 7, now);
+        assert!(startup.enabled && startup.initialized);
+        assert!(startup.handover.is_none());
+        assert_eq!(startup.expected.as_ref(), Some(&document));
+        assert_eq!(startup.path.as_ref(), Some(&profile));
+        assert_eq!(startup.context, 7);
+        assert!(!startup.can_retry_search(now));
+        assert!(!startup.complete_search());
+        startup.record_search_started();
+        assert_eq!(startup.early_manual_starts, 0);
+        assert!(startup.complete_search());
+        assert!(startup.can_retry_search(now));
+
+        startup.cancel();
+        assert!(!startup.can_retry_search(now));
+    }
 
     #[test]
     fn discovery_dto_follows_only_the_current_proposal() {

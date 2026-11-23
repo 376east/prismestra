@@ -118,10 +118,11 @@ fn wait_completion<F: Future>(
     let mut context = Context::from_waker(&waker);
     let mut future = std::pin::pin!(future);
     loop {
-        if let Poll::Ready(result) = future.as_mut().poll(&mut context) {
+        let result = future.as_mut().poll(&mut context);
+        ble::check_wait(control, started)?;
+        if let Poll::Ready(result) = result {
             return Ok(result);
         }
-        ble::check_wait(control, started)?;
         let remaining = ble::TIMEOUT.saturating_sub(control.now().saturating_sub(started));
         // Production invokes the event wait; fake controls advance their clock instead.
         // A retained predicate handles completion between poll and entering the wait.
@@ -380,11 +381,15 @@ fn record_pixel_address(addresses: &mut BTreeMap<u64, bool>, address: u64, suppo
 fn scan_pixel_addresses(
     control: &mut dyn Control,
     exclude: &BTreeSet<u64>,
+    radio_present: impl FnOnce() -> Result<bool, String>,
 ) -> Result<BTreeMap<u64, bool>, String> {
     let started = control.now();
     ble::check_wait(control, started)?;
-    if !has_local_radio()? {
-        return Ok(BTreeMap::new());
+    if !radio_present()? {
+        return Err(
+            "Windows не обнаружила Bluetooth-адаптер. Подключите или включите его и повторите поиск."
+                .into(),
+        );
     }
     let _apartment = Apartment::new()?;
     let mut scan = Discovery::passive()?;
@@ -443,7 +448,7 @@ pub(crate) fn discover_pixel_controllers(
     control: &mut dyn ble::Control,
     exclude: &BTreeSet<u64>,
 ) -> Result<Vec<PixelProbe>, String> {
-    let addresses = scan_pixel_addresses(control, exclude)?;
+    let addresses = scan_pixel_addresses(control, exclude, has_local_radio)?;
     probe_pixel_addresses(control, exclude, addresses, |address, budget| {
         WindowsBackend
             .connect(address, budget, &mut |_| {})
@@ -970,6 +975,20 @@ mod tests {
     }
 
     #[test]
+    fn pixel_discovery_without_adapter_reports_why_scan_could_not_start() {
+        let mut clock = Clock {
+            time: Duration::ZERO,
+            cancel: false,
+        };
+        let result = scan_pixel_addresses(&mut clock, &BTreeSet::new(), || Ok(false));
+        assert_eq!(
+            result.unwrap_err(),
+            "Windows не обнаружила Bluetooth-адаптер. Подключите или включите его и повторите поиск."
+        );
+        assert_eq!(clock.time, Duration::ZERO);
+    }
+
+    #[test]
     fn pixel_discovery_keeps_failed_and_confirmed_addresses() {
         let mut clock = Clock {
             time: Duration::ZERO,
@@ -1169,6 +1188,28 @@ mod tests {
         assert_eq!(result.unwrap_err().code(), failure.code());
         assert_eq!(clock.time, Duration::ZERO);
     }
+    #[test]
+    fn completion_at_the_deadline_cannot_report_success() {
+        let mut clock = Clock {
+            time: ble::TIMEOUT - ble::POLL,
+            cancel: false,
+        };
+        let mut pending = true;
+        let completes_on_next_poll = std::future::poll_fn(|_| {
+            if std::mem::take(&mut pending) {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        });
+        let result = wait_completion(completes_on_next_poll, &mut clock, Duration::ZERO);
+        assert_eq!(clock.time, ble::TIMEOUT);
+        assert_eq!(
+            result,
+            Err("Operation cancelled or timed out; disconnected".into())
+        );
+    }
+
     #[test]
     fn late_completion_waker_is_safe_after_waiter_has_timed_out() {
         struct SaveWaker(Arc<Mutex<Option<Waker>>>);

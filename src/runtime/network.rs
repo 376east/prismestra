@@ -62,6 +62,9 @@ impl RgbDriver for HomeAssistant {
     fn leds(&self) -> usize {
         1
     }
+    fn begin_mute(&mut self) {
+        self.last = None;
+    }
     fn prepare(&mut self, cancel: &Cancellation) -> Result<(), PrepareError> {
         let client = self
             .client

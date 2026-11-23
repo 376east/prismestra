@@ -65,6 +65,228 @@ fn arguments(root: &Path, flags: &[OsString]) -> Result<Vec<OsString>, String> {
     Ok(args)
 }
 
+pub(super) fn configure_openrgb(args: &[OsString]) -> Result<(), String> {
+    use super::resident::Instance;
+    use crate::app::managed_backend::provision::{self, Outcome};
+    use std::{net::SocketAddr, ptr::null_mut};
+
+    let (executable, config_dir, endpoint) = match args {
+        [executable, config_dir] => (executable, config_dir, None),
+        [executable, config_dir, endpoint] => {
+            let endpoint = endpoint.to_str().and_then(|value| value.parse::<SocketAddr>().ok())
+                .ok_or("Укажите числовой адрес и порт OpenRGB.")?;
+            (executable, config_dir, Some(endpoint))
+        }
+        _ => return Err("Используйте --configure-portable-openrgb <OpenRGB.exe> <папка-конфигурации> [IP:порт].".into()),
+    };
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let root = exe.parent().ok_or("Не найдена папка Prismestra.exe")?;
+    if !supports_openrgb_setup(&exe)? {
+        return Err(
+            "Настройка OpenRGB этой командой доступна только в распакованном portable ZIP.".into(),
+        );
+    }
+    let state = provision::prepare_state(root)?;
+    let _instance = Instance::acquire(&state)?;
+    let outcome = provision::configure(
+        &state,
+        Path::new(executable),
+        Path::new(config_dir),
+        endpoint,
+        |replace, pin, endpoint| {
+            confirm_openrgb(
+                null_mut(),
+                Path::new(executable),
+                Path::new(config_dir),
+                replace,
+                pin,
+                endpoint,
+            )
+        },
+    )?;
+    let message = match outcome {
+        Outcome::Saved => "Настройки OpenRGB сохранены.",
+        Outcome::Unchanged => "Настройки OpenRGB уже сохранены.",
+        Outcome::Cancelled => return Ok(()),
+    };
+    openrgb_notice(null_mut(), message);
+    Ok(())
+}
+
+pub(super) fn supports_openrgb_setup(exe: &Path) -> Result<bool, String> {
+    let root = exe.parent().ok_or("Не найдена папка Prismestra.exe")?;
+    match fs::symlink_metadata(root.join("install-manifest.json")) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            file_exists(&root.join("release-manifest.json"))
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn confirm_openrgb(
+    owner: super::HWND,
+    executable: &Path,
+    config_dir: &Path,
+    replace: bool,
+    pin: &str,
+    endpoint: std::net::SocketAddr,
+) -> bool {
+    use super::{IDYES, MB_ICONQUESTION, MessageBoxW, wide};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_DEFBUTTON2, MB_YESNO};
+
+    let action = if replace {
+        "Заменить существующие настройки OpenRGB?"
+    } else {
+        "Сохранить настройки OpenRGB?"
+    };
+    let text = wide(&format!(
+        "{action}\n\n{}\n{}\n{endpoint}\nSHA-256 {pin}",
+        executable.display(),
+        config_dir.display()
+    ));
+    unsafe {
+        MessageBoxW(
+            owner,
+            text.as_ptr(),
+            wide("Управляемый OpenRGB").as_ptr(),
+            MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION,
+        ) == IDYES
+    }
+}
+
+fn openrgb_notice(owner: super::HWND, message: &str) {
+    use super::{MessageBoxW, wide};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK};
+
+    unsafe {
+        MessageBoxW(
+            owner,
+            wide(message).as_ptr(),
+            wide("Управляемый OpenRGB").as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
+fn pick_openrgb_path(owner: super::HWND, folder: bool) -> Result<Option<PathBuf>, String> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+    use windows::{
+        Win32::{
+            Foundation::{ERROR_CANCELLED, HWND},
+            System::Com::{
+                CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+                CoTaskMemFree, CoUninitialize,
+            },
+            UI::Shell::{
+                FOS_DONTADDTORECENT, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR,
+                FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog,
+                SIGDN_FILESYSPATH,
+            },
+        },
+        core::w,
+    };
+    struct Apartment;
+    impl Drop for Apartment {
+        fn drop(&mut self) {
+            unsafe { CoUninitialize() };
+        }
+    }
+
+    (|| -> windows::core::Result<_> {
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+            let _apartment = Apartment;
+            let dialog: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+            let mode = if folder {
+                dialog.SetTitle(w!("Выберите отдельную папку конфигурации OpenRGB"))?;
+                FOS_PICKFOLDERS
+            } else {
+                dialog.SetTitle(w!("Выберите файл OpenRGB.exe"))?;
+                dialog.SetFileName(w!("OpenRGB.exe"))?;
+                FOS_FILEMUSTEXIST
+            };
+            dialog.SetOptions(
+                dialog.GetOptions()?
+                    | mode
+                    | FOS_FORCEFILESYSTEM
+                    | FOS_PATHMUSTEXIST
+                    | FOS_NOCHANGEDIR
+                    | FOS_DONTADDTORECENT,
+            )?;
+            match dialog.Show(Some(HWND(owner))) {
+                Err(error) if error.code() == ERROR_CANCELLED.to_hresult() => return Ok(None),
+                result => result?,
+            }
+            let path = dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?;
+            let selected = PathBuf::from(OsString::from_wide(path.as_wide()));
+            CoTaskMemFree(Some(path.0.cast()));
+            Ok(Some(selected))
+        }
+    })()
+    .map_err(|error| format!("Не удалось открыть окно выбора OpenRGB: {error}"))
+}
+
+pub(super) fn initial_openrgb_dialog(
+    owner: super::HWND,
+    state: &super::State,
+) -> Result<(), String> {
+    use super::connections::CONFIGURE_PORTABLE_OPENRGB;
+    use crate::app::managed_backend::provision::{self, Outcome};
+
+    let available = |app: &super::App| {
+        app.connection_visible(CONFIGURE_PORTABLE_OPENRGB)
+            && !app.shutdown.active()
+            && app.pending_open.is_none()
+            && !app.runtime.pending_configuration()
+    };
+    {
+        let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
+        if !slot.as_ref().is_some_and(available) {
+            return Err("Первичная настройка OpenRGB недоступна на этой странице.".into());
+        }
+    }
+    let Some(executable) = pick_openrgb_path(owner, false)? else {
+        return Ok(());
+    };
+    if !executable
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+    {
+        return Err("Выберите исполняемый файл OpenRGB (.exe).".into());
+    }
+    let Some(config_dir) = pick_openrgb_path(owner, true)? else {
+        return Ok(());
+    };
+    let outcome = {
+        let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
+        let app = slot
+            .as_ref()
+            .filter(|app| available(app))
+            .ok_or("Настройка OpenRGB стала недоступна. Повторите попытку.")?;
+        provision::configure(
+            &app.state_dir,
+            &executable,
+            &config_dir,
+            None,
+            |replace, pin, endpoint| {
+                !replace && confirm_openrgb(owner, &executable, &config_dir, false, pin, endpoint)
+            },
+        )?
+    };
+    if outcome == Outcome::Saved {
+        if let Some(app) = state.app.borrow().as_ref() {
+            app.show_page();
+        }
+        openrgb_notice(
+            owner,
+            "Настройки OpenRGB сохранены. Чтобы проверить подключение, выберите устройство OpenRGB и нажмите «Найти устройства».",
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,6 +299,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!("prismestra-portable-{stamp}"));
+        let exe = root.join("Prismestra.exe");
         let profile = root.join("data/profile.json");
         let state = root.join("data/state");
         let connected = ["--start-connected".into()];
@@ -92,6 +315,15 @@ mod tests {
         assert!(!root.exists());
 
         fs::create_dir_all(&state).unwrap();
+        assert!(!supports_openrgb_setup(&exe).unwrap());
+        let release = root.join("release-manifest.json");
+        let installed = root.join("install-manifest.json");
+        fs::write(&release, "{}").unwrap();
+        assert!(supports_openrgb_setup(&exe).unwrap());
+        fs::write(&installed, "{}").unwrap();
+        assert!(!supports_openrgb_setup(&exe).unwrap());
+        fs::remove_file(installed).unwrap();
+        fs::remove_file(release).unwrap();
         fs::write(&profile, "{}").unwrap();
         let preview = arguments(&root, &[]).unwrap();
         assert_eq!(preview[2], "--project");

@@ -4,6 +4,7 @@ use super::*;
 #[cfg(windows)]
 pub(crate) enum OutputActivity {
     Off,
+    TurningOff,
     Connecting,
     Retrying(String),
     Sent(u64),
@@ -71,13 +72,19 @@ impl OutputPlan {
 impl Runtime {
     #[cfg(windows)]
     pub(crate) fn output_activity(&self, device: &crate::devices::Device) -> OutputActivity {
-        use crate::runtime::output::Phase;
+        use crate::{devices::Driver, runtime::output::Phase};
 
         let id = &device.id;
         let is_lcd = device.role == Role::Lcd;
+        let group_off = !self.desired.on(self.target(id));
+        // A registered network output still has to deliver Off. Keep its failure visible.
+        let show_network_status_while_off = group_off
+            && matches!(device.driver, Driver::HomeAssistant | Driver::WledDdp)
+            && self.rgb_specs.contains_key(id)
+            && !self.rgb_requires_action(id);
         if !device.enabled
             || self.stopped
-            || !self.desired.on(self.target(id))
+            || (group_off && !show_network_status_while_off)
             || (is_lcd
                 && self
                     .document
@@ -132,6 +139,13 @@ impl Runtime {
             };
             if status.requires_action {
                 return OutputActivity::Unavailable(status.error);
+            }
+            if group_off && status.phase == Phase::Ready {
+                return if self.host.mute_submitted(id, &status) {
+                    OutputActivity::Off
+                } else {
+                    OutputActivity::TurningOff
+                };
             }
             (status.phase, status.submitted, status.error)
         };

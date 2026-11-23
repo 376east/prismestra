@@ -2,19 +2,17 @@
 
 Prismestra can own a local OpenRGB SDK server without its window or tray icon. Executable, configuration directory and numeric loopback endpoint are machine settings; device models/counts and personal paths are not compiled in. Remote or manually managed servers remain external.
 
-The Windows installer bundles and configures a private backend automatically, including its protected authorization policy. Its first-run coordinator can discover devices before saved bindings exist. See [the installed startup path](windows-installer.md). The manual configuration below applies to source builds and older portable packages.
+The Windows installer bundles and configures a private backend automatically, including its protected authorization policy. Its first-run coordinator can discover devices before saved bindings exist. See [the installed startup path](windows-installer.md).
 
 ## Configure a portable backend
 
-Select an OpenRGB SDK6 executable and an isolated configuration directory. Disable unrelated plugins and detectors for devices driven directly by Prismestra. Exit any server using the intended endpoint. From the extracted Prismestra folder, substitute your paths:
+In a fresh portable folder, open **Connections → Configure local OpenRGB** («Подключения → Настроить локальный OpenRGB…»). Select your OpenRGB SDK6 executable and an isolated configuration folder. Review the paths, default loopback endpoint and SHA-256, then confirm. To test the connection, select an OpenRGB device in Connections and start discovery. This action is available before a portable configuration or helper reference exists.
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Configure OpenRGB.ps1" -Executable "C:\Apps\OpenRGB\OpenRGB.exe" -ConfigDirectory "C:\Lighting\OpenRGB-config"
-```
+For a new or ordinary-user portable configuration, exit the resident session and open a Windows shortcut to the extracted `Prismestra.exe` with `--configure-portable-openrgb "C:\Apps\OpenRGB\OpenRGB.exe" "C:\Lighting\OpenRGB-config"`. An optional final argument sets a numeric loopback endpoint. Confirm the displayed endpoint and SHA-256 to save. Leave any configured helper task in place. If a proposed change would affect that configuration, Prismestra leaves both files intact so that the task's authorization can be reviewed separately.
 
-Setup pins the EXE SHA256 in `data/state/managed-openrgb.json`. The available options are `-StateDirectory`, `-Endpoint` (numeric IPv4/bracketed IPv6) and explicit `-Force` replacement. It never executes a backend, installs drivers, registers tasks or requests elevation. Use Connections discovery and save the profile and bindings, then use the [portable EXE shortcut for connected startup](portable-launch.md#first-setup). Explicit discovery can start the backend before binding identities exist. It waits in its worker. Saving bindings alone does not activate lights. Connected startup starts the backend only for enabled matching OpenRGB bindings.
+Select an OpenRGB SDK6 executable and an isolated configuration directory. Disable unrelated plugins and detectors for devices driven directly by Prismestra. Exit any server using the intended endpoint. The native configuration pins the EXE SHA-256 in `data/state/managed-openrgb.json`. Use Connections discovery and save the profile and bindings, then use the [portable EXE shortcut for connected startup](portable-launch.md#first-setup). Explicit discovery can start the backend before binding identities exist. Saving bindings alone does not activate lights. Connected startup starts the backend only for enabled matching OpenRGB bindings.
 
-To return to an external server, exit Prismestra, remove the managed configuration or set `enabled` to false while retaining its other fields, then restart. Do not run two servers on one endpoint.
+For a portable configuration without a helper reference, exit Prismestra, remove the managed configuration or set `enabled` to false while retaining its other fields, then restart to use an external server. Do not run two servers on one endpoint.
 
 ## Lifecycle
 
@@ -28,7 +26,11 @@ The private component recognizes its existing opt-in plus an inherited parent pi
 
 Default management uses ordinary permissions. Some controller paths require elevation. Windows Setup provisions the installed product's protected task and per-user policy during its installation elevation; the editor stays unelevated. [Installed permissions](windows-installer.md).
 
-For a portable build, an administrator may provision an authorized task/helper, selected through `backend-task.json` and setup's `-AuthorizedTaskName`. This is configurable, not a hardcoded personal task. The task launches the same Prismestra EXE with `--backend-helper <state-directory> <authorized-OpenRGB-executable> <authorized-SHA256>`, with pins supplied by the authorized action rather than scene data. The action must pin the helper EXE too. The administrator must trust/protect the action, binaries, dependencies and isolated configuration: EXE pinning alone does not protect a writable plugin tree. Portable configuration does not establish that trust automatically.
+For a portable build, an administrator may provision an authorized task/helper, selected through `data/state/backend-task.json`. The task launches the same Prismestra EXE with `--backend-helper <state-directory> <authorized-OpenRGB-executable> <authorized-SHA256>`, with pins supplied by the authorized action rather than scene data. The action must pin the helper EXE too. The administrator must trust and protect the action, binaries, dependencies and isolated configuration. EXE pinning alone does not protect a writable plugin tree.
+
+A portable ZIP update preserves the existing task reference and OpenRGB configuration. The helper can still run when the authorized action, paths and pins remain valid. Before updating, exit from the tray and back up the previous program files and `data`. If the update fails, restore the previous files at the same paths. If the OpenRGB files were changed too, restore the authorized binary and its matching configuration. If the task is missing or its action or pins need to change, ask the administrator who provisioned it to verify the authorization. Portable Connections and the native setup command cannot reauthorize that task.
+
+The matching source ZIP retains `prismestra-source/scripts/portable/Configure OpenRGB.ps1` for development and administrator compatibility. For initial association with a task the administrator has independently verified, the utility accepts `-AuthorizedTaskName` and an explicit `-StateDirectory` pointing to the portable folder's `data/state`. The utility checks that the task exists. Verification of its action, principal and protected files remains the administrator's responsibility. The utility cannot reauthorize an existing task or validate a changed pin against its action.
 
 The helper verifies the parent's PID, creation time and executable path. Nonce-bound heartbeat, status and cancel files reject stale sessions. The private controls use protocol2 and a boot-relative active-time clock, excluding sleep/hibernation and UTC corrections; deploy the helper launcher and application together. Parent death, cancellation or active heartbeat loss releases only its owned child. A bounded diagnostic history survives helper restarts. [Helper](../src/app/backend_helper.rs), [clock contract, diagnostics and actual boot gates](startup-recovery.md).
 

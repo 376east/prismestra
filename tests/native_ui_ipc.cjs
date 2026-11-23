@@ -153,7 +153,8 @@ presetClick({edit:plumDawn.id});
 assert.equal(commands.at(-1).op,'preview_scene');
 assert.equal(commands.at(-1).origin.id,null);
 assert.deepEqual(commands.at(-1).scene,plumDawn.scene);
-assert.ok(commands.slice(beforeBuiltIn).every(command=>command.op==='preview_scene'));
+assert.deepEqual(commands[beforeBuiltIn],{op:'editor_preview_visible',visible:true});
+assert.ok(commands.slice(beforeBuiltIn+1).every(command=>command.op==='preview_scene'));
 assert.ok(!find('#main').innerHTML.includes('data-action="rename"'));
 vm.runInContext('draft.speed=35;requestPreview();flushPreview();saveDraft("My plum scene")',context);
 assert.equal(commands.at(-1).op,'save_scene');
@@ -234,6 +235,32 @@ assert.deepEqual(commands.at(-1),{op:'native_action',id:1811,fields:[{id:101,val
 assert.equal(bindingSaveDisabled(),true,'the save remains locked until the native acknowledgement');
 console.log('PASS: first click saves staged connection text only when the host can accept it');
 
+// First-time portable setup uses the existing native action bridge.
+const portableAction={id:1822,label:'Настроить локальный OpenRGB…',enabled:true};
+context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeForm:{page:'connections',fields:[],actions:[portableAction],notes:[]}}};
+vm.runInContext('formStages.clear();window.prismestraReceive(payload)',context);
+assert.match(find('#main').innerHTML,/data-native-action="1822"[^>]*>Настроить локальный OpenRGB…<\/button>/);
+const portableButton={dataset:{nativeAction:'1822'},disabled:false,hasAttribute:()=>false};
+events.click({target:{closest:()=>portableButton}});
+assert.deepEqual(commands.at(-1),{op:'native_action',id:1822,fields:[],editor_fields:[]});
+context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeForm:{page:'connections',fields:[],actions:[],notes:[]}}};
+vm.runInContext('window.prismestraReceive(payload)',context);
+assert.doesNotMatch(find('#main').innerHTML,/data-native-action="1822"/);
+console.log('PASS: portable OpenRGB setup appears and dispatches through the native action bridge');
+
+const helperNotice='Настройки локального OpenRGB заблокированы существующей авторизацией. Ссылка на задачу находится в data/state/backend-task.json в папке Prismestra. Для замены OpenRGB обратитесь к администратору, который авторизовал задачу.';
+const linkedForm={page:'connections',fields:[],actions:[],notes:[],notice:helperNotice};
+context.payload={kind:'status',state:{nativeForm:linkedForm}};
+const beforeHelperHint=commands.length;
+vm.runInContext('window.prismestraReceive(payload)',context);
+assert.match(find('#main').innerHTML,/<p class="parameter-note" role="status">[^<]*заблокированы[^<]*data\/state\/backend-task\.json[^<]*обратитесь к администратору[^<]*<\/p><div class="native-form">/);
+assert.doesNotMatch(find('#main').innerHTML,/data-native-action="1822"/);
+assert.equal(commands.length,beforeHelperHint,'helper notice is read-only');
+context.payload={kind:'status',state:{nativeForm:{...linkedForm,notice:undefined}}};
+vm.runInContext('window.prismestraReceive(payload)',context);
+assert.doesNotMatch(find('#main').innerHTML,/backend-task\.json/);
+console.log('PASS: linked portable OpenRGB explains the block and its safe next step above the form');
+
 // The selected LCD can have a different index from its binding.
 const connectionDevices=['first-lcd','selected-lcd'].map(id=>({
  id,label:'LCD',role:'lcd',driver:{type:'tt_lcd'},leds:0,rate_hz:30,enabled:false
@@ -296,6 +323,84 @@ assert.equal(commands.length,beforePendingPage,'Do not send a card selection bef
 vm.runInContext('pendingView=null',context);
 console.log('PASS: device cards select by logical identity and the draft dropdown still uses indices');
 
+// Duplicate names must remain distinguishable on the cards, like in the native target selector.
+{
+ const [working, blocked] = ['rgb-left','rgb-right'].map(id=>({
+  id,label:'ARGB',role:'canvas',driver:{type:'open_rgb'},leds:32,rate_hz:30,enabled:true
+ }));
+ const lcd = {id:'usb-lcd',label:'LCD',role:'lcd',driver:{type:'tt_lcd'},leds:0,rate_hz:30,enabled:true};
+ const activity = {
+  labels:{[working.id]:'Кадры отправлены',[blocked.id]:'Недоступно',[lcd.id]:'Недоступно'},
+  reasons:{[blocked.id]:'endpointLeaseBusy'}
+ };
+ const snapshot = (devices,selected,detail) => {
+  context.payload={kind:'snapshot',state:{
+   ...structuredClone(initial),devices,draftDevices:devices,detail,deviceActivity:activity,
+   editor:{page:'devices',deviceId:selected.id,index:devices.indexOf(selected),
+    targets:devices.map(({label,id})=>`${label} (${id})`),fields:[],dirty:false}
+  }};
+  vm.runInContext('window.prismestraReceive(payload)',context);
+ };
+ const selectCard = device => {
+  const button=find(`[data-device-id="${device.id}"]`);
+  button.dataset.deviceId=device.id;
+  button.focus();
+  events.click({target:{closest:()=>button}});
+  assert.deepEqual(commands.at(-1),{op:'select_device',id:device.id});
+  return button;
+ };
+ vm.runInContext('formStages.clear();view="devices";pendingView=null',context);
+ snapshot([working,blocked,lcd],working,'Кадры отправлены: 5');
+ assert.match(mainMarkup,/<h2>ARGB \(rgb-left\)<\/h2>/);
+ assert.match(mainMarkup,/<h2>ARGB \(rgb-right\)<\/h2>/);
+ assert.match(mainMarkup,/aria-label="Свойства: ARGB \(rgb-right\)" aria-describedby="device-status-rgb-right"/);
+ assert.match(mainMarkup,/aria-label="Свойства: LCD" aria-describedby="device-status-usb-lcd"/);
+ const conflictCard=selectCard(blocked);
+ snapshot([blocked,working,lcd],blocked,'Ожидает повтора');
+ assert.equal(document.activeElement,conflictCard);
+ assert.match(mainMarkup,/data-output-status="rgb-right">Подключение занято другим выходом Prismestra/);
+ assert.match(mainMarkup,/data-connection-device="rgb-right"/);
+ vm.runInContext('deviceInspection=null',context);
+ console.log('PASS: same-name cards identify their outputs; selection, reason and connection target survive a reordered snapshot');
+}
+
+// Runtime detail is scoped to the selected LCD. Its existing connection action uses the same ID.
+{
+ const [missing,neighbor]=['missing-lcd','neighbor-lcd'].map(id=>({
+  id,label:'LCD',role:'lcd',driver:{type:'tt_lcd'},leds:0,rate_hz:30,enabled:true
+ }));
+ const guidance='Windows не находит LCD по сохранённому подключению. Проверьте питание и USB-кабель экрана. Если экран подключён, откройте его подключение и проверьте привязку.';
+ const snapshot = (devices,selected,detail) => {
+  context.payload={kind:'snapshot',state:{
+   ...structuredClone(initial),devices,draftDevices:devices,detail,
+   editor:{page:'devices',deviceId:selected?.id,index:selected?devices.indexOf(selected):0,
+    targets:devices.map(({label,id})=>`${label} (${id})`),fields:[],dirty:false}
+  }};
+  vm.runInContext('window.prismestraReceive(payload)',context);
+ };
+ vm.runInContext('formStages.clear();view="devices";pendingView=null',context);
+ snapshot([missing,neighbor],missing,'Подключается');
+ context.payload={kind:'status',state:{detail:guidance}};
+ vm.runInContext('window.prismestraReceive(payload)',context);
+ assert.equal(find('#native-runtime-detail').textContent,guidance);
+ snapshot([neighbor,missing],missing,guidance);
+ assert.match(mainMarkup,/data-connection-device="missing-lcd"/);
+ const repair=new Node();
+ repair.dataset={view:'connections',connectionDevice:missing.id};
+ const beforeRepair=commands.length;
+ events.click({target:{closest:()=>repair}});
+ assert.deepEqual(commands.slice(beforeRepair),[{op:'page',page:'connections',device:missing.id}]);
+ vm.runInContext('window.prismestraReceive({kind:"error",message:"Fixture return to Devices"})',context);
+ snapshot([neighbor,missing],neighbor,'Кадры отправлены: 5');
+ assert.equal(find('#native-runtime-detail').textContent,'Кадры отправлены: 5');
+ assert.match(mainMarkup,/data-connection-device="neighbor-lcd"/);
+ assert.doesNotMatch(mainMarkup,/Windows не находит LCD/);
+ snapshot([],undefined,'Добавьте устройство из списка поддерживаемых протоколов.');
+ assert.doesNotMatch(find('nav').innerHTML,/data-view="lcd"/);
+ assert.doesNotMatch(mainMarkup,/data-connection-device|data-view="lcd"|Windows не находит LCD/);
+ console.log('PASS: missing LCD guidance refreshes in place, opens only its binding, and stays hidden without LCD');
+}
+
 // A retry belongs to one saved row, request and profile scope.
 {
  const button=new Node(), status=new Node(), help=new Node(), disabled=new Map();
@@ -337,9 +442,23 @@ console.log('PASS: device cards select by logical identity and the draft dropdow
  assert.equal(status.textContent,'Подключаемся…');
  reply('rgb',first.request,'before','Identity changed');
  assert.equal(status.textContent,'Identity changed');
+ click();
+ assert.equal(commands.length,start+1,'a failure alone does not re-enable the last ticket');
  receive({kind:'status',state:{deviceActivity:{retryScope:'before',retryTickets:{},reasons:{}}}});
  assert(help.hidden);
  assert.equal(vm.runInContext('deviceStatus(state.devices[0])',context),'Недоступно');
+ receive({kind:'status',state:{deviceActivity:{retryScope:'before',retryTickets:{wled:'first'}}}});
+ click();
+ assert.equal(commands.length,start+1,'a ticket for another output cannot re-enable the selected one');
+ receive({kind:'status',state:{deviceActivity:{retryScope:'before',retryTickets:{rgb:'first'}}}});
+ assert.equal(disabled.get('aria-disabled'),'false','the host republished the selected output ticket');
+ click();click();
+ const republished=commands.at(-1);
+ assert.deepEqual(republished,{op:'retry_output',id:'rgb',ticket:'first',request:republished.request});
+ assert.equal(commands.length,start+2,'exactly one new attempt uses the republished ticket');
+ assert.notEqual(republished.request,first.request);
+ reply('rgb',first.request,'before','late rejection');
+ assert.equal(status.textContent,'Подключаемся…','the previous request cannot settle the new one');
  receive({kind:'snapshot',state:stateForScope('after','next')});
  click();
  assert.equal(status.textContent,'Подключаемся…');
@@ -438,6 +557,70 @@ receiveDeviceState('status', candidateFixtures.replacement);
 assert.ok(hasCandidate(candidateFixtures.replacement.deviceCandidates[0].id));
 assert.equal(discoveryAnnouncement.textContent, 'Найдено устройство: Fixture.');
 console.log('PASS: candidate identity, applied precedence, metadata replacement, empty device selection');
+
+{
+ const empty = {...foundState, devices: [], deviceCandidates: [], startupDiscoveryRetry: true};
+ vm.runInContext('view="library"',context);
+ receiveDeviceState('snapshot', empty);
+ assert.ok(mainMarkup.includes('data-action="retry-startup-discovery"'));
+ receiveDeviceState('status',{startupDiscoveryRetry:false});
+ assert.ok(!mainMarkup.includes('data-action="retry-startup-discovery"'),'running search hides the action');
+ receiveDeviceState('status',{startupDiscoveryRetry:true});
+ assert.ok(mainMarkup.includes('data-action="retry-startup-discovery"'),'an empty result allows a fresh user action');
+ vm.runInContext('view="devices"',context);
+ receiveDeviceState('snapshot', empty);
+ assert.ok(mainMarkup.includes('data-action="retry-startup-discovery"'));
+ const retry = {dataset:{action:'retry-startup-discovery'},disabled:false,hasAttribute:()=>true};
+ const clickRetry = () => events.click({target:{closest:()=>retry}});
+ const before = commands.length;
+ vm.runInContext('formStages.set("pending",{kind:"native",page:"devices",id:714,value:"Keep"})',context);
+ clickRetry();
+ assert.equal(commands.length,before,'unapplied edits protect the profile from a rescan');
+ vm.runInContext('formStages.clear()',context);
+ clickRetry();
+ clickRetry();
+ assert.deepEqual(commands.slice(before),[{op:'retry_startup_discovery'}]);
+ receiveDeviceState('status',{startupDiscoveryRetry:false,pending:true,deviceCandidates:[foundRgb]});
+ assert.ok(hasCandidate(foundRgb.id));
+ assert.match(mainMarkup,/Настраивается автоматически/,'the late proposal is still being applied');
+ assert.ok(!mainMarkup.includes('data-action="retry-startup-discovery"'));
+ receiveDeviceState('snapshot',{...empty,startupDiscoveryRetry:false,devices:[{...foundRgb,leds:1}]});
+ assert.ok(!hasCandidate(foundRgb.id),'committed device replaces the late proposal');
+ assert.match(mainMarkup,new RegExp(`data-device-id="${foundRgb.id}"`));
+ console.log('PASS: one rescan from an empty profile; late candidate becomes an applied device');
+}
+{
+ const pending={...foundState,pending:true,deviceCandidates:[foundRgb],nativeAux:{
+  page:'devices',fields:[{id:714,label:'Семейство',kind:'select',enabled:true,value:'openrgb',choices:[]}],actions:[],notes:[],
+ }};
+ const before=commands.length;
+ receiveDeviceState('snapshot',pending);
+ assert.match(mainMarkup,/Prismestra добавляет найденное устройство в профиль/);
+ assert.match(mainMarkup,/Настраивается автоматически/);
+ assert.doesNotMatch(mainMarkup,/data-action="apply-document"|id="native-target"/);
+ receiveDeviceState('status',{pending:false,error:'Таймаут подключения'});
+ assert.ok(hasCandidate(foundRgb.id),'the stale discovery row is still present');
+ assert.doesNotMatch(mainMarkup,/Настраивается автоматически|Prismestra добавляет/);
+ assert.match(mainMarkup,/<button[^>]*data-action="focus-device-setup" data-mutation\s*>Добавить устройство/);
+ assert.match(mainMarkup,/id="native-target"/);
+ receiveDeviceState('snapshot',{...pending,pending:false});
+ assert.doesNotMatch(mainMarkup,/Настраивается автоматически|Prismestra добавляет/);
+ assert.match(mainMarkup,/data-action="focus-device-setup"/);
+ receiveDeviceState('status',{pending:true});
+ assert.match(mainMarkup,/Настраивается автоматически/,'a fresh active transition can show progress again');
+ assert.equal(commands.length,before,'candidate arrival must not issue a command');
+ receiveDeviceState('snapshot',{...pending,editor:{...pending.editor,dirty:true}});
+ assert.match(mainMarkup,/id="native-target"/,'existing edits keep their form');
+ receiveDeviceState('snapshot',{...pending,pending:false,deviceCandidates:[],error:'Подключение не применилось'});
+ assert.doesNotMatch(mainMarkup,/Настраивается автоматически/,'cancelled discovery restores the empty state');
+ assert.match(mainMarkup,/<button[^>]*data-action="focus-device-setup" data-mutation\s*>Добавить устройство/,
+  'a failed setup enables manual device setup');
+ receiveDeviceState('snapshot',{...pending,pending:false,deviceCandidates:[],devices:[{...foundRgb,leds:1}],
+  editor:{page:'devices',index:0,targets:[foundRgb.label],fields:[],dirty:false}});
+ assert.match(mainMarkup,/id="native-target"/,'properties return after the output is applied');
+ assert.doesNotMatch(mainMarkup,/Настраивается автоматически/);
+}
+console.log('PASS: first discovered output presents automatic setup until it becomes configurable');
 
 vm.runInContext('view="devices";state.editor={page:"devices",index:0,targets:["Strip"],fields:[],dirty:false};state.detail="Ошибка RGB: <test>";render()',context);
 assert.ok(find('#main').innerHTML.includes('Ошибка RGB: &lt;test&gt;'));
@@ -543,7 +726,8 @@ function selectScene(id){
 restoreDraft(draftState);
 selectScene(entryA.id);
 evaluate('draft.colors[0]=0xaabbcc;editDraft();flushPreview();changeView("library")');
-const draftA=commands.at(-1);
+assert.deepEqual(commands.at(-1),{op:'editor_preview_visible',visible:false});
+const draftA=commands.at(-2);
 assert.equal(draftA.origin.id,entryA.id);
 assert.equal(draftA.origin.scene.colors[0],0x112233);
 const beforeSwitch=commands.length;
@@ -877,3 +1061,201 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
  assert.doesNotMatch(mainMarkup,/id="open-argb"/);
 }
 console.log('PASS: selected managed ARGB device exposes a read-only IPC route and removes it when unavailable');
+
+{
+ restoreDraft(draftState);
+ const submitNew=()=>{
+  evaluate('nameDialog("new")');
+  find('#scene-name').value='New fixture';
+  find('#name-form').onsubmit({preventDefault(){}});
+  return commands.at(-1);
+ };
+ assert.deepEqual(submitNew(),{op:'save_scene',id:null,name:'New fixture',scene});
+ evaluate('window.prismestraReceive(payload)');
+ assert.equal(evaluate('view'),'library','an unrelated snapshot cannot open the editor');
+ evaluate('window.prismestraReceive({kind:"error",message:"Cannot write catalog"})');
+ assert.equal(evaluate('view'),'library');
+ assert.equal(evaluate('busy()'),false);
+ submitNew();
+ const firstSave=commands.length;
+ const created={id:'created',name:'New fixture',scene};
+ context.payload={kind:'snapshot',state:{...draftState,library:[entryA,entryB,created]}};
+ evaluate('window.prismestraReceive(payload)');
+ assert.equal(evaluate('view'),'editor');
+ assert.equal(evaluate('selectedId'),created.id);
+ assert.equal(document.activeElement,find('#scene-effect'));
+ assert.equal(commands.at(-1).origin.id,created.id);
+ assert.equal(commands.slice(firstSave).some(command=>command.op==='apply_scene'),false);
+}
+console.log('PASS: new scene opens its editor and focuses the effect only after a confirmed save');
+
+{
+ const templateState={...draftState,library:[plumDawn]};
+ restoreDraft(templateState);
+ selectScene(plumDawn.id);
+ evaluate('nameDialog("clone")');
+ find('#scene-name').value='My plum template';
+ find('#name-form').onsubmit({preventDefault(){}});
+ assert.deepEqual(commands.at(-1),{op:'save_scene',id:null,name:'My plum template',scene:plumDawn.scene});
+
+ context.payload={kind:'snapshot',state:templateState};
+ evaluate('window.prismestraReceive(payload)');
+ assert.equal(evaluate('selectedId'),null);
+ assert.equal(evaluate('draftName'),plumDawn.name);
+
+ const copy={id:'plum-copy',name:'My plum template',scene:plumDawn.scene};
+ const beforeAck=commands.length;
+ context.payload={kind:'snapshot',state:{...templateState,library:[plumDawn,copy]}};
+ evaluate('window.prismestraReceive(payload)');
+ assert.equal(evaluate('view'),'editor');
+ assert.equal(evaluate('selectedId'),copy.id);
+ assert.equal(document.activeElement,find('#scene-effect'));
+ assert.equal(commands.at(-1).origin.id,copy.id);
+ assert.equal(commands.slice(beforeAck).some(command=>command.op==='apply_scene'),false);
+}
+console.log('PASS: copying a built-in scene focuses the effect on the confirmed copy');
+
+const lcdBackground = {
+ page:'lcd', index:0, deviceId:navLcd.id, targets:['LCD'], dirty:false,
+ fields:[{key:'media',label:'Фон LCD',value:'Выбран · 12345678',choices:[],hint:'',file:true}],
+};
+vm.runInContext('formStages.clear();view="lcd";pendingView=null',context);
+receiveDeviceState('snapshot',navFixture([navLcd],{editor:lcdBackground}));
+const backgroundInput=find('#field-0');
+backgroundInput.value='';
+events.input({target:backgroundInput});
+events.click({target:{closest:()=>({dataset:{action:'apply-document'},disabled:false,hasAttribute:()=>true})}});
+assert.deepEqual(commands.at(-1),{op:'apply_fields',fields:[{key:'media',value:''}]});
+console.log('PASS: clearing the LCD background sends an explicit empty field in Apply');
+
+{
+ const library=Array.from({length:100},(_,i)=>({
+  id:'search-'+i,name:i===99?'Ёлка 099':`Evening ${i}`,
+  scene:{...scene,effect:i===99?'gradient_wave':'breathing'},
+ }));
+ const effects=[{id:'gradient_wave',name:'Градиентная волна'},{id:'breathing',name:'Дыхание'}];
+ vm.runInContext('formStages.clear();view="library";pendingView=null;libraryEffect="";search=""',context);
+ receiveDeviceState('snapshot',{...initial,library,effects});
+ const beforeSearch=commands.length;
+ const query=value=>{const input=find('#search');input.id='search';input.value=value;events.input({target:input});};
+ for(const value of ['ГРАДИЕНТНАЯ волна','gradient_wave','елка gradient wave']){
+  query(value);
+  assert.match(mainMarkup,/data-preview="search-99"/,value);
+  assert.doesNotMatch(mainMarkup,/data-preview="search-98"/,value);
+ }
+ query('evening 98');
+ assert.match(mainMarkup,/data-preview="search-98"/);
+ query('gradient wave');
+ events.change({target:{id:'library-effect',value:'breathing'}});
+ assert.match(mainMarkup,/Сцен не найдено/);
+ assert.equal(commands.length,beforeSearch,'search and filtering stay local');
+}
+console.log('PASS: bilingual effect and scene search across 100 saved scenes without IPC');
+
+{
+ const assignments={key:'sources',label:'Показатели и подписи',value:'ram=RAM',choices:[],hint:'',file:false};
+ const choice={key:'add_source',label:'Добавить показатель',value:'',choices:[{label:'Выберите источник…',value:''},{label:'a',value:'a'}],hint:'',file:false};
+ const editor={...lcdBackground,fields:[assignments,choice]};
+ vm.runInContext('formStages.clear();view="lcd";pendingView=null',context);
+ receiveDeviceState('snapshot',navFixture([navLcd],{editor}));
+ const sourceInput=find('#field-0');
+ sourceInput.value='ram=Память';
+ events.input({target:sourceInput});
+ const select=new Node();
+ select.tagName='SELECT';
+ select.dataset.field='add_source';
+ select.value='a';
+ events.change({target:select});
+ assert.deepEqual(commands.at(-1),{op:'set_field',key:'add_source',value:'a',fields:[{key:'sources',value:'ram=Память'}]});
+ const fields=[{...assignments,value:'ram=Память; a=A'},{...choice,choices:[{label:'Все источники добавлены',value:''}]}];
+ receiveDeviceState('snapshot',navFixture([navLcd],{editor:{...editor,fields,dirty:true}}));
+ assert.equal(find('#field-0').value,'ram=Память; a=A');
+ assert.match(mainMarkup,/data-field="add_source"[^>]*>\s*<option value="" selected>Все источники добавлены/);
+}
+console.log('PASS: LCD source choice preserves staged labels and refreshes the editable assignments');
+
+async function checkOutputStatusCopy() {
+ const [selected,neighbor]=['private-output-id','private-neighbor-id'].map(id=>({
+  id,label:'Private room',role:'canvas',driver:{type:'open_rgb',endpoint:'192.0.2.42:6742'},
+  leds:56,rate_hz:48,enabled:true
+ }));
+ const privateError='Failed to open C:\\Users\\Fixture\\profile.json with token fixture-secret';
+ const snapshot = devices => {
+  const index=devices.indexOf(selected);
+  receiveDeviceState('snapshot',{
+   ...initial,devices,draftDevices:devices,detail:privateError,error:privateError,
+   editor:{page:'devices',deviceId:selected.id,index,targets:devices.map(({label})=>label),fields:[],dirty:false},
+   deviceActivity:{labels:{[selected.id]:'Кадры отправлены',[neighbor.id]:'Кадры отправлены'},
+    framesSent:{[selected.id]:'7',[neighbor.id]:'100'}}
+  });
+ };
+ const writes=[];
+ let denied=false;
+ context.navigator={clipboard:{writeText:async text=>{
+  if(denied)throw new Error(privateError);
+  writes.push(text);
+ }}};
+ const feedback=find('#output-copy-result');
+ const click = async id => {
+  const button=new Node();
+  button.dataset={action:'copy-output-status',copyOutput:id};
+  button.focus();
+  events.click({target:{closest:()=>button}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(document.activeElement,button);
+ };
+ vm.runInContext('formStages.clear();view="devices";pendingView=null',context);
+ snapshot([neighbor,selected]);
+ assert.match(mainMarkup,/data-copy-output="private-output-id">Скопировать статус/);
+ assert.doesNotMatch(mainMarkup,/data-copy-output="private-neighbor-id"/);
+ const beforeCopy=commands.length;
+ await click(neighbor.id);
+ assert.deepEqual(writes,[],'stale or neighboring action cannot copy');
+ await click(selected.id);
+ assert.deepEqual(writes,['Транспорт: OpenRGB\nСостояние: Кадры отправлены\nОтправлено кадров: 7']);
+ assert.equal(feedback.textContent,'Статус скопирован');
+ snapshot([selected,neighbor]);
+ receiveDeviceState('status',{deviceActivity:{labels:{[selected.id]:'Кадры отправлены'},
+  framesSent:{[selected.id]:'18446744073709551615',[neighbor.id]:'100'}}});
+ await click(selected.id);
+ assert.match(writes.at(-1),/кадров: 18446744073709551615$/);
+ receiveDeviceState('status',{deviceActivity:{labels:{[selected.id]:'Кадры отправлены'},
+  framesSent:{[selected.id]:'7\n'+privateError}}});
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Кадры отправлены');
+ receiveDeviceState('status',{deviceActivity:{labels:{[selected.id]:privateError},
+  reasons:{[selected.id]:'endpointLeaseBusy'},framesSent:{[neighbor.id]:'100'}}});
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Подключение занято другим выходом Prismestra');
+ receiveDeviceState('status',{deviceActivity:{labels:{[selected.id]:privateError}}});
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Нет данных о состоянии');
+ denied=true;
+ await click(selected.id);
+ assert.equal(feedback.textContent,'Не удалось скопировать статус');
+ assert.equal(commands.length,beforeCopy,'copy issues no host commands');
+ receiveDeviceState('snapshot',{...initial,draftDevices:[selected],
+  editor:{page:'devices',deviceId:selected.id,index:0,targets:[selected.label],fields:[],dirty:true}});
+ assert.doesNotMatch(mainMarkup,/data-copy-output/,'draft-only output has no runtime status to copy');
+ console.log('PASS: selected runtime status copies only allowlisted text and its validated counter, with local clipboard feedback');
+
+{
+ const canvasPlacement={width:13,height:11,objects:[{id:'strip',label:'Strip <1>',bounds:[1,1,2,1]}]};
+ restoreDraft({...draftState,canvasPlacement});
+ evaluate('view="editor";pendingView=null;commandPending=false;awaitingCommandAck=false;openPlacement()');
+ assert.deepEqual(commands.at(-1),{op:'page',page:'devices'});
+ context.payload={kind:'snapshot',state:{...draftState,canvasPlacement,draftMapRevision:'7',editor:{page:'devices',dirty:false}}};
+ evaluate('window.prismestraReceive(payload)');
+ assert.match(evaluate('renderPlacementObjects()'),/Strip &lt;1&gt;/);
+ evaluate('movePlacement("strip","7",1,0)');
+ assert.deepEqual(commands.at(-1),{op:'move_canvas_device',device:'strip',revision:'7',dx:1,dy:0});
+ context.payload.state.editor.dirty=true;
+ evaluate('window.prismestraReceive(payload)');
+ assert.equal(evaluate('pageHasEdits()'),true);
+ evaluate('changeView("library")');
+ assert.equal(evaluate('view'),'editor');
+ assert.equal(evaluate('send({op:"save"},true)'),false);
+}
+console.log('PASS: scene placement uses the device draft and guards navigation and profile save until apply or revert');
+}
+checkOutputStatusCopy().catch(error=>{console.error(error);process.exitCode=1;});

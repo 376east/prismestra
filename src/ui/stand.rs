@@ -437,6 +437,7 @@ mod tests {
                     routes: vec![ambient::Route {
                         device: "ambient".into(),
                         source: "screen".into(),
+                        scene_edges: false,
                         enabled: true,
                         zone: Zone::linear(2, false, Mode::ScreenCopy).unwrap(),
                         processing: Settings::default(),

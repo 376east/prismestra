@@ -18,7 +18,7 @@ enum Kind {
 
 fn allowed(app: &App, id: i32) -> bool {
     match app.page {
-        Page::Connections => (1800..=1821).contains(&id) && app.connection_visible(id),
+        Page::Connections => connections::is_control(id) && app.connection_visible(id),
         Page::Sources => (1100..=1153).contains(&id) && app.source_visible(id),
         Page::Schedule => (401..=407).contains(&id),
         _ => aux_allowed(app.page, id),
@@ -162,12 +162,18 @@ fn choices(hwnd: HWND) -> Vec<Value> {
 
 pub(super) fn snapshot(app: &App) -> Option<Value> {
     let (page, ids) = match app.page {
-        Page::Connections => ("connections", 1800..=1821),
+        Page::Connections => (
+            "connections",
+            1800..=connections::CONFIGURE_PORTABLE_OPENRGB,
+        ),
         Page::Sources => ("sources", 1100..=1153),
         Page::Schedule => ("schedule", 401..=407),
         _ => return None,
     };
     let mut form = form_snapshot(app, page, ids);
+    if let Some(notice) = app.portable_helper_notice() {
+        form["notice"] = json!(notice);
+    }
     if app.page == Page::Schedule {
         let dirty = schedule_dirty(app);
         form["dirty"] = json!(dirty);
@@ -477,7 +483,10 @@ pub(super) fn action(state: &State, id: i32) -> Result<(), String> {
             return Err("Действие отключено".into());
         }
     }
-    if id == sources::MODULE_SELECT {
+    if matches!(
+        id,
+        sources::MODULE_SELECT | connections::CONFIGURE_PORTABLE_OPENRGB
+    ) {
         return modal_command(state.editor_window.get(), state, id);
     }
     let mut slot = state.app.try_borrow_mut().map_err(|_| "Редактор занят")?;

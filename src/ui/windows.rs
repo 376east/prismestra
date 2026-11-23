@@ -75,6 +75,7 @@ const MODAL_COMMANDS: &[i32] = &[
     COLOR_EDIT,
     E_FILE,
     sources::MODULE_SELECT,
+    connections::CONFIGURE_PORTABLE_OPENRGB,
 ];
 const E_TARGET: i32 = 701;
 const E_LIST: i32 = 702;
@@ -545,6 +546,7 @@ struct App {
     status: String,
     path: Option<PathBuf>,
     state_dir: PathBuf,
+    portable_openrgb_setup: bool,
     groups: [bool; 2],
 }
 struct PendingOpen {
@@ -597,7 +599,9 @@ impl App {
                 .lcd
                 .get(self.editor.as_ref().map_or(0, |e| e.index))
             {
-                Some(entry) if entry.config.media.is_none() => "Выберите анимацию",
+                Some(entry) if !entry.config.has_content() => {
+                    "Выберите фон или включите панель температур"
+                }
                 Some(entry) if !entry.config.enabled => "Включите воспроизведение",
                 Some(entry)
                     if self
@@ -605,7 +609,7 @@ impl App {
                         .lcd_status(&entry.device)
                         .is_some_and(|s| s.error.is_some()) =>
                 {
-                    "Нет кадра.\nПроверьте файл."
+                    "Нет кадра.\nПроверьте настройки LCD."
                 }
                 Some(_) => "Подготовка кадра…",
                 None => "LCD не добавлен",
@@ -1666,7 +1670,8 @@ impl App {
                     self.editor_dirty = true;
                     self.dirty = true;
                     self.status =
-                        "LCD добавлен выключенным. Выберите анимацию и примените настройки.".into();
+                        "LCD добавлен выключенным. Выберите фон или настройте панель температур."
+                            .into();
                     self.refresh_editor(true);
                     return Ok(true);
                 }
@@ -1876,14 +1881,7 @@ impl App {
                     return "Предпросмотр".into();
                 }
                 self.runtime.read(|runtime| {
-                    let activity = runtime.output_activity(applied);
-                    use crate::app::runtime::OutputActivity;
-                    match activity {
-                        OutputActivity::Sent(frames) => format!("Кадры отправлены: {frames}"),
-                        OutputActivity::Retrying(error) => format!("Ожидает повтора ({error})"),
-                        OutputActivity::Unavailable(Some(error)) => format!("Недоступно: {error}"),
-                        _ => output_activity_label(&activity).into(),
-                    }
+                    device_activity_detail(&applied.driver, runtime.output_activity(applied))
                 })
             },
         );
@@ -2475,7 +2473,7 @@ fn import_asset(app: &mut App, path: &Path, key: &str) -> Result<(), String> {
     match key {
         "font" => config.font = Some(id),
         "media" => config.media = Some(id),
-        _ => return Err("Выберите анимацию или шрифт".into()),
+        _ => return Err("Выберите фон или шрифт".into()),
     };
     app.editor_dirty = true;
     app.dirty = true;
@@ -2486,6 +2484,9 @@ fn import_asset(app: &mut App, path: &Path, key: &str) -> Result<(), String> {
 fn modal_command(hwnd: HWND, state: &State, id: i32) -> Result<(), String> {
     if id == sources::MODULE_SELECT {
         return sources::module_dialog(hwnd, state);
+    }
+    if id == connections::CONFIGURE_PORTABLE_OPENRGB {
+        return portable::initial_openrgb_dialog(hwnd, state);
     }
     {
         let slot = state.app.try_borrow().map_err(|_| "UI занято")?;
@@ -2504,7 +2505,7 @@ fn modal_command(hwnd: HWND, state: &State, id: i32) -> Result<(), String> {
             let field = a
                 .selected_field()
                 .filter(|f| f.file)
-                .ok_or("Выберите анимацию или шрифт")?;
+                .ok_or("Выберите фон или шрифт")?;
             let e = a.editor.as_ref().ok_or("Нет редактора")?;
             (
                 field.key,
@@ -2989,10 +2990,29 @@ fn run_with_instance(
     }
     result
 }
+fn device_activity_detail(
+    driver: &crate::devices::Driver,
+    activity: crate::app::runtime::OutputActivity,
+) -> String {
+    use crate::{app::runtime::OutputActivity, lcd::hid_policy::TARGET_UNAVAILABLE};
+    match activity {
+        OutputActivity::Retrying(ref error) | OutputActivity::Unavailable(Some(ref error))
+            if matches!(driver, crate::devices::Driver::TtLcd) && error == TARGET_UNAVAILABLE =>
+        {
+            "Windows не находит LCD по сохранённому подключению. Проверьте питание и USB-кабель экрана. Если экран подключён, откройте его подключение и проверьте привязку.".into()
+        }
+        OutputActivity::Sent(frames) => format!("Кадры отправлены: {frames}"),
+        OutputActivity::Retrying(error) => format!("Ожидает повтора ({error})"),
+        OutputActivity::Unavailable(Some(error)) => format!("Недоступно: {error}"),
+        _ => output_activity_label(&activity).into(),
+    }
+}
+
 fn output_activity_label(activity: &crate::app::runtime::OutputActivity) -> &'static str {
     use crate::app::runtime::OutputActivity;
     match activity {
         OutputActivity::Off => "Выключено",
+        OutputActivity::TurningOff => "Выключается",
         OutputActivity::Connecting => "Подключается",
         OutputActivity::Retrying(_) => "Ожидает повтора",
         OutputActivity::Sent(_) => "Кадры отправлены",
@@ -3004,6 +3024,13 @@ fn native_sources_allowed(snapshot: bool, selftest: bool) -> bool {
     !snapshot && !selftest
 }
 fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Result<(), String> {
+    if installed.is_none()
+        && args
+            .first()
+            .is_some_and(|arg| arg == "--configure-portable-openrgb")
+    {
+        return portable::configure_openrgb(&args[1..]);
+    }
     let (args, portable_exe) = if installed.is_none() {
         portable::resolve(args)?
     } else {
@@ -3041,6 +3068,9 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
         o.snapshot = Some(state_dir.join("diagnostics/selftest.png"));
     }
     let resident_mode = o.snapshot.is_none() && !o.selftest;
+    let portable_openrgb_setup = portable_exe
+        .as_deref()
+        .is_some_and(|exe| portable::supports_openrgb_setup(exe).unwrap_or(false));
     let portable_instance = if let Some(exe) = portable_exe {
         let state = state_dir
             .canonicalize()
@@ -3248,6 +3278,7 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
         },
         path: o.project.clone(),
         state_dir,
+        portable_openrgb_setup,
         groups: [true, true],
     };
     let built = app.build(raw).and_then(|_| {
@@ -4230,6 +4261,37 @@ mod webview_recovery_stand;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn missing_bound_lcd_explains_how_to_check_its_connection() {
+        use crate::{app::runtime::OutputActivity, devices::Driver, lcd::hid_policy};
+
+        let path =
+            r"\\?\hid#vid_264a&pid_233c&mi_01#fixture#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        let missing =
+            hid_policy::select(hid_policy::Kind::Display, &[], Some(path), false).unwrap_err();
+        let unavailable = |error| OutputActivity::Unavailable(Some(error));
+        let detail = device_activity_detail(&Driver::TtLcd, unavailable(missing.clone()));
+        assert!(detail.starts_with("Windows не находит LCD по сохранённому подключению."));
+        assert!(detail.contains("питание и USB-кабель"));
+        assert!(detail.contains("проверьте привязку"));
+        assert_eq!(
+            device_activity_detail(&Driver::TtLcd, OutputActivity::Retrying(missing.clone())),
+            detail
+        );
+        assert_eq!(
+            device_activity_detail(&Driver::OpenRgb, unavailable(missing.clone())),
+            format!("Недоступно: {missing}")
+        );
+        assert_eq!(
+            device_activity_detail(&Driver::TtLcd, unavailable("Other failure".into())),
+            "Недоступно: Other failure"
+        );
+        assert_eq!(
+            device_activity_detail(&Driver::TtLcd, OutputActivity::Sent(3)),
+            "Кадры отправлены: 3"
+        );
+    }
+
     #[test]
     fn connected_startup_requires_a_profile_and_excludes_diagnostics_and_legacy_mode() {
         assert!(!options(vec![]).unwrap().start_connected);
