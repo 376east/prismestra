@@ -113,6 +113,10 @@ const sourceNeedsApply = () => !!state?.native && !!draft
  && (draft.effect!==state.scene.effect || !state.captureAuthorized);
 const applyNeeded = () => changed() || sourceNeedsApply();
 let placementOpen=false, placementDrag=null, placementSelection=null;
+let placementLimited=false;
+const placementHelp=()=>placementLimited
+ ? 'Край холста. Все LED устройства должны оставаться внутри.'
+ : 'Перетащите устройство или выберите его клавишей Tab и сдвиньте стрелками.';
 const placementDirty=()=>view==='editor' && placementOpen && state?.editor?.page==='devices' && state.editor.dirty;
 const unsavedDraft = () => !!draft && (!draftOrigin || !same(draft,draftOrigin.scene));
 const deviceFocusKey = id => `[data-device-id="${CSS.escape(id)}"]`;
@@ -397,7 +401,7 @@ function renderPlacementControls() {
   <select id="placement-picker">${objects.map(object=>`<option value="${esc(object.id)}" ${object.id===placementSelection?'selected':''}>${esc(placementLabel(object,objects))}</option>`).join('')}</select>
  </label><button type="button" id="focus-placement" class="button" data-action="focus-placement">К метке</button>` : '';
  return `<div class="placement-actions" aria-label="Раскладка RGB">
-  <p id="placement-help">Перетащите устройство или выберите его клавишей Tab и сдвиньте стрелками.</p>
+  <p id="placement-help" role="status">${placementHelp()}</p>
   ${picker}
   <span role="status">${placementDirty()?'Раскладка не применена':''}</span>
   ${action('Применить раскладку','apply-placement',true,'data-needs-change="document"')}${action('Отменить изменения','revert-document')}
@@ -412,6 +416,19 @@ function openPlacement() {
 }
 function movePlacement(device,revision,dx,dy) {
  if(placementOpen&&revision&&(dx||dy))send({op:'move_canvas_device',device,revision,dx,dy},true);
+}
+function showPlacementLimit(limited) {
+ if(placementLimited===limited)return;
+ placementLimited=limited;
+ const help=$('#placement-help');
+ if(help)help.textContent=placementHelp();
+}
+function placementDelta(drag,clientX,clientY) {
+ const rawX=Math.round((clientX-drag.x)/drag.cellX);
+ const rawY=Math.round((clientY-drag.y)/drag.cellY);
+ const dx=Math.min(drag.maxX,Math.max(drag.minX,rawX));
+ const dy=Math.min(drag.maxY,Math.max(drag.minY,rawY));
+ return {dx,dy,limited:dx!==rawX||dy!==rawY};
 }
 function sceneParameters() {
  const noise=draft.effect==='noise_map';
@@ -698,6 +715,7 @@ function changeView(next, source) {
   : null;
  placementOpen=false;
  placementSelection=null;
+ placementLimited=false;
  view=next;render();focusHeading();
  if(!['library','editor'].includes(next)){
   pendingView={previous,next,opener};
@@ -1010,11 +1028,11 @@ document.addEventListener('click',event=>{
  case 'apply-scene':send({op:'apply_scene',scene:clone(draft)},true);break;
  case 'open-placement':openPlacement();break;
  case 'focus-placement':document.getElementById('placement-'+$('#placement-picker')?.value)?.focus();break;
- case 'apply-placement':send({op:'apply_document'},true);break;
+ case 'apply-placement':showPlacementLimit(false);send({op:'apply_document'},true);break;
  case 'insert-palette-color':case 'move-palette-earlier':case 'move-palette-later':return reorderPalette(b.dataset.action);
  case 'add-color':if(draft.colors.length<8)draft.colors.push(draft.colors.at(-1));render();requestPreview();break;
  case 'apply-document':send({op:'apply_fields'},true);break;
- case 'revert-document':formStages.clear();submittedStages=[];if(state.editor?.dirty||state.pending||commandPending)send({op:'revert_document'},true);else render();break;
+ case 'revert-document':showPlacementLimit(false);formStages.clear();submittedStages=[];if(state.editor?.dirty||state.pending||commandPending)send({op:'revert_document'},true);else render();break;
  case 'discard-page-fields':discardPageFields();break;
  case 'discard-fields':discardPageFields();showError('Незавершённый ввод отменён.');break;
  case 'retry-document':send({op:'retry_document'},true);break;
@@ -1113,24 +1131,34 @@ document.addEventListener('pointerdown',event=>{
  pointerGesture=true;
  const node=event.target?.closest?.('[data-placement-device]');
  if(!node||event.button!==0||placementDrag||busy()||!state.draftMapRevision)return;
- const {width,height}=state.canvasPlacement;
+ const {width,height,objects}=state.canvasPlacement;
+ const object=objects.find(({id})=>id===node.dataset.placementDevice);
+ if(!object)return;
+ const [left,top,right,bottom]=object.bounds;
  const stage=node.parentElement.getBoundingClientRect();
+ showPlacementLimit(false);
  placementDrag={node,pointer:event.pointerId,x:event.clientX,y:event.clientY,
-  cellX:stage.width/width,cellY:stage.height/height,revision:state.draftMapRevision};
+  cellX:stage.width/width,cellY:stage.height/height,revision:state.draftMapRevision,
+  minX:-left,maxX:width-1-right,minY:-top,maxY:height-1-bottom};
  node.setPointerCapture(event.pointerId);
 },true);
 document.addEventListener('pointermove',event=>{
  if(placementDrag?.pointer!==event.pointerId)return;
- const {node,x,y}=placementDrag;
- node.style.translate=`${event.clientX-x}px ${event.clientY-y}px`;
+ const {dx,dy,limited}=placementDelta(placementDrag,event.clientX,event.clientY);
+ const {node,cellX,cellY}=placementDrag;
+ node.style.translate=`${dx*cellX}px ${dy*cellY}px`;
+ showPlacementLimit(limited);
 });
 function finishPlacementDrag(event) {
  if(!placementDrag||(event&&placementDrag.pointer!==event.pointerId))return;
- const {node,x,y,cellX,cellY,revision}=placementDrag;
+ const drag=placementDrag;
  placementDrag=null;
- node.style.translate='';
- if(event?.type==='pointerup')movePlacement(node.dataset.placementDevice,revision,
-  Math.round((event.clientX-x)/cellX),Math.round((event.clientY-y)/cellY));
+ drag.node.style.translate='';
+ if(event?.type==='pointerup'){
+  const {dx,dy,limited}=placementDelta(drag,event.clientX,event.clientY);
+  showPlacementLimit(limited);
+  movePlacement(drag.node.dataset.placementDevice,drag.revision,dx,dy);
+ }else showPlacementLimit(false);
 }
 document.addEventListener('pointerup',event=>{pointerGesture=false;finishPlacementDrag(event);releaseGesture();},true);
 document.addEventListener('pointercancel',event=>{pointerGesture=false;finishPlacementDrag(event);releaseGesture();},true);
@@ -1156,7 +1184,7 @@ document.addEventListener('keydown',event=>{
  const delta={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]}[event.key];
  if(device&&Array.isArray(delta)){
   event.preventDefault();
-  if(!placementDrag&&!event.isComposing)movePlacement(device,state.draftMapRevision,...delta);
+  if(!placementDrag&&!event.isComposing){showPlacementLimit(false);movePlacement(device,state.draftMapRevision,...delta);}
   return;
  }
  if((event.key===' '||event.key==='Spacebar')&&event.target.closest('button'))keyGesture=true;
