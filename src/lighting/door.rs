@@ -449,7 +449,7 @@ fn variable_pixel_counts_reject_invalid_input_before_off_or_fragmentation() {
             [off_packet(7)]
         );
     }
-    assert!(pixel_fragments_for_points(&colors, 15, 7, 23, 20).is_err());
+    assert!(pixel_fragments_for_points(&colors, 15, 7, 22, 20).is_err());
     let lit = [Rgb::new(255, 0, 0)];
     for pdu in [0, 3, 4, 12] {
         assert!(pixel_fragments_for_points(&lit, 15, 7, pdu, 1).is_err());
