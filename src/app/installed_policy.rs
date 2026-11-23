@@ -13,44 +13,39 @@ use std::{
     path::{Path, PathBuf},
     ptr::{addr_of, null, null_mut},
 };
-use windows_sys::{
-    Win32::{
-        Foundation::{
-            ERROR_BAD_IMPERSONATION_LEVEL, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, HANDLE,
-            INVALID_HANDLE_VALUE, LUID, WAIT_TIMEOUT,
+use windows_sys::Win32::{
+    Foundation::{
+        ERROR_BAD_IMPERSONATION_LEVEL, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, HANDLE,
+        INVALID_HANDLE_VALUE, LUID, WAIT_TIMEOUT,
+    },
+    Security::{
+        CheckTokenMembership, CreateWellKnownSid, DuplicateTokenEx, GetTokenInformation,
+        RevertToSelf, SECURITY_MAX_SID_SIZE, SecurityImpersonation, SetTokenInformation,
+        TOKEN_ADJUST_DEFAULT, TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_IMPERSONATE,
+        TOKEN_INFORMATION_CLASS, TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_OWNER,
+        TOKEN_QUERY, TOKEN_STATISTICS, TOKEN_USER, TokenElevation, TokenElevationType,
+        TokenElevationTypeFull, TokenElevationTypeLimited, TokenImpersonation, TokenIntegrityLevel,
+        TokenLinkedToken, TokenOwner, TokenPrimary, TokenSessionId, TokenStatistics, TokenUser,
+        WinBuiltinAdministratorsSid, WinInteractiveSid,
+    },
+    Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT,
+    System::{
+        Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
         },
-        Security::{
-            CheckTokenMembership, CreateWellKnownSid, DuplicateTokenEx, GetTokenInformation,
-            RevertToSelf, SECURITY_MAX_SID_SIZE, SecurityImpersonation, SetTokenInformation,
-            TOKEN_ADJUST_DEFAULT, TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_IMPERSONATE,
-            TOKEN_INFORMATION_CLASS, TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_OWNER,
-            TOKEN_QUERY, TOKEN_STATISTICS, TOKEN_USER, TokenElevation, TokenElevationType,
-            TokenElevationTypeFull, TokenElevationTypeLimited, TokenImpersonation,
-            TokenIntegrityLevel, TokenLinkedToken, TokenOwner, TokenPrimary, TokenSessionId,
-            TokenStatistics, TokenUser, WinBuiltinAdministratorsSid, WinInteractiveSid,
-        },
-        Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT,
-        System::{
-            Diagnostics::ToolHelp::{
-                CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
-                TH32CS_SNAPPROCESS,
-            },
-            EventLog::{
-                DeregisterEventSource, EVENTLOG_ERROR_TYPE, RegisterEventSourceW, ReportEventW,
-            },
-            SystemInformation::{GetSystemDirectoryW, GetSystemWindowsDirectoryW},
-            Threading::{
-                GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_NATIVE,
-                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
-                SetThreadToken, WaitForSingleObject,
-            },
-        },
-        UI::{
-            Shell::{FOLDERID_LocalAppData, FOLDERID_ProgramData, FOLDERID_ProgramFiles},
-            WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId},
+        EventLog::EVENTLOG_ERROR_TYPE,
+        SystemInformation::{GetSystemDirectoryW, GetSystemWindowsDirectoryW},
+        Threading::{
+            GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_NATIVE,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
+            SetThreadToken, WaitForSingleObject,
         },
     },
-    core::w,
+    UI::{
+        Shell::{FOLDERID_LocalAppData, FOLDERID_ProgramData, FOLDERID_ProgramFiles},
+        WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId},
+    },
 };
 
 #[path = "windows_protected_path.rs"]
@@ -397,6 +392,10 @@ pub(super) struct HelperAuthority {
 }
 
 impl HelperAuthority {
+    pub(super) fn verified_parent(&self) -> &Identity {
+        &self.parent
+    }
+
     fn check_pid(&self, pid: u32) -> Result<(), String> {
         if self.parent.pid != pid
             || unsafe { WaitForSingleObject(self.process.0, 0) } != WAIT_TIMEOUT
@@ -875,26 +874,7 @@ impl DuplicationError {
 fn report_owner_token_failure(failure: &DuplicationError) {
     // The scheduled GUI executable may start without stderr. This fixed event
     // carries numeric token metadata only and does not need a profile path.
-    let source = unsafe { RegisterEventSourceW(null(), w!("Prismestra Installed Backend")) };
-    if source.is_null() {
-        return;
-    }
-    let data: Vec<u16> = failure.event_data().encode_utf16().chain([0]).collect();
-    let strings = [data.as_ptr()];
-    unsafe {
-        ReportEventW(
-            source,
-            EVENTLOG_ERROR_TYPE,
-            0,
-            1,
-            null_mut(),
-            1,
-            0,
-            strings.as_ptr(),
-            null(),
-        );
-        DeregisterEventSource(source);
-    }
+    super::backend_diagnostics::windows_event(1, EVENTLOG_ERROR_TYPE, &failure.event_data());
 }
 
 fn impersonation_token(token: &Handle) -> Result<Handle, DuplicationError> {

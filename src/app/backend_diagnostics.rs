@@ -15,6 +15,103 @@ const MAX_BYTES: usize = 16_384;
 const MAX_EVENTS: usize = 32;
 static WRITER: Mutex<()> = Mutex::new(());
 
+pub(super) fn utc_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+#[cfg(windows)]
+pub(super) fn windows_event(id: u32, kind: u16, detail: &str) {
+    use std::ptr::{null, null_mut};
+    use windows_sys::{
+        Win32::System::EventLog::{DeregisterEventSource, RegisterEventSourceW, ReportEventW},
+        core::w,
+    };
+
+    let source = unsafe { RegisterEventSourceW(null(), w!("Prismestra Installed Backend")) };
+    if source.is_null() {
+        return;
+    }
+    let data: Vec<u16> = bounded(detail, 256).encode_utf16().chain([0]).collect();
+    unsafe {
+        ReportEventW(
+            source,
+            kind,
+            0,
+            id,
+            null_mut(),
+            1,
+            0,
+            &data.as_ptr(),
+            null(),
+        );
+        DeregisterEventSource(source);
+    }
+}
+
+#[cfg(windows)]
+struct WindowsEvent {
+    id: u32,
+    kind: u16,
+    detail: String,
+    written: Option<std::sync::mpsc::Sender<()>>,
+}
+
+#[cfg(windows)]
+fn enqueue_windows_event(event: WindowsEvent) -> bool {
+    use std::sync::{OnceLock, mpsc};
+
+    static EVENTS: OnceLock<Option<mpsc::SyncSender<WindowsEvent>>> = OnceLock::new();
+    let events = EVENTS.get_or_init(|| {
+        let (send, receive) = mpsc::sync_channel::<WindowsEvent>(16);
+        std::thread::Builder::new()
+            .name("backend-launch-events".into())
+            .spawn(move || {
+                while let Ok(event) = receive.recv() {
+                    windows_event(event.id, event.kind, &event.detail);
+                    if let Some(written) = event.written {
+                        let _ = written.send(());
+                    }
+                }
+            })
+            .ok()?;
+        Some(send)
+    });
+    events
+        .as_ref()
+        .is_some_and(|events| events.try_send(event).is_ok())
+}
+
+#[cfg(windows)]
+pub(super) fn queue_windows_event(id: u32, detail: String) {
+    use windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE;
+
+    enqueue_windows_event(WindowsEvent {
+        id,
+        kind: EVENTLOG_INFORMATION_TYPE,
+        detail,
+        written: None,
+    });
+}
+
+#[cfg(windows)]
+pub(super) fn finish_windows_event(id: u32, kind: u16, detail: String) {
+    let (written, receive) = std::sync::mpsc::channel();
+    if enqueue_windows_event(WindowsEvent {
+        id,
+        kind,
+        detail,
+        written: Some(written),
+    }) {
+        // A short-lived failed action may exit before logging. Never let a
+        // stalled Event Log hold the scheduled task open indefinitely.
+        let _ = receive.recv_timeout(std::time::Duration::from_millis(100));
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct History {
@@ -108,11 +205,7 @@ fn try_record(
         Err(error) => return Err(error),
     };
     history.events.push_back(Event {
-        utc_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .min(u64::MAX as u128) as u64,
+        utc_ms: utc_ms(),
         helper_pid: std::process::id(),
         parent_pid,
         backend_pid,

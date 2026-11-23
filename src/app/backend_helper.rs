@@ -288,7 +288,14 @@ impl Proxy {
             .get_or_init(|| start_status_worker(read_status))
             .as_ref()
             .map_err(Clone::clone)?;
-        Self::start_with(state_dir, status_dir, task_name, polls.clone(), launch_task)
+        let installed = status_dir != state_dir;
+        Self::start_with(
+            state_dir,
+            status_dir,
+            task_name,
+            polls.clone(),
+            move |name, stop| launch_task(name, stop, installed),
+        )
     }
 
     fn start_with(
@@ -848,9 +855,52 @@ fn run_helper_inner(state_dir: &Path, pin: Option<(&Path, &str)>) -> Result<(), 
 /// Task Scheduler action. All paths and the endpoint are resolved by trusted policy.
 #[cfg(windows)]
 pub fn run_installed_helper() -> Result<(), String> {
+    use windows_sys::Win32::System::{
+        EventLog::{EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE},
+        Threading::GetCurrentProcess,
+    };
+
+    let helper_pid = std::process::id();
+    let helper_created = process_creation(unsafe { GetCurrentProcess() }).unwrap_or_default();
+    super::backend_diagnostics::queue_windows_event(
+        3,
+        format!(
+            "event=helper_action_started helper_pid={helper_pid} helper_created={helper_created} utc_ms={}",
+            super::backend_diagnostics::utc_ms()
+        ),
+    );
+    let mut stage = "policy_or_authority";
+    let mut parent = None;
+    let result = run_installed_helper_observed(&mut stage, &mut parent);
+    if stage != "accepted" {
+        let (parent_pid, parent_created) = parent.unwrap_or_default();
+        let (decision, kind) = match (&result, stage) {
+            (Ok(()), _) => ("declined", EVENTLOG_INFORMATION_TYPE),
+            (Err(_), "manager_start") => ("accepted_manager_failed", EVENTLOG_ERROR_TYPE),
+            (Err(_), _) => ("denied", EVENTLOG_ERROR_TYPE),
+        };
+        super::backend_diagnostics::finish_windows_event(
+            3,
+            kind,
+            format!(
+                "event=helper_admission decision={decision} stage={stage} helper_pid={helper_pid} helper_created={helper_created} parent_pid={parent_pid} parent_created={parent_created}"
+            ),
+        );
+    }
+    result
+}
+
+#[cfg(windows)]
+fn run_installed_helper_observed(
+    stage: &mut &'static str,
+    parent: &mut Option<(u32, u64)>,
+) -> Result<(), String> {
     let (policy, candidates) = InstalledPolicy::helper()?;
     let mut rejected = None;
     for authority in candidates {
+        let verified = authority.verified_parent();
+        *parent = Some((verified.pid, verified.created));
+        *stage = "owner_state";
         let state = match authority.state() {
             Ok(state) => state,
             Err(error) => {
@@ -863,22 +913,22 @@ pub fn run_installed_helper() -> Result<(), String> {
             output: &policy.outbox,
             authority: Some(&authority),
         };
-        match helper_owner(&channels) {
+        match helper_owner_at(&channels, stage) {
             Ok(None) => return Ok(()),
             Ok(Some((request, _))) => {
+                *stage = "creator_owner";
                 authority.set_creator_owner()?;
-                let Some((current, helper)) = helper_owner(&channels)? else {
+                let Some((current, helper)) = helper_owner_at(&channels, stage)? else {
                     return Ok(());
                 };
+                *stage = "owner_changed";
                 if current.parent != request.parent || current.nonce != request.nonce {
                     return Err("Backend helper owner identity changed before launch".into());
                 }
-                return own_backend(
-                    &channels,
-                    &current,
-                    &helper,
-                    Manager::start_installed(&policy)?,
-                );
+                *stage = "manager_start";
+                let manager = Manager::start_installed(&policy)?;
+                *stage = "accepted";
+                return own_backend(&channels, &current, &helper, manager);
             }
             Err(error) => rejected = Some(error),
         }
@@ -949,22 +999,41 @@ fn installed_admission_control(
 }
 
 fn helper_owner(channels: &HelperChannels<'_>) -> Result<Option<(Request, Identity)>, String> {
+    helper_owner_at(channels, &mut "")
+}
+
+fn helper_owner_at(
+    channels: &HelperChannels<'_>,
+    stage: &mut &'static str,
+) -> Result<Option<(Request, Identity)>, String> {
+    *stage = "owner_request";
     let request: Request = channels.read("owner-request.json").map_err(control_error)?;
+    *stage = "helper_identity";
     let helper = identity(std::process::id())?;
-    if request.nonce.is_empty()
-        || request.nonce.len() > 128
-        || !live_request(&request, now_ms()?)
-        || request.parent.executable != helper.executable
+    let invalid_owner = || "Backend helper owner identity is invalid".to_owned();
+    *stage = "invalid_request";
+    if request.nonce.is_empty() || request.nonce.len() > 128 {
+        return Err(invalid_owner());
+    }
+    *stage = "owner_lease";
+    if !live_request(&request, now_ms()?) {
+        return Err(invalid_owner());
+    }
+    *stage = "owner_identity";
+    if request.parent.executable != helper.executable
         || channels.parent_identity(request.parent.pid)? != request.parent
     {
-        return Err("Backend helper owner identity is invalid".into());
+        return Err(invalid_owner());
     }
-    if !request.restarting
-        || channels.admission_control("owner-pause.json", &request)?
-        || channels.admission_control("owner-cancel.json", &request)?
-    {
+    *stage = "owner_pause";
+    if !request.restarting || channels.admission_control("owner-pause.json", &request)? {
         return Ok(None);
     }
+    *stage = "owner_cancel";
+    if channels.admission_control("owner-cancel.json", &request)? {
+        return Ok(None);
+    }
+    *stage = "owner_recheck";
     #[cfg(windows)]
     if let Some(authority) = channels.authority
         && (authority.parent_identity(request.parent.pid)? != request.parent
@@ -985,13 +1054,14 @@ fn own_backend(
     let allow_heartbeat_catch_up = channels.authority.is_some();
     #[cfg(not(windows))]
     let allow_heartbeat_catch_up = false;
-    helper_note(
-        channels.output,
-        request,
-        "helper_started",
-        None,
-        "Validated owner; managed backend worker started",
-    );
+    let mut started = "Validated owner; managed backend worker started".to_owned();
+    if allow_heartbeat_catch_up {
+        started.push_str(&format!(
+            "; helper_created={} parent_created={}",
+            helper.created, request.parent.created
+        ));
+    }
+    helper_note(channels.output, request, "helper_started", None, &started);
     let result = supervise_channels(
         channels,
         request,
@@ -1507,11 +1577,34 @@ fn client_lock(_: &Path) -> Result<File, String> {
 }
 
 #[cfg(windows)]
-fn launch_task(name: &str, stop: &AtomicBool) -> Result<(), String> {
+fn launch_task(name: &str, stop: &AtomicBool, installed: bool) -> Result<(), String> {
     use std::{
         os::windows::process::CommandExt,
         process::{Command, Stdio},
     };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    static LAUNCH_ATTEMPT: AtomicU64 = AtomicU64::new(1);
+    let trace = installed.then(|| {
+        (
+            LAUNCH_ATTEMPT.fetch_add(1, Ordering::Relaxed),
+            std::process::id(),
+            process_creation(unsafe { GetCurrentProcess() }).unwrap_or_default(),
+        )
+    });
+    let report = |event: &str, result: &str, number: Option<i32>| {
+        if let Some((attempt, pid, created)) = trace {
+            let code = number.map_or_else(|| "none".into(), |code| code.to_string());
+            super::backend_diagnostics::queue_windows_event(
+                2,
+                format!(
+                    "event={event} attempt={attempt} parent_pid={pid} parent_created={created} utc_ms={} result={result} code={code}",
+                    super::backend_diagnostics::utc_ms()
+                ),
+            );
+        }
+    };
+    report("launch_request", "pending", None);
     // Resolve the system binary rather than a PATH/current-directory executable.
     let mut buffer = [0u16; 32768];
     let len = unsafe {
@@ -1521,12 +1614,14 @@ fn launch_task(name: &str, stop: &AtomicBool) -> Result<(), String> {
         )
     } as usize;
     if len == 0 || len >= buffer.len() {
+        report("launch_result", "system_directory_failed", None);
         return Err("Cannot resolve Windows system directory".into());
     }
     use std::os::windows::ffi::OsStringExt;
     let executable =
         PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])).join("schtasks.exe");
     if stop.load(Ordering::SeqCst) {
+        report("launch_result", "cancelled_before_spawn", None);
         return Err("Authorized backend task launch cancelled".into());
     }
     let mut child = Command::new(executable)
@@ -1536,11 +1631,15 @@ fn launch_task(name: &str, stop: &AtomicBool) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            report("launch_result", "spawn_failed", e.raw_os_error());
+            e.to_string()
+        })?;
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         match child.try_wait() {
             Ok(Some(code)) => {
+                report("launch_result", "exited", code.code());
                 return if code.success() {
                     Ok(())
                 } else {
@@ -1548,13 +1647,24 @@ fn launch_task(name: &str, stop: &AtomicBool) -> Result<(), String> {
                 };
             }
             Err(e) => {
+                report("launch_result", "wait_failed", e.raw_os_error());
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(e.to_string());
             }
             Ok(None) => {}
         }
-        if stop.load(Ordering::SeqCst) || Instant::now() >= deadline {
+        let cancelled = stop.load(Ordering::SeqCst);
+        if cancelled || Instant::now() >= deadline {
+            report(
+                "launch_result",
+                if cancelled {
+                    "cancelled_after_spawn"
+                } else {
+                    "timed_out"
+                },
+                None,
+            );
             let _ = child.kill();
             let _ = child.wait();
             return Err("Authorized backend task launch timed out or cancelled".into());
@@ -1563,7 +1673,7 @@ fn launch_task(name: &str, stop: &AtomicBool) -> Result<(), String> {
     }
 }
 #[cfg(not(windows))]
-fn launch_task(_: &str, _: &AtomicBool) -> Result<(), String> {
+fn launch_task(_: &str, _: &AtomicBool, _: bool) -> Result<(), String> {
     Err("Backend task requires Windows".into())
 }
 
@@ -1598,10 +1708,8 @@ pub(super) fn identity_from_handle(
 ) -> Result<Identity, String> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::{
-        Foundation::{FILETIME, WAIT_TIMEOUT},
-        System::Threading::{
-            GetProcessId, GetProcessTimes, QueryFullProcessImageNameW, WaitForSingleObject,
-        },
+        Foundation::WAIT_TIMEOUT,
+        System::Threading::{GetProcessId, QueryFullProcessImageNameW, WaitForSingleObject},
     };
     if pid == 0
         || unsafe { GetProcessId(handle) } != pid
@@ -1609,15 +1717,7 @@ pub(super) fn identity_from_handle(
     {
         return Err("Backend owner/helper PID differs or process has exited".into());
     }
-    let mut times = [FILETIME::default(); 4];
-    let [created, exited, kernel, user] = &mut times;
-    if unsafe { GetProcessTimes(handle, created, exited, kernel, user) } == 0 {
-        return Err(std::io::Error::last_os_error().to_string());
-    }
-    let created = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
-    if created == 0 {
-        return Err("Backend owner/helper has no creation time".into());
-    }
+    let created = process_creation(handle)?;
     let mut buffer = vec![0u16; 32768];
     let mut length = buffer.len() as u32;
     if unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) } == 0 {
@@ -1638,6 +1738,22 @@ pub(super) fn identity_from_handle(
 #[cfg(not(windows))]
 fn identity(_: u32) -> Result<Identity, String> {
     Err("Backend helper process identity requires Windows".into())
+}
+
+#[cfg(windows)]
+fn process_creation(handle: windows_sys::Win32::Foundation::HANDLE) -> Result<u64, String> {
+    use windows_sys::Win32::{Foundation::FILETIME, System::Threading::GetProcessTimes};
+
+    let mut times = [FILETIME::default(); 4];
+    let [created, exited, kernel, user] = &mut times;
+    if unsafe { GetProcessTimes(handle, created, exited, kernel, user) } == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let creation = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+    if creation == 0 {
+        return Err("Backend owner/helper has no creation time".into());
+    }
+    Ok(creation)
 }
 
 #[cfg(test)]
@@ -3203,19 +3319,22 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn helper_admission_requires_live_instance_and_unpaused_request() {
-        let (directory, request, _) = sharing_fixture("helper-admission");
+        let (directory, mut request, _) = sharing_fixture("helper-admission");
         let path = directory.join("owner-request.json");
         let channels = HelperChannels::private(&directory);
         assert!(helper_owner(&channels).unwrap().is_some());
 
         let mut stale = request.clone();
+        let mut stage = "";
         stale.parent.created -= 1;
         write_json(&path, &stale).unwrap();
-        assert!(helper_owner(&channels).is_err());
+        assert!(helper_owner_at(&channels, &mut stage).is_err());
+        assert_eq!(stage, "owner_identity");
         stale = request.clone();
         stale.parent.pid = u32::MAX;
         write_json(&path, &stale).unwrap();
-        assert!(helper_owner(&channels).is_err());
+        assert!(helper_owner_at(&channels, &mut stage).is_err());
+        assert_eq!(stage, "owner_identity");
         stale = request.clone();
         stale.parent.executable = directory.join("other.exe");
         write_json(&path, &stale).unwrap();
@@ -3223,7 +3342,8 @@ mod tests {
         stale = request.clone();
         stale.timestamp_ms += 60_000;
         write_json(&path, &stale).unwrap();
-        assert!(helper_owner(&channels).is_err());
+        assert!(helper_owner_at(&channels, &mut stage).is_err());
+        assert_eq!(stage, "owner_lease");
         write_json(&path, &request).unwrap();
 
         let control = Cancel {
@@ -3252,10 +3372,16 @@ mod tests {
             )
             .is_err()
         );
-        for name in ["owner-pause.json", "owner-cancel.json"] {
+        for (name, expected_stage) in [
+            ("owner-pause.json", "owner_pause"),
+            ("owner-cancel.json", "owner_cancel"),
+        ] {
             let control_path = directory.join(name);
             write_json(&control_path, &control).unwrap();
-            assert!(helper_owner(&channels).unwrap().is_none());
+            request.timestamp_ms = now_ms().unwrap();
+            write_json(&path, &request).unwrap();
+            assert!(helper_owner_at(&channels, &mut stage).unwrap().is_none());
+            assert_eq!(stage, expected_stage);
             fs::remove_file(control_path).unwrap();
         }
         fs::remove_file(path).unwrap();
