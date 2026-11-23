@@ -1410,18 +1410,16 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                     }
                     a.update_scene(scene, true)?;
                     if let Some(request) = request {
-                        let message = if a.native_lighting.is_none() {
-                            Some("Режим предпросмотра.")
-                        } else if !a.runtime.group_on(Target::Pc)
-                            && !a.runtime.group_on(Target::Door)
-                        {
-                            Some("Свет выключен. Включите его в панели воспроизведения.")
+                        let output = if a.native_lighting.is_none() {
+                            "preview_only"
+                        } else if a.runtime.read(Runtime::has_active_scene_rgb) {
+                            "active_rgb"
                         } else {
-                            None
+                            "no_active_rgb"
                         };
                         send(
                             state,
-                            &json!({"kind":"scene_activation","request":request,"status":"applied","message":message}),
+                            &json!({"kind":"scene_activation","request":request,"status":"applied","output":output}),
                         )?;
                     }
                 }

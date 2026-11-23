@@ -659,6 +659,75 @@ impl ambient::Provider for Pixels {
         }))
     }
 }
+#[cfg(windows)]
+#[test]
+fn applying_a_scene_reports_only_active_rgb_scene_outputs() {
+    let stand = Stand::new();
+    let mut scene = stand.document.lighting.scene.clone();
+    scene.brightness = 31;
+
+    let mut empty = stand.document.clone();
+    empty.lighting.setup.devices.clear();
+    empty.lighting.setup.canvas.points.clear();
+    empty.lighting.groups.pc.clear();
+    empty.lighting.groups.door.clear();
+    empty.ambient = Default::default();
+    empty.lcd.clear();
+    let mut runtime = Runtime::new(empty.clone(), None).unwrap();
+    let desired = runtime.desired();
+    runtime.apply_native_scene(scene.clone()).unwrap();
+    assert_eq!(runtime.host().scene(), &scene);
+    assert_eq!(runtime.desired(), desired);
+    assert!(!runtime.has_active_scene_rgb());
+
+    empty.lighting.setup.devices.extend(
+        stand
+            .document
+            .lighting
+            .setup
+            .devices
+            .iter()
+            .filter(|device| device.role == Role::Lcd)
+            .cloned(),
+    );
+    empty.lighting.groups.pc.push("lcd".into());
+    empty.lcd.clone_from(&stand.document.lcd);
+    let mut lcd_only = Runtime::new(empty, None).unwrap();
+    lcd_only
+        .attach_lcd("lcd", vec![], stand.lcd_factory())
+        .unwrap();
+    lcd_only.apply_native_scene(scene.clone()).unwrap();
+    wait(|| {
+        lcd_only.tick(now(), wall()).unwrap();
+        lcd_only
+            .lcd_status("lcd")
+            .is_some_and(|status| status.frames_sent > 0)
+    });
+    assert!(!lcd_only.has_active_scene_rgb());
+
+    let mut rgb = stand.runtime(false);
+    let record = Arc::new(Record::default());
+    let calls = Arc::new(AtomicUsize::new(0));
+    rgb.apply_native_scene(scene.clone()).unwrap();
+    assert!(!rgb.has_active_scene_rgb());
+    rgb.attach_rgb(
+        "body",
+        vec![],
+        rgb_factory(&stand.document, "body", record, calls),
+    )
+    .unwrap();
+    assert!(!rgb.has_active_scene_rgb());
+    wait(|| {
+        rgb.tick(now(), wall()).unwrap();
+        rgb.has_active_scene_rgb()
+    });
+    rgb.apply_native_scene(scene).unwrap();
+    assert!(rgb.has_active_scene_rgb());
+    rgb.set_group(Target::Pc, false).unwrap();
+    assert!(rgb.group_on(Target::Door));
+    assert!(!rgb.has_active_scene_rgb());
+}
+
 #[test]
 fn actual_workers_share_scene_capture_and_lcd_without_blocking_coordinator() {
     let stand = Stand::new();
