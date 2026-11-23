@@ -38,6 +38,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 2
       - name: Check formatting
         run: cargo +stable fmt --all -- --check
       - name: Check embedded editor commands
@@ -50,6 +51,22 @@ jobs:
         run: python scripts/test_pinned_setup_download.py
       - name: Check release packaging boundaries
         run: python scripts/test_package_release.py
+      - name: Check Inno source when installer inputs change
+        if: github.event_name == 'pull_request'
+        run: |
+          # Checkout uses the PR merge commit, whose first parent is the base.
+          $paths = @(
+            ':(glob)scripts/installer/*.iss'
+            'scripts/installer/prerequisites.lock.json'
+            'scripts/package_installer.py'
+            'scripts/build_windows_candidate.py'
+            'scripts/check_inno_source.py'
+            'scripts/pinned_setup_download.py'
+            '.github/workflows/windows.yml'
+          )
+          $changed = git diff --name-only HEAD^1 HEAD -- $paths
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($changed) { python scripts/check_inno_source.py }
 
   software:
     name: Full software checks
