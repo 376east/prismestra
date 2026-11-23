@@ -608,7 +608,7 @@ pub(super) fn close_failed(state: &State, message: &str) {
     let _ = send(state, &json!({"kind":"error","message":message}));
 }
 
-fn confirm_unapplied_close(hwnd: HWND, exit: bool) -> Result<bool, String> {
+fn confirm_unapplied_close(hwnd: HWND, exit: bool, language: Language) -> Result<bool, String> {
     use windows_sys::Win32::UI::Controls::{
         TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TDF_ALLOW_DIALOG_CANCELLATION,
     };
@@ -617,18 +617,20 @@ fn confirm_unapplied_close(hwnd: HWND, exit: bool) -> Result<bool, String> {
         System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW},
     };
     const DISCARD: i32 = 100;
-    let title = wide(if exit {
-        "Выход из Prismestra"
+    let title = if exit {
+        ShellText::ExitTitle
     } else {
-        "Закрытие редактора"
-    });
-    let content = wide("Неприменённые значения настроек будут потеряны.");
-    let keep = wide("Вернуться к правкам");
-    let discard = wide(if exit {
-        "Выйти без применения"
+        ShellText::CloseEditorTitle
+    };
+    let discard = if exit {
+        ShellText::ExitWithoutApplying
     } else {
-        "Закрыть без применения"
-    });
+        ShellText::CloseWithoutApplying
+    };
+    let title = wide(title.get(language));
+    let content = wide(ShellText::EditsWillBeLost.get(language));
+    let keep = wide(ShellText::ReturnToEdits.get(language));
+    let discard = wide(discard.get(language));
     let buttons = [
         TASKDIALOG_BUTTON {
             nButtonID: IDCANCEL,
@@ -1113,7 +1115,7 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                 (request, ask, clean_draft)
             };
             if ask {
-                let discard = confirm_unapplied_close(hwnd, request.exit);
+                let discard = confirm_unapplied_close(hwnd, request.exit, state.language);
                 let mut sessions = state.modern_session.borrow_mut();
                 let Some(session) = sessions
                     .as_mut()
