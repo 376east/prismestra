@@ -1351,6 +1351,153 @@ fn recovery_stop_cancels_pending_initial_connection_retry() {
     drain(&mut runtime);
 }
 
+#[cfg(windows)]
+#[test]
+fn fresh_status_from_same_helper_restores_frames_after_exhausted_retries() {
+    struct GuardedLink(RgbLink, Cancellation);
+    impl RgbDriver for GuardedLink {
+        fn protocol(&self) -> Driver {
+            Driver::OpenRgb
+        }
+        fn leds(&self) -> usize {
+            self.0.leds()
+        }
+        fn write(&mut self, colors: &[Rgb], cancel: &Cancellation) -> Result<WriteResult, String> {
+            if self.1.cancelled() {
+                return Err("Managed backend status expired".into());
+            }
+            self.0.write(colors, cancel)
+        }
+    }
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let state = std::env::temp_dir().join(format!(
+        "prismestra-same-helper-{}-{}",
+        std::process::id(),
+        crate::clock::monotonic_us()
+    ));
+    std::fs::create_dir(&state).unwrap();
+    let block_read = Arc::new(AtomicBool::new(false));
+    let read_gate = block_read.clone();
+    let deny_acl = Arc::new(AtomicBool::new(false));
+    let acl_gate = deny_acl.clone();
+    let (entered, blocked) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let backend = crate::app::backend_helper::Backend::fixture_with_status_reader(
+        listener.local_addr().unwrap(),
+        &state,
+        move || {
+            if read_gate.swap(false, Ordering::SeqCst) {
+                entered.send(()).unwrap();
+                resume
+                    .recv_timeout(Duration::from_secs(12))
+                    .map_err(|error| error.to_string())?;
+            }
+            if acl_gate.load(Ordering::SeqCst) {
+                return Err("Fixture status ACL denied".into());
+            }
+            Ok(())
+        },
+    );
+    wait(|| backend.snapshot().ready);
+    let original = backend.snapshot();
+    assert_eq!(original.ready_generation, 1);
+    let mut document = runtime().document().clone();
+    document.lighting.setup.devices[0].driver = Driver::OpenRgb;
+    let mut runtime = Runtime::new(document, None).unwrap();
+    runtime.managed_backend_ids.insert("a".into());
+    runtime.managed_backend = Some(backend);
+    let link = Arc::new(Link::default());
+    let driver_link = link.clone();
+    runtime
+        .attach_rgb(
+            "a",
+            Vec::new(),
+            Arc::new(move |guarded_cancel| {
+                driver_link.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(GuardedLink(
+                    RgbLink(driver_link.clone(), Driver::OpenRgb),
+                    guarded_cancel.clone(),
+                )))
+            }),
+        )
+        .unwrap();
+    runtime.enable_output_recovery("a").unwrap();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+
+    block_read.store(true, Ordering::SeqCst);
+    blocked.recv_timeout(Duration::from_secs(2)).unwrap();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.host.status("a").unwrap().phase == Phase::Failed
+            && !runtime.managed_backend.as_ref().unwrap().snapshot().ready
+    });
+    for delay in [1_000_000, 5_000_000, 15_000_000] {
+        tick(&mut runtime, &mut now);
+        let previous = runtime.host.status("a").unwrap().generation;
+        now += delay;
+        tick(&mut runtime, &mut now);
+        wait(|| {
+            runtime.tick(now, 1_800_000_000).unwrap();
+            let status = runtime.host.status("a").unwrap();
+            status.generation != previous && status.phase == Phase::Failed
+        });
+    }
+    tick(&mut runtime, &mut now);
+    let exhausted = runtime.host.status("a").unwrap().generation;
+    now += 60_000_000;
+    tick(&mut runtime, &mut now);
+    assert_eq!(runtime.host.status("a").unwrap().generation, exhausted);
+    let before = link.frames.lock().unwrap().len();
+    assert!(before > 0);
+
+    deny_acl.store(true, Ordering::SeqCst);
+    release.send(()).unwrap();
+    wait(|| {
+        let snapshot = runtime.managed_backend.as_ref().unwrap().snapshot();
+        !snapshot.ready && snapshot.detail.contains("Fixture status ACL denied")
+    });
+    tick(&mut runtime, &mut now);
+    assert_eq!(runtime.host.status("a").unwrap().generation, exhausted);
+    assert_eq!(link.frames.lock().unwrap().len(), before);
+    deny_acl.store(false, Ordering::SeqCst);
+    wait(|| runtime.managed_backend.as_ref().unwrap().snapshot().ready);
+    let restored = runtime.managed_backend.as_ref().unwrap().snapshot();
+    assert_eq!(restored.backend_pid, original.backend_pid);
+    eprintln!(
+        "exhausted output generation {exhausted}, {} frames before recovery, same backend PID, client ready generation {} -> {}",
+        before, original.ready_generation, restored.ready_generation
+    );
+    tick(&mut runtime, &mut now);
+    // Let the recovery delay elapse on the runtime clock without a manual retry.
+    now += 1_000_000;
+    working(&mut runtime, "a", &mut now);
+    assert_eq!(restored.ready_generation, original.ready_generation + 1);
+    assert!(link.frames.lock().unwrap().len() > before);
+    assert_eq!(link.calls.load(Ordering::SeqCst), 2);
+    let stable = runtime.host.status("a").unwrap().generation;
+    std::thread::sleep(Duration::from_millis(450));
+    tick(&mut runtime, &mut now);
+    assert_eq!(
+        runtime.managed_backend_generation,
+        restored.ready_generation
+    );
+    assert_eq!(runtime.host.status("a").unwrap().generation, stable);
+
+    drain(&mut runtime);
+    runtime.release_managed_backend();
+    for file in [
+        "owner-pause.json",
+        "owner-cancel.json",
+        "owner-request.json",
+        "backend-client.lock",
+    ] {
+        std::fs::remove_file(state.join(file)).unwrap();
+    }
+    std::fs::remove_dir(state).unwrap();
+}
+
 #[test]
 fn recovery_reopens_only_failed_output_after_submission_and_restores_current_off() {
     let mut runtime = runtime();
