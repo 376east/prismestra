@@ -216,11 +216,13 @@ function nativeControlDisabled(node) {
   field.enabled && field.kind==='text' && formStages.has(stageKey('native',field.id)));
  return closing || commandPending || !(item?.enabled || staged);
 }
-function showError(message,fromCommand=false,detail='') {
+function showError(message,fromCommand=false,{detail='',retrySearch=false}={}) {
  errorIsCommand=fromCommand;error=String(message);const box=$('#native-error');box.hidden=false;
- const recovery=detail?`<details><summary>Technical details</summary><p>${esc(detail)}</p></details>`
+ const recovery=retrySearch
+  ?action(ui('Повторить поиск','Retry search'),'retry-startup-discovery',false,'id="startup-discovery-retry-error"')
   :'<button class="button" data-action="retry-document" data-mutation>'+ui('Повторить','Retry')+'</button>';
- box.innerHTML=`<button class="icon-button" data-action="dismiss-error" aria-label="${ui('Закрыть сообщение','Dismiss message')}">×</button><p>${esc(error)}</p>${stagedDirty()?'<button class="button" data-action="discard-fields">Отменить незавершённый ввод</button>':''}${recovery}`;
+ const details=detail?`<details><summary>${ui('Технические подробности','Technical details')}</summary><p>${esc(detail)}</p></details>`:'';
+ box.innerHTML=`<button class="icon-button" data-action="dismiss-error" aria-label="${ui('Закрыть сообщение','Dismiss message')}">×</button><p>${esc(error)}</p>${stagedDirty()?'<button class="button" data-action="discard-fields">Отменить незавершённый ввод</button>':''}${recovery}${details}`;
 }
 function send(command, mutation=false) {
  if(closing)return false;
@@ -885,8 +887,9 @@ window.prismestraReceive = message => {
   if(message.kind==='error'){
    if(state?.editor?.page!=='devices')placementOpen=false;awaitingCommandAck=false;closing=false;submittedStages=[];savedSceneRequest=null;commandPending=false;nativeAwaitingAck=false;
    if(pendingView){view=pendingView.previous;pendingView=null;render();focusHeading();}
-   if(englishPreview&&message.code==='startupDiscoveryRetry'){
-    showError('Could not start device search. Try again when Find devices is available.',true,message.message);
+   if(message.code==='startupDiscoveryRetry'){
+    showError(ui('Не удалось повторить поиск устройств. Попробуйте снова, когда поиск станет доступен.',
+     'Could not start device search. Try again when search is available.'),true,{detail:message.message,retrySearch:true});
    }else showError(message.message,true);
    syncControls();return;
   }

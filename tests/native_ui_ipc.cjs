@@ -1403,7 +1403,33 @@ async function checkOutputStatusCopy() {
 }
 console.log('PASS: scene placement uses the device draft and guards navigation and profile save until apply or revert');
 }
+function checkSearchRetryRecovery(testContext, label) {
+ const receive=payload=>{
+  testContext.payload=payload;
+  vm.runInContext('window.prismestraReceive(payload)',testContext);
+ };
+ const click=action=>events.click({target:{closest:()=>({dataset:{action},hasAttribute:()=>true})}});
+ vm.runInContext('formStages.clear();view="library";pendingView=null',testContext);
+ receive({kind:'snapshot',state:{...structuredClone(initial),startupDiscoveryRetry:false}});
+ receive({kind:'error',code:'startupDiscoveryRetry',message:'Search is busy'});
+ const banner=find('#native-error');
+ assert.ok(banner.innerHTML.includes(`id="startup-discovery-retry-error">${label}</button>`));
+ assert.doesNotMatch(banner.innerHTML,/data-action="retry-document"/);
+ const before=commands.length;
+ click('retry-startup-discovery');
+ assert.equal(commands.length,before,'unavailable discovery does not dispatch');
+ receive({kind:'status',state:{startupDiscoveryRetry:true}});
+ click('retry-startup-discovery');
+ click('retry-startup-discovery');
+ assert.deepEqual(commands.slice(before),[{op:'retry_startup_discovery'}]);
+ receive({kind:'error',message:'Connection configuration requested recovery'});
+ assert.match(banner.innerHTML,/data-action="retry-document"/);
+ assert.doesNotMatch(banner.innerHTML,/id="startup-discovery-retry-error"/);
+ click('retry-document');
+ assert.deepEqual(commands.at(-1),{op:'retry_document'});
+}
 function checkEnglishStartupPreview() {
+ checkSearchRetryRecovery(context,'Повторить поиск');
  document.documentElement={lang:'ru'};
  document.activeElement=null;
  const preview=vm.createContext({
@@ -1447,6 +1473,8 @@ function checkEnglishStartupPreview() {
  assert.equal(find('#player-status').title,'Сбой SDK');
  receive('status',{startupStatus:null,status:'Сцена сохранена'});
  assert.equal(find('#player-status').textContent,'Сцена сохранена','unscoped native statuses keep their own text');
+ checkSearchRetryRecovery(preview,'Retry search');
  console.log('PASS: English browser preview translates navigation and startup IPC with original command IDs');
+ console.log('PASS: rejected discovery retries only discovery in Russian and English; other errors retain document recovery');
 }
 checkOutputStatusCopy().then(checkEnglishStartupPreview).catch(error=>{console.error(error);process.exitCode=1;});
