@@ -1296,7 +1296,9 @@ impl App {
             Page::Ambient if self.editor.as_ref().is_some_and(|e| e.document.ambient.routes.is_empty()
                 && e.ambient_candidates().is_empty()) =>
                 "Добавьте ленту в «Устройствах» и выберите назначение «От экрана».",
-            Page::Ambient => "Источник здесь логический. Предпросмотр получает только явно включённый тестовый кадр.",
+            Page::Ambient => self.editor.as_ref()
+                .and_then(super::editor::Editor::ambient_route_notice)
+                .unwrap_or("Источник здесь логический. Предпросмотр получает только явно включённый тестовый кадр."),
             Page::Lcd if self.editor.as_ref().is_some_and(|e| e.document.lcd.is_empty()) =>
                 "Добавьте TT LCD кнопкой ниже, затем выберите анимацию.",
             Page::Lcd => "Анимация и панель температур. Передача выполняется в памяти, без доступа к помпе.",
