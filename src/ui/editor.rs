@@ -241,9 +241,12 @@ impl Editor {
             } else {
                 "door"
             },
-            "Логическая группа; без привязки к оборудованию.",
+            "Устройства одной группы можно включать и выключать вместе.",
         );
-        group.choices = vec![("PC".into(), "pc".into()), ("Дверь".into(), "door".into())];
+        group.choices = vec![
+            ("Основной свет".into(), "pc".into()),
+            ("Дополнительный свет".into(), "door".into()),
+        ];
         let mut fields = vec![
             field("name", "Название", &d.label, "Название в профиле"),
             boolean(
@@ -680,7 +683,7 @@ impl Editor {
                 target = match value {
                     "pc" => crate::schedule::Target::Pc,
                     "door" => crate::schedule::Target::Door,
-                    _ => return Err("Выберите PC или Дверь".into()),
+                    _ => return Err("Выберите основной или дополнительный свет".into()),
                 }
             }
             "headers_line" => {
@@ -1989,6 +1992,31 @@ mod tests {
         assert_eq!(editor.selected_output_id(), Some("screen"));
         editor.index = 1;
         assert_eq!(editor.selected_output_id(), None);
+    }
+
+    #[test]
+    fn device_group_labels_match_scene_controls_and_keep_profile_values() {
+        let mut editor = Editor {
+            document: document(),
+            page: Page::Devices,
+            index: 0,
+        };
+        let field = editor
+            .device_fields()
+            .into_iter()
+            .find(|field| field.key == "group")
+            .unwrap();
+        assert_eq!(field.value, "pc");
+        assert_eq!(
+            field.choices,
+            vec![
+                ("Основной свет".into(), "pc".into()),
+                ("Дополнительный свет".into(), "door".into()),
+            ]
+        );
+
+        editor.set("group", "door").unwrap();
+        assert_eq!(editor.document.lighting.groups.door, ["screen"]);
     }
 
     #[test]
