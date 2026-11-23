@@ -1151,3 +1151,25 @@ console.log('PASS: clearing the LCD background sends an explicit empty field in 
  assert.equal(commands.length,beforeSearch,'search and filtering stay local');
 }
 console.log('PASS: bilingual effect and scene search across 100 saved scenes without IPC');
+
+{
+ const assignments={key:'sources',label:'Показатели и подписи',value:'ram=RAM',choices:[],hint:'',file:false};
+ const choice={key:'add_source',label:'Добавить показатель',value:'',choices:[{label:'Выберите источник…',value:''},{label:'a',value:'a'}],hint:'',file:false};
+ const editor={...lcdBackground,fields:[assignments,choice]};
+ vm.runInContext('formStages.clear();view="lcd";pendingView=null',context);
+ receiveDeviceState('snapshot',navFixture([navLcd],{editor}));
+ const sourceInput=find('#field-0');
+ sourceInput.value='ram=Память';
+ events.input({target:sourceInput});
+ const select=new Node();
+ select.tagName='SELECT';
+ select.dataset.field='add_source';
+ select.value='a';
+ events.change({target:select});
+ assert.deepEqual(commands.at(-1),{op:'set_field',key:'add_source',value:'a',fields:[{key:'sources',value:'ram=Память'}]});
+ const fields=[{...assignments,value:'ram=Память; a=A'},{...choice,choices:[{label:'Все источники добавлены',value:''}]}];
+ receiveDeviceState('snapshot',navFixture([navLcd],{editor:{...editor,fields,dirty:true}}));
+ assert.equal(find('#field-0').value,'ram=Память; a=A');
+ assert.match(mainMarkup,/data-field="add_source"[^>]*>\s*<option value="" selected>Все источники добавлены/);
+}
+console.log('PASS: LCD source choice preserves staged labels and refreshes the editable assignments');

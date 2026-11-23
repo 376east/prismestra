@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, sync::Arc};
 
 const FONT_LIMIT: usize = 8 * 1024 * 1024;
-const MAX_SOURCES: usize = 32;
+pub(crate) const MAX_SOURCES: usize = 32;
 const MAX_SAMPLES: usize = 4096;
 const TTL_MS: u64 = 5000;
 
