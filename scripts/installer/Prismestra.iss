@@ -65,6 +65,7 @@ var
   VcRuntimeRestartRequired: Boolean;
 #ifndef LifecycleTest
   WebViewProbeExtracted: Boolean;
+  LegacyStartupPermissionsDeferred: Boolean;
 #endif
 
 function InstallPath: String;
@@ -305,28 +306,33 @@ begin
     Log('Managed PC task unavailable; retained ownership intent for safe cleanup.');
 end;
 
-function LegacyStartup(const Action, SID: String): Boolean;
+function LegacyStartup(const Action, SID: String): Integer;
 var
-  Tool: String;
+  Tool, Args: String;
   Code: Integer;
 begin
   Tool := InstallPath + '\Prismestra-Legacy-Startup.exe';
-  Result := ValidSID(SID) and GuardInstall('Check') and FileExists(Tool) and
+  Args := Action + ' ' + SID;
+  if Action = 'Disable' then Args := Args + ' --setup-outcome';
+  Result := -1;
+  if ValidSID(SID) and GuardInstall('Check') and FileExists(Tool) and
     (GetSHA256OfFile(Tool) = '{#LegacyStartupToolSha256}') and
-    ExecAndLogOutput(Tool, Action + ' ' + SID, ExpandConstant('{sys}'), SW_HIDE,
-      ewWaitUntilTerminated, Code, nil) and (Code = 0);
+    ExecAndLogOutput(Tool, Args, ExpandConstant('{sys}'), SW_HIDE,
+      ewWaitUntilTerminated, Code, nil) then
+    Result := Code;
 end;
 
 procedure RetireLegacyStartup;
 var
   SID: String;
+  Code: Integer;
 begin
   SID := CurrentSID;
   if not ProbeOriginalUser(SID) then begin
     Log('Legacy startup migration requires matching original and elevated user identities.');
     Exit;
   end;
-  if not LegacyStartup('Prepare', SID) then begin
+  if LegacyStartup('Prepare', SID) <> 0 then begin
     Log('Legacy startup source could not be prepared; previous startup entries kept.');
     Exit;
   end;
@@ -338,7 +344,12 @@ begin
     Log('Legacy profile could not be prepared as the original ordinary user; previous startup entries kept.');
     Exit;
   end;
-  if not LegacyStartup('Disable', SID) then
+  Code := LegacyStartup('Disable', SID);
+  { Exact exit codes from the hash-verified helper. Its JSON remains in the log. }
+  LegacyStartupPermissionsDeferred := (Code = 20) or (Code = 21);
+  if LegacyStartupPermissionsDeferred then
+    Log('Profile imported. Setup kept the old Prismestra sign-in tasks enabled because it could not verify Task Scheduler permissions.')
+  else if Code <> 0 then
     Log('Legacy startup migration was deferred; previous startup definitions were preserved.');
 end;
 #endif
@@ -442,6 +453,13 @@ begin
   if (Step = ssDone) and not WizardSilent and not RebootRequired and
     WizardIsTaskSelected('launch') and not RunOriginalInstalledCommand('--setup-launch-installed') then
     Log('Prismestra start deferred. Open it from the Start menu under your ordinary account.');
+#ifndef LifecycleTest
+  if (Step = ssDone) and not WizardSilent and LegacyStartupPermissionsDeferred then
+    SuppressibleMsgBox(
+      'Your Prismestra profile was imported. Setup kept the old Prismestra sign-in tasks enabled because it could not verify Task Scheduler permissions.'#13#10#13#10 +
+      'In Task Scheduler, review only the entries whose actions reference the folder where you ran the previous version of Prismestra. See the Setup log for the exact reason.',
+      mbInformation, MB_OK, IDOK);
+#endif
 end;
 
 procedure RemoveOwnedStartup;
