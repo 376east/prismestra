@@ -1049,7 +1049,9 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             | Command::CardPreview { .. }
             | Command::CloseReady { .. }
             | Command::Alice {
-                request: super::alice::Action::Status | super::alice::Action::Cancel
+                request: super::alice::Action::Status
+                    | super::alice::Action::Open
+                    | super::alice::Action::Cancel
             }
     ) {
         let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
@@ -1057,6 +1059,13 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             .as_ref()
             .is_some_and(|app| app.shutdown.active() || app.pending_open.is_some())
         {
+            if matches!(&command, Command::Alice { .. }) {
+                send(
+                    state,
+                    &json!({"kind":"alice","error":"Дождитесь завершения текущей операции."}),
+                )?;
+                return Ok(false);
+            }
             return Err("Дождитесь завершения текущей операции".into());
         }
     }

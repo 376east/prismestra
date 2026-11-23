@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Home Assistant token storage in the current user's Windows Credential Manager.
+//! Provider credentials in the current user's Windows Credential Manager.
 //! Requires windows-sys 0.61 features Win32_Security_Credentials and
 //! Win32_Foundation; register this module only on Windows.
 //!
@@ -12,7 +12,7 @@
 //! Generic credentials persist for this user on this PC, without enterprise
 //! roaming. Windows targets are case-insensitive; callers should generate stable
 //! opaque IDs, preferably lowercase UUIDs, and store only IDs in local bindings.
-//! No enumeration, alternate target prefix, file fallback or credential logging.
+//! Fixed provider namespaces, with no enumeration, file fallback or credential logging.
 //! Returned Strings and caller-provided tokens remain ordinary process memory;
 //! callers must not log them. Credential Manager is not isolation from other
 //! processes running as the same Windows user.
@@ -24,6 +24,7 @@ use windows_sys::Win32::Security::Credentials::{
 };
 
 const TARGET_PREFIX: &str = "Prismestra/HomeAssistant/v1/";
+const ALICE_TARGET: &str = "Prismestra/Alice/v1/DesktopPilot";
 pub const MAX_ID_BYTES: usize = 128;
 pub const MAX_TOKEN_BYTES: usize = CRED_MAX_CREDENTIAL_BLOB_SIZE as usize;
 
@@ -46,7 +47,14 @@ impl std::error::Error for Error {}
 /// Save or replace exactly this application's credential for `id`.
 /// The generic blob stores visible ASCII bytes directly, without a terminator.
 pub fn save(id: &str, token: &str) -> Result<(), Error> {
-    let mut target = target(id)?;
+    save_at(target(id)?, token)
+}
+
+pub(crate) fn save_alice(grant: &str) -> Result<(), Error> {
+    save_at(alice_target(), grant)
+}
+
+fn save_at(mut target: Vec<u16>, token: &str) -> Result<(), Error> {
     validate_token(token.as_bytes())?;
     let credential = CREDENTIALW {
         Type: CRED_TYPE_GENERIC,
@@ -67,7 +75,14 @@ pub fn save(id: &str, token: &str) -> Result<(), Error> {
 
 /// Read only the exact namespaced target. Missing is distinct from OS failure.
 pub fn read(id: &str) -> Result<Option<String>, Error> {
-    let target = target(id)?;
+    read_at(target(id)?)
+}
+
+pub(crate) fn read_alice() -> Result<Option<String>, Error> {
+    read_at(alice_target())
+}
+
+fn read_at(target: Vec<u16>) -> Result<Option<String>, Error> {
     let mut raw = std::ptr::null_mut();
     if unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut raw) } == 0 {
         return missing_or_error(None);
@@ -98,12 +113,23 @@ pub fn read(id: &str) -> Result<Option<String>, Error> {
 
 /// Delete only the exact namespaced target; false means it was already absent.
 pub fn delete(id: &str) -> Result<bool, Error> {
-    let target = target(id)?;
+    delete_at(target(id)?)
+}
+
+pub(crate) fn delete_alice() -> Result<bool, Error> {
+    delete_at(alice_target())
+}
+
+fn delete_at(target: Vec<u16>) -> Result<bool, Error> {
     if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
         missing_or_error(false)
     } else {
         Ok(true)
     }
+}
+
+fn alice_target() -> Vec<u16> {
+    ALICE_TARGET.encode_utf16().chain(Some(0)).collect()
 }
 
 fn target(id: &str) -> Result<Vec<u16>, Error> {
