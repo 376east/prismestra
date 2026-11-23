@@ -13,9 +13,9 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{self, TryRecvError},
+        mpsc::{self, SyncSender, TryRecvError, TrySendError},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -240,6 +240,21 @@ impl Backend {
 
 impl Proxy {
     fn start(state_dir: &Path, status_dir: &Path, task_name: String) -> Result<Self, String> {
+        static STATUS_POLLS: OnceLock<Result<SyncSender<StatusPoll>, String>> = OnceLock::new();
+        let polls = STATUS_POLLS
+            .get_or_init(|| start_status_worker(read_status))
+            .as_ref()
+            .map_err(Clone::clone)?;
+        Self::start_with(state_dir, status_dir, task_name, polls.clone(), launch_task)
+    }
+
+    fn start_with(
+        state_dir: &Path,
+        status_dir: &Path,
+        task_name: String,
+        polls: SyncSender<StatusPoll>,
+        launcher: impl Fn(&str, &AtomicBool) -> Result<(), String> + Clone + Send + 'static,
+    ) -> Result<Self, String> {
         let client_lock = client_lock(state_dir)?;
         let parent = identity(std::process::id())?;
         let nonce = format!(
@@ -285,8 +300,8 @@ impl Proxy {
                         stop: cancel,
                         restarting: restart,
                     },
-                    launch_task,
-                    read_status,
+                    launcher,
+                    &polls,
                 );
             })
             .map_err(|e| e.to_string())?;
@@ -333,6 +348,30 @@ struct ProxyControl {
     restarting: Arc<AtomicBool>,
 }
 
+struct StatusPoll {
+    path: PathBuf,
+    installed: bool,
+    reply: SyncSender<Result<Option<Status>, String>>,
+}
+
+fn start_status_worker(
+    mut read: impl FnMut(&Path, bool) -> Result<Option<Status>, String> + Send + 'static,
+) -> Result<SyncSender<StatusPoll>, String> {
+    // Rendezvous with one process-wide reader. A blocked read can outlive
+    // its owner, but there is no queue and it holds neither the client lock
+    // nor the new owner's private reply channel.
+    let (polls, requests) = mpsc::sync_channel::<StatusPoll>(0);
+    thread::Builder::new()
+        .name("backend-helper-status".into())
+        .spawn(move || {
+            while let Ok(poll) = requests.recv() {
+                let _ = poll.reply.send(read(&poll.path, poll.installed));
+            }
+        })
+        .map_err(|error| format!("Could not start backend status reader: {error}"))?;
+    Ok(polls)
+}
+
 fn proxy_loop(
     directory: &Path,
     status_dir: &Path,
@@ -341,44 +380,14 @@ fn proxy_loop(
     output: &Mutex<Snapshot>,
     control: &ProxyControl,
     launcher: impl Fn(&str, &AtomicBool) -> Result<(), String> + Clone + Send + 'static,
-    status_reader: impl Fn(&Path, bool) -> Result<Option<Status>, String> + Send + 'static,
+    polls: &SyncSender<StatusPoll>,
 ) {
     let stop = &control.stop;
     let restarting = &control.restarting;
     let status_path = status_dir.join("helper-status.json");
     let installed = status_dir != directory;
-    let (poll_status, poll_requests) = mpsc::sync_channel::<()>(1);
     let (status_result, status_results) = mpsc::sync_channel(1);
-    let reader_stop = stop.clone();
-    let reader_lock = control.client_lock.clone();
-    // Keep at most one reader across owner epochs, even if a filesystem call
-    // outlives shutdown. The reader has no authority to publish or launch.
-    let reader = thread::Builder::new()
-        .name("backend-helper-status".into())
-        .spawn(move || {
-            let _lock = reader_lock;
-            while poll_requests.recv().is_ok() && !reader_stop.load(Ordering::SeqCst) {
-                if status_result
-                    .send(status_reader(&status_path, installed))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-    let reader = match reader {
-        Ok(reader) => reader,
-        Err(error) => {
-            stop.store(true, Ordering::SeqCst);
-            let mut snapshot = output.lock().unwrap_or_else(|p| p.into_inner());
-            snapshot.ready = false;
-            snapshot.detail = format!("Could not start backend status reader: {error}");
-            return;
-        }
-    };
-    // Both channels start empty and the reader cannot disconnect before it
-    // receives that first request.
-    let _ = poll_status.try_send(());
+    let mut pending = false;
     let mut attempts = VecDeque::new();
     let mut next_attempt = Instant::now();
     let mut generation = 0u64;
@@ -415,8 +424,22 @@ fn proxy_loop(
                 failure_detail = result.err().unwrap_or_default();
             }
         }
+        if !pending {
+            match polls.try_send(StatusPoll {
+                path: status_path.clone(),
+                installed,
+                reply: status_result.clone(),
+            }) {
+                Ok(()) => pending = true,
+                Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Disconnected(_)) => break,
+            }
+        }
         let status = match status_results.try_recv() {
-            Ok(status) => status,
+            Ok(status) => {
+                pending = false;
+                status
+            }
             Err(TryRecvError::Disconnected) => break,
             Err(TryRecvError::Empty) => {
                 let Ok(now) = now_ms() else { break };
@@ -529,17 +552,9 @@ fn proxy_loop(
             snapshot.detail = failure_detail.clone();
         }
         *output.lock().unwrap_or_else(|p| p.into_inner()) = snapshot;
-        if poll_status.try_send(()).is_err() {
-            break;
-        }
         thread::sleep(POLL);
     }
     stop.store(true, Ordering::SeqCst);
-    drop(poll_status);
-    drop(status_results);
-    if reader.is_finished() {
-        let _ = reader.join();
-    }
     let mut snapshot = output.lock().unwrap_or_else(|p| p.into_inner());
     snapshot.ready = false;
     snapshot.detail = "Backend helper client ownership ended".into();
@@ -2530,7 +2545,7 @@ mod tests {
                         let _ = launch.send(());
                         Ok(())
                     },
-                    read_status,
+                    &start_status_worker(read_status).unwrap(),
                 );
             });
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -2615,7 +2630,7 @@ mod tests {
                             .recv_timeout(Duration::from_secs(10));
                         Ok(())
                     },
-                    read_status,
+                    &start_status_worker(read_status).unwrap(),
                 );
             });
             let running = started.recv_timeout(Duration::from_secs(2)).is_ok();
@@ -2675,6 +2690,16 @@ mod tests {
             let snapshot_ref = &snapshot;
             scope.spawn(move || {
                 let first_read = Cell::new(true);
+                let polls = start_status_worker(move |path, installed| {
+                    assert!(installed);
+                    assert_eq!(path, expected_path);
+                    if first_read.replace(false) {
+                        entered.send(()).unwrap();
+                        blocked.recv_timeout(Duration::from_secs(10)).unwrap();
+                    }
+                    Err("fixture outbox unavailable".into())
+                })
+                .unwrap();
                 proxy_loop(
                     directory_ref,
                     outbox_ref,
@@ -2683,15 +2708,7 @@ mod tests {
                     snapshot_ref,
                     control_ref,
                     |_, _| panic!("unavailable outbox must not launch a task"),
-                    move |path, installed| {
-                        assert!(installed);
-                        assert_eq!(path, expected_path);
-                        if first_read.replace(false) {
-                            entered.send(()).unwrap();
-                            blocked.recv_timeout(Duration::from_secs(10)).unwrap();
-                        }
-                        Err("fixture outbox unavailable".into())
-                    },
+                    &polls,
                 );
             });
             reading.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -2777,6 +2794,17 @@ mod tests {
                 let control = &control;
                 scope.spawn(move || {
                     let first_read = Cell::new(true);
+                    let polls = start_status_worker(move |_, _| {
+                        if first_read.replace(false) {
+                            entered.send(()).unwrap();
+                            blocked.recv_timeout(Duration::from_secs(8)).unwrap();
+                            Ok(None)
+                        } else {
+                            entered.send(()).unwrap();
+                            Err("fixture outbox unavailable".into())
+                        }
+                    })
+                    .unwrap();
                     proxy_loop(
                         directory,
                         &outbox,
@@ -2788,16 +2816,7 @@ mod tests {
                             let _ = launch.send(());
                             Ok(())
                         },
-                        move |_, _| {
-                            if first_read.replace(false) {
-                                entered.send(()).unwrap();
-                                blocked.recv_timeout(Duration::from_secs(8)).unwrap();
-                                Ok(None)
-                            } else {
-                                entered.send(()).unwrap();
-                                Err("fixture outbox unavailable".into())
-                            }
-                        },
+                        &polls,
                     );
                     ended.send(()).unwrap();
                 });
@@ -2812,10 +2831,7 @@ mod tests {
                     "cancel" => {
                         control.stop.store(true, Ordering::SeqCst);
                         exits.recv_timeout(Duration::from_secs(2)).unwrap();
-                        // The owner loop has stopped while read is still blocked.
-                        // Its worker retains the lease, so a second reader cannot start.
-                        assert_eq!(Arc::strong_count(&control.client_lock), 2);
-                        assert!(client_lock(directory).is_err());
+                        assert_eq!(Arc::strong_count(&control.client_lock), 1);
                     }
                     "owner change" => {
                         let mut replacement = request.clone();
@@ -2846,6 +2862,118 @@ mod tests {
             fs::remove_file(directory.join("backend-client.lock")).unwrap();
             fs::remove_dir(directory).unwrap();
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stopping_and_reenabling_rgb_reuses_reader_and_accepts_only_new_owner() {
+        let (directory, _, _) = sharing_fixture("reenable-pending-status");
+        let outbox = directory.join("outbox");
+        let owner_path = directory.join("owner-request.json");
+        let (entered, reads) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        let (launched, starts) = mpsc::channel();
+        let active = Arc::new(Mutex::new(None::<Request>));
+        let fixture_status = |owner: &Request| Status {
+            version: clock::PROTOCOL,
+            clock_domain: clock::DOMAIN.into(),
+            nonce: owner.nonce.clone(),
+            parent: owner.parent.clone(),
+            helper: owner.parent.clone(),
+            timestamp_ms: now_ms().unwrap(),
+            ready_generation: 1,
+            ready: true,
+            backend_pid: Some(owner.parent.pid),
+            detail: owner.nonce.clone(),
+        };
+        let reader_owner = owner_path.clone();
+        let reader_active = active.clone();
+        let mut first_read = true;
+        let polls = start_status_worker(move |_, installed| {
+            assert!(installed);
+            entered.send(thread::current().id()).unwrap();
+            if std::mem::take(&mut first_read) {
+                let old = read_json::<Request>(&reader_owner).unwrap();
+                blocked.recv_timeout(Duration::from_secs(8)).unwrap();
+                return Ok(Some(fixture_status(&old)));
+            }
+            Ok(reader_active.lock().unwrap().as_ref().map(fixture_status))
+        })
+        .unwrap();
+        let launch_owner = owner_path.clone();
+        let launch = move |_: &str, _: &AtomicBool| {
+            let owner = read_json::<Request>(&launch_owner)?;
+            launched.send(owner.nonce.clone()).unwrap();
+            *active.lock().unwrap() = Some(owner);
+            Ok(())
+        };
+        let enable = || {
+            Proxy::start_with(
+                &directory,
+                &outbox,
+                "fixture".into(),
+                polls.clone(),
+                launch.clone(),
+            )
+            .unwrap()
+        };
+        let old = enable();
+        let reader = reads.recv_timeout(Duration::from_secs(2)).unwrap();
+        let old_nonce = old.nonce.clone();
+        drop(old);
+        assert_eq!(
+            read_json::<Cancel>(&directory.join("owner-cancel.json"))
+                .unwrap()
+                .nonce,
+            old_nonce
+        );
+        let intermediate = enable();
+        let intermediate_nonce = intermediate.nonce.clone();
+        assert_ne!(intermediate_nonce, old_nonce);
+        drop(intermediate);
+
+        let current = enable();
+        assert_ne!(current.nonce, intermediate_nonce);
+        let initial = read_json::<Request>(&owner_path).unwrap();
+        assert_eq!(initial.nonce, current.nonce);
+        assert_eq!(
+            reads.recv_timeout(Duration::from_secs(1)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        let renewed = read_json::<Request>(&owner_path).unwrap();
+        assert_eq!(renewed.nonce, current.nonce);
+        assert!(renewed.timestamp_ms > initial.timestamp_ms);
+        assert!(!current.snapshot.lock().unwrap().ready);
+        assert!(starts.try_recv().is_err());
+
+        release.send(()).unwrap();
+        assert_eq!(reads.recv_timeout(Duration::from_secs(2)).unwrap(), reader);
+        assert_eq!(
+            starts.recv_timeout(Duration::from_secs(2)).unwrap(),
+            current.nonce
+        );
+        let until = Instant::now() + Duration::from_secs(2);
+        loop {
+            let status = current.snapshot.lock().unwrap().clone();
+            if status.ready {
+                assert_eq!(status.detail, current.nonce);
+                assert_eq!(status.ready_generation, 1);
+                break;
+            }
+            assert!(Instant::now() < until, "new owner did not become ready");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(starts.try_recv().is_err());
+        drop(current);
+        assert!(client_lock(&directory).is_ok());
+        for name in [
+            "owner-cancel.json",
+            "owner-request.json",
+            "backend-client.lock",
+        ] {
+            fs::remove_file(directory.join(name)).unwrap();
+        }
+        fs::remove_dir(directory).unwrap();
     }
 
     #[cfg(windows)]
