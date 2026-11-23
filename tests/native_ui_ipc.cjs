@@ -1247,6 +1247,11 @@ async function checkOutputStatusCopy() {
  context.payload={kind:'snapshot',state:{...draftState,canvasPlacement,draftMapRevision:'7',editor:{page:'devices',dirty:false}}};
  evaluate('window.prismestraReceive(payload)');
  assert.match(evaluate('renderPlacementObjects()'),/Strip &lt;1&gt;/);
+ assert.doesNotMatch(evaluate('renderPlacementControls()'),/id="placement-picker"/);
+ canvasPlacement.objects.push({id:'overlap',label:'Strip <1>',bounds:[1,1,2,1]});
+ events.change({target:{id:'placement-picker',value:'overlap'}});
+ assert.match(evaluate('renderPlacementControls()'),/value="overlap" selected>Strip &lt;1&gt; · overlap/);
+ assert.match(evaluate('renderPlacementObjects()'),/aria-label="Strip &lt;1&gt; · strip"/);
  evaluate('movePlacement("strip","7",1,0)');
  assert.deepEqual(commands.at(-1),{op:'move_canvas_device',device:'strip',revision:'7',dx:1,dy:0});
  context.payload.state.editor.dirty=true;

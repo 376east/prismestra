@@ -112,7 +112,7 @@ const sourceNeedsApply = () => !!state?.native && !!draft
  && ['camera','keys'].includes(reactiveEffects.get(draft.effect))
  && (draft.effect!==state.scene.effect || !state.captureAuthorized);
 const applyNeeded = () => changed() || sourceNeedsApply();
-let placementOpen=false, placementDrag=null;
+let placementOpen=false, placementDrag=null, placementSelection=null;
 const placementDirty=()=>view==='editor' && placementOpen && state?.editor?.page==='devices' && state.editor.dirty;
 const unsavedDraft = () => !!draft && (!draftOrigin || !same(draft,draftOrigin.scene));
 const deviceFocusKey = id => `[data-device-id="${CSS.escape(id)}"]`;
@@ -375,19 +375,30 @@ function renderScene() {
  if(!Object.hasOwn(effects,draft.effect))effectIds.unshift(draft.effect);
  return heading(draftName,'Изменения остаются в черновике до нажатия «Применить».',action('Сохранить сцену','save-scene')+action('Создать копию','clone')+(selectedId?action('Переименовать','rename'):'')+action('Применить','apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status"></p><div class="editor-layout"><section class="preview-panel" aria-label="Предпросмотр"><div class="stage"><canvas id="stage" aria-label="Предпросмотр сцены из движка Prismestra"></canvas><div class="stage-bar"><span class="stage-chip">Предпросмотр</span></div><div class="stage-caption">Кадр движка · черновик</div>${renderPlacementObjects()}</div>${renderPlacementControls()}<p class="preview-description">Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.</p><div class="native-field"><label for="scene-effect">Эффект</label><select id="scene-effect" data-mutation ${disabled()}>${effectIds.map(id=>effectOption(id,draft.effect)).join('')}</select></div><div class="parameter-panel" style="margin-top:20px"><h2>Выходы</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> Основной свет · RGB и LCD</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> Дополнительный свет</label><button class="button" data-view="devices">Устройства и свойства</button></div></section><aside class="parameter-panel" id="scene-parameters" aria-label="Параметры сцены">${sceneParameters()}</aside></div>`;
 }
+function placementLabel(object,objects) {
+ return objects.some(other=>other.id!==object.id&&other.label===object.label)
+  ? `${object.label} · ${object.id}` : object.label;
+}
 function renderPlacementObjects() {
  if(!placementOpen||!state.draftMapRevision)return '';
  const {width,height,objects}=state.canvasPlacement;
- return objects.map(({id,label,bounds:[x,y,right,bottom]})=>{
+ return objects.map(object=>{
+  const {id,label,bounds:[x,y,right,bottom]}=object;
+  const name=esc(placementLabel(object,objects));
   const left=(x+right+1)*50/width, top=(y+bottom+1)*50/height;
-  return `<button type="button" class="placement-object" id="placement-${esc(id)}" data-placement-device="${esc(id)}" aria-describedby="placement-help" title="${esc(label)}" style="left:${left}%;top:${top}%">${esc(label)}</button>`;
+  return `<button type="button" class="placement-object" id="placement-${esc(id)}" data-placement-device="${esc(id)}" aria-describedby="placement-help" aria-label="${name}" title="${name}" style="left:${left}%;top:${top}%">${esc(label)}</button>`;
  }).join('');
 }
 function renderPlacementControls() {
- if(!state.canvasPlacement?.objects.length)return '';
+ const objects=state.canvasPlacement?.objects;
+ if(!objects?.length)return '';
  if(!placementOpen)return action('Разместить RGB','open-placement',false,'id="open-placement"');
+ const picker=objects.length>1&&state.draftMapRevision ? `<label class="native-field placement-picker" for="placement-picker">RGB-устройство
+  <select id="placement-picker">${objects.map(object=>`<option value="${esc(object.id)}" ${object.id===placementSelection?'selected':''}>${esc(placementLabel(object,objects))}</option>`).join('')}</select>
+ </label><button type="button" id="focus-placement" class="button" data-action="focus-placement">К метке</button>` : '';
  return `<div class="placement-actions" aria-label="Раскладка RGB">
   <p id="placement-help">Перетащите устройство или выберите его клавишей Tab и сдвиньте стрелками.</p>
+  ${picker}
   <span role="status">${placementDirty()?'Раскладка не применена':''}</span>
   ${action('Применить раскладку','apply-placement',true,'data-needs-change="document"')}${action('Отменить изменения','revert-document')}
  </div>`;
@@ -686,6 +697,7 @@ function changeView(next, source) {
   ? '#main .settings-links '+focusKey(source)
   : null;
  placementOpen=false;
+ placementSelection=null;
  view=next;render();focusHeading();
  if(!['library','editor'].includes(next)){
   pendingView={previous,next,opener};
@@ -997,6 +1009,7 @@ document.addEventListener('click',event=>{
  case 'save-scene':return nameDialog('save');
  case 'apply-scene':send({op:'apply_scene',scene:clone(draft)},true);break;
  case 'open-placement':openPlacement();break;
+ case 'focus-placement':document.getElementById('placement-'+$('#placement-picker')?.value)?.focus();break;
  case 'apply-placement':send({op:'apply_document'},true);break;
  case 'insert-palette-color':case 'move-palette-earlier':case 'move-palette-later':return reorderPalette(b.dataset.action);
  case 'add-color':if(draft.colors.length<8)draft.colors.push(draft.colors.at(-1));render();requestPreview();break;
@@ -1029,6 +1042,7 @@ document.addEventListener('input',event=>{
 });
 document.addEventListener('change',event=>{
  const input=event.target;
+ if(input.id==='placement-picker'){placementSelection=input.value;return;}
  if(input.id==='library-effect'){libraryEffect=input.value;libraryLimit=libraryPageSize;render();return;}
  if(input.dataset.nativeField!==undefined){if(['text','secret'].includes(input.dataset.nativeKind)){stageText(input);return;}if(nativeControlDisabled(input))return;send({op:'native_field',id:input.dataset.nativeField,value:input.dataset.nativeKind==='checkbox'?String(input.checked):input.value},true);return;}
  if(busy())return;
@@ -1121,7 +1135,15 @@ function finishPlacementDrag(event) {
 document.addEventListener('pointerup',event=>{pointerGesture=false;finishPlacementDrag(event);releaseGesture();},true);
 document.addEventListener('pointercancel',event=>{pointerGesture=false;finishPlacementDrag(event);releaseGesture();},true);
 document.addEventListener('lostpointercapture',finishPlacementDrag);
-document.addEventListener('focusin',()=>{syncDeviceAnnouncement();syncOutputRetries();requestAnimationFrame(syncCardMotion);});
+document.addEventListener('focusin',event=>{
+ const device=event?.target?.dataset?.placementDevice;
+ if(device){
+  placementSelection=device;
+  const picker=$('#placement-picker');
+  if(picker)picker.value=device;
+ }
+ syncDeviceAnnouncement();syncOutputRetries();requestAnimationFrame(syncCardMotion);
+});
 for(const name of ['pointerover','pointerout','focusout','visibilitychange']){
  document.addEventListener(name,()=>{
   if(name==='visibilitychange')syncEditorPreview();
