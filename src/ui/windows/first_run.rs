@@ -50,6 +50,7 @@ pub(super) struct Startup {
     phase: &'static str,
     report: Vec<u8>,
     reported_phase: &'static str,
+    status_label: Option<(&'static str, String)>,
     discovery_issues: Vec<String>,
     unconfigured_argb: Vec<crate::transport::openrgb::UnconfiguredArgb>,
     unknown_openrgb_controller: bool,
@@ -78,6 +79,7 @@ impl Startup {
             phase: if enabled { "starting" } else { "disabled" },
             report: Vec::new(),
             reported_phase: "",
+            status_label: None,
             discovery_issues: Vec::new(),
             unconfigured_argb: Vec::new(),
             unknown_openrgb_controller: false,
@@ -213,6 +215,20 @@ impl App {
         &self.first_run.unconfigured_argb
     }
 
+    fn set_first_run_status(&mut self, label: &'static str, message: impl Into<String>) {
+        self.status = message.into();
+        self.first_run.status_label = Some((label, self.status.clone()));
+    }
+
+    pub(super) fn first_run_status_label(&self) -> Option<&'static str> {
+        // Other routes also write the shared status line.
+        self.first_run
+            .status_label
+            .as_ref()
+            .filter(|(_, message)| message == &self.status)
+            .map(|(label, _)| *label)
+    }
+
     pub(super) fn startup_empty_search_result(&self) -> Option<&'static str> {
         if self.path != self.first_run.path
             || self.context_revision != self.first_run.context
@@ -256,7 +272,7 @@ impl App {
             self.context_revision,
             Instant::now(),
         );
-        self.status = "Ищу поддерживаемые устройства…".into();
+        self.set_first_run_status("searching", "Ищу поддерживаемые устройства…");
         Ok(())
     }
 
@@ -295,7 +311,7 @@ impl App {
             Err(error) => {
                 self.first_run.cancel();
                 self.first_run.phase = "error";
-                self.status = format!("Автонастройка: {error}");
+                self.set_first_run_status("failed", format!("Автонастройка: {error}"));
                 true
             }
         };
@@ -364,7 +380,10 @@ impl App {
                     })
                     .map_err(|e| e.to_string())?,
             );
-            self.status = "Восстанавливаю сохранённую сцену и подключения…".into();
+            self.set_first_run_status(
+                "restoring",
+                "Восстанавливаю сохранённую сцену и подключения…",
+            );
             return Ok(true);
         }
         if let Some(job) = &self.first_run.handover {
@@ -388,9 +407,10 @@ impl App {
                 || !self.connections.scan.is_idle()
             {
                 self.first_run.cancel();
-                self.status =
-                    "Автовключение отменено: вы изменили профиль. Правки остаются в редакторе."
-                        .into();
+                self.set_first_run_status(
+                    "cancelled",
+                    "Автовключение отменено: вы изменили профиль. Правки остаются в редакторе.",
+                );
                 return Ok(true);
             }
             // The bootstrap deliberately loaded migrated live sessions in preview until drain.
@@ -430,9 +450,10 @@ impl App {
             if !self.source_scope_inputs()?.1.is_empty() {
                 self.start_bound_sources()?;
             }
-            self.status =
-                "Сохранённые подключения восстановлены. Статусы передачи доступны в устройствах."
-                    .into();
+            self.set_first_run_status(
+                "restored",
+                "Сохранённые подключения восстановлены. Статусы передачи доступны в устройствах.",
+            );
             return Ok(true);
         }
         if self.first_run.applying.is_none()
@@ -446,7 +467,10 @@ impl App {
                 || !self.connections.scan.is_idle())
         {
             self.first_run.cancel();
-            self.status = "Автонастройка остановлена: сохраняю ваши текущие правки.".into();
+            self.set_first_run_status(
+                "cancelled",
+                "Автонастройка остановлена: сохраняю ваши текущие правки.",
+            );
             return Ok(true);
         }
         if let Some(pending) = &self.first_run.applying {
@@ -459,7 +483,7 @@ impl App {
                     self.dirty = true;
                 }
                 self.first_run.cancel();
-                self.status = "Автонастройка остановлена. Ваши правки остаются в редакторе; профиль не перезаписан.".into();
+                self.set_first_run_status("cancelled", "Автонастройка остановлена. Ваши правки остаются в редакторе; профиль не перезаписан.");
                 return Ok(true);
             }
             if self.runtime.pending_configuration() {
@@ -508,7 +532,7 @@ impl App {
                 self.open_connections()?;
             }
             self.refresh_connections();
-            self.status = format!(
+            self.set_first_run_status("applied", format!(
                 "На карте устройств: {}. Карта и сцена сохранены; проверяйте статусы передачи.{}",
                 self.runtime.document().lighting.setup.devices.len(),
                 if applied.plan.issues.is_empty() {
@@ -516,7 +540,7 @@ impl App {
                 } else {
                     format!(" {}", applied.plan.issues.join("; "))
                 }
-            );
+            ));
             self.first_run.schedule_next_search(Instant::now());
             return Ok(true);
         }
@@ -527,11 +551,15 @@ impl App {
             if !plan.changed {
                 if !self.first_run.worker.is_idle() {
                     self.first_run.phase = "discovering";
-                    self.status = "Ищу остальные поддерживаемые устройства…".into();
+                    self.set_first_run_status(
+                        "searchingMore",
+                        "Ищу остальные поддерживаемые устройства…",
+                    );
                     return Ok(true);
                 }
                 let empty = self.runtime.document().lighting.setup.devices.is_empty();
-                self.status = if empty && !self.first_run.unconfigured_argb.is_empty() {
+                let needs_argb_setup = empty && !self.first_run.unconfigured_argb.is_empty();
+                let message = if needs_argb_setup {
                     "Найдены контроллеры ARGB без настроенных LED. Откройте «Каналы ARGB» на вкладке «Устройства».".into()
                 } else if empty {
                     format!(
@@ -543,6 +571,14 @@ impl App {
                 } else {
                     format!("Поиск устройств: {}", plan.issues.join("; "))
                 };
+                let label = if needs_argb_setup {
+                    "unconfiguredArgb"
+                } else if empty {
+                    "empty"
+                } else {
+                    "noNewDevices"
+                };
+                self.set_first_run_status(label, message);
                 self.first_run.record_search_result(empty, Instant::now());
                 return Ok(true);
             }
@@ -565,7 +601,7 @@ impl App {
                 context: self.context_revision,
             });
             self.first_run.phase = "applying";
-            self.status = "Устройства найдены. Подключаю к общей сцене…".into();
+            self.set_first_run_status("applying", "Устройства найдены. Подключаю к общей сцене…");
             return Ok(true);
         }
         let endpoint = "127.0.0.1:17422".parse().unwrap();
@@ -594,10 +630,13 @@ impl App {
             return Ok(false);
         }
         if self.first_run.complete_search() {
-            self.status = format!(
-                "Автопоиск завершён. Устройств на карте: {}. {}",
-                self.runtime.document().lighting.setup.devices.len(),
-                self.first_run.discovery_issues.join("; ")
+            self.set_first_run_status(
+                "complete",
+                format!(
+                    "Автопоиск завершён. Устройств на карте: {}. {}",
+                    self.runtime.document().lighting.setup.devices.len(),
+                    self.first_run.discovery_issues.join("; ")
+                ),
             );
             return Ok(true);
         }
@@ -619,7 +658,10 @@ impl App {
             .worker
             .start(endpoint, guard, local, progressive)?;
         self.first_run.record_search_started();
-        self.status = "Ищу поддерживаемые устройства. Сцена включится автоматически…".into();
+        self.set_first_run_status(
+            "searching",
+            "Ищу поддерживаемые устройства. Сцена включится автоматически…",
+        );
         Ok(true)
     }
 }

@@ -8,10 +8,20 @@ use crate::{
         lcd, sensors,
     },
     capture::ambient::Mode,
+    devices::{Driver, Role},
     lighting::ambient::Rect,
 };
 use std::{borrow::Cow, collections::HashMap};
 const SCENE_EDGES: &str = "@scene_edges";
+const LEGACY_HOME_ASSISTANT_ROUTE: &str = "Сохранён старый маршрут Home Assistant. Чтобы вернуть свет в сцены, откройте «Устройства», выберите «Общий холст» и снова включите свет.";
+
+fn can_switch_to_ambient(driver: &Driver) -> bool {
+    matches!(
+        driver,
+        Driver::SkydimoSerial { .. } | Driver::WledDdp | Driver::OpenRgb
+    )
+}
+
 #[derive(Clone, Debug)]
 pub struct Field {
     pub key: &'static str,
@@ -286,26 +296,33 @@ impl Editor {
             group,
             preset,
         ];
-        if matches!(
-            d.driver,
-            crate::devices::Driver::SkydimoSerial { .. }
-                | crate::devices::Driver::WledDdp
-                | crate::devices::Driver::OpenRgb
-                | crate::devices::Driver::HomeAssistant
-        ) {
+        let legacy_home_assistant = d.driver == Driver::HomeAssistant && d.role == Role::Ambient;
+        if can_switch_to_ambient(&d.driver) || legacy_home_assistant {
             let mut role = field(
                 "role",
                 "Назначение",
-                if d.role == crate::devices::Role::Ambient {
+                if d.role == Role::Ambient {
                     "ambient"
                 } else {
                     "canvas"
                 },
-                "Смена назначения выключает ленту и убирает прежнюю карту или связь. Для холста создаётся линия.",
+                if legacy_home_assistant {
+                    LEGACY_HOME_ASSISTANT_ROUTE
+                } else {
+                    "Смена назначения выключает ленту и убирает прежнюю карту или связь. Для холста создаётся линия."
+                },
             );
             role.choices = vec![
                 ("Общий холст".into(), "canvas".into()),
-                ("От экрана".into(), "ambient".into()),
+                (
+                    if legacy_home_assistant {
+                        "От экрана (старый маршрут)"
+                    } else {
+                        "От экрана"
+                    }
+                    .into(),
+                    "ambient".into(),
+                ),
             ];
             fields.insert(2, role);
         }
@@ -404,7 +421,7 @@ impl Editor {
             .setup
             .devices
             .iter()
-            .filter(|d| d.role == crate::devices::Role::Ambient)
+            .filter(|d| d.role == Role::Ambient && d.driver != Driver::HomeAssistant)
             .filter(|d| {
                 !self
                     .document
@@ -427,8 +444,11 @@ impl Editor {
             .setup
             .devices
             .iter()
-            .find(|d| d.id == device && d.role == crate::devices::Role::Ambient)
+            .find(|d| d.id == device && d.role == Role::Ambient)
             .ok_or("Выберите устройство экранной подсветки")?;
+        if d.driver == Driver::HomeAssistant {
+            return Err("Для Home Assistant доступны сцены через «Общий холст».".into());
+        }
         if self
             .document
             .ambient
@@ -474,6 +494,25 @@ impl Editor {
         self.document = next;
         Ok(())
     }
+
+    #[cfg(any(windows, test))]
+    pub(super) fn ambient_route_notice(&self) -> Option<&'static str> {
+        let id = self
+            .document
+            .ambient
+            .routes
+            .get(self.index)?
+            .device
+            .as_str();
+        self.document
+            .lighting
+            .setup
+            .devices
+            .iter()
+            .any(|d| d.id == id && d.driver == Driver::HomeAssistant)
+            .then_some(LEGACY_HOME_ASSISTANT_ROUTE)
+    }
+
     /// Removing a route keeps its source (possibly shared) and the device.
     /// Disable the now-unrouted output in this draft to retain a valid profile.
     pub fn remove_ambient_route(&mut self) -> Result<(), String> {
@@ -591,12 +630,9 @@ impl Editor {
         let mut target = device_setup::target(&self.document, &d.id);
         match key {
             "role" => {
-                if !matches!(
-                    d.driver,
-                    crate::devices::Driver::SkydimoSerial { .. }
-                        | crate::devices::Driver::WledDdp
-                        | crate::devices::Driver::OpenRgb
-                ) {
+                let legacy_home_assistant =
+                    d.driver == Driver::HomeAssistant && d.role == Role::Ambient;
+                if !can_switch_to_ambient(&d.driver) && !legacy_home_assistant {
                     return Err("Для этого семейства нельзя сменить назначение".into());
                 }
                 let role = match value {
@@ -1595,6 +1631,68 @@ mod tests {
         assert_eq!(e.document, before);
         e.add_ambient_route("screen", Some("main")).unwrap();
         assert_eq!(e.document.ambient.sources.len(), 16);
+    }
+
+    #[test]
+    fn existing_home_assistant_route_can_return_to_scenes_without_offering_new_routes() {
+        let mut legacy = document();
+        let device = &mut legacy.lighting.setup.devices[0];
+        device.driver = Driver::HomeAssistant;
+        device.leds = 1;
+        device.rate_hz = 1;
+        device.enabled = true;
+        legacy.ambient.routes[0].zone = Zone::linear(1, false, Mode::ScreenCopy).unwrap();
+        let mut editor = Editor {
+            document: Document::decode(&legacy.encode().unwrap()).unwrap(),
+            page: Page::Ambient,
+            index: 0,
+        };
+        assert_eq!(
+            editor.ambient_route_notice(),
+            Some(LEGACY_HOME_ASSISTANT_ROUTE)
+        );
+        assert_eq!(editor.document, legacy);
+        editor.remove_ambient_route().unwrap();
+        assert!(editor.ambient_route_notice().is_none());
+        assert!(editor.ambient_candidates().is_empty());
+        let without_route = editor.document.clone();
+        assert!(editor.add_ambient_route("screen", Some("main")).is_err());
+        assert_eq!(editor.document, without_route);
+
+        editor.document = legacy.clone();
+        editor.page = Page::Devices;
+        let role = editor
+            .fields()
+            .into_iter()
+            .find(|f| f.key == "role")
+            .unwrap();
+        assert_eq!(role.hint, LEGACY_HOME_ASSISTANT_ROUTE);
+        assert!(role.choices.iter().any(|(_, value)| value == "canvas"));
+        editor.set("role", "canvas").unwrap();
+        assert!(editor.fields().iter().all(|field| field.key != "role"));
+        assert!(editor.set("role", "ambient").is_err());
+        editor.set("enabled", "true").unwrap();
+
+        let saved = editor.merged(&legacy).unwrap().encode().unwrap();
+        let reopened = Document::decode(&saved).unwrap();
+        let device = &reopened.lighting.setup.devices[0];
+        assert_eq!(device.id, "screen");
+        assert_eq!(device.driver, Driver::HomeAssistant);
+        assert_eq!(device.role, Role::Canvas);
+        assert!(device.enabled);
+        assert!(
+            reopened
+                .lighting
+                .setup
+                .canvas
+                .points
+                .iter()
+                .any(|p| p.device == device.id)
+        );
+        assert!(reopened.ambient.routes.is_empty());
+        assert_eq!(reopened.ambient.sources, legacy.ambient.sources);
+        assert_eq!(reopened.lighting.scene, legacy.lighting.scene);
+        assert_eq!(reopened.lighting.groups, legacy.lighting.groups);
     }
     #[test]
     fn adding_lcd_selects_its_configuration_not_its_setup_index() {
