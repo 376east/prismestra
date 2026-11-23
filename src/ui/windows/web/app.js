@@ -991,8 +991,33 @@ const englishAliceStatus=new Map([
  ['Проверьте системное время для входа в Алису.','Check the system clock before signing in to Alice.'],
  ['Доступ к Алисе истёк или отозван. Войдите через Яндекс ID заново.','Alice access expired or was revoked. Sign in with Yandex ID again.'],
  ['Яндекс отклонил доступ. Войдите заново и проверьте права на лампу.','Yandex denied access. Sign in again and check access to the lamp.'],
- ['Подтвердите вход в браузере.','Confirm sign-in in your browser.'],
+ ['Ждём подтверждения в браузере. Войдите через Яндекс ID и вернитесь в Prismestra.','Waiting for your browser. Sign in with Yandex ID, then return to Prismestra.'],
+ ['Ответ получен. Получаем доступ от Яндекса…','Browser response received. Getting access from Yandex…'],
  ['Загружаем доступные лампы…','Loading available lights…'],
+ ['Не удалось получить доступ от Яндекса. Повторите вход.','Could not get access from Yandex. Sign in again.'],
+ ['Не удалось загрузить список ламп. Повторите попытку.','Could not load available lights. Try again.'],
+ ['Яндекс не предоставил права на список и управление лампами. Повторите вход.','Yandex did not grant permission to list and control lights. Sign in again.'],
+ ['Вход отменён или доступ не разрешён. Начните вход заново.','Sign-in was cancelled or access was denied. Start sign-in again.'],
+ ['Время ожидания входа истекло. Начните вход заново.','The sign-in attempt timed out. Start sign-in again.'],
+ ['Не удалось открыть вход в браузере. Повторите вход.','Could not open sign-in in your browser. Try again.'],
+ ['Не удалось принять ответ Яндекса.','Could not receive the browser response. Sign in again.'],
+ ['Ответ Яндекса не содержит допустимого кода.','The browser returned an invalid sign-in response. Sign in again.'],
+ ['Порт входа Алисы 45183 занят.','The local sign-in port is busy. Close the other sign-in attempt and try again.'],
+ ['Не удалось запустить приём входа.','Could not start the local sign-in listener. Try again.'],
+ ['Не удалось подготовить безопасный вход.','Could not prepare secure sign-in. Try again.'],
+ ['Операция Алисы прервалась.','The Alice operation stopped. Try again.'],
+ ['Дождитесь завершения операции Алисы.','Wait for the current Alice operation to finish.'],
+ ['Не удалось прочитать сохранённый вход Алисы.','Could not read the saved Alice sign-in on this PC.'],
+ ['Доступ получен, но не удалось сохранить вход для следующего запуска.','Access is ready, but Prismestra could not remember your sign-in.'],
+ ['Проверяем лампу и отправляем разовую команду.','Checking the selected light and sending one command…'],
+ ['Сначала включите выбранную лампу.','Turn on the selected light before changing brightness.'],
+ ['Выбранная лампа изменилась или недоступна.','The selected light changed or is unavailable. Reopen lamp controls and choose it again.'],
+ ['Назначение лампы изменилось. Закройте и снова откройте настройки Алисы.','The selected light changed. Reopen lamp controls and choose it again.'],
+ ['Лампа уже включена.','The light is already on.'],
+ ['Лампа уже выключена.','The light is already off.'],
+ ['Связь с Яндексом прервалась.','The connection to Yandex was interrupted.'],
+ ['Не удалось разобрать ответ Яндекса.','Prismestra received an unreadable response from Yandex.'],
+ ['Не удалось связаться с Prismestra.','Could not reach Prismestra.'],
  ['Выберите лампу.','Choose a light.'],
  ['Нет доступных ламп с регулировкой яркости.','No dimmable lights are available.'],
  ['Вы вышли из Алисы в Prismestra.','Signed out of Alice in Prismestra.'],
@@ -1229,7 +1254,8 @@ function receiveAlice(message) {
   : message.state;
  aliceState=state;
  const status=$('#alice-status');
- status.textContent=aliceStatusText(state.message);
+ const text=aliceStatusText(state.message);
+ if(status.textContent!==text)status.textContent=text;
  status.title=english&&(status.textContent!==state.message)?state.message:'';
  $('#alice-login').hidden=state.busy || !state.needsLogin;
  retry.hidden=state.busy || !state.saved || state.needsLogin || Boolean(state.ticket);
@@ -1321,8 +1347,13 @@ document.addEventListener('click',event=>{
  case 'alice-retry':
  case 'alice-sign-out':
   if(aliceState?.busy)break;
-  receiveAlice({state:{...aliceState,busy:true,lamps:[]}});
-  if(b.dataset.action==='alice-sign-in')aliceRequest('sign_in',{remember:$('#alice-remember').checked});
+  const pendingText={
+   'alice-sign-in':ui('Открываем вход в браузере…','Opening sign-in in your browser…'),
+   'alice-retry':ui('Загружаем доступные лампы…','Loading available lights…'),
+   'alice-sign-out':ui('Завершаем выход из Алисы…','Signing out of Alice…')
+  };
+  receiveAlice({state:{...aliceState,busy:true,lamps:[],message:pendingText[b.dataset.action]}});
+  if(b.dataset.action==='alice-sign-in')aliceRequest('sign_in',{remember:$('#alice-remember').checked,language:english?'en':'ru'});
   else aliceRequest(b.dataset.action==='alice-retry'?'open':'sign_out');
   break;
  case 'alice-turn-on':
