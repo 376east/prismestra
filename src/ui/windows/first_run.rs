@@ -8,6 +8,7 @@ use crate::devices::{Device, Role};
 use std::{thread::JoinHandle, time::Duration};
 
 const STARTUP_SEARCHES: u8 = 3;
+const STARTUP_SEARCH_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(serde::Serialize)]
 pub(super) struct DeviceCandidate<'a> {
@@ -61,6 +62,7 @@ pub(super) struct Startup {
     context: u64,
     attempts: u8,
     search_limit: u8,
+    manual_between_passes: bool,
     next: Instant,
 }
 
@@ -83,6 +85,7 @@ impl Startup {
             context: 0,
             attempts: 0,
             search_limit: STARTUP_SEARCHES,
+            manual_between_passes: false,
             next: Instant::now(),
         }
     }
@@ -103,24 +106,54 @@ impl Startup {
         self.applying.is_some() || self.restoring.is_some()
     }
 
-    fn can_retry_search(&self) -> bool {
+    fn can_retry_search(&self, now: Instant) -> bool {
         self.installed
             && self.initialized
-            && self.phase == "complete"
+            && (self.phase == "complete"
+                || (self.phase == "discovered"
+                    && self.attempts < self.search_limit
+                    && now < self.next))
             && !self.configuring()
             && self.drained()
     }
 
-    fn retry_search(&mut self, document: &Document, path: &Path, context: u64) {
+    fn retry_search(&mut self, document: &Document, path: &Path, context: u64, now: Instant) {
         self.expected = Some(document.clone());
         self.path = Some(path.to_path_buf());
         self.context = context;
-        self.attempts = 0;
-        self.search_limit = 1;
-        self.next = Instant::now();
+        if self.phase == "discovered" {
+            // A user-requested pass can use the idle time without consuming the
+            // next automatic pass or moving its original deadline.
+            self.manual_between_passes = true;
+        } else {
+            self.attempts = 0;
+            self.search_limit = 1;
+            self.next = now;
+        }
         self.enabled = true;
         self.phase = "discovering";
         self.discovery_issues.clear();
+    }
+
+    fn search_due(&self, now: Instant) -> bool {
+        self.manual_between_passes || now >= self.next
+    }
+
+    fn record_search_started(&mut self) {
+        if !self.manual_between_passes {
+            self.attempts += 1;
+        }
+    }
+
+    fn schedule_next_search(&mut self, now: Instant) {
+        if self.manual_between_passes {
+            // A progressive result can be applied before the other probes finish.
+            if self.worker.is_idle() {
+                self.manual_between_passes = false;
+            }
+        } else {
+            self.next = now + STARTUP_SEARCH_INTERVAL;
+        }
     }
 
     fn complete_search(&mut self) -> bool {
@@ -135,7 +168,7 @@ impl Startup {
 
 impl App {
     pub(super) fn can_retry_startup_discovery(&self) -> bool {
-        self.first_run.can_retry_search()
+        self.first_run.can_retry_search(Instant::now())
             && self.runtime.document().lighting.setup.devices.is_empty()
             && self.path.is_some()
             && self.path == self.first_run.path
@@ -158,6 +191,7 @@ impl App {
             self.runtime.document(),
             self.path.as_deref().ok_or("Нет пути профиля")?,
             self.context_revision,
+            Instant::now(),
         );
         self.status = "Ищу поддерживаемые устройства…".into();
         Ok(())
@@ -419,7 +453,7 @@ impl App {
                     format!(" {}", applied.plan.issues.join("; "))
                 }
             );
-            self.first_run.next = Instant::now() + Duration::from_secs(30);
+            self.first_run.schedule_next_search(Instant::now());
             return Ok(true);
         }
         if let Some(result) = self.first_run.worker.poll() {
@@ -442,7 +476,7 @@ impl App {
                 } else {
                     format!("Поиск устройств: {}", plan.issues.join("; "))
                 };
-                self.first_run.next = Instant::now() + Duration::from_secs(30);
+                self.first_run.schedule_next_search(Instant::now());
                 return Ok(true);
             }
             let outputs = plan.local.prepare(&plan.document, &self.asset_root)?;
@@ -497,7 +531,7 @@ impl App {
             );
             return Ok(true);
         }
-        if Instant::now() < self.first_run.next {
+        if !self.first_run.search_due(Instant::now()) {
             return Ok(false);
         }
         let local = self
@@ -514,7 +548,7 @@ impl App {
         self.first_run
             .worker
             .start(endpoint, guard, local, progressive)?;
-        self.first_run.attempts += 1;
+        self.first_run.record_search_started();
         self.first_run.phase = "discovering";
         self.status = "Ищу поддерживаемые устройства. Сцена включится автоматически…".into();
         Ok(true)
@@ -527,30 +561,70 @@ mod tests {
     use crate::devices::Driver;
 
     #[test]
+    fn empty_first_scan_offers_manual_search_before_the_next_automatic_pass() {
+        let (_fixture, profile, _, _) = crate::app::installed::tests::fresh_profile();
+        let document = Document::load(&profile).unwrap();
+        let mut startup = Startup::new(true);
+        let first_finished = startup.next + Duration::from_secs(6);
+        startup.initialized = true;
+        startup.record_search_started();
+        startup.phase = "discovered";
+        startup.schedule_next_search(first_finished);
+        let second_automatic = first_finished + Duration::from_secs(30);
+
+        assert!(startup.can_retry_search(first_finished));
+        assert!(!startup.can_retry_search(second_automatic));
+        assert!(!startup.search_due(second_automatic - Duration::from_millis(1)));
+        startup.retry_search(&document, &profile, 1, first_finished);
+        assert!(!startup.can_retry_search(first_finished));
+        assert!(startup.search_due(first_finished));
+        startup.record_search_started();
+        assert_eq!(startup.attempts, 1);
+        let manual_finished = first_finished + Duration::from_secs(6);
+        startup.phase = "discovered";
+        startup.schedule_next_search(manual_finished);
+        assert!(startup.can_retry_search(manual_finished));
+        assert!(!startup.search_due(second_automatic - Duration::from_millis(1)));
+        assert!(startup.search_due(second_automatic));
+
+        startup.record_search_started();
+        assert_eq!(startup.attempts, 2);
+        let second_finished = second_automatic + Duration::from_secs(6);
+        startup.schedule_next_search(second_finished);
+        let third_automatic = second_finished + Duration::from_secs(30);
+        assert!(!startup.search_due(third_automatic - Duration::from_millis(1)));
+        assert!(startup.search_due(third_automatic));
+        startup.record_search_started();
+        assert!(startup.complete_search());
+        assert!(startup.can_retry_search(third_automatic + Duration::from_secs(6)));
+    }
+
+    #[test]
     fn empty_startup_search_can_be_rearmed_for_one_pass_without_handover() {
         let (_fixture, profile, _, _) = crate::app::installed::tests::fresh_profile();
         let document = Document::load(&profile).unwrap();
         let mut startup = Startup::new(true);
-        assert!(!startup.can_retry_search());
+        let now = startup.next;
+        assert!(!startup.can_retry_search(now));
         startup.initialized = true;
         startup.attempts = STARTUP_SEARCHES;
         assert!(startup.complete_search());
-        assert!(startup.can_retry_search());
+        assert!(startup.can_retry_search(now));
 
-        startup.retry_search(&document, &profile, 7);
+        startup.retry_search(&document, &profile, 7, now);
         assert!(startup.enabled && startup.initialized);
         assert!(startup.handover.is_none());
         assert_eq!(startup.expected.as_ref(), Some(&document));
         assert_eq!(startup.path.as_ref(), Some(&profile));
         assert_eq!(startup.context, 7);
-        assert!(!startup.can_retry_search());
+        assert!(!startup.can_retry_search(now));
         assert!(!startup.complete_search());
-        startup.attempts += 1;
+        startup.record_search_started();
         assert!(startup.complete_search());
-        assert!(startup.can_retry_search());
+        assert!(startup.can_retry_search(now));
 
         startup.cancel();
-        assert!(!startup.can_retry_search());
+        assert!(!startup.can_retry_search(now));
     }
 
     #[test]
