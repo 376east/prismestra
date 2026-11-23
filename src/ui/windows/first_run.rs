@@ -63,6 +63,8 @@ pub(super) struct Startup {
     attempts: u8,
     search_limit: u8,
     manual_between_passes: bool,
+    manual_started_since_automatic: bool,
+    early_manual_starts: u64,
     next: Instant,
 }
 
@@ -86,6 +88,8 @@ impl Startup {
             attempts: 0,
             search_limit: STARTUP_SEARCHES,
             manual_between_passes: false,
+            manual_started_since_automatic: false,
+            early_manual_starts: 0,
             next: Instant::now(),
         }
     }
@@ -107,12 +111,14 @@ impl Startup {
     }
 
     fn can_retry_search(&self, now: Instant) -> bool {
+        // A click can win while the worker is still idle, even if the automatic
+        // pass is due. Once a manual pass has run, let the due automatic pass go next.
         self.installed
             && self.initialized
             && (self.phase == "complete"
                 || (self.phase == "discovered"
                     && self.attempts < self.search_limit
-                    && now < self.next))
+                    && (now < self.next || !self.manual_started_since_automatic)))
             && !self.configuring()
             && self.drained()
     }
@@ -140,9 +146,14 @@ impl Startup {
     }
 
     fn record_search_started(&mut self) {
-        if !self.manual_between_passes {
+        if self.manual_between_passes {
+            self.manual_started_since_automatic = true;
+            self.early_manual_starts = self.early_manual_starts.saturating_add(1);
+        } else {
+            self.manual_started_since_automatic = false;
             self.attempts += 1;
         }
+        self.phase = "discovering";
     }
 
     fn schedule_next_search(&mut self, now: Instant) {
@@ -242,6 +253,7 @@ impl App {
             let report = serde_json::to_vec_pretty(&serde_json::json!({
                 "version": 1, "phase": self.first_run.phase,
                 "attempt": self.first_run.attempts,
+                "early_manual_starts": self.first_run.early_manual_starts,
                 "native_outputs": self.native_lighting.is_some(),
                 "devices": self.runtime.document().lighting.setup.devices.len(),
                 "discovery_issues": self.first_run.discovery_issues,
@@ -549,7 +561,6 @@ impl App {
             .worker
             .start(endpoint, guard, local, progressive)?;
         self.first_run.record_search_started();
-        self.first_run.phase = "discovering";
         self.status = "Ищу поддерживаемые устройства. Сцена включится автоматически…".into();
         Ok(true)
     }
@@ -559,6 +570,42 @@ impl App {
 mod tests {
     use super::*;
     use crate::devices::Driver;
+
+    #[test]
+    fn early_click_is_admitted_when_the_automatic_pass_is_due_but_has_not_started() {
+        let (_fixture, profile, _, _) = crate::app::installed::tests::fresh_profile();
+        let document = Document::load(&profile).unwrap();
+        let mut startup = Startup::new(true);
+        startup.initialized = true;
+        startup.record_search_started();
+        startup.phase = "discovered";
+        startup.schedule_next_search(startup.next);
+        let click = startup.next + Duration::from_millis(1);
+        let scheduled = startup.next;
+        assert!(startup.search_due(click));
+        assert!(startup.can_retry_search(click));
+        startup.retry_search(&document, &profile, 1, click);
+        assert_eq!(startup.early_manual_starts, 0, "queued is not started");
+        assert!(!startup.can_retry_search(click), "no second manual command");
+        startup.record_search_started();
+        assert_eq!((startup.attempts, startup.early_manual_starts), (1, 1));
+
+        let finished = click + Duration::from_secs(6);
+        startup.phase = "discovered";
+        startup.schedule_next_search(finished);
+        assert_eq!(startup.next, scheduled);
+        assert!(startup.search_due(finished));
+        assert!(
+            !startup.can_retry_search(finished),
+            "let the due automatic pass run"
+        );
+        startup.record_search_started();
+        assert_eq!((startup.attempts, startup.early_manual_starts), (2, 1));
+        assert!(
+            !startup.can_retry_search(finished),
+            "automatic pass already started"
+        );
+    }
 
     #[test]
     fn empty_first_scan_offers_manual_search_before_the_next_automatic_pass() {
@@ -573,7 +620,7 @@ mod tests {
         let second_automatic = first_finished + Duration::from_secs(30);
 
         assert!(startup.can_retry_search(first_finished));
-        assert!(!startup.can_retry_search(second_automatic));
+        assert!(startup.can_retry_search(second_automatic));
         assert!(!startup.search_due(second_automatic - Duration::from_millis(1)));
         startup.retry_search(&document, &profile, 1, first_finished);
         assert!(!startup.can_retry_search(first_finished));
@@ -586,6 +633,7 @@ mod tests {
         assert!(startup.can_retry_search(manual_finished));
         assert!(!startup.search_due(second_automatic - Duration::from_millis(1)));
         assert!(startup.search_due(second_automatic));
+        assert!(!startup.can_retry_search(second_automatic));
 
         startup.record_search_started();
         assert_eq!(startup.attempts, 2);
@@ -595,6 +643,10 @@ mod tests {
         assert!(!startup.search_due(third_automatic - Duration::from_millis(1)));
         assert!(startup.search_due(third_automatic));
         startup.record_search_started();
+        assert_eq!(
+            startup.early_manual_starts, 1,
+            "automatic passes keep the receipt"
+        );
         assert!(startup.complete_search());
         assert!(startup.can_retry_search(third_automatic + Duration::from_secs(6)));
     }
@@ -620,6 +672,7 @@ mod tests {
         assert!(!startup.can_retry_search(now));
         assert!(!startup.complete_search());
         startup.record_search_started();
+        assert_eq!(startup.early_manual_starts, 0);
         assert!(startup.complete_search());
         assert!(startup.can_retry_search(now));
 
