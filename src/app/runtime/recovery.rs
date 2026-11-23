@@ -29,6 +29,14 @@ pub(crate) struct LcdRetryTicket {
     pub attempt: u64,
 }
 
+#[derive(Default, PartialEq, Eq)]
+enum LcdPresence {
+    #[default]
+    Unknown,
+    Absent,
+    Returned,
+}
+
 #[derive(Default)]
 pub(super) struct Recovery {
     attempts: usize,
@@ -40,6 +48,7 @@ pub(super) struct Recovery {
     manual_attempt: u64,
     manual_started: Option<(OpenRgbRetryTicket, Option<u64>)>,
     pub(super) start_error: Option<OutputStartError>,
+    lcd_presence: LcdPresence,
 }
 impl Recovery {
     fn observe(&mut self, generation: u64, failed: bool, now: u64) -> bool {
@@ -224,20 +233,64 @@ impl Runtime {
     /// A resident native listener reports a real bound-interface arrival. Opening
     /// still happens on the existing worker, with its descriptor/lease checks.
     pub(super) fn lcd_interface_arrived(&mut self, path: &str, reappeared: bool) {
-        // A live RGB transition retains every existing LCD binding.
-        if self.automatic_recovery_paused() {
+        if self.stopped {
             return;
         }
+        let paused = self.automatic_recovery_paused();
         let key = format!("hid:{}", path.to_ascii_lowercase());
+        let mut returned = false;
         for (id, spec) in &self.lcd_specs {
-            if spec.keys.contains(&key)
-                && self.output_recovery.contains_key(id)
+            if !spec.keys.contains(&key) {
+                continue;
+            }
+            let Some(recovery) = self.output_recovery.get_mut(id) else {
+                continue;
+            };
+            if recovery.lcd_presence == LcdPresence::Absent {
+                recovery.lcd_presence = LcdPresence::Returned;
+                returned = true;
+            } else if recovery.lcd_presence == LcdPresence::Unknown
+                && !paused
                 && self.lcd.get(id).is_none_or(|worker| {
                     reappeared || worker.snapshot().phase != lcd_worker::Phase::Ready
                 })
             {
                 self.lcd_arrivals.insert(id.clone());
             }
+        }
+        if returned {
+            self.bump_view();
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    pub(super) fn lcd_interface_removed(&mut self, path: &str) {
+        if self.stopped {
+            return;
+        }
+        let key = format!("hid:{}", path.to_ascii_lowercase());
+        let mut removed = false;
+        for (id, spec) in &self.lcd_specs {
+            if !spec.keys.contains(&key) {
+                continue;
+            }
+            let Some(recovery) = self.output_recovery.get_mut(id) else {
+                continue;
+            };
+            if recovery.lcd_presence == LcdPresence::Absent {
+                continue;
+            }
+            recovery.lcd_presence = LcdPresence::Absent;
+            recovery.due_us = None;
+            recovery.start_error = Some("The bound LCD interface was disconnected".into());
+            self.lcd_arrivals.remove(id);
+            if let Some(worker) = self.lcd.get(id) {
+                worker.stop();
+            }
+            removed = true;
+        }
+        if removed {
+            self.bump_view();
         }
     }
 
@@ -416,6 +469,13 @@ impl Runtime {
         keys: Vec<String>,
         factory: LcdFactory,
     ) -> Result<(), String> {
+        if self
+            .output_recovery
+            .get(id)
+            .is_some_and(|state| state.lcd_presence == LcdPresence::Absent)
+        {
+            return Err("The bound LCD interface was disconnected".into());
+        }
         // Resume can restore other outputs while the old LCD call unwinds.
         // Keep this logical owner until it has actually released its worker.
         if self.lcd.get(id).is_some_and(|worker| !worker.is_reaped()) {
@@ -438,6 +498,9 @@ impl Runtime {
             Ok((controller, transport))
         })?;
         self.lcd.insert(id.to_owned(), worker);
+        if let Some(state) = self.output_recovery.get_mut(id) {
+            state.lcd_presence = LcdPresence::Unknown;
+        }
         Ok(())
     }
 
@@ -524,6 +587,18 @@ impl Runtime {
                 }
             } else if let Some(spec) = self.lcd_specs.get(id) {
                 let worker = self.lcd.get(id);
+                let reaped = worker.is_none_or(lcd_worker::Worker::is_reaped);
+                match state.lcd_presence {
+                    LcdPresence::Absent => continue,
+                    LcdPresence::Returned => {
+                        if reaped {
+                            *state = Recovery::default();
+                            lcd.push((id.clone(), spec.keys.clone(), spec.factory.clone()));
+                        }
+                        continue;
+                    }
+                    LcdPresence::Unknown => {}
+                }
                 let snapshot = worker.map(lcd_worker::Worker::snapshot);
                 let failed = state.start_error.is_some()
                     || snapshot
@@ -539,9 +614,7 @@ impl Runtime {
                 }
                 scheduled_retry |=
                     state.observe(snapshot.as_ref().map_or(0, |s| s.generation), failed, now);
-                if failed
-                    && state.take_attempt(now, worker.is_none_or(lcd_worker::Worker::is_reaped))
-                {
+                if failed && state.take_attempt(now, reaped) {
                     lcd.push((id.clone(), spec.keys.clone(), spec.factory.clone()));
                 }
             }

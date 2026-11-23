@@ -418,7 +418,7 @@ fn bootstrap_with_migration(
         .share_mode(0)
         .open(user_root.join(".installed-bootstrap.lock"))
         .map_err(|e| format!("Installed profile bootstrap: {e}"))?;
-    let profile = user_root.join("profile.json");
+    let profile = startup_profile_path(user_root);
     let local = state.join("lighting-local.json");
     directory(&state.join("assets"))?;
     super::first_run::recover(state, &profile)?;
@@ -491,6 +491,48 @@ fn bootstrap_with_migration(
     // The resident startup coordinator activates saved outputs after the previous
     // session AND its owned helper/backend have drained. A draft still opens for repair.
     Ok(args)
+}
+
+pub(crate) fn startup_profile_path(user_root: &Path) -> PathBuf {
+    user_root.join("profile.json")
+}
+
+pub(crate) fn startup_profile_destination(user_root: &Path) -> Result<PathBuf, String> {
+    let root = checked_local_path(user_root).map_err(|error| error.to_string())?;
+    let path = startup_profile_path(&root);
+    absent(&path)?;
+    Ok(path)
+}
+
+pub(crate) fn save_profile_copy(
+    user_root: &Path,
+    path: &Path,
+    document: &Document,
+) -> Result<(), String> {
+    document.save(&profile_copy_destination(user_root, path)?)
+}
+
+fn profile_copy_destination(user_root: &Path, path: &Path) -> Result<PathBuf, String> {
+    let root = checked_local_path(user_root).map_err(|error| error.to_string())?;
+    let parent = path
+        .parent()
+        .ok_or("Choose a folder for the profile copy.")?;
+    let parent = checked_local_path(parent).map_err(|error| error.to_string())?;
+    if parent
+        .ancestors()
+        .any(|ancestor| ancestor.as_os_str().eq_ignore_ascii_case(root.as_os_str()))
+    {
+        return Err("Choose a folder outside the Prismestra data folder for the copy.".into());
+    }
+    let file = path
+        .file_name()
+        .ok_or("Choose a file name for the profile copy.")?;
+    if file.to_string_lossy().contains(':') {
+        return Err("Choose an ordinary profile file name.".into());
+    }
+    let path = parent.join(file);
+    absent(&path)?;
+    Ok(path)
 }
 
 pub(crate) fn directory(path: &Path) -> Result<PathBuf, String> {
@@ -911,6 +953,139 @@ pub(crate) mod tests {
                 &fingerprint(b"fixture backend"),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn installed_save_round_trips_scene_lcd_and_strip_on_next_bootstrap() {
+        use crate::app::{ambient, assets::Store, device_setup, document::Lcd, lcd};
+        use crate::capture::ambient::{Mode, Zone};
+
+        let fixture = Fixture::new();
+        let (exe, manifest) = fixture.payload(b"fixture backend");
+        let user = fixture.0.join("user");
+        let downloads = directory(&fixture.0.join("Downloads")).unwrap();
+        let external = downloads.join("Main.json");
+        let args = bootstrap(&manifest, &exe, &user).unwrap();
+        let startup = PathBuf::from(&args[3]);
+        let state = PathBuf::from(&args[1]);
+
+        let mut old = Document::load(&startup).unwrap();
+        let mut strip = device_setup::preset("SK0410")
+            .unwrap()
+            .device_with_leds("fixture-strip", 30)
+            .unwrap();
+        strip.role = crate::devices::Role::Ambient;
+        old.lighting.setup.devices.push(strip);
+        old.lighting.setup.devices.push(
+            device_setup::preset("tt-lcd")
+                .unwrap()
+                .device("fixture-lcd")
+                .unwrap(),
+        );
+        old.lighting
+            .groups
+            .pc
+            .extend(["fixture-strip".into(), "fixture-lcd".into()]);
+        old.ambient.sources.push(ambient::Source {
+            key: "monitor".into(),
+            rate_hz: 30,
+            crop: None,
+            stale_after_ms: 500,
+        });
+        old.ambient.routes.push(ambient::Route {
+            device: "fixture-strip".into(),
+            source: "monitor".into(),
+            scene_edges: false,
+            enabled: false,
+            zone: Zone::linear(30, false, Mode::ScreenCopy).unwrap(),
+            processing: Default::default(),
+            output: Default::default(),
+        });
+        let store = Store::new(state.join("assets")).unwrap();
+        old.lcd.push(Lcd {
+            device: "fixture-lcd".into(),
+            config: lcd::Config {
+                media: Some(store.put(b"old media fixture", 1024).unwrap()),
+                ..Default::default()
+            },
+        });
+        old.save(&startup).unwrap();
+        let mut edited = old.clone();
+        edited.lighting.scene.colors[0] = 0xa2e14b;
+        edited.lcd[0].config.media = Some(store.put(b"new media fixture", 1024).unwrap());
+        edited.ambient.routes[0].scene_edges = true;
+        edited.save(&external).unwrap();
+
+        // Before the fix, Save As only wrote Main.json. The next installed bootstrap still
+        // selects the old profile, independently of the most recently written JSON file.
+        let old_restart = bootstrap(&manifest, &exe, &user).unwrap();
+        assert_eq!(Document::load(Path::new(&old_restart[3])).unwrap(), old);
+
+        let bindings = state.join("lighting-local.json");
+        let mut local = Local::read(&bindings, &old).unwrap();
+        local.devices.insert(
+            "fixture-lcd".into(),
+            crate::devices::Binding::Hid {
+                path:
+                    r"\\?\hid#vid_264a&pid_233c&mi_01#fixture#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+                        .into(),
+            },
+        );
+        local.validate(&old).unwrap();
+        fs::write(&bindings, serde_json::to_vec(&local).unwrap()).unwrap();
+        let original_bindings = fs::read(&bindings).unwrap();
+        let draft = state.join("editor-scene-draft.json");
+        fs::write(&draft, b"separate draft fixture").unwrap();
+        let saved = startup_profile_destination(&user).unwrap();
+        let mut runtime =
+            crate::app::runtime::Runtime::new(Document::load(&external).unwrap(), None).unwrap();
+        runtime
+            .save_profile_with_journal_at(&saved, state.join("startup-fixture-journal.json"))
+            .unwrap();
+        assert_eq!(saved, startup);
+        let fresh_args = bootstrap(&manifest, &exe, &user).unwrap();
+        assert_eq!(Document::load(Path::new(&fresh_args[3])).unwrap(), edited);
+
+        let copy = downloads.join("Copy.json");
+        save_profile_copy(&user, &copy, &old).unwrap();
+        assert_eq!(Document::load(&copy).unwrap(), old);
+        assert_eq!(Document::load(&startup).unwrap(), edited);
+        assert!(profile_copy_destination(&user, &startup).is_err());
+        assert!(profile_copy_destination(&user, &bindings).is_err());
+        assert!(profile_copy_destination(&user, &draft).is_err());
+        assert_eq!(fs::read(bindings).unwrap(), original_bindings);
+        assert_eq!(fs::read(draft).unwrap(), b"separate draft fixture");
+        assert_eq!(Document::load(&external).unwrap(), edited);
+    }
+
+    #[test]
+    fn saving_profile_copy_does_not_change_any_installed_data_file() {
+        fn files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+            let mut observed = std::collections::BTreeMap::new();
+            for entry in fs::read_dir(root).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    observed.extend(files(&path));
+                } else {
+                    observed.insert(path.clone(), fs::read(path).unwrap());
+                }
+            }
+            observed
+        }
+
+        let (fixture, profile, state, _) = fresh_profile();
+        let data = profile.parent().unwrap();
+        fs::write(state.join("editor-scene-draft.json"), b"draft").unwrap();
+        fs::write(state.join("runtime-fixture.json"), b"journal").unwrap();
+        let mut document = Document::load(&profile).unwrap();
+        document.lighting.scene.colors[0] = 0xa2e14b;
+        let before = files(data);
+
+        let copy = fixture.0.join("Copy.json");
+        save_profile_copy(data, &copy, &document).unwrap();
+        assert_eq!(Document::load(&copy).unwrap(), document);
+        assert_eq!(files(data), before);
     }
 
     #[test]
