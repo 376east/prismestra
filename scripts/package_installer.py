@@ -175,6 +175,34 @@ def stage_setup_tools(destination):
     return hashes
 
 
+def stage_inno_source(stage, version, stem, *, test_namespace, webview_probe_hash,
+                      setup_tool_hashes, include_pawnio, runtime_floor):
+    app_name = "Prismestra Lifecycle Test" if test_namespace else "Prismestra"
+    app_dir = f"{app_name}\\{test_namespace}" if test_namespace else app_name
+    compiler_defs = [
+        ("ProductName", app_name), ("ProductDirectory", app_dir),
+        ("InstallerVersion", version), ("InstallerBaseName", stem),
+        ("InstallerAppId", test_namespace or APP_ID),
+        ("ShortcutName", f"{app_name} {test_namespace}" if test_namespace else app_name),
+        ("StartupValue", f"Prismestra-Test-{test_namespace}" if test_namespace else "Prismestra"),
+    ]
+    defs = [f'#define {name} "{value}"' for name, value in compiler_defs]
+    if test_namespace:
+        defs.append("#define LifecycleTest")
+    else:
+        defs.append(f'#define WebViewProbeSha256 "{webview_probe_hash}"')
+        defs.append(f'#define PolicyToolSha256 "{setup_tool_hashes[POLICY_TOOL]}"')
+        defs.append(f'#define LegacyStartupToolSha256 "{setup_tool_hashes[LEGACY_STARTUP_TOOL]}"')
+    if include_pawnio:
+        defs.append("#define IncludePawnIO")
+    if runtime_floor is not None:
+        for name, part in zip(("VcMajor", "VcMinor", "VcBuild", "VcRevision"), runtime_floor):
+            defs.append(f"#define {name} {part}")
+    (stage / "generated.iss").write_bytes(("\n".join(defs) + "\n").encode("utf-8"))
+    for name in ("Prismestra.iss", "guard-native.iss"):
+        shutil.copyfile(ROOT / "installer" / name, stage / name)
+
+
 def package(args):
     if not re.fullmatch(r"[0-9a-f]{40}", args.expected_commit):
         raise ValueError("Use a full lowercase Git commit SHA")
@@ -212,6 +240,7 @@ def package(args):
     file_pin(app, args.app_sha256)
     release_source = stage_app_notices(args.release_dir, payload, args.app_sha256, args.expected_commit) if args.release_dir else None
     webview_probe_hash = None
+    setup_tool_hashes = {}
     if not test_mode:
         stage_prerequisites(packages, args.prerequisite_dir, stage / "prerequisites")
         webview_probe_hash = stage_webview_probe(stage / "prerequisites")
@@ -225,34 +254,13 @@ def package(args):
     if runtime_floor is not None:
         manifest["minimum_vc_runtime"] = ".".join(map(str, runtime_floor))
     write_json(payload / "install-manifest.json", manifest)
-    app_name = "Prismestra Lifecycle Test" if test_mode else "Prismestra"
-    app_dir = f"{app_name}\\{args.test_namespace}" if test_mode else app_name
     if test_mode:
         stem = f"Prismestra-{args.version}-{args.expected_commit[:12]}-x64-test-{args.test_namespace}"
     else:
         stem = f"Prismestra-Setup-{args.version}-x64"
-    compiler_defs = [
-        ("ProductName", app_name), ("ProductDirectory", app_dir),
-        ("InstallerVersion", args.version), ("InstallerBaseName", stem),
-        ("InstallerAppId", args.test_namespace or APP_ID),
-        ("ShortcutName", f"{app_name} {args.test_namespace}" if test_mode else app_name),
-        ("StartupValue", f"Prismestra-Test-{args.test_namespace}" if test_mode else "Prismestra"),
-    ]
-    defs = [f'#define {name} "{value}"' for name, value in compiler_defs]
-    if test_mode:
-        defs.append("#define LifecycleTest")
-    else:
-        defs.append(f'#define WebViewProbeSha256 "{webview_probe_hash}"')
-        defs.append(f'#define PolicyToolSha256 "{setup_tool_hashes[POLICY_TOOL]}"')
-        defs.append(f'#define LegacyStartupToolSha256 "{setup_tool_hashes[LEGACY_STARTUP_TOOL]}"')
-    if "pawnio" in packages:
-        defs.append("#define IncludePawnIO")
-    if runtime_floor is not None:
-        for name, part in zip(("VcMajor", "VcMinor", "VcBuild", "VcRevision"), runtime_floor):
-            defs.append(f"#define {name} {part}")
-    (stage / "generated.iss").write_bytes(("\n".join(defs) + "\n").encode("utf-8"))
-    for name in ("Prismestra.iss", "guard-native.iss"):
-        shutil.copyfile(ROOT / "installer" / name, stage / name)
+    stage_inno_source(stage, args.version, stem, test_namespace=args.test_namespace,
+                      webview_probe_hash=webview_probe_hash, setup_tool_hashes=setup_tool_hashes,
+                      include_pawnio="pawnio" in packages, runtime_floor=runtime_floor)
 
     receipt = {"scope": "staged_only", "manifest_sha256": sha256(payload / "install-manifest.json")}
     if webview_probe_hash is not None:
