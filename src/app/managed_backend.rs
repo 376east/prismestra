@@ -793,6 +793,31 @@ impl Default for MonitorTiming {
     }
 }
 
+impl MonitorTiming {
+    fn should_restart(
+        &self,
+        failure: &ProbeFailure,
+        ever_ready: bool,
+        ever_populated: bool,
+        unhealthy: u32,
+        uptime: Duration,
+    ) -> bool {
+        if matches!(failure, ProbeFailure::Unknown(_)) {
+            return false;
+        }
+        if !ever_ready {
+            return uptime >= self.startup_limit;
+        }
+        // A protocol handshake can precede the hardware scan. Allow one
+        // additional startup interval for an owned SDK that stalls on read
+        // before reporting any controllers. Anchor it to the child lifetime.
+        unhealthy >= 3
+            && (!matches!(failure, ProbeFailure::ReadTimeout)
+                || ever_populated
+                || uptime >= self.startup_limit.saturating_mul(2))
+    }
+}
+
 fn monitor_owned(
     config: &Config,
     state: &Shared,
@@ -826,15 +851,14 @@ fn monitor_owned(
             }
         }
         if let Err(failure) = probe(config.endpoint, owned.child.id()) {
-            let (confirmed, reason) = match failure {
-                ProbeFailure::Unknown(reason) => {
-                    unhealthy = 0;
-                    (false, reason)
-                }
-                ProbeFailure::Confirmed(reason) => {
-                    unhealthy += 1;
-                    (true, reason)
-                }
+            unhealthy = if matches!(failure, ProbeFailure::Unknown(_)) {
+                0
+            } else {
+                unhealthy + 1
+            };
+            let reason = match &failure {
+                ProbeFailure::Unknown(reason) | ProbeFailure::Confirmed(reason) => reason,
+                ProbeFailure::ReadTimeout => "SDK read response",
             };
             {
                 let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
@@ -842,10 +866,14 @@ fn monitor_owned(
                 snapshot.detail = format!("Managed OpenRGB SDK unavailable: {reason}");
             }
             ready = false;
-            if confirmed
-                && state.restarting.load(Ordering::SeqCst)
-                && ((ever_ready && unhealthy >= 3)
-                    || (!ever_ready && began.elapsed() >= timing.startup_limit))
+            if state.restarting.load(Ordering::SeqCst)
+                && timing.should_restart(
+                    &failure,
+                    ever_ready,
+                    inventory.ever_populated,
+                    unhealthy,
+                    began.elapsed(),
+                )
             {
                 state.lifecycle(owned.child.id(), format!("SDK unhealthy; restarting owned child (failures={unhealthy}, ready_before={ever_ready}, uptime_ms={}, stage={reason})", began.elapsed().as_millis()));
                 break;
@@ -937,16 +965,19 @@ fn scan_inventory(
 
 struct InventoryWatch {
     last: [u8; 32],
+    ever_populated: bool,
 }
 impl Default for InventoryWatch {
     fn default() -> Self {
         Self {
             last: fingerprint(&[]),
+            ever_populated: false,
         }
     }
 }
 impl InventoryWatch {
     fn observe(&mut self, count: usize, fingerprint: [u8; 32], state: &Shared) {
+        self.ever_populated |= count > 0;
         let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
         if self.last != fingerprint {
             self.last = fingerprint;
@@ -960,10 +991,17 @@ impl InventoryWatch {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum ProbeFailure {
     Unknown(String),
     Confirmed(String),
+    ReadTimeout,
+}
+
+impl ProbeFailure {
+    fn sdk(stage: &str) -> Self {
+        Self::Confirmed(format!("SDK {stage}"))
+    }
 }
 
 fn check_owned_listener(endpoint: SocketAddr, pid: u32, stage: &str) -> Result<(), ProbeFailure> {
@@ -993,16 +1031,17 @@ fn probe_owned_sdk(
         return Err(ProbeFailure::Unknown("SDK probe cancelled".into()));
     }
     check_owned_listener(endpoint, pid, "ownership after SDK probe")?;
-    result.map_err(|stage| ProbeFailure::Confirmed(format!("SDK {stage}")))
+    result
 }
 
 // Same protocol6 negotiation as vendor/openrgb2/src/protocol/{mod,stream}.rs.
 // Its internal framing helpers are private; this probe sends only packet40 and
 // accepts exactly20bytes, without enumeration, client flags or device writes.
-fn probe_sdk(endpoint: SocketAddr, cancelled: &impl Fn() -> bool) -> Result<(), &'static str> {
-    let mut stream = TcpStream::connect_timeout(&endpoint, IO_LIMIT).map_err(|_| "connect")?;
+fn probe_sdk(endpoint: SocketAddr, cancelled: &impl Fn() -> bool) -> Result<(), ProbeFailure> {
+    let mut stream = TcpStream::connect_timeout(&endpoint, IO_LIMIT)
+        .map_err(|_| ProbeFailure::sdk("connect"))?;
     if stream.set_write_timeout(Some(IO_LIMIT)).is_err() {
-        return Err("configure timeouts");
+        return Err(ProbeFailure::sdk("configure timeouts"));
     }
     let mut request = [0u8; 20];
     request[..4].copy_from_slice(b"ORGB");
@@ -1010,36 +1049,36 @@ fn probe_sdk(endpoint: SocketAddr, cancelled: &impl Fn() -> bool) -> Result<(), 
     request[12..16].copy_from_slice(&4u32.to_le_bytes());
     request[16..].copy_from_slice(&6u32.to_le_bytes());
     if stream.write_all(&request).is_err() {
-        return Err("write request");
+        return Err(ProbeFailure::sdk("write request"));
     }
     // A timed-out blocking receive can leave a Winsock connection indeterminate.
     // Poll a nonblocking socket so cancellation and partial replies share one deadline.
     stream
         .set_nonblocking(true)
-        .map_err(|_| "configure response socket")?;
+        .map_err(|_| ProbeFailure::sdk("configure response socket"))?;
     let mut response = [0u8; 20];
     let deadline = Instant::now() + SDK_READ_LIMIT;
     let mut offset = 0;
     while offset < response.len() {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if cancelled() {
-            return Err("cancelled");
+            return Err(ProbeFailure::Unknown("SDK probe cancelled".into()));
         }
         if remaining.is_zero() {
-            return Err("read response");
+            return Err(ProbeFailure::ReadTimeout);
         }
         match stream.read(&mut response[offset..]) {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(remaining.min(POLL));
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Ok(0) | Err(_) => return Err("read response"),
+            Ok(0) | Err(_) => return Err(ProbeFailure::sdk("read response")),
             Ok(n) => offset += n,
         }
     }
     if response[..16] != request[..16] || u32::from_le_bytes(response[16..].try_into().unwrap()) < 6
     {
-        return Err("validate response");
+        return Err(ProbeFailure::sdk("validate response"));
     }
     Ok(())
 }
@@ -1345,6 +1384,23 @@ mod tests {
     }
 
     #[test]
+    fn cold_inventory_read_timeout_uses_only_the_bounded_startup_grace() {
+        let timing = MonitorTiming::default();
+        let read = ProbeFailure::ReadTimeout;
+        let hard = ProbeFailure::Confirmed("listener missing".into());
+        let unknown = ProbeFailure::Unknown("ownership table unreadable".into());
+
+        assert!(!timing.should_restart(&read, true, false, 3, Duration::from_millis(11_110)));
+        assert!(!timing.should_restart(&read, true, false, 9, Duration::from_millis(35_966)));
+        assert!(!timing.should_restart(&read, true, false, 9, Duration::from_millis(59_999)));
+        assert!(timing.should_restart(&read, true, false, 9, Duration::from_secs(60)));
+        assert!(timing.should_restart(&read, true, true, 3, Duration::from_millis(11_110)));
+        assert!(timing.should_restart(&hard, true, false, 3, Duration::from_millis(11_110)));
+        assert!(!timing.should_restart(&unknown, true, false, 9, Duration::from_secs(120)));
+        assert!(timing.should_restart(&read, false, false, 9, Duration::from_secs(30)));
+    }
+
+    #[test]
     fn loopback_probe_requires_exact_sdk_header_and_protocol() {
         for valid in [true, false] {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1368,7 +1424,7 @@ mod tests {
                 if valid {
                     Ok(())
                 } else {
-                    Err("validate response")
+                    Err(ProbeFailure::sdk("validate response"))
                 }
             );
             server.join().unwrap();
@@ -1457,6 +1513,7 @@ mod tests {
             &mut owned,
             &mut Retry::default(),
             MonitorTiming {
+                startup_limit: Duration::ZERO, // Exercise the post-startup watchdog.
                 health_interval: Duration::ZERO,
                 inventory_interval: Duration::from_secs(60),
                 ..MonitorTiming::default()
