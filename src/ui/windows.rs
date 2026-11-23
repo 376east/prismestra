@@ -76,6 +76,7 @@ const MODAL_COMMANDS: &[i32] = &[
     E_FILE,
     sources::MODULE_SELECT,
     connections::CONFIGURE_PORTABLE_OPENRGB,
+    connections::APPLY_OUTPUTS,
 ];
 const E_TARGET: i32 = 701;
 const E_LIST: i32 = 702;
@@ -2488,6 +2489,9 @@ fn modal_command(hwnd: HWND, state: &State, id: i32) -> Result<(), String> {
     }
     if id == connections::CONFIGURE_PORTABLE_OPENRGB {
         return portable::initial_openrgb_dialog(hwnd, state);
+    }
+    if id == connections::APPLY_OUTPUTS {
+        return connections::confirm_connection_apply(hwnd, state);
     }
     {
         let slot = state.app.try_borrow().map_err(|_| "UI занято")?;
