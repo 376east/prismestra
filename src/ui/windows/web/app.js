@@ -258,11 +258,19 @@ function heading(title,description,actions='') {
  return `<div class="page-heading"><div><h1>${esc(title)}</h1><p>${esc(description)}</p></div><div class="heading-actions">${actions}${sceneFileAction}</div></div>`;
 }
 function action(label,code,primary=false,extra='') {return `<button class="button ${primary?'primary':''}" data-action="${code}" data-mutation ${disabled()} ${extra}>${label}</button>`;}
+function searchText(text) {
+ return text.normalize('NFC').toLowerCase().replaceAll('ё','е');
+}
 function renderLibrary() {
- const query=search.trim().toLocaleLowerCase('ru');
+ const words=searchText(search).match(/[\p{L}\p{N}]+/gu)??[];
  const available=new Set(state.library.map(item=>item.scene.effect));
- const list=state.library.filter(item=>(!libraryEffect||item.scene.effect===libraryEffect)
-  && item.name.toLocaleLowerCase('ru').includes(query));
+ const list=state.library.filter(item=>{
+  const effect=item.scene.effect;
+  if(libraryEffect&&effect!==libraryEffect)return false;
+  if(!words.length)return true;
+  const searchable=searchText(`${item.name}\n${effectLabel(effect)}\n${effect}`);
+  return words.every(word=>searchable.includes(word));
+ });
  const effectIds=[...Object.keys(effects).filter(id=>available.has(id)),...Array.from(available).filter(id=>!Object.hasOwn(effects,id))];
  const options=effectIds.map(id=>effectOption(id,libraryEffect)).join('');
  const cards=list.slice(0,libraryLimit).map(item=>`<article class="scene-card ${same(item.scene,state.scene)?'selected':''}">
@@ -283,7 +291,7 @@ function renderLibrary() {
   <div class="toolbar">
    <select id="library-effect" aria-label="Тип эффекта"><option value="">Все эффекты</option>${options}</select>
    <output class="muted" aria-live="polite">Показано ${Math.min(libraryLimit,list.length)} из ${list.length}</output>
-   <label class="search"><input id="search" placeholder="Найти сцену" aria-label="Найти сцену" value="${esc(search)}"></label>
+   <label class="search"><input id="search" placeholder="Название сцены или эффект" aria-label="Поиск по названию сцены или эффекту" value="${esc(search)}"></label>
   </div>
   <div class="library-grid">${cards||'<div class="empty"><h2>Сцен не найдено</h2><p>Измените запрос или выберите другой тип эффекта.</p></div>'}</div>
   ${list.length>libraryLimit?'<button class="button" id="library-more">Показать ещё</button>':''}`;
