@@ -1,6 +1,6 @@
 # Windows installer
 
-The candidate entry point is `Prismestra-Setup-0.1.0.6-x64.exe` for the planned [Preview 6 release](https://github.com/malyarq/prismestra/releases/tag/v0.1.0-preview.6). This is a Windows 10/11 x64 installer, not a portable ZIP. Device support remains model- and firmware-specific; see [compatibility](compatibility.md).
+Download the Windows 10/11 x64 Setup EXE from the [project README](../README.md) or [GitHub Releases](https://github.com/376east/prismestra/releases). The current public build is [Preview 10](https://github.com/376east/prismestra/releases/tag/v0.1.0-preview.10), `Prismestra-Setup-0.1.0.10-x64.exe`. Device support depends on the model and firmware. See the [compatibility guide](compatibility.md).
 
 ## Install and use
 
@@ -52,19 +52,21 @@ Maintained sources: [`scripts/package_installer.py`](../scripts/package_installe
 Use a clean committed checkout, build its app/source release with `scripts/package_release.py`, verify/package the matching PC component, then stage and compile with:
 
 ```powershell
-python scripts/package_installer.py --app-exe APP_EXE --app-sha256 APP_SHA256 --component-zip COMPONENT_ZIP --component-sha256 COMPONENT_SHA256 --expected-commit COMMIT --version 0.1.0.6 --output NEW_OUTPUT_DIRECTORY --release-dir APPLICATION_NOTICE_DIRECTORY --prerequisite-lock scripts/installer/prerequisites.lock.json --prerequisite-dir VERIFIED_OFFLINE_DOWNLOADS --iscc ISCC_EXE
+python scripts/package_installer.py --app-exe APP_EXE --app-sha256 APP_SHA256 --component-zip COMPONENT_ZIP --component-sha256 COMPONENT_SHA256 --expected-commit COMMIT --version VERSION --output NEW_OUTPUT_DIRECTORY --release-dir APPLICATION_NOTICE_DIRECTORY --prerequisite-lock scripts/installer/prerequisites.lock.json --prerequisite-dir VERIFIED_OFFLINE_DOWNLOADS --iscc ISCC_EXE
 ```
 
 `--test-namespace GUID` creates a separately named lifecycle fixture without drivers, prerequisites or elevated tasks. `test_lifecycle.ps1` distinguishes ordinary interactive startup/live-drain checks from elevated disposable-runner file/repair/upgrade/uninstall checks. Those are different gates. Published release notes record actual results; software fixtures do not certify untested hardware or a cold boot on every Windows version.
 
 ### Windows Actions candidate
 
-Run the CI workflow manually with `validation: setup` to build and test a Setup candidate. To publish the verified Setup and source ZIP, dispatch the same workflow on an annotated release tag pointing to a commit on `master` and enable `publish_release`. Pushing the tag alone does not publish a release. Use `vX.Y.Z-preview.N` for prereleases and `vX.Y.Z` for stable releases. Prerelease installer versions use `X.Y.Z.N`. Stable installer versions use `X.Y.Z.0`, so increment the patch number before promoting a preview line to stable.
+Pull requests and pushes to `master` run quick checks. For an internal candidate, open the [CI workflow](https://github.com/376east/prismestra/actions/workflows/windows.yml), select **Run workflow** on `master`, choose `validation=setup`, give a four-part `installer_version`, and leave `publish_release=false`. Confirm that the run SHA matches the intended commit. This mode runs full software checks and the Windows lifecycle matrix.
 
-Use **Windows checks** → **Run workflow** on the intended revision and provide a four-part Windows version. Pushes to delivery CI branches and preview tags also run packaging. A preview tag such as `v0.1.0-preview.6` supplies version `0.1.0.6`. The job builds on a native x64 Windows runner with Visual Studio 2022 to stay within the bundled Visual C++ runtime floor. It uses pinned Rust and Inno versions, the application and component recipes, and the current OpenRGB lock and patch. Its pinned published Preview 5 source companion supplies verified dependency files and corresponding source archives. The previous backend executable is excluded. The build checks the new backend inventory and tests its parent lease with hardware detection disabled.
+To publish the tested Setup and source ZIP, manually dispatch `validation=setup` with `publish_release=true` on an annotated release tag whose commit is on `master`. A tag push alone does not build or publish Setup. The workflow takes the installer version from the tag. A preview tag `vX.Y.Z-preview.N` supplies `X.Y.Z.N`, and a stable tag `vX.Y.Z` supplies `X.Y.Z.0`. Increment the patch number before promoting a preview line to stable.
+
+The package job uses a native x64 Windows runner with Visual Studio 2022 and pinned Rust, Inno and OpenRGB build inputs. It verifies the complete OpenRGB package before reuse. A cache miss or rejected package triggers a build from pinned inputs, including backend inventory and parent-lease checks with hardware detection disabled.
 
 The prerequisite URLs are checked against `prerequisites.lock.json`. If the Microsoft URLs change bytes, approved HTTPS mirrors of the exact files can be configured with `PRISMESTRA_VC_REDIST_X64_URL` and `PRISMESTRA_WEBVIEW2_X64_URL`. Size, SHA-256 and the packager's Authenticode checks still apply.
 
 The run stores the compiled Setup, source companion, installation manifest and checksums as an Actions artifact. Separate artifacts contain synthetic repair/upgrade inputs and lifecycle evidence. The offline-payload and fresh-account jobs run the **same production Setup SHA-256** on separate disposable runners. The fresh account checks HKCU registration and executes the installed command under a standard token. Setup itself runs under the elevated CI account. True interactive UAC, a reboot or Windows sign-in, missing runtimes, optional driver provisioning and physical devices require separate acceptance. The production-upgrade job downloads published Preview 7 into the disposable upgrade runner, verifies it against the baseline lock, installs it, writes a synthetic per-user profile, and upgrades using the same candidate Setup SHA-256. It verifies version, installed manifest and app/backend hashes, and data preservation after update and uninstall. No app session runs during this job. The synthetic repair/upgrade cases check files and saved data through a separate AppId.
 
-Only after all required jobs pass does the run retain `prismestra-verified-candidate-<attempt>` with the tested bytes. This workflow has read-only repository permissions and does not publish a release. A newly compiled or signed EXE requires its own installation checks.
+Only after all required jobs pass does a closed run retain `prismestra-verified-candidate-<attempt>` with the tested bytes. A newly compiled or signed EXE requires its own installation checks.
