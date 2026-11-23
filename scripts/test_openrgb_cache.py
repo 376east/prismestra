@@ -1,16 +1,19 @@
 """Use synthetic ZIPs and tools to check the cache without running a build."""
 
 import hashlib
+import io
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import DEFAULT, patch
+from unittest.mock import DEFAULT, call, patch
 from zipfile import ZipFile
 
+import build_openrgb_component as builder
 import build_windows_candidate as candidate
 import openrgb_cache as cache
+from components import verify_openrgb_component as verifier
 from test_package_installer import amd64_fixture
 
 
@@ -41,13 +44,15 @@ class OpenRGBCacheTests(unittest.TestCase):
 
         files = {f"runtime/{name}": name.encode() for name in cache.REQUIRED}
         files["runtime/OpenRGB.exe"] = amd64_fixture(linker)
+        patch_bytes = self.write("components/openrgb/test.patch", b"fixture patch")
         files["build/source-lock.json"] = lock("source-lock.json", {
             "repository": self.source, "revision": self.revision, "patch": "test.patch",
+            "patch_sha256": pin(patch_bytes)["sha256"],
         })
         files["build/dependency-lock.json"] = lock("dependency-lock.json", {
             "files": {"PawnIOLib.dll": pin(files["runtime/PawnIOLib.dll"])},
         })
-        files["build/test.patch"] = self.write("components/openrgb/test.patch", b"fixture patch")
+        files["build/test.patch"] = patch_bytes
         for recipe in cache.RECIPES:
             files["build/" + recipe] = self.write("scripts/components/" + recipe, recipe.encode())
         files["build/VERIFICATION.md"] = self.write("docs/openrgb-component-verification.md", b"verification")
@@ -218,11 +223,67 @@ class OpenRGBCacheTests(unittest.TestCase):
 
     def test_candidate_only_queues_a_new_cache_after_a_cold_build(self):
         original = self.make_bundle()
+        downloads = self.root / "downloads"
+        downloads.mkdir()
+        previous_component = io.BytesIO()
+        with ZipFile(previous_component, "w") as archive:
+            archive.writestr("source/fixture.zip", b"source/fixture.zip")
+        with ZipFile(downloads / "Prismestra-Sources-0.1.0.5.zip", "w") as archive:
+            archive.writestr("openrgb/Prismestra-OpenRGB-component.zip", previous_component.getvalue())
+        with ZipFile(downloads / "jom.zip", "w") as archive:
+            archive.writestr("jom.exe", b"fixture")
+
+        source = self.root / "openrgb-source"
+        patch_path = self.component / "test.patch"
+        locked_digest = builder.read(self.component / "source-lock.json")["patch_sha256"]
+        sha256 = builder.sha256
         vsdevcmd = self.root / "vs.bat"
-        with patch.object(candidate, "build_component", return_value=original) as build:
+        calls = []
+
+        def run(exe, *args):
+            if exe == "git":
+                calls.append(call(exe, *args))
+            elif exe.name == "7z.exe":
+                qmake = self.root / "qt/bin/qmake.exe"
+                qmake.parent.mkdir(parents=True)
+                qmake.touch()
+            elif exe == builder.POWERSHELL:
+                exe_file = self.root / "openrgb-build/release/OpenRGB.exe"
+                exe_file.parent.mkdir(parents=True)
+                exe_file.write_bytes(amd64_fixture())
+            else:
+                self.fail(f"unexpected subprocess: {exe}")
+
+        def digest(path):
+            if path == self.root / "previous-component.zip":
+                return "42ab552ffb4d429a9df7d83aab8d53a1df30269491f2e28c9dd57c7d9187f8e7"
+            return sha256(path)
+
+        def recipe(name, *args):
+            calls.append(call(name))
+            if name == "components/package_openrgb_component.py":
+                supplied = args[args.index("--patch") + 1]
+                self.assertEqual(supplied, patch_path)
+                self.assertEqual(sha256(supplied), locked_digest)
+                args[args.index("--output") + 1].write_bytes(original.read_bytes())
+
+        with (
+            patch.dict(builder.os.environ, {"ProgramFiles": str(self.root)}),
+            patch.multiple(builder, COMPONENT=self.component, run=run, recipe=recipe, sha256=digest),
+            patch.object(builder, "checkout", return_value=source),
+            patch.object(builder, "fetch", side_effect=lambda _, name, *pin: downloads / name),
+            patch.object(verifier, "working_diff", return_value=patch_path.read_bytes()) as exported,
+        ):
             result = candidate.load_or_build_component(self.root, vsdevcmd, self.cache, self.key, write_cache=True)
-        build.assert_called_once_with(self.root, vsdevcmd)
-        self.assertEqual(result, original)
+        exported.assert_called_once_with(source)
+        self.assertEqual(calls, [
+            call("git", "-C", source, "apply", "--check", patch_path),
+            call("git", "-C", source, "apply", "--intent-to-add", patch_path),
+            call("components/verify_openrgb_component.py"),
+            call("components/package_openrgb_component.py"),
+            call("components/test_parent_pipe.py"),
+        ])
+        self.assertEqual(result, self.root / builder.BUNDLE)
         self.assertTrue((self.root / cache.READY).is_file())
         self.assertEqual(cache.restore(self.cache, self.key, self.root, self.repo).read_bytes(), original.read_bytes())
 

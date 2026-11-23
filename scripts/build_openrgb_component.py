@@ -75,8 +75,9 @@ def build_component(root, vsdevcmd):
     source_lock = COMPONENT / "source-lock.json"
     dependency_lock = COMPONENT / "dependency-lock.json"
     lock = read(source_lock)
+    patch = COMPONENT / lock["patch"]
     source = checkout(lock, root / "openrgb-source")
-    apply_locked_patch(source, COMPONENT / lock["patch"], lock["patch_sha256"])
+    apply_locked_patch(source, patch, lock["patch_sha256"])
     tools = {name: fetch(root, name, *PINNED_INPUTS[name])
              for name in PINNED_INPUTS}
 
