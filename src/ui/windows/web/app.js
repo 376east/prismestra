@@ -814,7 +814,7 @@ function nameDialog(mode) {
 window.prismestraReceive = message => {
  try {
   if(typeof message==='string')message=JSON.parse(message);
-  if(message.kind==='alice'){receiveAlice(message);return;}
+  if(message.kind==='alice'){if(message.sequence===aliceSequence)receiveAlice(message);return;}
   if(message.kind==='output_preview'){window.outputMap?.receive(message);return;}
   if(message.kind==='argb_channels'||message.kind==='argb_channel_saved'){window.argbChannel?.receive(message);return;}
   if(message.kind==='output_retry'){receiveOutputRetry(message);return;}
@@ -900,10 +900,11 @@ window.prismestraReceive = message => {
   syncControls();
  }
 };
-let aliceTimer, aliceState;
+let aliceTimer, aliceState, aliceSequence=0;
 let aliceLamps=[];
 function aliceRequest(action, options={}) {
- if(!send({op:'alice',request:{action,...options}}) && action!=='cancel')
+ clearTimeout(aliceTimer);
+ if(!send({op:'alice',sequence:++aliceSequence,request:{action,...options}}) && action!=='cancel')
   receiveAlice({error:'Не удалось связаться с Prismestra.'});
 }
 function aliceWait() {
@@ -951,7 +952,7 @@ function receiveAlice(message) {
  }
  $('#alice-choice').hidden=!state.lamps.length;
  aliceSelection();
- if(state.busy)aliceWait();
+ if(state.busy&&message.sequence!==undefined)aliceWait();
 }
 $('#alice-dialog')?.addEventListener('close',()=>{
  clearTimeout(aliceTimer);

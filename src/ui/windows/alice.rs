@@ -104,7 +104,7 @@ pub(super) struct Session {
 
 impl Session {
     pub(super) fn handle(&mut self, action: Action) -> Result<Value, String> {
-        if !matches!(&action, Action::Cancel) {
+        if !matches!(&action, Action::Cancel | Action::SignOut) {
             self.poll();
         }
         match action {
@@ -118,15 +118,11 @@ impl Session {
                 self.needs_login = false;
             }
             Action::SignOut => {
-                if self.job.is_some() {
-                    return Err("Дождитесь завершения операции Алисы.".into());
-                }
-                self.grant = None;
-                credentials::delete_alice()
-                    .map_err(|_| "Не удалось удалить сохранённый вход Алисы.")?;
-                self.saved = false;
-                self.needs_login = true;
-                self.message = "Вы вышли из Алисы в Prismestra.".into();
+                self.sign_out_with(|| {
+                    credentials::delete_alice()
+                        .map(|_| ())
+                        .map_err(|_| "Не удалось удалить сохранённый вход Алисы.".into())
+                })?;
             }
             Action::SignIn { remember } => {
                 if self.job.is_some() {
@@ -184,13 +180,26 @@ impl Session {
     }
 
     fn open_saved(&mut self) -> Result<(), String> {
+        self.open_saved_with(
+            || {
+                credentials::read_alice()
+                    .map_err(|_| "Не удалось прочитать сохранённый вход Алисы.".into())
+            },
+            |token, ticket, until, cancel| load_grant(token, ticket, Some(until), cancel),
+        )
+    }
+
+    fn open_saved_with(
+        &mut self,
+        read: impl FnOnce() -> Result<Option<String>, String>,
+        load: impl FnOnce(String, String, u64, &AtomicBool) -> Result<Grant, String> + Send + 'static,
+    ) -> Result<(), String> {
         if self.job.is_some() || self.grant.is_some() {
             return Ok(());
         }
         self.message.clear();
         self.needs_login = false;
-        let saved = credentials::read_alice()
-            .map_err(|_| "Не удалось прочитать сохранённый вход Алисы.")?;
+        let saved = read()?;
         self.saved = saved.is_some();
         let Some(saved) = saved else { return Ok(()) };
         let Ok((until, token)) = parse_saved(&saved, unix_now()?) else {
@@ -203,8 +212,19 @@ impl Session {
         self.start(
             "Загружаем лампы кабинета…",
             "",
-            move |cancel| load_grant(token, ticket, Some(until), cancel).map(Some),
+            move |cancel| load(token, ticket, until, cancel).map(Some),
         )
+    }
+
+    fn sign_out_with(&mut self, delete: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+        delete()?;
+        self.job = None;
+        self.grant = None;
+        self.remember_pending = false;
+        self.saved = false;
+        self.needs_login = true;
+        self.message = "Вы вышли из Алисы в Prismestra.".into();
+        Ok(())
     }
 
     fn apply_selection(&mut self, ticket: &str, lamp: usize, change: Change) -> Result<(), String> {
@@ -1008,6 +1028,96 @@ mod tests {
             assert!(parse_saved(invalid, 200).is_err());
         }
         assert!(parse_saved("201:header\r\n", 200).is_err());
+    }
+
+    #[test]
+    fn cold_open_restores_optional_access_and_sign_out_discards_late_catalog() {
+        use std::cell::RefCell;
+
+        let now = unix_now().unwrap();
+        let saved = RefCell::new(Some(format!("{}:fixture-token", now + 60)));
+        let grant = |token, ticket, until| Grant {
+            token,
+            ticket,
+            expires: Instant::now() + Duration::from_secs(30),
+            valid_until: Some(until),
+            lamps: lamps(&fixture()).unwrap(),
+        };
+        let mut session = Session::default();
+        session
+            .open_saved_with(
+                || Ok(saved.borrow().clone()),
+                move |token, ticket, until, _| {
+                    assert_eq!(token, "fixture-token");
+                    assert_eq!(until, now + 60);
+                    Ok(grant(token, ticket, until))
+                },
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let restored = loop {
+            let view = session.handle(Action::Status).unwrap();
+            if view["busy"] == false {
+                break view;
+            }
+            assert!(Instant::now() < deadline, "saved catalog must complete");
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(restored["saved"], true);
+        assert_eq!(restored["needsLogin"], false);
+        assert_eq!(restored["lamps"].as_array().unwrap().len(), 2);
+        assert!(!restored.to_string().contains("fixture-token"));
+        session
+            .open_saved_with(|| unreachable!(), |_, _, _, _| unreachable!())
+            .unwrap();
+
+        let mut restarted = Session::default();
+        let (finish, in_flight) = mpsc::channel();
+        let (completed, outcome) = mpsc::channel();
+        restarted
+            .open_saved_with(
+                || Ok(saved.borrow().clone()),
+                move |token, ticket, until, cancel| {
+                    in_flight.recv_timeout(Duration::from_secs(2)).unwrap();
+                    completed.send(cancel.load(Ordering::Acquire)).unwrap();
+                    Ok(grant(token, ticket, until))
+                },
+            )
+            .unwrap();
+        restarted
+            .sign_out_with(|| {
+                assert!(saved.borrow_mut().take().is_some());
+                Ok(())
+            })
+            .unwrap();
+        finish.send(()).unwrap();
+        assert!(outcome.recv_timeout(Duration::from_secs(2)).unwrap());
+        let signed_out = restarted.handle(Action::Status).unwrap();
+        assert_eq!(signed_out["saved"], false);
+        assert_eq!(signed_out["needsLogin"], true);
+        assert_eq!(signed_out["ticket"], Value::Null);
+        assert_eq!(signed_out["lamps"], json!([]));
+        assert_eq!(signed_out["busy"], false);
+        assert!(restarted.job.is_none());
+
+        restarted
+            .open_saved_with(|| Ok(saved.borrow().clone()), |_, _, _, _| unreachable!())
+            .unwrap();
+        assert_eq!(
+            restarted.handle(Action::Status).unwrap()["needsLogin"],
+            true
+        );
+        restarted
+            .open_saved_with(
+                || Ok(Some(format!("{now}:fixture-token"))),
+                |_, _, _, _| unreachable!(),
+            )
+            .unwrap();
+        let expired = restarted.handle(Action::Status).unwrap();
+        assert_eq!(expired["saved"], true);
+        assert_eq!(expired["needsLogin"], true);
+        assert_eq!(expired["ticket"], Value::Null);
+        assert!(restarted.job.is_none());
     }
 
     #[test]

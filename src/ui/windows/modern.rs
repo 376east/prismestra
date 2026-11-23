@@ -37,6 +37,7 @@ enum Command {
     Snapshot,
     RetryStartupDiscovery,
     Alice {
+        sequence: u32,
         request: super::alice::Action,
     },
     ArgbChannels {
@@ -1051,7 +1052,8 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             | Command::Alice {
                 request: super::alice::Action::Status
                     | super::alice::Action::Open
-                    | super::alice::Action::Cancel
+                    | super::alice::Action::Cancel,
+                ..
             }
     ) {
         let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
@@ -1059,10 +1061,10 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             .as_ref()
             .is_some_and(|app| app.shutdown.active() || app.pending_open.is_some())
         {
-            if matches!(&command, Command::Alice { .. }) {
+            if let Command::Alice { sequence, .. } = &command {
                 send(
                     state,
-                    &json!({"kind":"alice","error":"Дождитесь завершения текущей операции."}),
+                    &json!({"kind":"alice","sequence":sequence,"error":"Дождитесь завершения текущей операции."}),
                 )?;
                 return Ok(false);
             }
@@ -1070,14 +1072,14 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
         }
     }
     match command {
-        Command::Alice { request } => {
+        Command::Alice { sequence, request } => {
             let result = {
                 let mut slot = state.modern_session.borrow_mut();
                 slot.as_mut().ok_or("Нет интерфейса")?.alice.handle(request)
             };
             let message = match result {
-                Ok(value) => json!({"kind":"alice","state":value}),
-                Err(error) => json!({"kind":"alice","error":error}),
+                Ok(value) => json!({"kind":"alice","sequence":sequence,"state":value}),
+                Err(error) => json!({"kind":"alice","sequence":sequence,"error":error}),
             };
             send(state, &message)?;
             return Ok(false);
