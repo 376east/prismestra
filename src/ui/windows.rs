@@ -74,6 +74,7 @@ const NAV_CONNECTIONS: i32 = 114;
 const MODAL_COMMANDS: &[i32] = &[
     OPEN,
     SAVE,
+    SAVE_PROFILE_COPY,
     EXPORT,
     COLOR_EDIT,
     E_FILE,
@@ -102,6 +103,7 @@ const E_ROUTE_DEVICE: i32 = 718;
 const E_ROUTE_SOURCE: i32 = 719;
 const OPEN: i32 = 110;
 const SAVE: i32 = 111;
+const SAVE_PROFILE_COPY: i32 = 113;
 const EXPORT: i32 = 112;
 const EFFECT: i32 = 201;
 const BRIGHT: i32 = 202;
@@ -518,6 +520,7 @@ impl Drop for Bitmap {
     }
 }
 struct App {
+    installed_profile_root: Option<PathBuf>,
     language: Language,
     web_mode: bool,
     first_run: first_run::Startup,
@@ -664,6 +667,7 @@ impl App {
         Ok(())
     }
     fn build(&mut self, parent: HWND, language: Language) -> Result<(), String> {
+        let installed = self.installed_profile_root.is_some();
         self.control(
             parent,
             MODERN_RETURN,
@@ -702,9 +706,22 @@ impl App {
             parent,
             SAVE,
             "BUTTON",
-            ShellText::SaveProfile.get(language),
+            if installed {
+                language.text("Сохранить профиль", "Save profile")
+            } else {
+                ShellText::SaveProfile.get(language)
+            },
             BS_PUSHBUTTON as u32,
         )?;
+        if installed {
+            self.control(
+                parent,
+                SAVE_PROFILE_COPY,
+                "BUTTON",
+                language.text("Сохранить копию…", "Save a copy…"),
+                BS_PUSHBUTTON as u32,
+            )?;
+        }
         self.control(
             parent,
             EXPORT,
@@ -1027,6 +1044,9 @@ impl App {
         self.pos(MODERN_RETURN, 16, 72, 156, 32);
         self.pos(OPEN, 16, h - 132, 132, 32);
         self.pos(SAVE, 16, h - 92, 132, 32);
+        if self.widgets.contains_key(&SAVE_PROFILE_COPY) {
+            self.pos(SAVE_PROFILE_COPY, 16, h - 52, 132, 32);
+        }
         self.pos(EXPORT, 16, h - 172, 132, 32);
         // Native list rows need breathing room independently of the font.
         // Reapply on DPI changes as well as the initial layout.
@@ -1844,6 +1864,23 @@ impl App {
             ))
         }
     }
+    fn ready_to_save_installed_profile(&self) -> Result<(), String> {
+        if self.editor_dirty
+            || self.runtime.pending_configuration()
+            || self.pending_open.is_some()
+            || self.connection_switching()
+            || self.first_run.configuring()
+        {
+            return Err(self
+                .language
+                .text(
+                    "Примените или отмените правки параметров перед сохранением профиля.",
+                    "Apply or discard output settings before saving the profile.",
+                )
+                .into());
+        }
+        Ok(())
+    }
     fn export_profile(&self, path: &Path) -> Result<usize, String> {
         if self.pending_open.is_some() || self.runtime.pending_configuration() {
             return Err("Дождитесь применения или открытия профиля.".into());
@@ -2421,12 +2458,36 @@ fn file_dialog_named(
     )))
 }
 fn save_dialog(hwnd: HWND, state: &State) -> Result<bool, String> {
-    let Some(path) = dialog(hwnd, true)? else {
-        return Ok(false);
+    let root = state
+        .app
+        .try_borrow()
+        .map_err(|_| "UI занято")?
+        .as_ref()
+        .ok_or("UI не создан")?
+        .installed_profile_root
+        .clone();
+    let standalone_path = if root.is_none() {
+        let Some(path) = dialog(hwnd, true)? else {
+            return Ok(false);
+        };
+        Some(path)
+    } else {
+        None
     };
     let mut slot = state.app.try_borrow_mut().map_err(|_| "UI занято")?;
     let app = slot.as_mut().ok_or("UI не создан")?;
-    app.save(&path)?;
+    let path = if let Some(root) = &root {
+        app.ready_to_save_installed_profile()?;
+        let document = app.runtime.requested_document();
+        let path = crate::app::installed::save_startup_profile(root, document)?;
+        app.runtime
+            .relocate_journal(journal_path(&app.state_dir, Some(&path), document))?;
+        path
+    } else {
+        let path = standalone_path.expect("standalone save dialog returned a path");
+        app.save(&path)?;
+        path
+    };
     app.path = Some(path);
     app.dirty = false;
     app.status = "Профиль сохранён.".into();
@@ -2579,6 +2640,28 @@ fn modal_command(hwnd: HWND, state: &State, id: i32) -> Result<(), String> {
     }
     if id == SAVE {
         save_dialog(hwnd, state)?;
+        return Ok(());
+    }
+    if id == SAVE_PROFILE_COPY {
+        let root = state
+            .app
+            .try_borrow()
+            .map_err(|_| "UI занято")?
+            .as_ref()
+            .and_then(|app| app.installed_profile_root.clone())
+            .ok_or("Profile copy is only available in installed mode")?;
+        let Some(path) = dialog(hwnd, true)? else {
+            return Ok(());
+        };
+        let mut slot = state.app.try_borrow_mut().map_err(|_| "UI занято")?;
+        let app = slot.as_mut().ok_or("UI не создан")?;
+        let path = crate::app::installed::profile_copy_destination(&root, &path)?;
+        app.ready_to_save_installed_profile()?;
+        app.runtime.save(&path)?;
+        app.status = app
+            .language
+            .text("Копия профиля сохранена.", "Profile copy saved.")
+            .into();
         return Ok(());
     }
     if id == EXPORT {
@@ -3314,6 +3397,7 @@ fn run_inner_with_language(
     state.editor_window.set(raw);
     let window = Window(state.editor_window.clone());
     let mut app = App {
+        installed_profile_root: installed.as_ref().map(|(_, root)| root.clone()),
         language: state.language,
         web_mode: false,
         first_run: first_run::Startup::new(
