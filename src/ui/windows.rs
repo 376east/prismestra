@@ -2973,20 +2973,42 @@ fn run_with_instance(
         .windows(2)
         .find(|pair| pair[0] == "--state-dir")
         .map(|pair| PathBuf::from(&pair[1]));
+    let installed_start = installed.is_some();
     let result = run_inner(args, installed);
+    finish_ui_startup(
+        result,
+        diagnostic,
+        installed_start,
+        error_dir.as_deref(),
+        |error| {
+            let message: String = error.chars().take(1000).collect();
+            unsafe {
+                MessageBoxW(
+                    null_mut(),
+                    wide(&message).as_ptr(),
+                    wide("Не удалось запустить программу").as_ptr(),
+                    MB_OK | MB_ICONERROR,
+                );
+            }
+        },
+    )
+}
+
+fn finish_ui_startup(
+    result: Result<(), String>,
+    diagnostic: bool,
+    installed_start: bool,
+    error_dir: Option<&Path>,
+    show_error: impl FnOnce(&str),
+) -> Result<(), String> {
     if !diagnostic && let Err(error) = &result {
         startup_ack::failed(error);
         if let Some(dir) = error_dir {
             let _ = std::fs::write(dir.join("startup-error.txt"), error);
         }
-        let message: String = error.chars().take(1000).collect();
-        unsafe {
-            MessageBoxW(
-                null_mut(),
-                wide(&message).as_ptr(),
-                wide("Не удалось запустить программу").as_ptr(),
-                MB_OK | MB_ICONERROR,
-            );
+        // The executable also handles errors before the installed UI is dispatched.
+        if !installed_start {
+            show_error(error);
         }
     }
     result
@@ -4274,6 +4296,45 @@ mod webview_recovery_stand;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_startup_preserves_diagnostics_and_leaves_the_dialog_to_the_executable() {
+        let dir = std::env::temp_dir().join(format!(
+            "prismestra-startup-error-{}-{}",
+            std::process::id(),
+            crate::clock::monotonic_us()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let error_file = dir.join("startup-error.txt");
+        let mut native_dialogs = Vec::new();
+        let mut run = |result, diagnostic, installed| {
+            finish_ui_startup(result, diagnostic, installed, Some(&dir), |message| {
+                native_dialogs.push(message.to_owned());
+            })
+        };
+        assert_eq!(run(Ok(()), false, true), Ok(()));
+        assert!(!error_file.exists());
+        assert_eq!(
+            run(Err("Diagnostic".into()), true, false),
+            Err("Diagnostic".into())
+        );
+        assert!(!error_file.exists());
+        assert_eq!(
+            run(Err("Installed detail".into()), false, true),
+            Err("Installed detail".into())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&error_file).unwrap(),
+            "Installed detail"
+        );
+        assert_eq!(
+            run(Err("Standalone detail".into()), false, false),
+            Err("Standalone detail".into())
+        );
+        assert_eq!(native_dialogs, ["Standalone detail"]);
+        std::fs::remove_file(error_file).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
     #[test]
     fn missing_bound_lcd_explains_how_to_check_its_connection() {
         use crate::{app::runtime::OutputActivity, devices::Driver, lcd::hid_policy};
