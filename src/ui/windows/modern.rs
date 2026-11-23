@@ -744,10 +744,11 @@ pub(crate) fn device_activity_for(
     busy: bool,
     context: u64,
 ) -> Value {
-    use crate::app::runtime::OutputFailureReason;
+    use crate::app::runtime::{OutputActivity, OutputFailureReason};
 
     let mut labels = BTreeMap::new();
     let mut reasons = BTreeMap::new();
+    let mut frames_sent = BTreeMap::new();
     let mut tickets = BTreeMap::new();
     for device in &runtime.document().lighting.setup.devices {
         let activity = runtime.output_activity(device);
@@ -765,6 +766,9 @@ pub(crate) fn device_activity_for(
             output_activity_label(&activity)
         };
         labels.insert(&device.id, label);
+        if active && let OutputActivity::Sent(count) = &activity {
+            frames_sent.insert(&device.id, count.to_string());
+        }
         if let Some(reason) = reason {
             reasons.insert(&device.id, reason);
         }
@@ -778,6 +782,7 @@ pub(crate) fn device_activity_for(
     json!({
         "labels": labels,
         "reasons": reasons,
+        "framesSent": frames_sent,
         "retryScope": context.to_string(),
         "retryTickets": tickets,
     })

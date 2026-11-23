@@ -213,6 +213,7 @@ function syncControls(keepRetryFocus) {
   else node.disabled=disabled;
  });
  document.querySelectorAll('[data-native-control]').forEach(node=>node.disabled=nativeControlDisabled(node));
+ const copyOutput=$('[data-copy-output]');if(copyOutput)copyOutput.disabled=closing||!!pendingView||commandPending;
  document.querySelectorAll('[data-local-discard]').forEach(node=>{node.hidden=!currentPageStaged();node.disabled=closing||commandPending;});
  $('#master-brightness').disabled=busy()||!draft;
  $('#footer-apply').disabled=busy()||!applyNeeded();
@@ -382,7 +383,9 @@ function nativeProperties() {
   ? '<button id="open-argb" class="button" data-action="open-argb" data-mutation>Каналы ARGB</button>' : '';
  const repair=state.devices.some(device=>device.id===editor.deviceId)
   ? `<button class="button" data-view="connections" data-connection-device="${esc(editor.deviceId)}" data-mutation ${disabled()}>Открыть подключение устройства</button>` : '';
- return `<section class="native-properties"><div class="native-inline"><label for="native-target">Объект</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${view==='devices'&&editor.index>=editor.targets.length?'<option value="" disabled selected>Выберите устройство…</option>':''}${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select>${repair}${argb}</div><div class="parameter-panel"><p class="parameter-note" id="native-runtime-detail"${view==='devices'?'':' role="status"'}>${esc(state.detail||'')}</p><div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>Выбрать…</button>`:''}</div>`}${field.hint?`<small>${esc(field.hint)}</small>`:''}</div>`).join('')||'<p class="muted">Параметров объекта нет.</p>'}</div><div class="native-property-actions">${action('Применить','apply-document',true,'data-needs-change="document"')}${action('Отменить изменения','revert-document')}${action('Повторить','retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
+ const copy=view==='devices'&&repair
+  ? `<button class="button" data-action="copy-output-status" data-copy-output="${esc(editor.deviceId)}">Скопировать статус</button><span id="output-copy-result" class="muted" role="status"></span>` : '';
+ return `<section class="native-properties"><div class="native-inline"><label for="native-target">Объект</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${view==='devices'&&editor.index>=editor.targets.length?'<option value="" disabled selected>Выберите устройство…</option>':''}${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select>${repair}${argb}${copy}</div><div class="parameter-panel"><p class="parameter-note" id="native-runtime-detail"${view==='devices'?'':' role="status"'}>${esc(state.detail||'')}</p><div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>Выбрать…</button>`:''}</div>`}${field.hint?`<small>${esc(field.hint)}</small>`:''}</div>`).join('')||'<p class="muted">Параметров объекта нет.</p>'}</div><div class="native-property-actions">${action('Применить','apply-document',true,'data-needs-change="document"')}${action('Отменить изменения','revert-document')}${action('Повторить','retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
 }
 function deviceStatus(device) {
  if(!device)return '';
@@ -391,6 +394,37 @@ function deviceStatus(device) {
  if(labels?.[device.id]==='Подключается' && outputRetries.get(device.id)?.awaitingActivity)return 'Кадры отправлены';
  if(labels&&Object.hasOwn(labels,device.id))return labels[device.id];
  return !device.enabled?'Выключено':state.native?'Недоступно':'Предпросмотр';
+}
+const transportLabels = new Map([
+ ['skydimo_serial','Последовательный порт'],['door_ble','Bluetooth LE'],
+ ['surplife_e1_pixels','Bluetooth LE'],['wled_ddp','WLED (DDP)'],['open_rgb','OpenRGB'],
+ ['home_assistant','Home Assistant'],['tt_lcd','USB HID'],['fusion2','USB HID'],
+ ['ene_dram','SMBus'],['valkyrie','USB HID'],['unsupported','Не поддерживается'],
+]);
+const copyableOutputStatuses = new Set([
+ 'Выключено','Выключается','Подключается','Ожидает повтора','Кадры отправлены','Недоступно',
+ 'Предпросмотр','Подключение занято другим выходом Prismestra','Проверьте доступ Home Assistant',
+]);
+async function copyOutputStatus(id) {
+ if(view!=='devices'||closing||pendingView||commandPending||state?.editor?.page!=='devices'||state.editor.deviceId!==id)return;
+ const device=state.devices.find(item=>item.id===id);
+ const feedback=$('#output-copy-result');
+ if(!device||!feedback)return;
+ const transport=transportLabels.get(device.driver?.type)??'Неизвестен';
+ const status=deviceStatus(device);
+ const safeStatus=copyableOutputStatuses.has(status)?status:'Нет данных о состоянии';
+ const frames=state.deviceActivity?.framesSent?.[id];
+ const lines=[`Транспорт: ${transport}`,`Состояние: ${safeStatus}`];
+ if(safeStatus==='Кадры отправлены'&&typeof frames==='string'&&/^[1-9][0-9]{0,19}$/.test(frames)){
+  lines.push(`Отправлено кадров: ${frames}`);
+ }
+ feedback.textContent='';
+ try{
+  await navigator.clipboard.writeText(lines.join('\n'));
+  feedback.textContent='Статус скопирован';
+ }catch{
+  feedback.textContent='Не удалось скопировать статус';
+ }
 }
 function syncDeviceAnnouncement() {
  if(view!=='devices')deviceInspection=null;
@@ -901,6 +935,7 @@ document.addEventListener('click',event=>{
   return;
  }
  switch(b.dataset.action){
+ case 'copy-output-status':void copyOutputStatus(b.dataset.copyOutput);break;
  case 'alice-open':$('#alice-dialog').showModal();aliceRequest('status');break;
  case 'alice-close':$('#alice-dialog').close();break;
  case 'alice-sign-in':

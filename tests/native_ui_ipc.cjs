@@ -1173,3 +1173,70 @@ console.log('PASS: bilingual effect and scene search across 100 saved scenes wit
  assert.match(mainMarkup,/data-field="add_source"[^>]*>\s*<option value="" selected>Все источники добавлены/);
 }
 console.log('PASS: LCD source choice preserves staged labels and refreshes the editable assignments');
+
+async function checkOutputStatusCopy() {
+ const [selected,neighbor]=['private-output-id','private-neighbor-id'].map(id=>({
+  id,label:'Private room',role:'canvas',driver:{type:'open_rgb',endpoint:'192.0.2.42:6742'},
+  leds:56,rate_hz:48,enabled:true
+ }));
+ const privateError='Failed to open C:\\Users\\Fixture\\profile.json with token fixture-secret';
+ const snapshot = devices => {
+  const index=devices.indexOf(selected);
+  receiveDeviceState('snapshot',{
+   ...initial,devices,draftDevices:devices,detail:privateError,error:privateError,
+   editor:{page:'devices',deviceId:selected.id,index,targets:devices.map(({label})=>label),fields:[],dirty:false},
+   deviceActivity:{labels:{[selected.id]:'Кадры отправлены',[neighbor.id]:'Кадры отправлены'},
+    framesSent:{[selected.id]:'7',[neighbor.id]:'100'}}
+  });
+ };
+ const writes=[];
+ let denied=false;
+ context.navigator={clipboard:{writeText:async text=>{
+  if(denied)throw new Error(privateError);
+  writes.push(text);
+ }}};
+ const feedback=find('#output-copy-result');
+ const click = async id => {
+  const button=new Node();
+  button.dataset={action:'copy-output-status',copyOutput:id};
+  button.focus();
+  events.click({target:{closest:()=>button}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(document.activeElement,button);
+ };
+ vm.runInContext('formStages.clear();view="devices";pendingView=null',context);
+ snapshot([neighbor,selected]);
+ assert.match(mainMarkup,/data-copy-output="private-output-id">Скопировать статус/);
+ assert.doesNotMatch(mainMarkup,/data-copy-output="private-neighbor-id"/);
+ const beforeCopy=commands.length;
+ await click(neighbor.id);
+ assert.deepEqual(writes,[],'stale or neighboring action cannot copy');
+ await click(selected.id);
+ assert.deepEqual(writes,['Транспорт: OpenRGB\nСостояние: Кадры отправлены\nОтправлено кадров: 7']);
+ assert.equal(feedback.textContent,'Статус скопирован');
+ snapshot([selected,neighbor]);
+ receiveDeviceState('status',{deviceActivity:{labels:{[selected.id]:'Кадры отправлены'},
+  framesSent:{[selected.id]:'18446744073709551615',[neighbor.id]:'100'}}});
+ await click(selected.id);
+ assert.match(writes.at(-1),/кадров: 18446744073709551615$/);
+ receiveDeviceState('status',{deviceActivity:{labels:{[selected.id]:'Кадры отправлены'},
+  framesSent:{[selected.id]:'7\n'+privateError}}});
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Кадры отправлены');
+ receiveDeviceState('status',{deviceActivity:{labels:{[selected.id]:privateError},
+  reasons:{[selected.id]:'endpointLeaseBusy'},framesSent:{[neighbor.id]:'100'}}});
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Подключение занято другим выходом Prismestra');
+ receiveDeviceState('status',{deviceActivity:{labels:{[selected.id]:privateError}}});
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Нет данных о состоянии');
+ denied=true;
+ await click(selected.id);
+ assert.equal(feedback.textContent,'Не удалось скопировать статус');
+ assert.equal(commands.length,beforeCopy,'copy issues no host commands');
+ receiveDeviceState('snapshot',{...initial,draftDevices:[selected],
+  editor:{page:'devices',deviceId:selected.id,index:0,targets:[selected.label],fields:[],dirty:true}});
+ assert.doesNotMatch(mainMarkup,/data-copy-output/,'draft-only output has no runtime status to copy');
+ console.log('PASS: selected runtime status copies only allowlisted text and its validated counter, with local clipboard feedback');
+}
+checkOutputStatusCopy().catch(error=>{console.error(error);process.exitCode=1;});

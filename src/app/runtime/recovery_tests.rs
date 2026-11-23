@@ -719,6 +719,14 @@ fn first_start_lease_contention_exposes_one_manual_openrgb_retry() {
         activity["reasons"],
         serde_json::json!({"a": "endpointLeaseBusy"})
     );
+    let OutputActivity::Sent(frames) = runtime.output_activity(&document.lighting.setup.devices[1])
+    else {
+        panic!("the independent WLED output should still send frames");
+    };
+    assert_eq!(
+        activity["framesSent"],
+        serde_json::json!({"b": frames.to_string()})
+    );
     assert_eq!(activity["retryTickets"].as_object().unwrap().len(), 1);
     assert!(activity["retryTickets"]["a"].is_string());
 
