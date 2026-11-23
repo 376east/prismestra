@@ -61,6 +61,41 @@ struct WindowsEvent {
 }
 
 #[cfg(windows)]
+static WINDOWS_QUEUE_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(windows)]
+fn try_enqueue<T>(
+    sender: &std::sync::mpsc::SyncSender<T>,
+    event: T,
+    dropped: &std::sync::atomic::AtomicU64,
+) -> bool {
+    use std::sync::{atomic::Ordering, mpsc::TrySendError};
+
+    match sender.try_send(event) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => {
+            dropped.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+        Err(TrySendError::Disconnected(_)) => false,
+    }
+}
+
+#[cfg(windows)]
+fn detail_with_queue_loss(detail: String, dropped: &std::sync::atomic::AtomicU64) -> String {
+    use std::sync::atomic::Ordering;
+
+    let lost = dropped.swap(0, Ordering::Relaxed);
+    if lost == 0 {
+        return detail;
+    }
+    let suffix = format!(" queue_dropped={lost}");
+    let mut detail = bounded(&detail, 256 - suffix.len());
+    detail.push_str(&suffix);
+    detail
+}
+
+#[cfg(windows)]
 fn enqueue_windows_event(event: WindowsEvent) -> bool {
     use std::sync::{OnceLock, mpsc};
 
@@ -71,7 +106,8 @@ fn enqueue_windows_event(event: WindowsEvent) -> bool {
             .name("backend-launch-events".into())
             .spawn(move || {
                 while let Ok(event) = receive.recv() {
-                    windows_event(event.id, event.kind, &event.detail);
+                    let detail = detail_with_queue_loss(event.detail, &WINDOWS_QUEUE_DROPPED);
+                    windows_event(event.id, event.kind, &detail);
                     if let Some(written) = event.written {
                         let _ = written.send(());
                     }
@@ -82,7 +118,7 @@ fn enqueue_windows_event(event: WindowsEvent) -> bool {
     });
     events
         .as_ref()
-        .is_some_and(|events| events.try_send(event).is_ok())
+        .is_some_and(|events| try_enqueue(events, event, &WINDOWS_QUEUE_DROPPED))
 }
 
 #[cfg(windows)]
@@ -229,6 +265,20 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(windows)]
+    #[test]
+    fn full_queue_reports_drops_on_the_next_event_without_an_extra_send() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let dropped = AtomicU64::new(0);
+        assert!(try_enqueue(&sender, "a".repeat(256), &dropped));
+        assert!(!try_enqueue(&sender, "lost".into(), &dropped));
+        assert!(!try_enqueue(&sender, "lost too".into(), &dropped));
+        let event = detail_with_queue_loss(receiver.recv().unwrap(), &dropped);
+        assert_eq!(event.len(), 256);
+        assert!(event.ends_with(" queue_dropped=2"));
+        assert_eq!(detail_with_queue_loss("normal".into(), &dropped), "normal");
+    }
 
     fn directory() -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
