@@ -2986,6 +2986,145 @@ fn genuine_lcd_rearrival_survives_ready_until_old_handle_reports_failure() {
 }
 
 #[test]
+fn idle_static_lcd_reopens_only_its_returned_interface_after_draining() {
+    use crate::lcd::protocol::{ACK_BYTES, REPORT_BYTES, ReportTransport};
+    use std::{io::Cursor, sync::mpsc};
+
+    struct StaticTransport {
+        counts: Arc<AtomicUsize>,
+        drain_gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    }
+
+    impl ReportTransport for StaticTransport {
+        fn now_ms(&self) -> u64 {
+            crate::clock::monotonic_ms()
+        }
+
+        fn write_report(&mut self, _: &[u8; REPORT_BYTES], _: u64) -> Result<usize, String> {
+            Ok(REPORT_BYTES)
+        }
+
+        fn read_ack(&mut self, bytes: &mut [u8; ACK_BYTES], _: u64) -> Result<usize, String> {
+            self.counts.fetch_add(1, Ordering::SeqCst);
+            bytes.fill(0);
+            Ok(ACK_BYTES)
+        }
+    }
+
+    impl Drop for StaticTransport {
+        fn drop(&mut self) {
+            if let Some((entered, release)) = self.drain_gate.take() {
+                let _ = entered.send(());
+                let _ = release.recv_timeout(Duration::from_secs(5));
+            }
+        }
+    }
+
+    let mut png = Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(32, 24, image::Rgb([24, 80, 144]))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let (document, dir) =
+        arrival_lcd_document(runtime().document().clone(), "idle-static", png.get_ref());
+    let mut runtime = Runtime::new(document, None).unwrap();
+    let (entered, draining) = mpsc::channel();
+    let (release, drain_gate) = mpsc::channel();
+    let gate = Mutex::new(Some((entered, drain_gate)));
+    let counts = Arc::new(AtomicUsize::new(0));
+    let observed_acks = counts.clone();
+    let opens = Arc::new(AtomicUsize::new(0));
+    let observed_opens = opens.clone();
+    let root = dir.clone();
+    let key = "static-lcd-interface";
+    runtime
+        .attach_lcd(
+            "lcd",
+            vec![format!("hid:{key}")],
+            Arc::new(move |config, _| {
+                observed_opens.fetch_add(1, Ordering::SeqCst);
+                Ok((
+                    lcd::Controller::new(config, &Assets::new(root.clone())?)?,
+                    Box::new(StaticTransport {
+                        counts: observed_acks.clone(),
+                        drain_gate: gate.lock().unwrap().take(),
+                    }),
+                ))
+            }),
+        )
+        .unwrap();
+    runtime.enable_output_recovery("lcd").unwrap();
+
+    let rgb = Arc::new(Link::default());
+    runtime
+        .attach_rgb("a", vec!["static-neighbor-rgb".into()], factory(&rgb))
+        .unwrap();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+    let rgb_generation = runtime.host.status("a").unwrap().generation;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.lcd_status("lcd").unwrap().frames_sent == 1
+    });
+    let original = runtime.lcd_status("lcd").unwrap();
+    let quiet_since = Instant::now();
+    runtime.lcd_interface_arrived(key, false);
+    runtime.lcd_interface_removed("other-static-lcd-interface");
+    runtime.lcd_interface_arrived("other-static-lcd-interface", true);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        quiet_since.elapsed() >= Duration::from_millis(120)
+    });
+    assert_eq!(opens.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        runtime.lcd_status("lcd").unwrap().generation,
+        original.generation
+    );
+
+    runtime.lcd_interface_removed(&key.to_ascii_uppercase());
+    draining.recv_timeout(Duration::from_secs(2)).unwrap();
+    let stopped = runtime.lcd_status("lcd").unwrap();
+    assert_eq!(stopped.phase, lcd_worker::Phase::Stopping);
+    assert!(runtime.output_recovery["lcd"].start_error.is_some());
+    assert_eq!(counts.load(Ordering::SeqCst), 1);
+    runtime.lcd_interface_arrived(key, true);
+    for _ in 0..3 {
+        tick(&mut runtime, &mut now);
+    }
+    assert_eq!(opens.load(Ordering::SeqCst), 1);
+    assert!(!runtime.lcd["lcd"].is_reaped());
+    release.send(()).unwrap();
+
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        let current = runtime.lcd_status("lcd").unwrap();
+        current.generation != original.generation && current.frames_sent == 1
+    });
+    let reopened = runtime.lcd_status("lcd").unwrap();
+    assert_eq!(reopened.preview, original.preview);
+    let quiet_since = Instant::now();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        quiet_since.elapsed() >= Duration::from_millis(120)
+    });
+    assert_eq!(counts.load(Ordering::SeqCst), 2);
+    assert_eq!(opens.load(Ordering::SeqCst), 2);
+    assert_eq!(runtime.host.status("a").unwrap().generation, rgb_generation);
+    assert_eq!(rgb.calls.load(Ordering::SeqCst), 1);
+
+    runtime.lcd_interface_removed(key);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.lcd["lcd"].is_reaped()
+    });
+    now += 60_000_000;
+    tick(&mut runtime, &mut now);
+    assert_eq!(opens.load(Ordering::SeqCst), 2);
+    drain(&mut runtime);
+    remove_lcd_assets(runtime, dir);
+}
+
+#[test]
 fn lcd_arrivals_cannot_survive_stop_or_suspend_epochs() {
     let link = Arc::new(Link::default());
     link.fail_open.store(true, Ordering::SeqCst);

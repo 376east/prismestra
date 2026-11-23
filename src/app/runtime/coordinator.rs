@@ -327,13 +327,16 @@ fn run(shared: &Shared, wall: impl Fn() -> Result<i64, String>) -> Result<(), St
                 } else {
                     None
                 };
-                let arrivals = notifications
+                let (removals, arrivals) = notifications
                     .as_mut()
-                    .map(|watch| watch.take_arrivals())
+                    .map(|watch| watch.take_changes())
                     .unwrap_or_default();
                 state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(error) = update {
                     state.runtime.error = Some(message(error));
+                }
+                for path in removals {
+                    state.runtime.lcd_interface_removed(&path);
                 }
                 for arrival in arrivals {
                     state
