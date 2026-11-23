@@ -380,7 +380,10 @@ fn proxy_loop(
         }
         let status_path = status_dir.join("helper-status.json");
         let installed = status_dir != directory;
-        let status = read_status(&status_path, installed);
+        let (status, outbox_error) = match read_status(&status_path, installed) {
+            Ok(status) => (status, None),
+            Err(error) => (None, Some(error)),
+        };
         // Read the clock after the file: a concurrent status publication must
         // not appear to carry a future tick relative to a pre-read observation.
         let now = match now_ms() {
@@ -418,6 +421,8 @@ fn proxy_loop(
                 backend_pid: status.backend_pid,
                 timestamp_ms: status.timestamp_ms,
             };
+        } else if let Some(error) = &outbox_error {
+            snapshot.detail = format!("Installed backend outbox unavailable: {error}");
         } else if launch.is_none()
             && restarting.load(Ordering::SeqCst)
             && Instant::now() >= next_attempt
@@ -461,7 +466,7 @@ fn proxy_loop(
                 next_attempt = now + Duration::from_secs(30);
             }
         }
-        if !snapshot.ready && !failure_detail.is_empty() {
+        if !snapshot.ready && outbox_error.is_none() && !failure_detail.is_empty() {
             snapshot.detail = failure_detail.clone();
         }
         *output.lock().unwrap_or_else(|p| p.into_inner()) = snapshot;
@@ -473,14 +478,34 @@ fn proxy_loop(
     snapshot.detail = "Backend helper client ownership ended".into();
 }
 
-fn read_status(path: &Path, installed: bool) -> Option<Status> {
-    if installed {
-        #[cfg(windows)]
-        super::installed_policy::verify_status(path).ok()?;
-        #[cfg(not(windows))]
-        return None;
+fn read_status(path: &Path, installed: bool) -> Result<Option<Status>, String> {
+    if !installed {
+        return Ok(read_json(path).ok());
     }
-    read_json(path).ok()
+    #[cfg(windows)]
+    {
+        match fs::symlink_metadata(path) {
+            Ok(_) => super::installed_policy::verify_status(path)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // An empty outbox is normal before the first launch. A missing
+                // directory would make the installed helper reject its policy.
+                let outbox = path.parent().ok_or("Missing outbox parent path")?;
+                let metadata = fs::symlink_metadata(outbox).map_err(|error| error.to_string())?;
+                if !metadata.is_dir() {
+                    return Err("Expected an outbox directory".into());
+                }
+                return Ok(None);
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+        match read_json_typed(path) {
+            Ok(status) => Ok(Some(status)),
+            Err(ControlRead::Invalid(_)) => Ok(None),
+            Err(ControlRead::Io(error)) => Err(error.to_string()),
+        }
+    }
+    #[cfg(not(windows))]
+    Ok(None)
 }
 
 #[cfg(windows)]
@@ -2388,6 +2413,70 @@ mod tests {
         let _ = fs::remove_file(directory.join("backend-events.json"));
         fs::remove_dir(directory).unwrap();
     }
+    #[cfg(windows)]
+    #[test]
+    fn installed_proxy_waits_for_outbox_before_requesting_a_launch() {
+        let (directory, request, _) = sharing_fixture("missing-outbox");
+        let outbox = directory.join("outbox");
+        let control = ProxyControl {
+            client_lock: Arc::new(client_lock(&directory).unwrap()),
+            stop: Arc::new(AtomicBool::new(false)),
+            restarting: Arc::new(AtomicBool::new(true)),
+        };
+        let snapshot = Mutex::new(Snapshot::default());
+        let (launch, launched) = std::sync::mpsc::channel();
+        let (renewed, waiting, early_launch, created, resumed) = thread::scope(|scope| {
+            scope.spawn(|| {
+                proxy_loop(
+                    &directory,
+                    &outbox,
+                    "fixture",
+                    &request,
+                    &snapshot,
+                    &control,
+                    move |_, _| {
+                        let _ = launch.send(());
+                        Ok(())
+                    },
+                );
+            });
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let renewed = loop {
+                if read_json::<Request>(&directory.join("owner-request.json"))
+                    .is_ok_and(|owner| owner.timestamp_ms > request.timestamp_ms)
+                {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                thread::sleep(Duration::from_millis(10));
+            };
+            let waiting = !snapshot.lock().unwrap().ready;
+            let early_launch = launched.try_recv().is_ok();
+            let created = fs::create_dir(&outbox);
+            let resumed = launched.recv_timeout(Duration::from_secs(4)).is_ok();
+            control.stop.store(true, Ordering::SeqCst);
+            (renewed, waiting, early_launch, created, resumed)
+        });
+        drop(control);
+        created.unwrap();
+        fs::remove_dir_all(&directory).unwrap();
+        assert!(
+            renewed,
+            "owner heartbeat must continue while the outbox is missing"
+        );
+        assert!(waiting, "a missing outbox cannot prove readiness");
+        assert!(
+            !early_launch,
+            "a missing outbox cannot admit a helper launch"
+        );
+        assert!(
+            resumed,
+            "an empty restored outbox admits a fresh launch attempt"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn proxy_renews_heartbeat_while_one_task_launch_is_blocked() {
