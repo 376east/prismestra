@@ -71,6 +71,21 @@ impl OutputPlan {
 }
 impl Runtime {
     #[cfg(windows)]
+    pub(crate) fn has_active_scene_rgb(&self) -> bool {
+        self.document.lighting.setup.devices.iter().any(|device| {
+            let receives_scene =
+                match device.role {
+                    Role::Canvas => true,
+                    Role::Ambient => self.document.ambient.routes.iter().any(|route| {
+                        route.device == device.id && route.enabled && route.scene_edges
+                    }),
+                    Role::Lcd => false,
+                };
+            receives_scene && matches!(self.output_activity(device), OutputActivity::Sent(_))
+        })
+    }
+
+    #[cfg(windows)]
     pub(crate) fn output_activity(&self, device: &crate::devices::Device) -> OutputActivity {
         use crate::{devices::Driver, runtime::output::Phase};
 

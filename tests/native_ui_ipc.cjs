@@ -1046,7 +1046,7 @@ console.log('PASS: restored capture is inert and can be explicitly applied witho
  const libraryState={...initial,library:[entry]};
  vm.runInContext('view="library";draft=null;search="";libraryEffect=""',context);
  receiveDeviceState('snapshot',libraryState);
- assert.match(mainMarkup,/<button[^>]+data-apply="night"[^>]*>Включить сцену<\/button>/);
+ assert.match(mainMarkup,/<button[^>]+data-apply="night"[^>]*>Применить сцену<\/button>/);
  assert.match(mainMarkup,/data-preview="night"/);
  assert.match(mainMarkup,/data-edit="night"/);
  const click=(key)=>events.click({target:{closest:()=>({
@@ -1063,17 +1063,17 @@ console.log('PASS: restored capture is inert and can be explicitly applied witho
  const apply=commands.at(-1);
  assert.deepEqual(apply,{op:'apply_scene',scene:entry.scene,request:apply.request});
  assert.deepEqual(commands.slice(before).filter(command=>command.op==='apply_scene'),[apply]);
- assert.match(status.textContent,/Включаем/);
+ assert.match(status.textContent,/Применяем/);
  assert.equal(devices.hidden,true);
  receiveDeviceState('snapshot',{...libraryState,scene:entry.scene});
  receiveDeviceState('status',{scene:entry.scene,pending:false});
- assert.match(status.textContent,/Включаем/,'snapshots and unrelated status cannot confirm even the same scene');
- const reply=(request,result,message)=>vm.runInContext(
-  'window.prismestraReceive('+JSON.stringify({kind:'scene_activation',request,status:result,message})+')',context);
- reply(apply.request+1,'applied');
- assert.match(status.textContent,/Включаем/);
- reply(apply.request,'failed','Устройство недоступно.');
- assert.match(status.textContent,/Не удалось включить.*Устройство недоступно/);
+ assert.match(status.textContent,/Применяем/,'snapshots and unrelated status cannot confirm even the same scene');
+ const reply=(request,result,details)=>vm.runInContext(
+  'window.prismestraReceive('+JSON.stringify({kind:'scene_activation',request,status:result,...details})+')',context);
+ reply(apply.request+1,'applied',{output:'active_rgb'});
+ assert.match(status.textContent,/Применяем/);
+ reply(apply.request,'failed',{message:'Устройство недоступно.'});
+ assert.match(status.textContent,/Не удалось применить.*Устройство недоступно/);
  assert.equal(devices.hidden,true);
  click('apply');
  const second=commands.at(-1);
@@ -1081,17 +1081,23 @@ console.log('PASS: restored capture is inert and can be explicitly applied witho
  vm.runInContext('window.prismestraReceive({kind:"error",message:"Ошибка другой команды"})',context);
  assert.equal(find('#native-error').hidden,false);
  assert.match(find('#native-error').innerHTML,/Ошибка другой команды/);
- assert.match(status.textContent,/Включаем/,'an unrelated error cannot settle the activation');
+ assert.match(status.textContent,/Применяем/,'an unrelated error cannot settle the activation');
  click('apply');
  assert.equal(commands.at(-1),second,'an unrelated error cannot unlock another activation');
- reply(apply.request,'applied');
- assert.match(status.textContent,/Включаем/);
- reply(second.request,'applied');
- assert.equal(status.textContent,'Сцена «Ночная» применена.');
+ reply(apply.request,'applied',{output:'active_rgb'});
+ assert.match(status.textContent,/Применяем/);
+ reply(second.request,'applied',{output:'no_active_rgb'});
+ assert.equal(status.textContent,'Сцена «Ночная» применена. Нет активных RGB-выходов для этой сцены.');
  assert.equal(find('#native-error').hidden,false,'the scene result does not dismiss the unrelated error');
  assert.equal(devices.hidden,false);
+ click('apply');
+ reply(commands.at(-1).request,'applied',{output:'active_rgb'});
+ assert.equal(status.textContent,'Сцена «Ночная» применена.');
  receiveDeviceState('status',{native:false});
  assert.equal(devices.hidden,true,'hardware status is not offered in preview');
+ click('apply');
+ reply(commands.at(-1).request,'applied',{output:'preview_only'});
+ assert.equal(status.textContent,'Сцена «Ночная» применена. Режим предпросмотра.');
  assert.equal(viewNow(),'library');
  assert.equal(vm.runInContext('draft.brightness',context),65,'activation does not replace the editor draft');
 }

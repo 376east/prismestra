@@ -298,7 +298,7 @@ function renderLibrary() {
     <span class="scene-preview-label">Предпросмотр</span>
    </button></div>
    <div class="scene-body"><div class="scene-title"><h2>${esc(item.name)}</h2><small class="muted">${item.builtIn?'Шаблон · ':''}${esc(effectLabel(item.scene.effect))}${item.audioDemo?' · Тестовый сигнал':''}</small></div>
-    <div class="card-actions"><button class="button primary" data-apply="${esc(item.id)}" aria-label="Включить сцену: ${esc(item.name)}" aria-disabled="${!!busy()}" data-mutation>Включить сцену</button>
+    <div class="card-actions"><button class="button primary" data-apply="${esc(item.id)}" aria-label="Применить сцену: ${esc(item.name)}" aria-disabled="${!!busy()}" data-mutation>Применить сцену</button>
      <button class="icon-button" data-edit="${esc(item.id)}" aria-label="Редактировать: ${esc(item.name)}" title="Редактировать" data-mutation ${disabled()}>${icon('edit')}</button>
      ${item.builtIn?'':`<button class="icon-button" data-remove="${esc(item.id)}" aria-label="Удалить: ${esc(item.name)}" data-mutation ${disabled()}>${icon('trash')}</button>`}
     </div>
@@ -785,7 +785,7 @@ function activateLibraryEntry(entry) {
  const request=++sceneActivationRequest;
  if(!send({op:'apply_scene',scene:clone(entry.scene),request}))return;
  if(sceneActivation)syncSceneActivation(sceneActivation.id,null);
- sceneActivation={request,id:entry.id,name:entry.name,pending:true,message:`Включаем «${entry.name}»…`};
+ sceneActivation={request,id:entry.id,name:entry.name,pending:true,message:`Применяем «${entry.name}»…`};
  syncControls();
 }
 function syncSceneActivation(id,result) {
@@ -796,10 +796,13 @@ function syncSceneActivation(id,result) {
  const devices=$('#scene-devices-'+key);
  if(devices)devices.hidden=!(result?.applied&&state?.native);
 }
-function receiveSceneActivation({request,status,message}) {
+function receiveSceneActivation({request,status,output,message}) {
  if(!sceneActivation?.pending||request!==sceneActivation.request)return;
- if(status==='applied')sceneActivation.message=`Сцена «${sceneActivation.name}» применена.${message?' '+message:''}`;
- else if(status==='failed')sceneActivation.message=`Не удалось включить «${sceneActivation.name}».${message?' '+message:''}`;
+ if(status==='applied'){
+  const detail=output==='preview_only'?' Режим предпросмотра.':output==='no_active_rgb'?' Нет активных RGB-выходов для этой сцены.':'';
+  sceneActivation.message=`Сцена «${sceneActivation.name}» применена.${detail}`;
+ }
+ else if(status==='failed')sceneActivation.message=`Не удалось применить «${sceneActivation.name}».${message?' '+message:''}`;
  else return;
  sceneActivation.pending=false;
  sceneActivation.applied=status==='applied';
