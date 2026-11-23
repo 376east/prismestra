@@ -4,8 +4,10 @@
 use super::installed_policy::{HelperAuthority, InstalledPolicy};
 use super::managed_backend::{Config, Manager};
 mod clock;
+mod control_tick;
 mod retry;
 use clock::{ActiveClock, Clock};
+use control_tick::{Sample, Stage, Tick, Trace};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::VecDeque,
@@ -495,9 +497,19 @@ fn proxy_loop(
     let mut launch: Option<LaunchWorker> = None;
     let mut reserved_launch = None;
     let mut report_launch_result = false;
+    let trace_clock = || now_ms().ok();
+    let report = |sample| report_control_tick("owner", request.parent.pid, sample);
+    let mut trace = Trace::new(&trace_clock, &report);
     while !stop.load(Ordering::SeqCst) {
+        let mut tick = trace.begin(installed && !cfg!(test));
         if heartbeat.elapsed() >= Duration::from_millis(600) {
-            match refresh_heartbeat(directory, request, restarting.load(Ordering::SeqCst)) {
+            match refresh_heartbeat_observed(
+                directory,
+                request,
+                restarting.load(Ordering::SeqCst),
+                &ActiveClock,
+                &mut tick,
+            ) {
                 Heartbeat::Lost => break,
                 Heartbeat::Retry(error) => {
                     *output.lock().unwrap_or_else(|p| p.into_inner()) = Snapshot {
@@ -506,7 +518,7 @@ fn proxy_loop(
                         detail: error,
                         ..Snapshot::default()
                     };
-                    thread::sleep(POLL);
+                    tick.sleep(POLL, thread::sleep);
                     continue; // Never launch a task while owner control I/O is unavailable.
                 }
                 Heartbeat::Published => {}
@@ -568,22 +580,23 @@ fn proxy_loop(
                     snapshot.detail = "Waiting for fresh backend helper status".into();
                 }
                 drop(snapshot);
-                thread::sleep(POLL);
+                tick.sleep(POLL, thread::sleep);
                 continue;
             }
         };
         if stop.load(Ordering::SeqCst) {
             break;
         }
-        let (status, outbox_error) =
-            match read_json_typed::<Request>(&directory.join("owner-request.json")) {
-                Ok(current) if same_owner_request(&current, request) => match status {
-                    Ok(status) => (status, None),
-                    Err(error) => (None, Some(error)),
-                },
-                Ok(_) | Err(ControlRead::Invalid(_)) => break,
-                Err(ControlRead::Io(error)) => (None, Some(error.to_string())),
-            };
+        let (status, outbox_error) = match tick.measure(Stage::ReadOwner, || {
+            read_json_typed::<Request>(&directory.join("owner-request.json"))
+        }) {
+            Ok(current) if same_owner_request(&current, request) => match status {
+                Ok(status) => (status, None),
+                Err(error) => (None, Some(error)),
+            },
+            Ok(_) | Err(ControlRead::Invalid(_)) => break,
+            Err(ControlRead::Io(error)) => (None, Some(error.to_string())),
+        };
         // Read the clock after the file: a concurrent status publication must
         // not appear to carry a future tick relative to a pre-read observation.
         let now = match now_ms() {
@@ -711,7 +724,7 @@ fn proxy_loop(
             snapshot.detail = failure_detail.clone();
         }
         *output.lock().unwrap_or_else(|p| p.into_inner()) = snapshot;
-        thread::sleep(POLL);
+        tick.sleep(POLL, thread::sleep);
     }
     stop.store(true, Ordering::SeqCst);
     let mut snapshot = output.lock().unwrap_or_else(|p| p.into_inner());
@@ -818,21 +831,68 @@ enum Heartbeat {
     Retry(String),
     Lost,
 }
+#[cfg(test)]
 fn refresh_heartbeat(directory: &Path, request: &Request, restarting: bool) -> Heartbeat {
     refresh_heartbeat_with_clock(directory, request, restarting, &ActiveClock)
 }
+
+#[cfg(test)]
 fn refresh_heartbeat_with_clock(
     directory: &Path,
     request: &Request,
     restarting: bool,
     clock: &impl Clock,
 ) -> Heartbeat {
+    let mut trace = Trace::new(&|| None, &|_| {});
+    refresh_heartbeat_observed(
+        directory,
+        request,
+        restarting,
+        clock,
+        &mut trace.begin(false),
+    )
+}
+
+fn report_control_tick(role: &str, parent_pid: u32, sample: Sample) {
+    #[cfg(windows)]
+    {
+        let [
+            identity,
+            owner_read,
+            cancel_read,
+            pause_read,
+            owner_write,
+            status_write,
+            journal,
+        ] = sample.stages;
+        super::backend_diagnostics::queue_windows_event(
+            4,
+            format!(
+                "event=slow_control_tick role={role} pid={} ppid={parent_pid} tick={} wake={} work={} id={identity} or={owner_read} cr={cancel_read} pr={pause_read} ow={owner_write} sw={status_write} j={journal}",
+                std::process::id(),
+                sample.ended_ms,
+                sample.wake_ms.min(u32::MAX as u64),
+                sample.elapsed_ms.min(u32::MAX as u64),
+            ),
+        );
+    }
+    #[cfg(not(windows))]
+    let _ = (role, parent_pid, sample);
+}
+
+fn refresh_heartbeat_observed(
+    directory: &Path,
+    request: &Request,
+    restarting: bool,
+    clock: &impl Clock,
+    tick: &mut Tick<'_, '_>,
+) -> Heartbeat {
     let now = match clock.now_ms() {
         Ok(now) => now,
         Err(_) => return Heartbeat::Lost,
     };
     let path = directory.join("owner-request.json");
-    let previous = match read_json_typed::<Request>(&path) {
+    let previous = match tick.measure(Stage::ReadOwner, || read_json_typed::<Request>(&path)) {
         Ok(current)
             if current.version == clock::PROTOCOL
                 && current.clock_domain == clock::DOMAIN
@@ -852,7 +912,7 @@ fn refresh_heartbeat_with_clock(
         .filter(|gap| (1..clock::LEASE_MS).contains(gap))
         .map(|_| previous);
     current.restarting = restarting;
-    match write_live_record(&path, &current) {
+    match tick.measure(Stage::WriteOwner, || write_live_record(&path, &current)) {
         Ok(()) => Heartbeat::Published,
         Err(error) => Heartbeat::Retry(error),
     }
@@ -1240,13 +1300,23 @@ fn supervise_channels(
     let mut status_write_failed = false;
     let mut owner_read_failed = false;
     let mut last_backend_state = None;
+    let trace_clock = || now_ms().ok();
+    let report = |sample| report_control_tick("helper", request.parent.pid, sample);
+    let mut trace = Trace::new(&trace_clock, &report);
+    let note = |tick: &mut Tick<'_, '_>, event, backend_pid, detail: &str| {
+        tick.measure(Stage::Journal, || {
+            helper_note(output, request, event, backend_pid, detail)
+        });
+    };
     loop {
-        match channels.parent_identity(request.parent.pid) {
+        let mut tick = trace.begin(allow_heartbeat_catch_up && !cfg!(test));
+        match tick.measure(Stage::Identity, || {
+            channels.parent_identity(request.parent.pid)
+        }) {
             Ok(parent) if parent == request.parent => {}
             Ok(_) => {
-                helper_note(
-                    output,
-                    request,
+                note(
+                    &mut tick,
                     "helper_stop",
                     None,
                     "Managed helper stopping: parent identity changed",
@@ -1254,9 +1324,8 @@ fn supervise_channels(
                 break;
             }
             Err(error) => {
-                helper_note(
-                    output,
-                    request,
+                note(
+                    &mut tick,
                     "helper_stop",
                     None,
                     &format!("Managed helper stopping: parent identity query failed: {error}"),
@@ -1264,27 +1333,34 @@ fn supervise_channels(
                 break;
             }
         }
-        if channels.control("owner-cancel.json", request) {
-            helper_note(
-                output,
-                request,
+        if tick.measure(Stage::ReadCancel, || {
+            channels.control("owner-cancel.json", request)
+        }) {
+            note(
+                &mut tick,
                 "helper_stop",
                 None,
                 "Managed helper stopping: matching owner cancellation",
             );
             break;
         }
-        let pause = channels.read::<Cancel>("owner-pause.json");
+        let pause = tick.measure(Stage::ReadPause, || {
+            channels.read::<Cancel>("owner-pause.json")
+        });
         if pause
             .as_ref()
             .is_ok_and(|pause| matches_control(pause, request))
         {
             stop_restarting();
         }
-        let current = channels.read::<Request>("owner-request.json");
-        let cancellation = current
-            .is_ok()
-            .then(|| channels.read::<Cancel>("owner-cancel.json"));
+        let current = tick.measure(Stage::ReadOwner, || {
+            channels.read::<Request>("owner-request.json")
+        });
+        let cancellation = current.is_ok().then(|| {
+            tick.measure(Stage::ReadCancel, || {
+                channels.read::<Cancel>("owner-cancel.json")
+            })
+        });
         let now = clock.now_ms()?;
         let mut renewed_during_catch_up = false;
         if now >= lease_deadline
@@ -1316,16 +1392,17 @@ fn supervise_channels(
                 };
                 catch_up = until.map(|until| (tick, until));
             }
-            if let Some((tick, until)) = catch_up
+            if let Some((record_tick, until)) = catch_up
                 && now < until
             {
-                if !channels
-                    .parent_identity(request.parent.pid)
+                if !tick
+                    .measure(Stage::Identity, || {
+                        channels.parent_identity(request.parent.pid)
+                    })
                     .is_ok_and(|parent| parent == request.parent)
                 {
-                    helper_note(
-                        output,
-                        request,
+                    note(
+                        &mut tick,
                         "helper_stop",
                         None,
                         "Managed helper stopping: parent identity lost during heartbeat catch-up",
@@ -1334,13 +1411,16 @@ fn supervise_channels(
                 }
                 let checked_at = clock.now_ms()?;
                 if checked_at < until {
-                    if current.timestamp_ms == tick {
+                    if current.timestamp_ms == record_tick {
                         // Re-reading the same record never extends this window or
                         // publishes readiness.
-                        clock.sleep(POLL.min(Duration::from_millis(until - checked_at)));
+                        tick.sleep(
+                            POLL.min(Duration::from_millis(until - checked_at)),
+                            |delay| clock.sleep(delay),
+                        );
                         continue;
                     }
-                    renewed_during_catch_up = current.timestamp_ms > tick
+                    renewed_during_catch_up = current.timestamp_ms > record_tick
                         && clock::deadline(current.timestamp_ms, checked_at)
                             .is_ok_and(|next| checked_at < next);
                 }
@@ -1371,9 +1451,8 @@ fn supervise_channels(
                 Some(Ok(_)) => "read".into(),
                 Some(Err(error)) => error.diagnostic_code(),
             };
-            helper_note(
-                output,
-                request,
+            note(
+                &mut tick,
                 "helper_stop",
                 None,
                 &format!(
@@ -1387,24 +1466,17 @@ fn supervise_channels(
         match current {
             Err(ControlRead::Io(error)) => {
                 if !owner_read_failed {
-                    helper_note(
-                        output,
-                        request,
-                        "owner_read_deferred",
-                        None,
-                        &error.to_string(),
-                    );
+                    note(&mut tick, "owner_read_deferred", None, &error.to_string());
                 }
                 owner_read_failed = true;
-                clock.sleep(POLL);
+                tick.sleep(POLL, |delay| clock.sleep(delay));
                 continue;
             }
             Err(ControlRead::Invalid(error)) => return Err(error),
             Ok(current) => {
                 if owner_read_failed {
-                    helper_note(
-                        output,
-                        request,
+                    note(
+                        &mut tick,
                         "owner_read_recovered",
                         None,
                         "Owner request readable again",
@@ -1412,9 +1484,8 @@ fn supervise_channels(
                     owner_read_failed = false;
                 }
                 if !same_owner_request(&current, request) || !live_request(&current, now) {
-                    helper_note(
-                        output,
-                        request,
+                    note(
+                        &mut tick,
                         "helper_stop",
                         None,
                         &format!(
@@ -1427,9 +1498,8 @@ fn supervise_channels(
                 if cancellation
                     .is_some_and(|read| read.is_ok_and(|cancel| matches_control(&cancel, request)))
                 {
-                    helper_note(
-                        output,
-                        request,
+                    note(
+                        &mut tick,
                         "helper_stop",
                         None,
                         "Managed helper stopping: matching owner cancellation",
@@ -1450,13 +1520,15 @@ fn supervise_channels(
                     snapshot.detail.clone(),
                 );
                 if last_backend_state.as_ref() != Some(&backend_state) {
-                    super::backend_diagnostics::record(
-                        output,
-                        "backend_state",
-                        Some(request.parent.pid),
-                        snapshot.backend_pid,
-                        &snapshot.detail,
-                    );
+                    tick.measure(Stage::Journal, || {
+                        super::backend_diagnostics::record(
+                            output,
+                            "backend_state",
+                            Some(request.parent.pid),
+                            snapshot.backend_pid,
+                            &snapshot.detail,
+                        );
+                    });
                     last_backend_state = Some(backend_state);
                 }
                 let status = Status {
@@ -1476,17 +1548,18 @@ fn supervise_channels(
                 let status_path = output.join("helper-status.json");
                 // The installed outbox is opened by the ordinary client.
                 // Keep legacy private control directories on their existing path.
-                let result = if output != channels.input {
-                    write_live_record(&status_path, &status)
-                } else {
-                    write_json(&status_path, &status)
-                };
+                let result = tick.measure(Stage::WriteStatus, || {
+                    if output != channels.input {
+                        write_live_record(&status_path, &status)
+                    } else {
+                        write_json(&status_path, &status)
+                    }
+                });
                 match result {
                     Ok(()) => {
                         if status_write_failed {
-                            helper_note(
-                                output,
-                                request,
+                            note(
+                                &mut tick,
                                 "status_write_recovered",
                                 snapshot.backend_pid,
                                 "Backend helper status publication recovered",
@@ -1496,9 +1569,8 @@ fn supervise_channels(
                     }
                     Err(error) => {
                         if !status_write_failed {
-                            helper_note(
-                                output,
-                                request,
+                            note(
+                                &mut tick,
                                 "status_write_deferred",
                                 snapshot.backend_pid,
                                 &format!("Backend helper status publication deferred: {error}"),
@@ -1509,7 +1581,7 @@ fn supervise_channels(
                 }
             }
         }
-        clock.sleep(POLL);
+        tick.sleep(POLL, |delay| clock.sleep(delay));
     }
     Ok(())
 }
