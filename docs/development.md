@@ -73,6 +73,6 @@ The output must be new. The packager checks input pins, required sources/notices
 
 ## Installations and private task configuration
 
-The portable ZIP starts from `Prismestra.exe` and includes `Configure OpenRGB.ps1` for explicitly provisioning a managed local backend. The historical `Launch Prismestra.ps1` remains in source for compatibility tests and older packages. An optional authorized helper must use [the protocol2 clock contract](startup-recovery.md). The development script `scripts/windows/Helper Clock.ps1` checks the launcher-side clock without creating a task or starting a process.
+The portable binary ZIP starts from `Prismestra.exe` and uses native OpenRGB configuration. `Configure OpenRGB.ps1` and `Launch Prismestra.ps1` remain in the corresponding source ZIP for administrator compatibility and development tests. An optional authorized helper must use [the protocol2 clock contract](startup-recovery.md). The development script `scripts/windows/Helper Clock.ps1` checks the launcher-side clock without creating a task or starting a process.
 
 The maintained general installer is described in [Windows installation](windows-installer.md); its lifecycle and privilege tests are separate release gates. Workstation-specific activation/rollback receipts are evidence, not a supported installer to copy for another user's PC. Do not promote old scripts containing fixed paths, PIDs, application versions or permission grants. Keep running installations unchanged when reorganizing source files; update a release through its separately checked update path.
