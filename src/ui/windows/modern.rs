@@ -2259,6 +2259,16 @@ mod tests {
                 issued.recv_timeout(Duration::from_secs(2)),
                 Err(mpsc::RecvTimeoutError::Disconnected)
             ));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while editor
+                .alice
+                .handle(super::super::alice::Action::Status)
+                .unwrap()["busy"]
+                == true
+            {
+                assert!(Instant::now() < deadline, "cancelled worker must finish");
+                std::thread::sleep(Duration::from_millis(5));
+            }
             assert!(editor.take_scene_lamp_result(Some(2)).is_none());
         }
         assert_eq!(

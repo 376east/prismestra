@@ -95,6 +95,7 @@ pub(super) struct Session {
     remember_pending: bool,
     saved: bool,
     needs_login: bool,
+    signing_out: bool,
     keep_for_scenes: bool,
     scene_request: Option<u32>,
     scene_result: Option<(u32, String)>,
@@ -108,9 +109,12 @@ impl Session {
         match action {
             Action::Status => {}
             Action::Open => self.open_saved()?,
+            Action::Cancel if self.signing_out => {}
             Action::Cancel => {
-                if self.scene_request.is_none() {
-                    self.job = None;
+                if self.scene_request.is_none()
+                    && let Some(job) = &self.job
+                {
+                    job.cancel.store(true, Ordering::Release);
                 }
                 if !self.keep_for_scenes {
                     self.grant = None;
@@ -243,6 +247,7 @@ impl Session {
         + 'static,
     ) -> Result<(), String> {
         // The editor drains each result before accepting another lamp operation.
+        self.poll();
         if self.job.is_some() || self.scene_result.is_some() {
             return Err("Дождитесь завершения операции Алисы и примените сцену заново.".into());
         }
@@ -284,7 +289,9 @@ impl Session {
 
     pub(super) fn cancel_scene(&mut self) {
         if self.scene_request.take().is_some() {
-            self.job = None;
+            if let Some(job) = &self.job {
+                job.cancel.store(true, Ordering::Release);
+            }
             self.message.clear();
         }
         self.scene_result = None;
@@ -332,7 +339,6 @@ impl Session {
         delete: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
         delete()?;
-        self.job = None;
         self.grant = None;
         self.keep_for_scenes = false;
         self.scene_request = None;
@@ -340,7 +346,15 @@ impl Session {
         self.remember_pending = false;
         self.saved = false;
         self.needs_login = true;
-        self.message = "Вы вышли из Алисы в Prismestra.".into();
+        if let Some(job) = &self.job {
+            // The final cancellation check and the synchronous send are separate.
+            // Keep the worker until it can no longer begin a request.
+            job.cancel.store(true, Ordering::Release);
+            self.signing_out = true;
+            self.message = "Завершаем выход из Алисы…".into();
+        } else {
+            self.message = "Вы вышли из Алисы в Prismestra.".into();
+        }
         Ok(())
     }
 
@@ -432,8 +446,16 @@ impl Session {
             Err(mpsc::TryRecvError::Disconnected) => Err("Операция Алисы прервалась.".into()),
         };
         let success = job.success;
+        let cancelled = job.cancel.load(Ordering::Acquire);
         self.job = None;
         let remember = std::mem::take(&mut self.remember_pending);
+        if std::mem::take(&mut self.signing_out) {
+            self.message = "Вы вышли из Алисы в Prismestra.".into();
+            return;
+        }
+        if cancelled {
+            return;
+        }
         match result {
             Ok(Some(grant)) => {
                 self.message = if grant.lamps.is_empty() {
@@ -1270,9 +1292,23 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+        let pending = restarted.handle(Action::Status).unwrap();
+        assert_eq!(pending["busy"], true);
+        assert_eq!(pending["ticket"], Value::Null);
         finish.send(()).unwrap();
         assert!(outcome.recv_timeout(Duration::from_secs(2)).unwrap());
-        let signed_out = restarted.handle(Action::Status).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let signed_out = loop {
+            let view = restarted.handle(Action::Status).unwrap();
+            if view["busy"] == false {
+                break view;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "sign-out must finish after the worker"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
         assert_eq!(signed_out["saved"], false);
         assert_eq!(signed_out["needsLogin"], true);
         assert_eq!(signed_out["ticket"], Value::Null);
@@ -1298,6 +1334,66 @@ mod tests {
         assert_eq!(expired["needsLogin"], true);
         assert_eq!(expired["ticket"], Value::Null);
         assert!(restarted.job.is_none());
+    }
+
+    #[test]
+    fn sign_out_waits_for_a_write_already_admitted_by_transport() {
+        let mut session = Session::default();
+        session.synthetic_login();
+        let binding = session.binding("fixture-ticket", 1, 40, false).unwrap();
+        let (entered, post_entered) = mpsc::channel();
+        let (release, post_can_finish) = mpsc::channel();
+        session
+            .apply_bound_with(
+                1,
+                binding,
+                || unreachable!(),
+                move |path, _, body, cancel| match path {
+                    "/v1.0/user/info" => Ok(fixture()),
+                    "/v1.0/devices/b" => {
+                        Ok(json!({"status":"ok","id":"b","room":"r","state":"online",
+                "capabilities":[{"type":ON,"state":{"value":true}},
+                    {"type":RANGE,"state":{"instance":"brightness","value":70}}]}))
+                    }
+                    "/v1.0/devices/actions" => {
+                        assert!(body.is_some());
+                        entered.send(false).unwrap();
+                        post_can_finish
+                            .recv_timeout(Duration::from_secs(2))
+                            .unwrap();
+                        entered.send(cancel.load(Ordering::Acquire)).unwrap();
+                        Err("fixture lost the response".into())
+                    }
+                    _ => panic!("a different lamp was accessed"),
+                },
+            )
+            .unwrap();
+        assert!(!post_entered.recv_timeout(Duration::from_secs(2)).unwrap());
+        session.sign_out_with(|| Ok(())).unwrap();
+        for action in [Action::Status, Action::Cancel, Action::Status] {
+            let pending = session.handle(action).unwrap();
+            assert_eq!(pending["busy"], true);
+            assert_eq!(pending["ticket"], Value::Null);
+            assert_eq!(pending["message"], "Завершаем выход из Алисы…");
+        }
+        release.send(()).unwrap();
+        assert!(post_entered.recv_timeout(Duration::from_secs(2)).unwrap());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let signed_out = loop {
+            let view = session.handle(Action::Status).unwrap();
+            if view["busy"] == false {
+                break view;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "sign-out must finish after the write"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(signed_out["message"], "Вы вышли из Алисы в Prismestra.");
+        assert_eq!(signed_out["ticket"], Value::Null);
+        assert_eq!(signed_out["lamps"], json!([]));
+        assert!(session.take_scene_result().is_none());
     }
 
     #[test]

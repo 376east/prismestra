@@ -1095,7 +1095,14 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
  click('alice-sign-out');
  const signOut=commands.at(-1);
  assert.equal(signOut.request.action,'sign_out');
- reply(signOut.sequence,{busy:false,saved:false,needsLogin:true,lamps:[],ticket:null,message:'Вы вышли из Алисы в Prismestra.'});
+ reply(signOut.sequence,{busy:true,saved:false,needsLogin:true,lamps:[],ticket:null,message:'Завершаем выход из Алисы…'});
+ reply(open.sequence,ready);
+ assert.equal(find('#alice-status').textContent,'Завершаем выход из Алисы…');
+ assert.equal(find('#alice-login').hidden,true,'sign-in stays hidden while the old request drains');
+ vm.runInContext('aliceRequest("status")',context);
+ const finished=commands.at(-1);
+ assert.equal(finished.request.action,'status');
+ reply(finished.sequence,{busy:false,saved:false,needsLogin:true,lamps:[],ticket:null,message:'Вы вышли из Алисы в Prismestra.'});
  assert.equal(find('#alice-choice').hidden,true);
  reply(open.sequence,ready);
  assert.equal(find('#alice-choice').hidden,true,'a late catalog reply cannot restore signed-out controls');
