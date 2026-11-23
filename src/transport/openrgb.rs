@@ -15,7 +15,7 @@ const OPERATION_LIMIT: Duration = Duration::from_secs(3);
 #[cfg(any(windows, test))]
 mod channels;
 #[cfg(any(windows, test))]
-pub(crate) use channels::ChannelInventory;
+pub(crate) use channels::{ChannelInventory, UnconfiguredArgb};
 #[cfg(windows)]
 pub(crate) use channels::{ConfirmedZoneSize, ZoneChannel, ZoneSizeRequest, ZoneSizeWriter};
 
@@ -80,6 +80,7 @@ impl ControllerInfo {
 pub(crate) struct InventoryEntry {
     pub(crate) identity_fields: [String; 5],
     pub(crate) description: OpenRgbResult<ControllerInfo>,
+    pub(crate) unconfigured_argb: Option<UnconfiguredArgb>,
 }
 
 fn kind(controller: &Controller) -> String {
@@ -275,10 +276,18 @@ impl OpenRgbSession {
                     let group = client.get_all_controllers().await?;
                     Ok(group
                         .iter()
-                        .map(|controller| InventoryEntry {
-                            identity_fields: identity_fields(controller, &kind(controller))
-                                .map(str::to_owned),
-                            description: describe(controller),
+                        .map(|controller| {
+                            let description = describe(controller);
+                            let unconfigured_argb = description
+                                .as_ref()
+                                .ok()
+                                .and_then(|info| channels::unconfigured_argb(controller, info));
+                            InventoryEntry {
+                                identity_fields: identity_fields(controller, &kind(controller))
+                                    .map(str::to_owned),
+                                description,
+                                unconfigured_argb,
+                            }
                         })
                         .collect())
                 },

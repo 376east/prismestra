@@ -167,6 +167,16 @@ window.argbChannel = (() => {
     start('list');
   }
 
+  function openPreview(controller, restoreFocus) {
+    open('preview', controller.label, {
+      list(request) {
+        receive({...request, kind:'argb_channels', status:'ready', writable:false, channels:controller.channels});
+        return true;
+      },
+      restoreFocus,
+    });
+  }
+
   function dismiss() {
     if (pending?.operation === 'save') return;
     const {api} = context;
@@ -201,5 +211,5 @@ window.argbChannel = (() => {
     event.preventDefault();
     dismiss();
   });
-  return {open, receive, blockClose: () => pending?.operation === 'save'};
+  return {open, openPreview, receive, blockClose: () => pending?.operation === 'save'};
 })();

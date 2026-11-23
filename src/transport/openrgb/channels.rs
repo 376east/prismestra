@@ -34,7 +34,13 @@ pub(crate) struct ChannelInventory {
     pub channels: Vec<ZoneChannel>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct UnconfiguredArgb {
+    pub(crate) label: String,
+    pub(crate) channels: Vec<ZoneChannel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct ZoneChannel {
     pub id: String,
     pub label: String,
@@ -69,7 +75,7 @@ impl OpenRgbSession {
                     if matching.next().is_some() {
                         return Err(geometry_error("bound controller identity is ambiguous"));
                     }
-                    describe_channels(controller)
+                    describe_channels(controller, &describe(controller)?)
                 },
                 deadline,
                 cancelled,
@@ -79,10 +85,39 @@ impl OpenRgbSession {
     }
 }
 
-fn describe_channels(controller: &Controller) -> OpenRgbResult<ChannelInventory> {
+pub(super) fn unconfigured_argb(
+    controller: &Controller,
+    info: &ControllerInfo,
+) -> Option<UnconfiguredArgb> {
+    if info.leds != 0 {
+        return None;
+    }
+    let channels = describe_channels(controller, info).ok()?.channels;
+    if !channels.iter().any(|zone| zone.mode == "manual") {
+        return None;
+    }
+    let label: String = info
+        .name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(100)
+        .collect();
+    Some(UnconfiguredArgb {
+        label: if label.trim().is_empty() {
+            "OpenRGB".into()
+        } else {
+            label
+        },
+        channels,
+    })
+}
+
+fn describe_channels(
+    controller: &Controller,
+    info: &ControllerInfo,
+) -> OpenRgbResult<ChannelInventory> {
     use openrgb2::{ZoneFlags, ZoneType};
 
-    let info = describe(controller)?;
     if info.kind == "Virtual" || !info.supports_direct {
         return Err(geometry_error("no physical Direct controller"));
     }
@@ -128,7 +163,7 @@ fn describe_channels(controller: &Controller) -> OpenRgbResult<ChannelInventory>
         })
         .collect();
     Ok(ChannelInventory {
-        topology: topology(&info),
+        topology: topology(info),
         channels,
     })
 }

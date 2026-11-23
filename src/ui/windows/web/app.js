@@ -25,6 +25,7 @@ const englishStartupStatus = new Map([
  ['searching','Looking for supported devices. Any devices found will be set up automatically.'],
  ['searchingMore','Looking for more supported devices…'],
  ['empty','No supported devices found yet.'],
+ ['unconfiguredArgb','Found ARGB controllers with no LEDs configured. Open ARGB channels on the Devices page.'],
  ['noNewDevices','No new devices found. Check Connections for details.'],
  ['applying','Devices found. Adding them to the shared scene…'],
  ['applied','Devices added to the profile. Check their output status in Devices.'],
@@ -591,7 +592,13 @@ function renderDevices(candidates) {
   <div class="device-info"><h2>${esc(candidate.label)}</h2><p>${esc(candidate.role)}</p></div>
   <div class="device-meta"><small>${firstSetup?ui('Настраивается автоматически','Setting up automatically'):ui('Найдено','Found')}</small></div>
  </article>`);
- const entries=[...devices,...found].join('')||`<div class="empty"><h2>${ui('В профиле нет устройств','No devices in this profile')}</h2><p>${state.startupDiscoveryRetry?ui('Подключите устройство и запустите поиск.','Connect a device and start a search.'):ui('Добавьте устройство в свойствах профиля.','You can add a device in the profile properties.')}</p></div>`;
+ const argbLabel=ui('Каналы ARGB','ARGB channels');
+ const unconfigured=(state.unconfiguredArgb??[]).map((controller,index)=>`<article class="device">
+  <div class="device-symbol">${icon('devices')}</div>
+  <div class="device-info"><h2>${esc(controller.label)}</h2><p>OpenRGB · ${ui('нет настроенных LED','no LEDs configured')}</p></div>
+  <button id="preview-argb-${index}" class="button" data-action="preview-argb" data-argb-index="${index}" aria-label="${argbLabel}: ${esc(controller.label)}">${argbLabel}</button>
+ </article>`);
+ const entries=[...devices,...found,...unconfigured].join('')||`<div class="empty"><h2>${ui('В профиле нет устройств','No devices in this profile')}</h2><p>${state.startupDiscoveryRetry?ui('Подключите устройство и запустите поиск.','Connect a device and start a search.'):ui('Добавьте устройство в свойствах профиля.','You can add a device in the profile properties.')}</p></div>`;
  const add = !firstSetup && state.nativeAux?.page==='devices' && state.nativeAux.fields.some(field=>field.id===devicePresetField && field.enabled)
   ? action(ui('Добавить устройство','Add device'),'focus-device-setup',true)
   : '';
@@ -934,6 +941,7 @@ window.prismestraReceive = message => {
     && Object.hasOwn(message.state,'pending')&&state.pending!==message.state.pending;
    const foundChanged=view==='devices'&&(
     (Object.hasOwn(message.state,'deviceCandidates')&&!same(state.deviceCandidates,message.state.deviceCandidates)) ||
+     (Object.hasOwn(message.state,'unconfiguredArgb')&&!same(state.unconfiguredArgb,message.state.unconfiguredArgb)) ||
     (Object.hasOwn(message.state,'argbDevice')&&state.argbDevice!==message.state.argbDevice)
    );
    const nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));
@@ -1067,6 +1075,12 @@ document.addEventListener('click',event=>{
   aliceSelection();
   aliceRequest('apply',{ticket,lamp:Number($('#alice-lamp').value),brightness:Number($('#alice-brightness').value)});
   break;
+ }
+ case 'preview-argb': {
+  const index=Number(b.dataset.argbIndex);
+  const controller=state?.unconfiguredArgb?.[index];
+  if(controller&&view==='devices')window.argbChannel?.openPreview(controller,()=>restoreFocus(`#preview-argb-${index}`));
+  return;
  }
  case 'open-argb': {
   const device=state?.devices.find(item=>item.id===state.argbDevice);

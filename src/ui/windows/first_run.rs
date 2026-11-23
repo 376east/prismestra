@@ -52,6 +52,7 @@ pub(super) struct Startup {
     reported_phase: &'static str,
     status_label: Option<(&'static str, String)>,
     discovery_issues: Vec<String>,
+    unconfigured_argb: Vec<crate::transport::openrgb::UnconfiguredArgb>,
     unknown_openrgb_controller: bool,
     completed_empty_pass: bool,
     enabled: bool,
@@ -80,6 +81,7 @@ impl Startup {
             reported_phase: "",
             status_label: None,
             discovery_issues: Vec::new(),
+            unconfigured_argb: Vec::new(),
             unknown_openrgb_controller: false,
             completed_empty_pass: false,
             enabled,
@@ -101,6 +103,7 @@ impl Startup {
     }
     pub(super) fn cancel(&mut self) {
         self.enabled = false;
+        self.unconfigured_argb.clear();
         self.unknown_openrgb_controller = false;
         self.phase = "cancelled";
         self.worker.cancel();
@@ -155,6 +158,7 @@ impl Startup {
     }
 
     fn record_search_started(&mut self) {
+        self.unconfigured_argb.clear();
         if self.manual_between_passes {
             self.manual_started_since_automatic = true;
             self.early_manual_starts = self.early_manual_starts.saturating_add(1);
@@ -202,6 +206,15 @@ impl Startup {
 }
 
 impl App {
+    pub(super) fn startup_unconfigured_argb(
+        &self,
+    ) -> &[crate::transport::openrgb::UnconfiguredArgb] {
+        if self.path != self.first_run.path || self.context_revision != self.first_run.context {
+            return &[];
+        }
+        &self.first_run.unconfigured_argb
+    }
+
     fn set_first_run_status(&mut self, label: &'static str, message: impl Into<String>) {
         self.status = message.into();
         self.first_run.status_label = Some((label, self.status.clone()));
@@ -220,6 +233,7 @@ impl App {
         if self.path != self.first_run.path
             || self.context_revision != self.first_run.context
             || !self.runtime.document().lighting.setup.devices.is_empty()
+            || !self.first_run.unconfigured_argb.is_empty()
         {
             return None;
         }
@@ -544,7 +558,10 @@ impl App {
                     return Ok(true);
                 }
                 let empty = self.runtime.document().lighting.setup.devices.is_empty();
-                let message = if empty {
+                let needs_argb_setup = empty && !self.first_run.unconfigured_argb.is_empty();
+                let message = if needs_argb_setup {
+                    "Найдены контроллеры ARGB без настроенных LED. Откройте «Каналы ARGB» на вкладке «Устройства».".into()
+                } else if empty {
                     format!(
                         "Поддерживаемые устройства пока не найдены. {}",
                         plan.issues.join("; ")
@@ -554,7 +571,14 @@ impl App {
                 } else {
                     format!("Поиск устройств: {}", plan.issues.join("; "))
                 };
-                self.set_first_run_status(if empty { "empty" } else { "noNewDevices" }, message);
+                let label = if needs_argb_setup {
+                    "unconfiguredArgb"
+                } else if empty {
+                    "empty"
+                } else {
+                    "noNewDevices"
+                };
+                self.set_first_run_status(label, message);
                 self.first_run.record_search_result(empty, Instant::now());
                 return Ok(true);
             }
@@ -582,6 +606,9 @@ impl App {
         }
         let endpoint = "127.0.0.1:17422".parse().unwrap();
         if let Some(inventory) = self.first_run.worker.poll_inventory() {
+            self.first_run
+                .unconfigured_argb
+                .clone_from(&inventory.unconfigured_argb);
             let local = self
                 .native_lighting
                 .clone()
