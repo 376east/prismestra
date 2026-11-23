@@ -112,6 +112,8 @@ const sourceNeedsApply = () => !!state?.native && !!draft
  && ['camera','keys'].includes(reactiveEffects.get(draft.effect))
  && (draft.effect!==state.scene.effect || !state.captureAuthorized);
 const applyNeeded = () => changed() || sourceNeedsApply();
+let placementOpen=false, placementDrag=null;
+const placementDirty=()=>view==='editor' && placementOpen && state?.editor?.page==='devices' && state.editor.dirty;
 const unsavedDraft = () => !!draft && (!draftOrigin || !same(draft,draftOrigin.scene));
 const deviceFocusKey = id => `[data-device-id="${CSS.escape(id)}"]`;
 function focusKey(node=document.activeElement) {
@@ -133,6 +135,7 @@ function controlDisabled(node) {
  if(closing)return true;
  const code=node.dataset.action;
  if(code==='classic')return !state;
+ if(code==='apply-scene'&&placementDirty())return true;
  if(code==='retry-startup-discovery')return !state?.startupDiscoveryRetry||busy()||stagedDirty();
  if(code==='revert-document')return !state || !(busy()||state.editor?.dirty||stagedDirty());
  if(code==='retry-document')return !state || !(busy()||error||state.error);
@@ -197,7 +200,7 @@ function send(command, mutation=false) {
  const nativeCommand=['native_field','native_action'].includes(command.op);
  if(nativeCommand){const node={dataset:{[command.op==='native_field'?'nativeField':'nativeAction']:String(command.id)}};if(nativeControlDisabled(node))return false;const items=command.op==='native_field'?nativeFormForView().fields:nativeFormForView().actions;command.id=items.find(item=>String(item.id)===String(command.id)).id;}
  else if(mutation && busy() && !recoveryOperation(command.op)) return false;
- if(['open','save','export'].includes(command.op)&&stagedDirty()){showError('Примените или отмените незавершённый ввод перед сохранением профиля.');return false;}
+ if(['open','save','export'].includes(command.op)&&(stagedDirty()||placementDirty())){showError('Примените или отмените незавершённый ввод перед сохранением профиля.');return false;}
  const stagedCommand=['apply_fields','set_field','asset','native_field','native_action'].includes(command.op);
  const discardNative=nativeCommand&&['408','1812','1819','1107','1141'].includes(String(command.id));
  if(stagedCommand&&!discardNative){if(nativeCommand){command.fields=currentNativeStages();command.editor_fields=state.pending?[]:currentGenericStages().filter(item=>state.editor.fields.find(field=>field.key===item.key)?.enabled!==false);}else command.fields=currentGenericStages();}
@@ -216,7 +219,7 @@ function syncControls(keepRetryFocus) {
  const copyOutput=$('[data-copy-output]');if(copyOutput)copyOutput.disabled=closing||!!pendingView||commandPending;
  document.querySelectorAll('[data-local-discard]').forEach(node=>{node.hidden=!currentPageStaged();node.disabled=closing||commandPending;});
  $('#master-brightness').disabled=busy()||!draft;
- $('#footer-apply').disabled=busy()||!applyNeeded();
+ $('#footer-apply').disabled=busy()||placementDirty()||!applyNeeded();
  $('#play').disabled=busy();
  const light=!!(state?.groups?.pc||state?.groups?.door);$('#play').textContent=light?'Выключить свет':'Включить свет';
  $('#player-name').textContent=state?effectLabel(state.scene.effect):'Prismestra';
@@ -370,7 +373,34 @@ function reorderPalette(actionCode) {
 function renderScene() {
  const effectIds=Object.keys(effects);
  if(!Object.hasOwn(effects,draft.effect))effectIds.unshift(draft.effect);
- return heading(draftName,'Изменения остаются в черновике до нажатия «Применить».',action('Сохранить сцену','save-scene')+action('Создать копию','clone')+(selectedId?action('Переименовать','rename'):'')+action('Применить','apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status"></p><div class="editor-layout"><section class="preview-panel" aria-label="Предпросмотр"><div class="stage"><canvas id="stage" aria-label="Предпросмотр сцены из движка Prismestra"></canvas><div class="stage-bar"><span class="stage-chip">Предпросмотр</span></div><div class="stage-caption">Кадр движка · черновик</div></div><p class="preview-description">Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.</p><div class="native-field"><label for="scene-effect">Эффект</label><select id="scene-effect" data-mutation ${disabled()}>${effectIds.map(id=>effectOption(id,draft.effect)).join('')}</select></div><div class="parameter-panel" style="margin-top:20px"><h2>Выходы</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> Основной свет · RGB и LCD</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> Дополнительный свет</label><button class="button" data-view="devices">Устройства и свойства</button></div></section><aside class="parameter-panel" id="scene-parameters" aria-label="Параметры сцены">${sceneParameters()}</aside></div>`;
+ return heading(draftName,'Изменения остаются в черновике до нажатия «Применить».',action('Сохранить сцену','save-scene')+action('Создать копию','clone')+(selectedId?action('Переименовать','rename'):'')+action('Применить','apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status"></p><div class="editor-layout"><section class="preview-panel" aria-label="Предпросмотр"><div class="stage"><canvas id="stage" aria-label="Предпросмотр сцены из движка Prismestra"></canvas><div class="stage-bar"><span class="stage-chip">Предпросмотр</span></div><div class="stage-caption">Кадр движка · черновик</div>${renderPlacementObjects()}</div>${renderPlacementControls()}<p class="preview-description">Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.</p><div class="native-field"><label for="scene-effect">Эффект</label><select id="scene-effect" data-mutation ${disabled()}>${effectIds.map(id=>effectOption(id,draft.effect)).join('')}</select></div><div class="parameter-panel" style="margin-top:20px"><h2>Выходы</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> Основной свет · RGB и LCD</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> Дополнительный свет</label><button class="button" data-view="devices">Устройства и свойства</button></div></section><aside class="parameter-panel" id="scene-parameters" aria-label="Параметры сцены">${sceneParameters()}</aside></div>`;
+}
+function renderPlacementObjects() {
+ if(!placementOpen||!state.draftMapRevision)return '';
+ const {width,height,objects}=state.canvasPlacement;
+ return objects.map(({id,label,bounds:[x,y,right,bottom]})=>{
+  const left=(x+right+1)*50/width, top=(y+bottom+1)*50/height;
+  return `<button type="button" class="placement-object" id="placement-${esc(id)}" data-placement-device="${esc(id)}" aria-describedby="placement-help" title="${esc(label)}" style="left:${left}%;top:${top}%">${esc(label)}</button>`;
+ }).join('');
+}
+function renderPlacementControls() {
+ if(!state.canvasPlacement?.objects.length)return '';
+ if(!placementOpen)return action('Разместить RGB','open-placement',false,'id="open-placement"');
+ return `<div class="placement-actions" aria-label="Раскладка RGB">
+  <p id="placement-help">Перетащите устройство или выберите его клавишей Tab и сдвиньте стрелками.</p>
+  <span role="status">${placementDirty()?'Раскладка не применена':''}</span>
+  ${action('Применить раскладку','apply-placement',true,'data-needs-change="document"')}${action('Отменить изменения','revert-document')}
+ </div>`;
+}
+function openPlacement() {
+ if(busy()||!state.canvasPlacement?.objects.length)return;
+ placementOpen=true;
+ if(state.editor?.page==='devices'){render();return;}
+ if(send({op:'page',page:'devices'},true))pendingView={previous:view,next:view};
+ else placementOpen=false;
+}
+function movePlacement(device,revision,dx,dy) {
+ if(placementOpen&&revision&&(dx||dy))send({op:'move_canvas_device',device,revision,dx,dy},true);
 }
 function sceneParameters() {
  const noise=draft.effect==='noise_map';
@@ -544,7 +574,7 @@ function renderProfilePage() {
 }
 
 function pageHasEdits() {
- return stagedDirty() || (state?.nativeForm?.page===view&&state.nativeForm.dirty)
+ return stagedDirty() || placementDirty() || (state?.nativeForm?.page===view&&state.nativeForm.dirty)
   || (state?.editor?.page===view&&state.editor.dirty);
 }
 
@@ -655,6 +685,7 @@ function changeView(next, source) {
  const opener = previous==='settings' && settingsPages.includes(next) && source?.closest('.settings-links')
   ? '#main .settings-links '+focusKey(source)
   : null;
+ placementOpen=false;
  view=next;render();focusHeading();
  if(!['library','editor'].includes(next)){
   pendingView={previous,next,opener};
@@ -766,7 +797,7 @@ window.prismestraReceive = message => {
   }
   if(message.kind==='close_cancelled'){closing=false;syncControls();return;}
   if(message.kind==='draft_error'){showError(message.message,true);syncControls();return;}
-  if(message.kind==='error'){awaitingCommandAck=false;closing=false;submittedStages=[];savedSceneRequest=null;commandPending=false;nativeAwaitingAck=false;if(pendingView){view=pendingView.previous;pendingView=null;render();focusHeading();}showError(message.message,true);syncControls();return;}
+  if(message.kind==='error'){if(state?.editor?.page!=='devices')placementOpen=false;awaitingCommandAck=false;closing=false;submittedStages=[];savedSceneRequest=null;commandPending=false;nativeAwaitingAck=false;if(pendingView){view=pendingView.previous;pendingView=null;render();focusHeading();}showError(message.message,true);syncControls();return;}
   if(['scene_file','scene_file_frame','scene_file_lcd_frame'].includes(message.kind)){window.sceneFile?.receive(message);return;}
   if(message.kind==='snapshot') {
    const acknowledged=awaitingCommandAck;awaitingCommandAck=false;completeStageAck();
@@ -965,6 +996,8 @@ document.addEventListener('click',event=>{
  case 'new':case 'clone':case 'rename':return nameDialog(b.dataset.action);
  case 'save-scene':return nameDialog('save');
  case 'apply-scene':send({op:'apply_scene',scene:clone(draft)},true);break;
+ case 'open-placement':openPlacement();break;
+ case 'apply-placement':send({op:'apply_document'},true);break;
  case 'insert-palette-color':case 'move-palette-earlier':case 'move-palette-later':return reorderPalette(b.dataset.action);
  case 'add-color':if(draft.colors.length<8)draft.colors.push(draft.colors.at(-1));render();requestPreview();break;
  case 'apply-document':send({op:'apply_fields'},true);break;
@@ -1026,7 +1059,7 @@ document.addEventListener('change',event=>{
  if(input.dataset.sceneSelect){draft[input.dataset.sceneSelect]=input.value;if(input.dataset.sceneSelect==='noise_palette')render();editDraft();}
 });
 $('#play').onclick=()=>{if(!state)return;const on=!(state.groups.pc||state.groups.door);send({op:'groups',pc:on,door:on},true);};
-$('#footer-apply').onclick=()=>{if(draft)send({op:'apply_scene',scene:clone(draft)},true);};
+$('#footer-apply').onclick=()=>{if(draft&&!placementDirty())send({op:'apply_scene',scene:clone(draft)},true);};
 $('#open-active').onclick=()=>changeView('editor');
 $('.brand').onclick=event=>{event.preventDefault();changeView('library');};
 $('#sun-icon').innerHTML=icon('sun');
@@ -1062,9 +1095,32 @@ projectActions.innerHTML=action('Открыть','open')+action('Сохрани�
  action('Экспорт профиля','export',false,`title="${esc(exportDescription)}" aria-describedby="profile-export-scope"`)+
  `<span id="profile-export-scope" class="sr-only">${esc(exportDescription)}</span>`;
 $('#save-status').before(projectActions);
-document.addEventListener('pointerdown',()=>{pointerGesture=true;},true);
-document.addEventListener('pointerup',()=>{pointerGesture=false;releaseGesture();},true);
-document.addEventListener('pointercancel',()=>{pointerGesture=false;releaseGesture();},true);
+document.addEventListener('pointerdown',event=>{
+ pointerGesture=true;
+ const node=event.target?.closest?.('[data-placement-device]');
+ if(!node||event.button!==0||placementDrag||busy()||!state.draftMapRevision)return;
+ const {width,height}=state.canvasPlacement;
+ const stage=node.parentElement.getBoundingClientRect();
+ placementDrag={node,pointer:event.pointerId,x:event.clientX,y:event.clientY,
+  cellX:stage.width/width,cellY:stage.height/height,revision:state.draftMapRevision};
+ node.setPointerCapture(event.pointerId);
+},true);
+document.addEventListener('pointermove',event=>{
+ if(placementDrag?.pointer!==event.pointerId)return;
+ const {node,x,y}=placementDrag;
+ node.style.translate=`${event.clientX-x}px ${event.clientY-y}px`;
+});
+function finishPlacementDrag(event) {
+ if(!placementDrag||(event&&placementDrag.pointer!==event.pointerId))return;
+ const {node,x,y,cellX,cellY,revision}=placementDrag;
+ placementDrag=null;
+ node.style.translate='';
+ if(event?.type==='pointerup')movePlacement(node.dataset.placementDevice,revision,
+  Math.round((event.clientX-x)/cellX),Math.round((event.clientY-y)/cellY));
+}
+document.addEventListener('pointerup',event=>{pointerGesture=false;finishPlacementDrag(event);releaseGesture();},true);
+document.addEventListener('pointercancel',event=>{pointerGesture=false;finishPlacementDrag(event);releaseGesture();},true);
+document.addEventListener('lostpointercapture',finishPlacementDrag);
 document.addEventListener('focusin',()=>{syncDeviceAnnouncement();syncOutputRetries();requestAnimationFrame(syncCardMotion);});
 for(const name of ['pointerover','pointerout','focusout','visibilitychange']){
  document.addEventListener(name,()=>{
@@ -1074,6 +1130,13 @@ for(const name of ['pointerover','pointerout','focusout','visibilitychange']){
 }
 reducedCardMotion?.addEventListener('change',syncCardMotion);
 document.addEventListener('keydown',event=>{
+ const device=event.target?.dataset?.placementDevice;
+ const delta={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]}[event.key];
+ if(device&&Array.isArray(delta)){
+  event.preventDefault();
+  if(!placementDrag&&!event.isComposing)movePlacement(device,state.draftMapRevision,...delta);
+  return;
+ }
  if((event.key===' '||event.key==='Spacebar')&&event.target.closest('button'))keyGesture=true;
  if(event.key!=='Escape'||event.defaultPrevented||event.isComposing||!deviceInspection||
   view!=='devices'||!event.target.closest('#device-properties'))return;
@@ -1083,7 +1146,7 @@ document.addEventListener('keydown',event=>{
 document.addEventListener('keyup',()=>{keyGesture=false;releaseGesture();},true);
 document.addEventListener('compositionstart',()=>{composing=true;},true);
 document.addEventListener('compositionend',()=>{composing=false;releaseGesture();},true);
-window.addEventListener('blur',()=>{stopCardMotion();pointerGesture=false;keyGesture=false;composing=false;releaseGesture();});
+window.addEventListener('blur',()=>{stopCardMotion();finishPlacementDrag();pointerGesture=false;keyGesture=false;composing=false;releaseGesture();});
 document.addEventListener('toggle',event=>{if(event.target.id==='advanced-scene')advancedOpen=event.target.open;},true);
 window.addEventListener('pagehide',()=>flushPreview(true));
 window.addEventListener('beforeunload',()=>flushPreview(true));

@@ -570,3 +570,45 @@ pub fn move_point(
     next.validate()?;
     Ok(next)
 }
+
+pub fn translate_canvas_device(
+    document: &Document,
+    id: &str,
+    dx: i32,
+    dy: i32,
+) -> Result<Document, String> {
+    let setup = &document.lighting.setup;
+    if !setup
+        .devices
+        .iter()
+        .any(|d| d.id == id && d.role == Role::Canvas)
+    {
+        return Err("RGB-устройство на холсте не найдено".into());
+    }
+    let (width, height) = (setup.canvas.width, setup.canvas.height);
+    if dx.unsigned_abs() >= width || dy.unsigned_abs() >= height {
+        return Err("Сдвиг выходит за границы холста".into());
+    }
+    let mut next = document.clone();
+    let mut points = next
+        .lighting
+        .setup
+        .canvas
+        .points
+        .iter_mut()
+        .filter(|p| p.device == id)
+        .peekable();
+    if points.peek().is_none() {
+        return Err("У устройства нет точек на холсте".into());
+    }
+    for point in points {
+        let x = point.x.checked_add_signed(dx).filter(|x| *x < width);
+        let y = point.y.checked_add_signed(dy).filter(|y| *y < height);
+        let (Some(x), Some(y)) = (x, y) else {
+            return Err("Сдвиг выходит за границы холста".into());
+        };
+        (point.x, point.y) = (x, y);
+    }
+    next.validate()?;
+    Ok(next)
+}
