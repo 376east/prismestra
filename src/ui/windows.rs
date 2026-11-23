@@ -47,6 +47,7 @@ mod native_forms;
 mod portable;
 mod resident;
 pub(crate) use resident::{Instance, shutdown_installed};
+mod locale;
 mod runtime_client;
 mod update_schedule;
 mod updates;

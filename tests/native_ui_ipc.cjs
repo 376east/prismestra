@@ -1428,13 +1428,13 @@ function checkSearchRetryRecovery(testContext, label) {
  click('retry-document');
  assert.deepEqual(commands.at(-1),{op:'retry_document'});
 }
-function checkEnglishStartupPreview() {
+function checkEnglishApplicationLanguage() {
  checkSearchRetryRecovery(context,'Повторить поиск');
  document.documentElement={lang:'ru'};
  document.activeElement=null;
  const preview=vm.createContext({
   document,window:{addEventListener:(name,fn)=>events[name]=fn,
-   ipc:{postMessage:value=>commands.push(JSON.parse(value))},location:{protocol:'file:',search:'?lang=en'}},
+   ipc:{postMessage:value=>commands.push(JSON.parse(value))},location:{protocol:'http:',search:'?lang=ru'},prismestraLanguage:'en'},
   requestAnimationFrame:fn=>rafQueue.push(fn),CSS:{escape:value=>value},URLSearchParams,
   structuredClone,setTimeout:()=>1,clearTimeout(){},console
  });
@@ -1472,9 +1472,45 @@ function checkEnglishStartupPreview() {
  assert.match(find('#player-status').textContent,/Automatic setup could not finish/);
  assert.equal(find('#player-status').title,'Сбой SDK');
  receive('status',{startupStatus:null,status:'Сцена сохранена'});
- assert.equal(find('#player-status').textContent,'Сцена сохранена','unscoped native statuses keep their own text');
+ assert.equal(find('#player-status').textContent,'Scene saved');
+ const device={id:'output1',label:'Личный RGB',role:'rgb',enabled:true,driver:{type:'open_rgb'},leds:8,rate_hz:30};
+ receive('snapshot',{...initial,devices:[device],deviceActivity:{labels:{output1:'Кадры отправлены'}},
+  editor:{page:'devices',index:0,targets:['Личный RGB'],fields:[]}});
+ assert.match(mainMarkup,/Личный RGB.*Frames sent/s,'user labels are preserved and output activity is localized');
+ events.click({target:{closest:()=>({dataset:{view:'settings'}})}});
+ assert.deepEqual(commands.at(-1),{op:'page',page:'settings'});
+ receive('snapshot',{...initial,preferredUiLanguage:'en'});
+ assert.match(mainMarkup,/Application language.*value="en" lang="en" selected/s);
+ const select=find('#ui-language');
+ select.id='ui-language';
+ select.value='ru';
+ const beforeLanguage=commands.length;
+ events.change({target:select});
+ events.change({target:select});
+ assert.deepEqual(commands.slice(beforeLanguage),[{op:'set_ui_language',language:'ru'}]);
+ preview.payload={kind:'error',code:'uiLanguage',message:'Write failed'};
+ vm.runInContext('window.prismestraReceive(payload)',preview);
+ assert.equal(select.value,'en');
+ assert.match(find('#native-error').innerHTML,/Could not save the application language/);
+ assert.doesNotMatch(find('#native-error').innerHTML,/retry-document/);
+ select.value='ru';
+ events.change({target:select});
+ receive('snapshot',{...initial,preferredUiLanguage:'ru'});
+ assert.match(mainMarkup,/value="ru" lang="ru" selected/);
+ assert.match(mainMarkup,/Exit Prismestra completely/);
+ assert.equal(document.documentElement.lang,'en','the running shell keeps its language until reopen');
+ const sample={id:'builtin:blue-hour',builtIn:true,name:'Синий час',scene:initial.scene};
+ vm.runInContext('view="library"',preview);
+ receive('snapshot',{...initial,library:[sample,{...sample,id:'my-scene',builtIn:false,name:'Моя сцена'}]});
+ assert.match(mainMarkup,/Blue hour.*Apply scene.*Моя сцена/s);
+ events.click({target:{closest:()=>({dataset:{apply:sample.id},getAttribute:()=>null})}});
+ const activate=commands.at(-1);
+ assert.equal(activate.op,'apply_scene');
+ preview.payload={kind:'scene_activation',request:activate.request,status:'applied',output:'no_active_rgb'};
+ vm.runInContext('window.prismestraReceive(payload)',preview);
+ assert.match(find('#scene-activation-'+sample.id).textContent,/applied.*No active RGB outputs/);
  checkSearchRetryRecovery(preview,'Retry search');
- console.log('PASS: English browser preview translates navigation and startup IPC with original command IDs');
+ console.log('PASS: English native bootstrap, scenes, device status and application language persistence IPC');
  console.log('PASS: rejected discovery retries only discovery in Russian and English; other errors retain document recovery');
 }
-checkOutputStatusCopy().then(checkEnglishStartupPreview).catch(error=>{console.error(error);process.exitCode=1;});
+checkOutputStatusCopy().then(checkEnglishApplicationLanguage).catch(error=>{console.error(error);process.exitCode=1;});

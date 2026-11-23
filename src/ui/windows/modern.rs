@@ -36,6 +36,9 @@ struct NativeValue {
 enum Command {
     Snapshot,
     RetryStartupDiscovery,
+    SetUiLanguage {
+        language: locale::Language,
+    },
     Alice {
         request: super::alice::Action,
     },
@@ -915,6 +918,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
         .chain(&session.built_in_cards)
         .collect::<Vec<_>>();
     let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":library,"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
+    value["state"]["preferredUiLanguage"] = json!(locale::Language::load(&app.state_dir));
     value["state"]["startupDiscoveryRetry"] = json!(app.can_retry_startup_discovery());
     value["state"]["startupEmptySearchResult"] = json!(app.startup_empty_search_result());
     value["state"]["startupStatus"] = json!(app.first_run_status_label());
@@ -1161,6 +1165,13 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                 stage_native(app, &fields)?;
             }
             native_forms::action(state, id)?;
+        }
+        Command::SetUiLanguage { language } => {
+            let slot = state.app.try_borrow().map_err(|_| "Editor is busy")?;
+            let app = slot.as_ref().ok_or("No editor session")?;
+            language
+                .save(&app.state_dir)
+                .map_err(|error| error.to_string())?;
         }
         Command::Snapshot => {
             if let Some(session) = state.modern_session.borrow_mut().as_mut() {
@@ -1587,6 +1598,7 @@ pub(super) fn maintain(state: &State) {
         let command = serde_json::from_str::<Command>(&message);
         let request = scene_activation_request(command.as_ref().ok(), &message);
         let retries_discovery = matches!(&command, Ok(Command::RetryStartupDiscovery));
+        let changes_language = matches!(&command, Ok(Command::SetUiLanguage { .. }));
         let result = command
             .map_err(|e| format!("Некорректная команда интерфейса: {e}"))
             .and_then(|c| execute(state, c));
@@ -1596,6 +1608,8 @@ pub(super) fn maintain(state: &State) {
                 snapshot_needed = true;
                 let reply = if let Some(request) = request {
                     json!({"kind":"scene_activation","request":request,"status":"failed","message":message})
+                } else if changes_language {
+                    json!({"kind":"error","code":"uiLanguage","message":message})
                 } else if retries_discovery {
                     json!({"kind":"error","code":"startupDiscoveryRetry","message":message})
                 } else {

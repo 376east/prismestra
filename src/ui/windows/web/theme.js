@@ -1,5 +1,6 @@
 (() => {
   'use strict';
+  const appearanceText = (ru, en) => document.documentElement.lang === 'en' ? en : ru;
   const key = 'prismestra.dark-study.appearance.v1';
   const presets = {
     graphite: {base: '#0d0e10', accent: '#c8d6e5'},
@@ -66,7 +67,7 @@
       if (!valid(parsed)) throw Error('Invalid appearance');
       appearance = parsed;
     }
-  } catch { notice = 'Настройки недоступны. Используется графитовая тема.'; }
+  } catch { notice = appearanceText('Настройки недоступны. Используется графитовая тема.', 'Appearance settings are unavailable. Using the default theme.'); }
   function apply() {
     const tokens = derive(appearance);
     Object.entries(tokens).forEach(([name, value]) => document.documentElement.style.setProperty(name, value));
@@ -83,18 +84,18 @@
   panel.setAttribute('role', 'dialog');
   panel.setAttribute('aria-labelledby', 'prism-appearance-title');
   panel.innerHTML = `
-    <div class="prism-appearance-heading"><h2 id="prism-appearance-title">Внешний вид</h2><button type="button" class="prism-appearance-close" aria-label="Закрыть настройку внешнего вида"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
-    <div class="prism-appearance-presets" aria-label="Готовые темы">
-      <button type="button" data-prism-preset="graphite">Тёмный</button>
-      <button type="button" data-prism-preset="ink">Чернила</button>
-      <button type="button" data-prism-preset="light">Светлая</button>
+    <div class="prism-appearance-heading"><h2 id="prism-appearance-title">${appearanceText('Внешний вид', 'Appearance')}</h2><button type="button" class="prism-appearance-close" aria-label="${appearanceText('Закрыть настройку внешнего вида', 'Close appearance settings')}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <div class="prism-appearance-presets" aria-label="${appearanceText('Готовые темы', 'Preset themes')}">
+      <button type="button" data-prism-preset="graphite">${appearanceText('Тёмный', 'Dark')}</button>
+      <button type="button" data-prism-preset="ink">${appearanceText('Чернила', 'Ink')}</button>
+      <button type="button" data-prism-preset="light">${appearanceText('Светлая', 'Light')}</button>
     </div>
-    <label class="prism-appearance-color"><span>Фон</span><output id="prism-appearance-base-value"></output><input type="color" id="prism-appearance-base" aria-label="Цвет фона"></label>
-    <label class="prism-appearance-color"><span>Акцент</span><output id="prism-appearance-accent-value"></output><input type="color" id="prism-appearance-accent" aria-label="Цвет акцента"></label>
-    <div class="prism-appearance-swatches" aria-label="Цвета акцента">
-      ${[['#d4d9e0','Серебристый'],['#b8a4ed','Лиловый'],['#a4ceb7','Шалфей'],['#edaa94','Коралловый']].map(([color,name]) => `<button type="button" data-prism-accent="${color}" style="--prism-swatch:${color}" aria-label="${name}" title="${name}"></button>`).join('')}
+    <label class="prism-appearance-color"><span>${appearanceText('Фон', 'Background')}</span><output id="prism-appearance-base-value"></output><input type="color" id="prism-appearance-base" aria-label="${appearanceText('Цвет фона', 'Background color')}"></label>
+    <label class="prism-appearance-color"><span>${appearanceText('Акцент', 'Accent')}</span><output id="prism-appearance-accent-value"></output><input type="color" id="prism-appearance-accent" aria-label="${appearanceText('Цвет акцента', 'Accent color')}"></label>
+    <div class="prism-appearance-swatches" aria-label="${appearanceText('Цвета акцента', 'Accent colors')}">
+      ${[['#d4d9e0',appearanceText('Серебристый', 'Silver')],['#b8a4ed',appearanceText('Лиловый', 'Lilac')],['#a4ceb7',appearanceText('Шалфей', 'Sage')],['#edaa94',appearanceText('Коралловый', 'Coral')]].map(([color,name]) => `<button type="button" data-prism-accent="${color}" style="--prism-swatch:${color}" aria-label="${name}" title="${name}"></button>`).join('')}
     </div>
-    <div class="prism-appearance-footer"><button type="button" id="prism-appearance-reset">Сбросить</button><span id="prism-appearance-status" role="status" aria-live="polite"></span></div>`;
+    <div class="prism-appearance-footer"><button type="button" id="prism-appearance-reset">${appearanceText('Сбросить', 'Reset')}</button><span id="prism-appearance-status" role="status" aria-live="polite"></span></div>`;
   document.body.append(panel);
   trigger.setAttribute('aria-controls', panel.id);
   trigger.setAttribute('aria-haspopup', 'dialog');
@@ -116,8 +117,8 @@
   function save() {
     apply();
     sync();
-    try { localStorage.setItem(key, JSON.stringify(appearance)); notice = ''; status.textContent = 'Сохранено'; }
-    catch { notice = 'Тема не сохранена. Проверьте доступ к хранилищу и повторите выбор.'; status.textContent = notice; }
+    try { localStorage.setItem(key, JSON.stringify(appearance)); notice = ''; status.textContent = appearanceText('Сохранено', 'Saved'); }
+    catch { notice = appearanceText('Тема не сохранена. Проверьте доступ к хранилищу и повторите выбор.', 'The theme could not be saved. Check storage access and try again.'); status.textContent = notice; }
   }
   function close(restoreFocus = true) {
     panel.hidden = true;
