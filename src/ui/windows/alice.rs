@@ -67,6 +67,12 @@ struct Lamp {
     label: String,
 }
 
+impl Lamp {
+    fn same_target(&self, other: &Self) -> bool {
+        self.id == other.id && self.household == other.household && self.room == other.room
+    }
+}
+
 struct Grant {
     token: String,
     ticket: String,
@@ -328,7 +334,7 @@ impl Session {
         let token = token.to_owned();
         let ticket = nonce()?;
         self.start(
-            "Загружаем лампы кабинета…",
+            "Загружаем доступные лампы…",
             "",
             move |cancel| load(token, ticket, until, cancel).map(Some),
         )
@@ -459,9 +465,9 @@ impl Session {
         match result {
             Ok(Some(grant)) => {
                 self.message = if grant.lamps.is_empty() {
-                    "В кабинете нет доступных ламп с яркостью."
+                    "Нет доступных ламп с регулировкой яркости."
                 } else {
-                    "Выберите лампу кабинета."
+                    "Выберите лампу."
                 }
                 .into();
                 if remember {
@@ -832,15 +838,14 @@ fn lamps(catalog: &Value) -> Result<Vec<Lamp>, String> {
         ) else {
             continue;
         };
+        let Some(room_entry) = rooms
+            .iter()
+            .find(|entry| entry["id"] == room && entry["household_id"] == household)
+        else {
+            continue;
+        };
         if id.is_empty()
             || id.len() > 256
-            || !rooms.iter().any(|entry| {
-                entry["id"] == room
-                    && entry["household_id"] == household
-                    && entry["name"]
-                        .as_str()
-                        .is_some_and(|name| name.trim().to_lowercase() == "кабинет")
-            })
             || devices
                 .iter()
                 .filter(|candidate| candidate["id"] == id)
@@ -854,6 +859,10 @@ fn lamps(catalog: &Value) -> Result<Vec<Lamp>, String> {
             .find(|entry| entry["id"] == household)
             .and_then(|entry| entry["name"].as_str())
             .unwrap_or("Дом");
+        let room_name = room_entry["name"]
+            .as_str()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("Комната без названия");
         let suffix: String = id
             .chars()
             .rev()
@@ -866,7 +875,7 @@ fn lamps(catalog: &Value) -> Result<Vec<Lamp>, String> {
             household: household.into(),
             room: room.into(),
             id: id.into(),
-            label: format!("{home} · Кабинет · {name} · {suffix}"),
+            label: format!("{home} · {room_name} · {name} · {suffix}"),
         });
     }
     Ok(listed)
@@ -982,11 +991,9 @@ fn apply_payload_with(
 ) -> Result<(), String> {
     let catalog = request("/v1.0/user/info", None)?;
     if catalog["status"] != "ok"
-        || !lamps(&catalog)?.iter().any(|lamp| {
-            lamp.id == selected.id
-                && lamp.room == selected.room
-                && lamp.household == selected.household
-        })
+        || !lamps(&catalog)?
+            .iter()
+            .any(|lamp| lamp.same_target(selected))
     {
         return Err(
             "Назначение лампы изменилось. Закройте и снова откройте настройки Алисы.".into(),
@@ -1089,21 +1096,28 @@ mod tests {
                 .iter()
                 .map(|lamp| lamp.id.as_str())
                 .collect::<Vec<_>>(),
-            ["a", "b"]
+            ["a", "b", "c"]
         );
+        assert_eq!(choices[1].label, "Дом · Кабинет · Лампа · b");
+        assert_eq!(choices[2].label, "Дом · Кухня · Лампа · c");
+        let mut renamed = catalog.clone();
+        renamed["rooms"][1]["name"] = json!("Мастерская");
+        renamed["devices"].as_array_mut().unwrap().reverse();
         let mut paths = Vec::new();
-        let result = apply_with(&choices[1], Change::Brightness(40), |path, body| {
+        let result = apply_with(&choices[2], Change::Brightness(40), |path, body| {
             paths.push(path.to_owned());
             match path {
-                "/v1.0/user/info" => Ok(catalog.clone()),
-                "/v1.0/devices/b" => Ok(json!({"status":"ok","id":"b","room":"r","state":"online",
+                "/v1.0/user/info" => Ok(renamed.clone()),
+                "/v1.0/devices/c" => Ok(
+                    json!({"status":"ok","id":"c","room":"neighbor","state":"online",
                     "capabilities":[{"type":ON,"state":{"value":true}},
-                        {"type":RANGE,"state":{"instance":"brightness","value":70}}]})),
+                        {"type":RANGE,"state":{"instance":"brightness","value":70}}]}),
+                ),
                 "/v1.0/devices/actions" => {
                     let body: Value = serde_json::from_slice(body.unwrap()).unwrap();
                     assert_eq!(
                         body,
-                        json!({"devices":[{"id":"b","actions":[
+                        json!({"devices":[{"id":"c","actions":[
                         {"type":RANGE,"state":{"instance":"brightness","value":40,"relative":false}}]}]})
                     );
                     Err("timeout".into())
@@ -1116,14 +1130,14 @@ mod tests {
             paths,
             [
                 "/v1.0/user/info",
-                "/v1.0/devices/b",
+                "/v1.0/devices/c",
                 "/v1.0/devices/actions"
             ]
         );
         let mut moved = fixture();
-        moved["devices"][1]["room"] = json!("neighbor");
+        moved["devices"][2]["room"] = json!("r");
         assert!(
-            apply_with(&choices[1], Change::Brightness(40), |path, _| {
+            apply_with(&choices[2], Change::Brightness(40), |path, _| {
                 assert_eq!(path, "/v1.0/user/info");
                 Ok(moved.clone())
             })
@@ -1201,7 +1215,7 @@ mod tests {
             session
                 .handle(Action::Apply {
                     ticket: "current".into(),
-                    lamp: 2,
+                    lamp: 3,
                     brightness: 40
                 })
                 .is_err()
@@ -1267,7 +1281,7 @@ mod tests {
         };
         assert_eq!(restored["saved"], true);
         assert_eq!(restored["needsLogin"], false);
-        assert_eq!(restored["lamps"].as_array().unwrap().len(), 2);
+        assert_eq!(restored["lamps"].as_array().unwrap().len(), 3);
         assert!(!restored.to_string().contains("fixture-token"));
         session
             .open_saved_with(|| unreachable!(), |_, _, _, _| unreachable!())

@@ -659,6 +659,75 @@ impl ambient::Provider for Pixels {
         }))
     }
 }
+#[cfg(windows)]
+#[test]
+fn applying_a_scene_reports_only_active_rgb_scene_outputs() {
+    let stand = Stand::new();
+    let mut scene = stand.document.lighting.scene.clone();
+    scene.brightness = 31;
+
+    let mut empty = stand.document.clone();
+    empty.lighting.setup.devices.clear();
+    empty.lighting.setup.canvas.points.clear();
+    empty.lighting.groups.pc.clear();
+    empty.lighting.groups.door.clear();
+    empty.ambient = Default::default();
+    empty.lcd.clear();
+    let mut runtime = Runtime::new(empty.clone(), None).unwrap();
+    let desired = runtime.desired();
+    runtime.apply_native_scene(scene.clone()).unwrap();
+    assert_eq!(runtime.host().scene(), &scene);
+    assert_eq!(runtime.desired(), desired);
+    assert!(!runtime.has_active_scene_rgb());
+
+    empty.lighting.setup.devices.extend(
+        stand
+            .document
+            .lighting
+            .setup
+            .devices
+            .iter()
+            .filter(|device| device.role == Role::Lcd)
+            .cloned(),
+    );
+    empty.lighting.groups.pc.push("lcd".into());
+    empty.lcd.clone_from(&stand.document.lcd);
+    let mut lcd_only = Runtime::new(empty, None).unwrap();
+    lcd_only
+        .attach_lcd("lcd", vec![], stand.lcd_factory())
+        .unwrap();
+    lcd_only.apply_native_scene(scene.clone()).unwrap();
+    wait(|| {
+        lcd_only.tick(now(), wall()).unwrap();
+        lcd_only
+            .lcd_status("lcd")
+            .is_some_and(|status| status.frames_sent > 0)
+    });
+    assert!(!lcd_only.has_active_scene_rgb());
+
+    let mut rgb = stand.runtime(false);
+    let record = Arc::new(Record::default());
+    let calls = Arc::new(AtomicUsize::new(0));
+    rgb.apply_native_scene(scene.clone()).unwrap();
+    assert!(!rgb.has_active_scene_rgb());
+    rgb.attach_rgb(
+        "body",
+        vec![],
+        rgb_factory(&stand.document, "body", record, calls),
+    )
+    .unwrap();
+    assert!(!rgb.has_active_scene_rgb());
+    wait(|| {
+        rgb.tick(now(), wall()).unwrap();
+        rgb.has_active_scene_rgb()
+    });
+    rgb.apply_native_scene(scene).unwrap();
+    assert!(rgb.has_active_scene_rgb());
+    rgb.set_group(Target::Pc, false).unwrap();
+    assert!(rgb.group_on(Target::Door));
+    assert!(!rgb.has_active_scene_rgb());
+}
+
 #[test]
 fn actual_workers_share_scene_capture_and_lcd_without_blocking_coordinator() {
     let stand = Stand::new();
@@ -715,6 +784,76 @@ fn actual_workers_share_scene_capture_and_lcd_without_blocking_coordinator() {
     runtime.stop();
     wait(|| runtime.drained());
 }
+
+#[cfg(windows)]
+#[test]
+fn installed_startup_restores_a_saved_lcd_without_rgb_outputs() {
+    use crate::{app::lighting_outputs::Local, devices::Binding};
+
+    let stand = Stand::new();
+    let executable = stand.root.join("unused-openrgb.exe");
+    fs::write(&executable, b"inert fixture").unwrap();
+    fs::write(
+        stand.root.join("managed-openrgb.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1, "enabled": true, "executable": executable,
+            "config_dir": stand.root, "endpoint": "127.0.0.1:17421",
+            "expected_executable_sha256": "0".repeat(64),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        crate::app::managed_backend::Config::read_optional(&stand.root)
+            .unwrap()
+            .is_some()
+    );
+
+    let mut profile = stand.document.clone();
+    profile
+        .lighting
+        .setup
+        .devices
+        .retain(|device| device.id == "lcd");
+    profile.lighting.setup.canvas.points.clear();
+    profile.lighting.groups.pc.retain(|id| id == "lcd");
+    profile.lighting.groups.door.clear();
+    profile.ambient = Default::default();
+    let local = Local {
+        version: 1,
+        devices: [(
+            "lcd".into(),
+            Binding::Hid {
+                path: r"\\?\hid#vid_264a&pid_233c&mi_01#fixture-lcd#{synthetic-interface}".into(),
+            },
+        )]
+        .into(),
+        monitors: Default::default(),
+        door_brightness: 60,
+    };
+    let mut plan = local.prepare(&profile, &stand.root.join("assets")).unwrap();
+    assert!(plan.rgb.is_empty() && plan.capture.is_none());
+    assert_eq!(plan.lcd.len(), 1);
+    // Keep the prepared route and replace only its physical HID transport.
+    plan.lcd[0].2 = stand.lcd_factory();
+    let mut runtime = Guard(Runtime::new(profile.clone(), None).unwrap());
+    let revision = runtime
+        .request_startup_outputs_for(&stand.root, None, &local, profile, plan)
+        .unwrap();
+    wait(|| {
+        runtime.tick(now(), wall()).unwrap();
+        runtime.output_revision() == revision
+            && runtime
+                .lcd_status("lcd")
+                .is_some_and(|snapshot| snapshot.frames_sent > 0)
+    });
+    assert!(runtime.output_plan().rgb.is_empty());
+    assert!(!runtime.has_active_scene_rgb());
+    assert!(runtime.managed_backend.is_none());
+    runtime.stop();
+    wait(|| runtime.drained());
+}
+
 #[test]
 fn journal_commits_intent_before_effect_and_restore_does_not_replay_old_event() {
     let mut stand = Stand::new();

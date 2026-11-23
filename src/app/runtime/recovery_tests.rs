@@ -1428,10 +1428,13 @@ fn fresh_status_from_same_helper_restores_frames_after_exhausted_retries() {
 
     block_read.store(true, Ordering::SeqCst);
     blocked.recv_timeout(Duration::from_secs(2)).unwrap();
+    // The proxy expires readiness on its own thread. Keep simulated time
+    // fixed until then so a slow proxy cannot spend our three retry attempts.
+    wait(|| !runtime.managed_backend.as_ref().unwrap().snapshot().ready);
+    tick(&mut runtime, &mut now);
     wait(|| {
-        tick(&mut runtime, &mut now);
+        runtime.tick(now, 1_800_000_000).unwrap();
         runtime.host.status("a").unwrap().phase == Phase::Failed
-            && !runtime.managed_backend.as_ref().unwrap().snapshot().ready
     });
     for delay in [1_000_000, 5_000_000, 15_000_000] {
         tick(&mut runtime, &mut now);

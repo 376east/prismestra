@@ -235,6 +235,34 @@ assert.deepEqual(commands.at(-1),{op:'native_action',id:1811,fields:[{id:101,val
 assert.equal(bindingSaveDisabled(),true,'the save remains locked until the native acknowledgement');
 console.log('PASS: first click saves staged connection text only when the host can accept it');
 
+// Apply uses the native confirmation route. A cancelled dialog leaves the
+// applied snapshot intact, and Apply can be requested again after the reply.
+{
+ const strip={id:'surplife-strip',label:'Desk strip',driver:{type:'surplife_e1_pixels'},role:'canvas',leds:120,rate_hz:10,enabled:true};
+ const neighbor={id:'neighbor',label:'Neighbor',driver:{type:'open_rgb'},role:'canvas',leds:12,rate_hz:25,enabled:true};
+ const apply={id:1818,label:'Apply',enabled:true};
+ const connections={...structuredClone(initial),devices:[strip,neighbor],nativeForm:{page:'connections',fields:[],actions:[apply],notes:[]}};
+ context.payload={kind:'snapshot',state:connections};
+ vm.runInContext('formStages.clear();view="connections";window.prismestraReceive(payload)',context);
+ const button={dataset:{nativeAction:'1818'},disabled:false,hasAttribute:()=>false};
+ const click=()=>events.click({target:{closest:()=>button}});
+ const before=commands.length;
+ click();
+ click();
+ const command={op:'native_action',id:1818,fields:[],editor_fields:[]};
+ assert.deepEqual(commands.slice(before),[command]);
+ context.payload={kind:'snapshot',state:connections};
+ vm.runInContext('window.prismestraReceive(payload)',context);
+ assert.equal(vm.runInContext('state.devices[0].leds',context),120);
+ click();
+ assert.deepEqual(commands.slice(before),[command,command]);
+ context.payload={kind:'snapshot',state:{...connections,devices:[{...strip,leds:153},neighbor]}};
+ vm.runInContext('window.prismestraReceive(payload)',context);
+ assert.equal(vm.runInContext('state.devices[0].leds',context),153);
+ assert.equal(vm.runInContext('state.devices[1].leds',context),12);
+ console.log('PASS: Connections Apply requests one native action at a time and can retry after a cancelled layout review');
+}
+
 // First-time portable setup uses the existing native action bridge.
 const portableAction={id:1822,label:'Настроить локальный OpenRGB…',enabled:true};
 context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeForm:{page:'connections',fields:[],actions:[portableAction],notes:[]}}};
@@ -588,6 +616,27 @@ console.log('PASS: candidate identity, applied precedence, metadata replacement,
  assert.ok(!hasCandidate(foundRgb.id),'committed device replaces the late proposal');
  assert.match(mainMarkup,new RegExp(`data-device-id="${foundRgb.id}"`));
  console.log('PASS: one rescan from an empty profile; late candidate becomes an applied device');
+}
+{
+ const empty={...foundState,pending:false,devices:[],draftDevices:[],deviceCandidates:[],startupDiscoveryRetry:false};
+ const summary=find('#startup-empty-search');
+ vm.runInContext('view="library";pendingView=null',context);
+ receiveDeviceState('snapshot',empty);
+ assert.equal(summary.hidden,true);
+ receiveDeviceState('status',{startupEmptySearchResult:'continuing',startupDiscoveryRetry:true});
+ assert.equal(summary.hidden,false);
+ assert.match(summary.textContent,/пока не найдены.*продолжится в фоне/);
+ receiveDeviceState('status',{startupDiscoveryRetry:false});
+ assert.equal(summary.hidden,false,'a later scan keeps the first result visible');
+ vm.runInContext('view="devices";pendingView=null',context);
+ receiveDeviceState('snapshot',{...empty,startupEmptySearchResult:'continuing'});
+ assert.equal(summary.hidden,false);
+ receiveDeviceState('status',{deviceCandidates:[foundLcd],pending:true});
+ assert.equal(summary.hidden,true,'the late proposal replaces the empty result during auto-apply');
+ receiveDeviceState('snapshot',{...empty,startupEmptySearchResult:'complete',startupDiscoveryRetry:true});
+ assert.equal(summary.hidden,false);
+ assert.match(summary.textContent,/Автопоиск завершён.*не найдены/);
+ console.log('PASS: a provisional empty result persists between scans and yields to a late candidate or completion');
 }
 {
  const applied={...foundRgb,leds:1};
@@ -1025,7 +1074,7 @@ console.log('PASS: restored capture is inert and can be explicitly applied witho
  const libraryState={...initial,library:[entry]};
  vm.runInContext('view="library";draft=null;search="";libraryEffect=""',context);
  receiveDeviceState('snapshot',libraryState);
- assert.match(mainMarkup,/<button[^>]+data-apply="night"[^>]*>Включить сцену<\/button>/);
+ assert.match(mainMarkup,/<button[^>]+data-apply="night"[^>]*>Применить сцену<\/button>/);
  assert.match(mainMarkup,/data-preview="night"/);
  assert.match(mainMarkup,/data-edit="night"/);
  const click=(key)=>events.click({target:{closest:()=>({
@@ -1042,17 +1091,17 @@ console.log('PASS: restored capture is inert and can be explicitly applied witho
  const apply=commands.at(-1);
  assert.deepEqual(apply,{op:'apply_scene',id:'night',scene:entry.scene,request:apply.request});
  assert.deepEqual(commands.slice(before).filter(command=>command.op==='apply_scene'),[apply]);
- assert.match(status.textContent,/Включаем/);
+ assert.match(status.textContent,/Применяем/);
  assert.equal(devices.hidden,true);
  receiveDeviceState('snapshot',{...libraryState,scene:entry.scene});
  receiveDeviceState('status',{scene:entry.scene,pending:false});
- assert.match(status.textContent,/Включаем/,'snapshots and unrelated status cannot confirm even the same scene');
- const reply=(request,result,message)=>vm.runInContext(
-  'window.prismestraReceive('+JSON.stringify({kind:'scene_activation',request,status:result,message})+')',context);
- reply(apply.request+1,'applied');
- assert.match(status.textContent,/Включаем/);
- reply(apply.request,'failed','Устройство недоступно.');
- assert.match(status.textContent,/Не удалось включить.*Устройство недоступно/);
+ assert.match(status.textContent,/Применяем/,'snapshots and unrelated status cannot confirm even the same scene');
+ const reply=(request,result,details)=>vm.runInContext(
+  'window.prismestraReceive('+JSON.stringify({kind:'scene_activation',request,status:result,...details})+')',context);
+ reply(apply.request+1,'applied',{output:'active_rgb'});
+ assert.match(status.textContent,/Применяем/);
+ reply(apply.request,'failed',{message:'Устройство недоступно.'});
+ assert.match(status.textContent,/Не удалось применить.*Устройство недоступно/);
  assert.equal(devices.hidden,true);
  click('apply');
  const second=commands.at(-1);
@@ -1060,17 +1109,23 @@ console.log('PASS: restored capture is inert and can be explicitly applied witho
  vm.runInContext('window.prismestraReceive({kind:"error",message:"Ошибка другой команды"})',context);
  assert.equal(find('#native-error').hidden,false);
  assert.match(find('#native-error').innerHTML,/Ошибка другой команды/);
- assert.match(status.textContent,/Включаем/,'an unrelated error cannot settle the activation');
+ assert.match(status.textContent,/Применяем/,'an unrelated error cannot settle the activation');
  click('apply');
  assert.equal(commands.at(-1),second,'an unrelated error cannot unlock another activation');
- reply(apply.request,'applied');
- assert.match(status.textContent,/Включаем/);
- reply(second.request,'applied');
- assert.equal(status.textContent,'Сцена «Ночная» применена.');
+ reply(apply.request,'applied',{output:'active_rgb'});
+ assert.match(status.textContent,/Применяем/);
+ reply(second.request,'applied',{output:'no_active_rgb'});
+ assert.equal(status.textContent,'Сцена «Ночная» применена. Нет активных RGB-выходов для этой сцены.');
  assert.equal(find('#native-error').hidden,false,'the scene result does not dismiss the unrelated error');
  assert.equal(devices.hidden,false);
+ click('apply');
+ reply(commands.at(-1).request,'applied',{output:'active_rgb'});
+ assert.equal(status.textContent,'Сцена «Ночная» применена.');
  receiveDeviceState('status',{native:false});
  assert.equal(devices.hidden,true,'hardware status is not offered in preview');
+ click('apply');
+ reply(commands.at(-1).request,'applied',{output:'preview_only'});
+ assert.equal(status.textContent,'Сцена «Ночная» применена. Режим предпросмотра.');
  assert.equal(viewNow(),'library');
  assert.equal(vm.runInContext('draft.brightness',context),65,'activation does not replace the editor draft');
 }
@@ -1079,7 +1134,10 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
 {
  const aliceDialog=find('#alice-dialog');
  aliceDialog.querySelector=find;
- find('#alice-lamp').replaceChildren=()=>{};
+ const picker=find('#alice-lamp');
+ const options=[];
+ picker.replaceChildren=()=>{options.length=0;picker.value='';};
+ picker.append=option=>options.push([option.value,option.textContent]);
  find('#alice-brightness').checkValidity=()=>true;
  const click=action=>events.click({target:{closest:()=>({dataset:{action},hasAttribute:()=>false})}});
  const reply=(sequence,state)=>{context.aliceReply={kind:'alice',sequence,state};vm.runInContext('window.prismestraReceive(aliceReply)',context);};
@@ -1087,11 +1145,21 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
  click('alice-open');
  const open=commands.at(-1);
  assert.equal(open.request.action,'open');
- const ready={saved:true,needsLogin:false,lamps:['Настольная'],ticket:'fixture-ticket',message:'Выберите лампу',busy:false};
+ const ready={saved:true,needsLogin:false,lamps:['Дом · Рабочая · Настольная · ab','Дом · Мастерская · Настольная · cd'],ticket:'fixture-ticket',message:'Выберите лампу',busy:false};
  reply(open.sequence,ready);
  assert.equal(find('#alice-login').hidden,true,'cold open with a valid saved grant skips sign-in');
  assert.equal(find('#alice-choice').hidden,false);
  assert.deepEqual(commands.slice(before).map(command=>command.request.action),['open']);
+ assert.deepEqual(options.slice(1),[['0',ready.lamps[0]],['1',ready.lamps[1]]]);
+ click('alice-apply');
+ assert.equal(commands.at(-1),open,'catalog entries are inert until a lamp is explicitly selected');
+ picker.value='1';
+ find('#alice-brightness').value='40';
+ click('alice-apply');
+ const apply=commands.at(-1);
+ assert.deepEqual(apply.request,{action:'apply',ticket:'fixture-ticket',lamp:1,brightness:40});
+ reply(apply.sequence,{...ready,ticket:'next-ticket'});
+ assert.equal(picker.value,'1','the selected room and lamp stay selected after a command');
  click('alice-sign-out');
  const signOut=commands.at(-1);
  assert.equal(signOut.request.action,'sign_out');
@@ -1111,7 +1179,7 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
  assert.notEqual(open.sequence,signOut.sequence);
  aliceDialog.close();
 }
-console.log('PASS: Alice cold open uses saved access and ignores a late catalog reply after sign-out');
+console.log('PASS: Alice uses saved access, distinguishes identical lamp names by room, and ignores a late reply after sign-out');
 
 {
  const light={id:'lamp-scene',name:'Кабинет',scene};
@@ -1162,11 +1230,12 @@ console.log('PASS: Alice cold open uses saved access and ignores a late catalog 
  const applied=commands.at(-1);
  assert.equal(applied.id,light.id);
  assert.equal(commands.slice(beforePreview).filter(command=>command.op==='apply_scene'&&command.id===light.id).length,1);
- bridge({kind:'scene_activation',request:applied.request,status:'applied',lamp:'Применяем яркость лампы сцены…'});
+ bridge({kind:'scene_activation',request:applied.request,status:'applied',output:'no_active_rgb',lamp:'Применяем яркость лампы сцены…'});
  bridge({kind:'scene_lamp',request:plainApply.request,message:'Устаревший результат'});
  assert.match(find('#scene-activation-lamp-scene').textContent,/Применяем яркость/);
  bridge({kind:'scene_lamp',request:applied.request,message:'Яндекс подтвердил команду лампе.'});
  assert.match(find('#scene-activation-lamp-scene').textContent,/Яндекс подтвердил/);
+ assert.match(find('#scene-activation-lamp-scene').textContent,/Нет активных RGB-выходов/);
  vm.runInContext('loadEntry(state.library.find(entry=>entry.id==="lamp-scene"))',context);
  find('#footer-apply').onclick();
  assert.equal(commands.at(-1).id,light.id,'ordinary editor Apply uses the same saved scene identity');
@@ -1335,6 +1404,38 @@ console.log('PASS: scene lamp binding IPC, restart snapshot, ordinary Apply, dup
  assert.doesNotMatch(mainMarkup,/id="open-argb"/);
 }
 console.log('PASS: managed ARGB editor routes typed inventory/save IPC and correlated save errors');
+
+{
+ const controller={label:'<Controller 0/0>',channels:[{id:'0',label:'Header A',mode:'manual',leds:0,min:1,max:64},{id:'1',label:'Header B',mode:'manual',leds:0,min:1,max:120}]};
+ vm.runInContext('view="devices";pendingView=null',context);
+ receiveDeviceState('snapshot',{...initial,devices:[],draftDevices:[],argbDevice:null});
+ for(const id of ['channel','template','dots']){
+  const field=find(`#argb-${id}`);
+  field.replaceChildren=(...children)=>{field.children=children;};
+ }
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'..','src','ui','windows','web','argb-channel.js'),'utf8'),context);
+ receiveDeviceState('status',{unconfiguredArgb:[controller]});
+ assert.match(mainMarkup,/&lt;Controller 0\/0&gt;/);
+ assert.match(mainMarkup,/id="preview-argb-0"/);
+ assert.doesNotMatch(mainMarkup,/data-output-status|id="open-argb"/);
+ const before=commands.length;
+ events.click({target:{closest:()=>({dataset:{action:'preview-argb',argbIndex:'0'},hasAttribute:()=>false})}});
+ assert.equal(find('#argb-dialog').open,true);
+ assert.equal(find('#argb-label').textContent,controller.label);
+ const channel=find('#argb-channel');
+ assert.deepEqual(channel.children.slice(1).map(item=>item.textContent),['Header A','Header B']);
+ channel.value='1';
+ channel.onchange();
+ assert.equal(find('#argb-count').max,120);
+ assert.equal(find('#argb-count').value,'');
+ assert.equal(find('#argb-save').hidden,true);
+ find('#argb-form').onsubmit({preventDefault(){}});
+ assert.equal(commands.length,before,'the unbound preview sends no IPC');
+ find('#argb-close').onclick();
+ receiveDeviceState('status',{unconfiguredArgb:[]});
+ assert.doesNotMatch(mainMarkup,/id="preview-argb-0"/);
+}
+console.log('PASS: an unconfigured ARGB controller opens a local preview without a binding or IPC');
 
 {
  restoreDraft(draftState);
@@ -1541,4 +1642,78 @@ async function checkOutputStatusCopy() {
 }
 console.log('PASS: scene placement uses the device draft and guards navigation and profile save until apply or revert');
 }
-checkOutputStatusCopy().catch(error=>{console.error(error);process.exitCode=1;});
+function checkSearchRetryRecovery(testContext, label) {
+ const receive=payload=>{
+  testContext.payload=payload;
+  vm.runInContext('window.prismestraReceive(payload)',testContext);
+ };
+ const click=action=>events.click({target:{closest:()=>({dataset:{action},hasAttribute:()=>true})}});
+ vm.runInContext('formStages.clear();view="library";pendingView=null',testContext);
+ receive({kind:'snapshot',state:{...structuredClone(initial),startupDiscoveryRetry:false}});
+ receive({kind:'error',code:'startupDiscoveryRetry',message:'Search is busy'});
+ const banner=find('#native-error');
+ assert.ok(banner.innerHTML.includes(`id="startup-discovery-retry-error">${label}</button>`));
+ assert.doesNotMatch(banner.innerHTML,/data-action="retry-document"/);
+ const before=commands.length;
+ click('retry-startup-discovery');
+ assert.equal(commands.length,before,'unavailable discovery does not dispatch');
+ receive({kind:'status',state:{startupDiscoveryRetry:true}});
+ click('retry-startup-discovery');
+ click('retry-startup-discovery');
+ assert.deepEqual(commands.slice(before),[{op:'retry_startup_discovery'}]);
+ receive({kind:'error',message:'Connection configuration requested recovery'});
+ assert.match(banner.innerHTML,/data-action="retry-document"/);
+ assert.doesNotMatch(banner.innerHTML,/id="startup-discovery-retry-error"/);
+ click('retry-document');
+ assert.deepEqual(commands.at(-1),{op:'retry_document'});
+}
+function checkEnglishStartupPreview() {
+ checkSearchRetryRecovery(context,'Повторить поиск');
+ document.documentElement={lang:'ru'};
+ document.activeElement=null;
+ const preview=vm.createContext({
+  document,window:{addEventListener:(name,fn)=>events[name]=fn,
+   ipc:{postMessage:value=>commands.push(JSON.parse(value))},location:{protocol:'file:',search:'?lang=en'}},
+  requestAnimationFrame:fn=>rafQueue.push(fn),CSS:{escape:value=>value},URLSearchParams,
+  structuredClone,setTimeout:()=>1,clearTimeout(){},console
+ });
+ vm.runInContext(source,preview);
+ const receive=(kind,state)=> {
+  preview.payload={kind,state};
+  vm.runInContext('window.prismestraReceive(payload)',preview);
+ };
+ assert.equal(document.documentElement.lang,'en');
+ assert.match(mainMarkup,/Connecting to Prismestra/);
+ receive('snapshot',{...initial,startupStatus:'searching',status:'Ищу устройства'});
+ assert.match(find('nav').innerHTML,/data-view="devices"[^>]*aria-label="Devices"/);
+ assert.match(mainMarkup,/<h1>Scenes<\/h1>/);
+ assert.match(find('#player-status').textContent,/Looking for supported devices/);
+ events.click({target:{closest:()=>({dataset:{view:'devices'}})}});
+ assert.deepEqual(commands.at(-1),{op:'page',page:'devices'});
+ receive('snapshot',{...initial,editor:{page:'devices',index:0,targets:[],fields:[]},
+  startupStatus:'empty',startupDiscoveryRetry:true,startupEmptySearchResult:'continuing'});
+ assert.match(mainMarkup,/<h1>Devices<\/h1>/);
+ assert.match(mainMarkup,/data-action="retry-startup-discovery"[^>]*>Find devices/);
+ assert.match(find('#startup-empty-search').textContent,/continue in the background/);
+ receive('status',{startupStatus:'unconfiguredArgb',startupEmptySearchResult:null,
+  status:'Найдены контроллеры ARGB',unconfiguredArgb:[{label:'Empty ARGB',channels:[]}]});
+ assert.match(find('#player-status').textContent,/Found ARGB controllers with no LEDs configured/);
+ assert.match(mainMarkup,/aria-label="ARGB channels: Empty ARGB">ARGB channels/);
+ assert.equal(find('#startup-empty-search').hidden,true);
+ const retry={dataset:{action:'retry-startup-discovery'},hasAttribute:()=>true};
+ events.click({target:{closest:()=>retry}});
+ assert.deepEqual(commands.at(-1),{op:'retry_startup_discovery'});
+ preview.payload={kind:'error',code:'startupDiscoveryRetry',message:'Сбой <details>'};
+ vm.runInContext('window.prismestraReceive(payload)',preview);
+ assert.match(find('#native-error').innerHTML,/Could not start device search.*Technical details.*Сбой &lt;details&gt;/);
+ assert.doesNotMatch(find('#native-error').innerHTML,/data-action="retry-document"/);
+ receive('status',{startupStatus:'failed',status:'Сбой SDK'});
+ assert.match(find('#player-status').textContent,/Automatic setup could not finish/);
+ assert.equal(find('#player-status').title,'Сбой SDK');
+ receive('status',{startupStatus:null,status:'Сцена сохранена'});
+ assert.equal(find('#player-status').textContent,'Сцена сохранена','unscoped native statuses keep their own text');
+ checkSearchRetryRecovery(preview,'Retry search');
+ console.log('PASS: English browser preview translates navigation and startup IPC with original command IDs');
+ console.log('PASS: rejected discovery retries only discovery in Russian and English; other errors retain document recovery');
+}
+checkOutputStatusCopy().then(checkEnglishStartupPreview).catch(error=>{console.error(error);process.exitCode=1;});

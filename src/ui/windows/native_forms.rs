@@ -485,7 +485,9 @@ pub(super) fn action(state: &State, id: i32) -> Result<(), String> {
     }
     if matches!(
         id,
-        sources::MODULE_SELECT | connections::CONFIGURE_PORTABLE_OPENRGB
+        sources::MODULE_SELECT
+            | connections::CONFIGURE_PORTABLE_OPENRGB
+            | connections::APPLY_OUTPUTS
     ) {
         return modal_command(state.editor_window.get(), state, id);
     }
