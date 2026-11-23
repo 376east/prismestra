@@ -47,6 +47,13 @@ impl Config {
     }
 
     fn read_saved(state_dir: &Path) -> Result<Option<Self>, String> {
+        Self::read_saved_with(state_dir, Self::validate)
+    }
+
+    fn read_saved_with(
+        state_dir: &Path,
+        validate: impl FnOnce(&Self) -> Result<(), String>,
+    ) -> Result<Option<Self>, String> {
         let path = state_dir.join("managed-openrgb.json");
         match fs::symlink_metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -65,7 +72,7 @@ impl Config {
         }
         let config: Self =
             serde_json::from_slice(&bytes).map_err(|e| format!("Managed OpenRGB config: {e}"))?;
-        config.validate()?;
+        validate(&config)?;
         Ok(Some(config))
     }
 
@@ -100,6 +107,16 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), String> {
+        self.validate_fields()?;
+        local_path(&self.executable)?;
+        local_path(&self.config_dir)?;
+        if !self.config_dir.is_dir() {
+            return Err("Managed OpenRGB config_dir must exist".into());
+        }
+        Ok(())
+    }
+
+    fn validate_fields(&self) -> Result<(), String> {
         if self.version != 1 || !self.endpoint.ip().is_loopback() || self.endpoint.port() == 0 {
             return Err(
                 "Managed OpenRGB requires version 1 and an explicit loopback endpoint".into(),
@@ -112,11 +129,6 @@ impl Config {
                 .all(|b| b.is_ascii_hexdigit())
         {
             return Err("Managed OpenRGB requires an explicit SHA-256 pin".into());
-        }
-        local_path(&self.executable)?;
-        local_path(&self.config_dir)?;
-        if !self.config_dir.is_dir() {
-            return Err("Managed OpenRGB config_dir must exist".into());
         }
         Ok(())
     }

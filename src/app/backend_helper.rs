@@ -48,6 +48,16 @@ impl TaskConfig {
     }
 }
 
+#[cfg(windows)]
+pub(super) fn portable_task_name(state_dir: &Path) -> Result<String, String> {
+    let task: TaskConfig = read_json(&state_dir.join("backend-task.json"))?;
+    task.validate()?;
+    if task.version != 1 {
+        return Err("Эта ссылка на задачу принадлежит установленной версии Prismestra.".into());
+    }
+    Ok(task.task_name)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Identity {
