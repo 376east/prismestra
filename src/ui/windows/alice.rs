@@ -891,6 +891,20 @@ fn lamps(catalog: &Value) -> Result<Vec<Lamp>, String> {
             label: format!("{home} · {room_name} · {name} · {suffix}"),
         });
     }
+    let mut label_counts = std::collections::BTreeMap::new();
+    for lamp in &listed {
+        *label_counts.entry(lamp.label.clone()).or_insert(0) += 1;
+    }
+    let mut occupied: std::collections::BTreeSet<_> = label_counts.keys().cloned().collect();
+    for lamp in &mut listed {
+        if label_counts[&lamp.label] > 1 {
+            let mut label = format!("{} · ID {}", lamp.label, lamp.id);
+            while !occupied.insert(label.clone()) {
+                label.push('·');
+            }
+            lamp.label = label;
+        }
+    }
     Ok(listed)
 }
 
@@ -1156,6 +1170,28 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn identical_labels_with_the_same_short_id_suffix_remain_distinguishable() {
+        let mut catalog = fixture();
+        catalog["devices"] = json!([
+            lamp("device-left-123456", "r"),
+            lamp("device-right-123456", "r"),
+            lamp("unique-123456", "neighbor")
+        ]);
+        let lamps = lamps(&catalog).unwrap();
+        assert_eq!(lamps.len(), 3);
+        assert_ne!(lamps[0].label, lamps[1].label);
+        for (lamp, id) in lamps
+            .iter()
+            .zip(["device-left-123456", "device-right-123456"])
+        {
+            assert_eq!(lamp.id, id);
+            assert!(lamp.label.ends_with(id));
+        }
+        assert_eq!(lamps[2].id, "unique-123456");
+        assert_eq!(lamps[2].label, "Дом · Кухня · Лампа · 123456");
     }
 
     #[test]
