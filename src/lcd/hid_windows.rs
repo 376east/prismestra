@@ -270,7 +270,7 @@ pub(crate) fn discover_displays() -> Result<(Vec<Descriptor>, Vec<String>), Stri
     ))
 }
 
-fn discover_display_paths(
+pub(crate) fn discover_display_paths(
     paths: Vec<String>,
     mut probe: impl FnMut(&str) -> Result<Descriptor, std::io::Error>,
     owned: &Mutex<Vec<Weak<Descriptor>>>,

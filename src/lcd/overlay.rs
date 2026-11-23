@@ -13,6 +13,22 @@ pub const CARD_WIDTH: u32 = 188;
 pub const CARD_HEIGHT: u32 = 76;
 pub const MAX_BLOCKS: usize = 4;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CardPosition {
+    pub x: u32,
+    pub y: u32,
+}
+
+impl CardPosition {
+    pub(crate) fn validate(self) -> Result<(), String> {
+        if self.x > LAYOUT_SIZE - CARD_WIDTH || self.y > LAYOUT_SIZE - CARD_HEIGHT {
+            return Err("Карточка выходит за границы LCD.".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GaugeStyle {
@@ -56,6 +72,7 @@ pub struct Renderer {
     font: fontdue::Font,
     glyphs: HashMap<char, (fontdue::Metrics, Vec<u8>)>,
     style: GaugeStyle,
+    card_position: CardPosition,
 }
 fn rounded(x: f32, y: f32, w: f32, h: f32, r: f32) -> tiny_skia::Path {
     let mut p = PathBuilder::new();
@@ -129,11 +146,17 @@ impl Renderer {
             font,
             glyphs: HashMap::new(),
             style: GaugeStyle::default(),
+            card_position: CardPosition { x: 146, y: 350 },
         })
     }
     pub fn with_style(mut self, style: GaugeStyle) -> Self {
         self.style = style;
         self
+    }
+    pub(crate) fn with_card_position(mut self, position: CardPosition) -> Result<Self, String> {
+        position.validate()?;
+        self.card_position = position;
+        Ok(self)
     }
     fn width(&self, text: &str) -> f32 {
         text.chars()
@@ -273,7 +296,8 @@ impl Renderer {
             _ => background.clone(),
         };
         let mut layer = Pixmap::new(LAYOUT_SIZE, LAYOUT_SIZE).ok_or("Cannot allocate overlay")?;
-        self.paint_card(&mut layer, 146, 350, &name, celsius);
+        let CardPosition { x, y } = self.card_position;
+        self.paint_card(&mut layer, x, y, &name, celsius);
         blend(&mut view, layer)?;
         Ok(match angle {
             90 => imageops::rotate90(&view),
