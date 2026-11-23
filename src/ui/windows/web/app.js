@@ -816,13 +816,13 @@ window.prismestraReceive = message => {
   if(typeof message==='string')message=JSON.parse(message);
   if(message.kind==='alice'){receiveAlice(message);return;}
   if(message.kind==='output_preview'){window.outputMap?.receive(message);return;}
-  if(message.kind==='argb_channels'){window.argbChannel?.receive(message);return;}
+  if(message.kind==='argb_channels'||message.kind==='argb_channel_saved'){window.argbChannel?.receive(message);return;}
   if(message.kind==='output_retry'){receiveOutputRetry(message);return;}
   if(message.kind==='scene_activation'){receiveSceneActivation(message);return;}
   if(message.kind==='card_preview'){receiveCardFrame(message);return;}
   if(message.kind==='flush'){
    if(!Number.isSafeInteger(message.id)||message.id<0)throw Error('Некорректный запрос закрытия');
-   if(window.sceneFile?.blockClose()){
+   if(window.sceneFile?.blockClose()||window.argbChannel?.blockClose?.()){
     window.ipc.postMessage(JSON.stringify({op:'close_ready',id:message.id,scene:null,blocked:true}));return;
    }
    stageText(document.activeElement);closing=true;clearTimeout(previewTimer);previewTimer=null;previewQueued=false;syncControls();
@@ -1020,6 +1020,7 @@ document.addEventListener('click',event=>{
   const device=state?.devices.find(item=>item.id===state.argbDevice);
   if(device&&view==='devices')window.argbChannel?.open(device.id,device.label,{
    list: request=>send({op:'argb_channels',...request}),
+   save: request=>send({op:'argb_channel_save',...request}),
    restoreFocus: ()=>restoreFocus('#open-argb'),
   });
   break;

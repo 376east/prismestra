@@ -16,6 +16,8 @@ const OPERATION_LIMIT: Duration = Duration::from_secs(3);
 mod channels;
 #[cfg(any(windows, test))]
 pub(crate) use channels::ChannelInventory;
+#[cfg(windows)]
+pub(crate) use channels::{ConfirmedZoneSize, ZoneChannel, ZoneSizeRequest, ZoneSizeWriter};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ZoneInfo {
