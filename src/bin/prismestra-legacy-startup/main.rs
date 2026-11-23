@@ -15,10 +15,14 @@ mod scheduler;
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
-    match run(std::env::args_os().skip(1)) {
-        Ok(report) => {
+    let result = arguments(std::env::args_os().skip(1)).and_then(|(action, sid, setup_outcome)| {
+        run(action, sid).map(|report| (report, setup_outcome))
+    });
+    match result {
+        Ok((report, setup_outcome)) => {
+            let code = report.exit_code(setup_outcome);
             println!("{}", serde_json::json!(report));
-            std::process::ExitCode::SUCCESS
+            std::process::ExitCode::from(code)
         }
         Err(error) => {
             eprintln!("Prismestra legacy startup: {error}");
@@ -57,6 +61,15 @@ impl Report {
             protection_block: None,
         }
     }
+
+    fn exit_code(&self, setup_outcome: bool) -> u8 {
+        // Prismestra.iss uses these codes for verified post-import deferrals.
+        match (setup_outcome, &self.protection_block) {
+            (true, Some(ProtectionBlock::SchedulerRoot)) => 20,
+            (true, Some(ProtectionBlock::RegisteredTask)) => 21,
+            _ => 0,
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -93,7 +106,7 @@ enum Action {
 #[cfg(windows)]
 fn arguments(
     args: impl IntoIterator<Item = std::ffi::OsString>,
-) -> Result<(Action, String), String> {
+) -> Result<(Action, String, bool), String> {
     let mut args = args.into_iter();
     let action = match args.next().as_deref().and_then(std::ffi::OsStr::to_str) {
         Some("Prepare") => Action::Prepare,
@@ -105,17 +118,21 @@ fn arguments(
         .and_then(|value| value.into_string().ok())
         .filter(|value| native::valid_original_sid(value))
         .ok_or("invalid original Windows SID")?;
+    let setup_outcome = match args.next() {
+        None => false,
+        Some(flag) if action == Action::Disable && flag == "--setup-outcome" => true,
+        Some(_) => return Err("unexpected legacy startup arguments".into()),
+    };
     if args.next().is_some() {
         return Err("unexpected legacy startup arguments".into());
     }
-    Ok((action, sid))
+    Ok((action, sid, setup_outcome))
 }
 
 #[cfg(windows)]
-fn run(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Report, String> {
+fn run(action: Action, sid: String) -> Result<Report, String> {
     use serde::Serialize;
 
-    let (action, sid) = arguments(args)?;
     let Some(user) = native::OriginalUser::current(&sid)? else {
         return Ok(Report::new("unchanged_original_split_token_required"));
     };
@@ -222,17 +239,27 @@ fn attributes_task_retirement_deferral_to_the_guest_scheduler_root() {
         report.protection_block,
         Some(ProtectionBlock::SchedulerRoot)
     );
-    let json = serde_json::to_value(report).unwrap();
+    assert_eq!(report.exit_code(false), 0);
+    assert_eq!(report.exit_code(true), 20);
+    let json = serde_json::to_value(&report).unwrap();
     assert_eq!(json["status"], "unchanged_task_protection_required");
     assert_eq!(json["protection_block"], "scheduler_root");
     assert_eq!(json["disabled"], serde_json::json!([]));
     assert!(json["rollback"].is_null());
 
     let task_with_write = "O:BAG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;FW;;;AU)";
+    report.protection_block = protection_block(allowed_root, [GUEST_TASK, task_with_write]);
     assert_eq!(
-        protection_block(allowed_root, [GUEST_TASK, task_with_write]),
+        report.protection_block,
         Some(ProtectionBlock::RegisteredTask)
     );
+    assert_eq!(report.exit_code(false), 0);
+    assert_eq!(report.exit_code(true), 21);
+    assert_eq!(
+        Report::new("unchanged_import_not_confirmed").exit_code(true),
+        0
+    );
+    assert_eq!(Report::new("disabled").exit_code(true), 0);
     assert!(
         serde_json::to_value(Report::new("verified"))
             .unwrap()
@@ -244,17 +271,26 @@ fn attributes_task_retirement_deferral_to_the_guest_scheduler_root() {
 #[cfg(all(test, windows))]
 #[test]
 fn accepts_only_named_phases_and_a_canonical_original_sid() {
-    fn parse(value: &[&str]) -> Result<(Action, String), String> {
+    fn parse(value: &[&str]) -> Result<(Action, String, bool), String> {
         arguments(value.iter().map(std::ffi::OsString::from))
     }
 
     let sid = "S-1-5-21-1-2-3-1001";
     assert_eq!(parse(&["Prepare", sid]).unwrap().0, Action::Prepare);
-    assert_eq!(parse(&["Disable", sid]).unwrap().0, Action::Disable);
+    assert_eq!(
+        parse(&["Disable", sid]).unwrap(),
+        (Action::Disable, sid.into(), false)
+    );
+    assert_eq!(
+        parse(&["Disable", sid, "--setup-outcome"]).unwrap(),
+        (Action::Disable, sid.into(), true)
+    );
     for args in [
         vec!["Audit", sid],
         vec!["Disable", "S-1-5-18"],
         vec!["Disable", sid, r"C:\profile"],
+        vec!["Prepare", sid, "--setup-outcome"],
+        vec!["Disable", sid, "--setup-outcome", "--setup-outcome"],
     ] {
         assert!(parse(&args).is_err());
     }
