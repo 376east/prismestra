@@ -135,6 +135,7 @@ enum Command {
     },
     Open,
     Save,
+    SaveProfileCopy,
     Export,
     ExportEventSource {
         format: crate::capture::event_bridge::ExportFormat,
@@ -1018,6 +1019,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
         .chain(session.built_in_cards.iter().cloned())
         .collect::<Vec<_>>();
     let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":library,"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app, state.language),"nativeAux":native_forms::aux_snapshot(app, state.language),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
+    value["state"]["installedProfile"] = json!(app.installed_profile_root.is_some());
     value["state"]["preferredUiLanguage"] = json!(locale::Language::load(&app.state_dir));
     value["state"]["startupDiscoveryRetry"] = json!(app.can_retry_startup_discovery());
     value["state"]["startupEmptySearchResult"] = json!(app.startup_empty_search_result());
@@ -1405,10 +1407,11 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             send(state, &value)?;
             return Ok(false);
         }
-        Command::Open | Command::Save | Command::Export => {
+        Command::Open | Command::Save | Command::SaveProfileCopy | Command::Export => {
             let id = match command {
                 Command::Open => OPEN,
                 Command::Save => SAVE,
+                Command::SaveProfileCopy => SAVE_PROFILE_COPY,
                 _ => EXPORT,
             };
             modal_command(hwnd, state, id)?;

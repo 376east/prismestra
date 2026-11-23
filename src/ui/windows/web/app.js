@@ -49,7 +49,7 @@ const englishStartupStatus = new Map([
  ['failed','Automatic setup could not finish. Check Connections or try searching again when available.'],
 ]);
 const englishRuntimeStatus=new Map([
- ['Готово','Ready'],['Профиль сохранён.','Profile saved.'],
+ ['Готово','Ready'],['Профиль сохранён.','Profile saved.'],['Profile copy saved.','Profile copy saved.'],
  ['Сцена сохранена','Scene saved'],['Сцена сохранена.','Scene saved.'],
  ['Параметр изменён. Нажмите «Применить».','A setting changed. Select Apply.'],
  ['Проверка и применение параметров…','Checking and applying settings…'],
@@ -306,7 +306,8 @@ function send(command, mutation=false) {
  const nativeCommand=['native_field','native_action'].includes(command.op);
  if(nativeCommand){const node={dataset:{[command.op==='native_field'?'nativeField':'nativeAction']:String(command.id)}};if(nativeControlDisabled(node))return false;const items=command.op==='native_field'?nativeFormForView().fields:nativeFormForView().actions;command.id=items.find(item=>String(item.id)===String(command.id)).id;}
  else if(mutation && busy() && !recoveryOperation(command.op)) return false;
- if(['open','save','export'].includes(command.op)&&(stagedDirty()||placementDirty())){showError(ui('Примените или отмените незавершённый ввод перед сохранением профиля.','Apply or discard unfinished input before saving the profile.'));return false;}
+ if((['open','save','save_profile_copy','export'].includes(command.op)&&(stagedDirty()||placementDirty()))
+  ||(state?.installedProfile&&['save','save_profile_copy'].includes(command.op)&&state.editor?.dirty)){showError(ui('Примените или отмените незавершённый ввод перед сохранением профиля.','Apply or discard unfinished input before saving the profile.'));return false;}
  const stagedCommand=['apply_fields','set_field','asset','native_field','native_action'].includes(command.op);
  const discardNative=nativeCommand&&['408','1812','1819','1107','1141'].includes(String(command.id));
  if(stagedCommand&&!discardNative){if(nativeCommand){command.fields=currentNativeStages();command.editor_fields=state.pending?[]:currentGenericStages().filter(item=>state.editor.fields.find(field=>field.key===item.key)?.enabled!==false);}else command.fields=currentGenericStages();}
@@ -685,6 +686,11 @@ function outputField(page,field) {
  return {...field,label,hint,value,choices};
 }
 function nativeProperties() {
+ const applyLabel=({
+  lcd:ui('Применить настройки LCD','Apply LCD settings'),
+  ambient:ui('Применить настройки подсветки экрана','Apply screen lighting settings'),
+  temperatures:ui('Применить настройки температур','Apply temperature settings'),
+ })[view]??ui('Применить настройки устройств','Apply device settings');
  const editor=state.editor;
  if(!editor || editor.page!==view)return state.nativeAux?.page===view?renderNativeForm(state.nativeAux):`<div class="native-wait">${ui('Настройки загружаются…','Loading settings…')}</div>`;
  const argb=view==='devices'&&state.argbDevice
@@ -693,7 +699,7 @@ function nativeProperties() {
   ? `<button class="button" data-view="connections" data-connection-device="${esc(editor.deviceId)}" data-mutation ${disabled()}>${ui('Открыть подключение устройства','Open device connection')}</button>` : '';
  const copy=view==='devices'&&repair
   ? `<button class="button" data-action="copy-output-status" data-copy-output="${esc(editor.deviceId)}">${ui('Скопировать статус','Copy status')}</button><span id="output-copy-result" class="muted" role="status"></span>` : '';
- return `<section class="native-properties"><div class="native-inline"><label for="native-target">${ui('Объект','Item')}</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${view==='devices'&&editor.index>=editor.targets.length?`<option value="" disabled selected>${ui('Выберите устройство…','Choose a device…')}</option>`:''}${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select>${repair}${argb}${copy}</div><div class="parameter-panel">${english&&!outputPage(view)?`<details id="native-runtime-diagnostics" ${state.detail?'':'hidden'}><summary>Technical details</summary><p id="native-runtime-detail">${esc(state.detail||'')}</p></details>`:`<p class="parameter-note" id="native-runtime-detail"${view==='devices'?'':' role="status"'}>${esc(outputDetail(state.detail||''))}</p>`}<div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(english&&view==='devices'?deviceFieldLabels.get(field.key)??field.label:field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(english&&view==='devices'?deviceFieldChoices.get(field.key+':'+choice.value)??choice.label:choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>${ui('Выбрать…','Choose…')}</button>`:''}</div>`}${field.hint?`<small>${esc(deviceFieldHint(field))}</small>`:''}</div>`).join('')||`<p class="muted">${ui('Параметров объекта нет.','No settings for this item.')}</p>`}</div><div class="native-property-actions">${action(ui('Применить','Apply'),'apply-document',true,'data-needs-change="document"')}${action(ui('Отменить изменения','Discard changes'),'revert-document')}${action(ui('Повторить','Retry'),'retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
+ return `<section class="native-properties"><div class="native-inline"><label for="native-target">${ui('Объект','Item')}</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${view==='devices'&&editor.index>=editor.targets.length?`<option value="" disabled selected>${ui('Выберите устройство…','Choose a device…')}</option>`:''}${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select>${repair}${argb}${copy}</div><div class="parameter-panel">${english&&!outputPage(view)?`<details id="native-runtime-diagnostics" ${state.detail?'':'hidden'}><summary>Technical details</summary><p id="native-runtime-detail">${esc(state.detail||'')}</p></details>`:`<p class="parameter-note" id="native-runtime-detail"${view==='devices'?'':' role="status"'}>${esc(outputDetail(state.detail||''))}</p>`}<div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(english&&view==='devices'?deviceFieldLabels.get(field.key)??field.label:field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(english&&view==='devices'?deviceFieldChoices.get(field.key+':'+choice.value)??choice.label:choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>${ui('Выбрать…','Choose…')}</button>`:''}</div>`}${field.hint?`<small>${esc(deviceFieldHint(field))}</small>`:''}</div>`).join('')||`<p class="muted">${ui('Параметров объекта нет.','No settings for this item.')}</p>`}</div><div class="native-property-actions">${action(applyLabel,'apply-document',true,'data-needs-change="document"')}${action(ui('Отменить изменения','Discard changes'),'revert-document')}${action(ui('Повторить','Retry'),'retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
 }
 const deviceStatus=device=>outputStatusLabel(rawDeviceStatus(device));
 function rawDeviceStatus(device) {
@@ -882,6 +888,7 @@ function pageHasEdits() {
 
 function render() {
  if(deferRender())return;renderQueued=false;
+ syncProjectActions();
  if(!busy()&&!pendingView&&!pageHasEdits()&&!outputPageAvailable(view)){
   changeView('devices');
   return;
@@ -1540,6 +1547,7 @@ document.addEventListener('click',event=>{
  case 'dismiss-error':error='';errorIsCommand=false;$('#native-error').hidden=true;if(state)state.error=null;break;
  case 'scene-file':return window.sceneFile?.open(draft,send,paintPixels);
  case 'open':case 'save':case 'export':send({op:b.dataset.action},true);break;
+ case 'save-profile-copy':send({op:'save_profile_copy'},true);break;
  case 'export-cs2':case 'export-dota2':case 'export-event-source':
   if(state?.native)send({op:'export_event_source',format:({'export-cs2':'cs2','export-dota2':'dota2','export-event-source':'connection'})[b.dataset.action]},true);
   break;
@@ -1632,9 +1640,21 @@ $('#cancel-remove').onclick=()=>{removal.close();restoreFocus(dialogReturn);};re
 const projectActions=document.createElement('div');
 projectActions.className='native-project-actions';
 const exportDescription=ui('Профиль и используемые медиа. «Мои сцены» хранятся отдельно.','The profile and its media. Saved scenes are stored separately.');
-projectActions.innerHTML=action(ui('Открыть','Open'),'open')+action(ui('Сохранить','Save'),'save')+
- action(ui('Экспорт профиля','Export profile'),'export',false,`title="${esc(exportDescription)}" aria-describedby="profile-export-scope"`)+
- `<span id="profile-export-scope" class="sr-only">${esc(exportDescription)}</span>`;
+function syncProjectActions() {
+ const installed=String(state?.installedProfile===true);
+ if(projectActions.dataset.installed===installed)return;
+ projectActions.dataset.installed=installed;
+ const isInstalled=installed==='true';
+ const saveDescription=ui('Этот профиль откроется при следующем запуске Prismestra.','Prismestra opens this profile the next time it starts.');
+ const copyDescription=ui('Записывает файл JSON. Активный профиль и локальные привязки остаются на месте.',
+  'Writes a JSON file and keeps the active profile and local bindings in place.');
+ projectActions.innerHTML=action(ui('Открыть','Open'),'open')
+  +action(isInstalled?ui('Сохранить активный профиль','Save active profile'):ui('Сохранить','Save'),'save',false,
+   isInstalled?`title="${esc(saveDescription)}"`:'')
+  +(isInstalled?action(ui('Сохранить копию…','Save a copy…'),'save-profile-copy',false,`title="${esc(copyDescription)}"`):'')
+  +action(ui('Экспорт профиля','Export profile'),'export',false,`title="${esc(exportDescription)}" aria-describedby="profile-export-scope"`)
+  +`<span id="profile-export-scope" class="sr-only">${esc(exportDescription)}</span>`;
+}
 $('#save-status').before(projectActions);
 document.addEventListener('pointerdown',event=>{
  pointerGesture=true;

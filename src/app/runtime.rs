@@ -87,10 +87,7 @@ impl Store {
             .collect();
         Ok(Self { path, fingerprint })
     }
-    fn load(&self) -> Result<Option<(Schedule, Desired)>, String> {
-        let Some(path) = &self.path else {
-            return Ok(None);
-        };
+    fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
         let meta = match std::fs::symlink_metadata(path) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -115,6 +112,15 @@ impl Store {
         if bytes.len() > LIMIT {
             return Err("Runtime journal exceeds 1 MiB".into());
         }
+        Ok(Some(bytes))
+    }
+    fn load(&self) -> Result<Option<(Schedule, Desired)>, String> {
+        let Some(path) = &self.path else {
+            return Ok(None);
+        };
+        let Some(bytes) = Self::read_bytes(path)? else {
+            return Ok(None);
+        };
         let j: Journal =
             serde_json::from_slice(&bytes).map_err(|e| format!("Runtime journal decode: {e}"))?;
         if j.version != 1 || j.scope != SCOPE || j.fingerprint != self.fingerprint {
@@ -133,7 +139,7 @@ impl Store {
         }
         Ok(Some((schedule, j.desired)))
     }
-    fn persist(&self, desired: Desired, ledger: &[u8]) -> Result<(), String> {
+    fn encoded(&self, desired: Desired, ledger: &[u8]) -> Result<Vec<u8>, String> {
         let j = Journal {
             version: 1,
             scope: SCOPE.into(),
@@ -145,6 +151,10 @@ impl Store {
         if bytes.len() > LIMIT {
             return Err("Runtime journal exceeds 1 MiB".into());
         }
+        Ok(bytes)
+    }
+    fn persist(&self, desired: Desired, ledger: &[u8]) -> Result<(), String> {
+        let bytes = self.encoded(desired, ledger)?;
         if let Some(path) = &self.path {
             storage::atomic_write(path, &bytes, LIMIT)
                 .map_err(|e| format!("Runtime journal atomic replace: {e}"))?;
@@ -883,6 +893,47 @@ impl Runtime {
         self.bump_view();
         Ok(())
     }
+    /// Save an applied installed profile under the same runtime lock as its journal.
+    #[cfg(any(windows, test))]
+    pub(crate) fn save_profile_with_journal_at(
+        &mut self,
+        profile: &Path,
+        journal: PathBuf,
+    ) -> Result<(), String> {
+        if self.pending.is_some() {
+            return Err("Wait for the configuration to finish before saving the profile.".into());
+        }
+        Self::journal_path(&journal)?;
+        if self.store.path.as_ref() == Some(&journal) {
+            return self.document.save(profile);
+        }
+
+        let store = Store::new(Some(journal.clone()), &self.document)?;
+        let previous = Store::read_bytes(&journal)?;
+        let prepared = store.encoded(self.desired, &self.schedule.encoded()?)?;
+        storage::atomic_write(&journal, &prepared, LIMIT)
+            .map_err(|error| format!("Prepare profile journal: {error}"))?;
+        if let Err(profile_error) = self.document.save(profile) {
+            let rollback = Store::read_bytes(&journal).and_then(|current| {
+                if current.as_deref() != Some(prepared.as_slice()) {
+                    return Err("Prepared journal changed during save".into());
+                }
+                match previous {
+                    Some(bytes) => storage::atomic_write(&journal, &bytes, LIMIT),
+                    None => std::fs::remove_file(&journal),
+                }
+                .map_err(|error| error.to_string())
+            });
+            return Err(match rollback {
+                Ok(()) => profile_error,
+                Err(error) => format!("{profile_error}. Restore previous startup journal: {error}"),
+            });
+        }
+        self.store = store;
+        self.bump_view();
+        Ok(())
+    }
+
     /// Export intent for a saved editor draft without queuing/applying it or relocating this runtime.
     pub fn export_journal_for(&self, document: &Document, path: PathBuf) -> Result<(), String> {
         document.validate()?;
