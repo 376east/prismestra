@@ -3028,6 +3028,13 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
     if installed.is_none()
         && args
             .first()
+            .is_some_and(|arg| arg == "--reauthorize-portable-openrgb")
+    {
+        return portable::reauthorize_openrgb(&args[1..]);
+    }
+    if installed.is_none()
+        && args
+            .first()
             .is_some_and(|arg| arg == "--configure-portable-openrgb")
     {
         return portable::configure_openrgb(&args[1..]);

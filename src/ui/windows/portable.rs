@@ -124,6 +124,53 @@ pub(super) fn supports_openrgb_setup(exe: &Path) -> Result<bool, String> {
     }
 }
 
+pub(super) fn reauthorize_openrgb(args: &[OsString]) -> Result<(), String> {
+    use super::{IDYES, MB_ICONQUESTION, MessageBoxW, resident::Instance, wide};
+    use crate::app::managed_backend::provision::{self, Outcome};
+    use std::ptr::null_mut;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_DEFBUTTON2, MB_YESNO};
+
+    let [backend] = args else {
+        return Err("Используйте --reauthorize-portable-openrgb <OpenRGB.exe>.".into());
+    };
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    if !supports_openrgb_setup(&exe)? {
+        return Err("Повторная авторизация доступна в распакованном portable ZIP.".into());
+    }
+    let state = provision::prepare_state(exe.parent().ok_or("Не найдена папка Prismestra.exe")?)?;
+    let _instance = Instance::acquire(&state)?;
+    let outcome = provision::reauthorize(
+        &state,
+        Path::new(backend),
+        |path, pin| provision::verify_portable_task(&state, &exe, path, pin),
+        |task, path, pin| {
+            let text = wide(&format!(
+                "Сохранить новый OpenRGB для этой задачи?\nПодтвердите, только если администратор проверил задачу и вы доверяете этому EXE.\n\nЗадача: {task}\n{}\nSHA-256 {pin}",
+                path.display(),
+            ));
+            unsafe {
+                MessageBoxW(
+                    null_mut(),
+                    text.as_ptr(),
+                    wide("Повторная авторизация OpenRGB").as_ptr(),
+                    MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION,
+                ) == IDYES
+            }
+        },
+    )?;
+    match outcome {
+        Outcome::Saved => openrgb_notice(
+            null_mut(),
+            "Новый OpenRGB сохранён для авторизованной задачи.",
+        ),
+        Outcome::Unchanged => {
+            openrgb_notice(null_mut(), "Задача и настройки OpenRGB уже совпадают.")
+        }
+        Outcome::Cancelled => {}
+    }
+    Ok(())
+}
+
 fn confirm_openrgb(
     owner: super::HWND,
     executable: &Path,
