@@ -996,7 +996,7 @@ console.log('PASS: restored capture is inert and can be explicitly applied witho
  assert.equal(viewNow(),'library');
  click('apply');click('apply');
  const apply=commands.at(-1);
- assert.deepEqual(apply,{op:'apply_scene',scene:entry.scene,request:apply.request});
+ assert.deepEqual(apply,{op:'apply_scene',id:'night',scene:entry.scene,request:apply.request});
  assert.deepEqual(commands.slice(before).filter(command=>command.op==='apply_scene'),[apply]);
  assert.match(status.textContent,/Включаем/);
  assert.equal(devices.hidden,true);
@@ -1031,6 +1031,65 @@ console.log('PASS: restored capture is inert and can be explicitly applied witho
  assert.equal(vm.runInContext('draft.brightness',context),65,'activation does not replace the editor draft');
 }
 console.log('PASS: scene activation survives an unrelated error, ignores stale replies, and settles only on matching rejection or success');
+
+{
+ const light={id:'lamp-scene',name:'Кабинет',scene};
+ const plain={id:'plain-scene',name:'Обычная',scene:{...scene,brightness:70}};
+ const withLibrary={...initial,library:[light,plain]};
+ const bridge=message=>{context.aliceReply=message;vm.runInContext('window.prismestraReceive(aliceReply)',context);};
+ const click=dataset=>events.click({target:{closest:()=>({dataset,hasAttribute:()=>false})}});
+ const dialog=find('#alice-dialog');
+ dialog.querySelector=find;
+ find('#alice-lamp').replaceChildren=()=>{};
+ find('#alice-brightness').checkValidity=()=>true;
+ vm.runInContext('view="library";search="";libraryEffect="";draft=null;selectedId=null',context);
+ const startup=commands.length;
+ receiveDeviceState('snapshot',withLibrary);
+ assert.ok(!commands.slice(startup).some(command=>['apply_scene','alice','configure_scene_lamp'].includes(command.op)));
+ assert.match(mainMarkup,/data-alice-scene="lamp-scene"[^>]*>Добавить лампу/);
+ click({aliceScene:light.id});
+ assert.deepEqual(commands.at(-1),{op:'alice',request:{action:'open'}});
+ bridge({kind:'alice',state:{busy:false,needsLogin:false,lamps:['Соседняя','Настольная'],ticket:'fixture-ticket',message:'Выберите лампу'}});
+ find('#alice-lamp').value='1';
+ find('#alice-brightness').value='41';
+ find('#alice-allow-power').checked=true;
+ vm.runInContext('aliceSelection()',context);
+ click({action:'alice-bind'});
+ click({action:'alice-bind'});
+ const configure=commands.at(-1);
+ assert.deepEqual(configure,{op:'configure_scene_lamp',id:'lamp-scene',selection:{ticket:'fixture-ticket',lamp:1,brightness:41,allow_power_on:true}});
+ assert.deepEqual(commands.slice(startup).filter(command=>command.op==='configure_scene_lamp'),[configure]);
+ bridge({kind:'alice_binding',id:light.id});
+ assert.equal(dialog.open,false);
+ const bound={...light,aliceLamp:{label:'Настольная',brightness:41,allowPowerOn:true}};
+ receiveDeviceState('snapshot',{...withLibrary,library:[bound,plain],lastSceneApplyRequest:50});
+ assert.match(mainMarkup,/data-alice-scene="lamp-scene"[^>]*>Лампа · Настольная/);
+ assert.match(mainMarkup,/data-alice-scene="plain-scene"[^>]*>Добавить лампу/);
+ const beforePreview=commands.length;
+ click({preview:light.id});
+ assert.equal(commands.length,beforePreview);
+ click({apply:plain.id});
+ const plainApply=commands.at(-1);
+ assert.equal(plainApply.id,plain.id);
+ assert.equal(plainApply.request,51,'a reloaded view resumes after the native request sequence');
+ bridge({kind:'scene_activation',request:plainApply.request,status:'applied'});
+ assert.doesNotMatch(find('#scene-activation-plain-scene').textContent,/ламп/i);
+ click({apply:light.id});click({apply:light.id});
+ const applied=commands.at(-1);
+ assert.equal(applied.id,light.id);
+ assert.equal(commands.slice(beforePreview).filter(command=>command.op==='apply_scene'&&command.id===light.id).length,1);
+ bridge({kind:'scene_activation',request:applied.request,status:'applied',lamp:'Применяем яркость лампы сцены…'});
+ bridge({kind:'scene_lamp',request:plainApply.request,message:'Устаревший результат'});
+ assert.match(find('#scene-activation-lamp-scene').textContent,/Применяем яркость/);
+ bridge({kind:'scene_lamp',request:applied.request,message:'Яндекс подтвердил команду лампе.'});
+ assert.match(find('#scene-activation-lamp-scene').textContent,/Яндекс подтвердил/);
+ vm.runInContext('loadEntry(state.library.find(entry=>entry.id==="lamp-scene"))',context);
+ find('#footer-apply').onclick();
+ assert.equal(commands.at(-1).id,light.id,'ordinary editor Apply uses the same saved scene identity');
+ const editorApply=commands.at(-1);
+ bridge({kind:'scene_activation',request:editorApply.request,status:'applied'});
+}
+console.log('PASS: scene lamp binding IPC, restart snapshot, ordinary Apply, duplicate guard, preview and asynchronous lamp result');
 
 {
  const controller={id:'argb-controller',label:'Контроллер ARGB',role:'canvas',driver:{type:'openrgb'},leds:1,rate_hz:25,enabled:true};

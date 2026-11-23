@@ -32,6 +32,15 @@ struct NativeValue {
     value: String,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LampSelection {
+    ticket: String,
+    lamp: usize,
+    brightness: u8,
+    allow_power_on: bool,
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
     Snapshot,
@@ -79,6 +88,11 @@ enum Command {
     ApplyScene {
         scene: Scene,
         request: Option<u32>,
+        id: Option<String>,
+    },
+    ConfigureSceneLamp {
+        id: String,
+        selection: Option<LampSelection>,
     },
     PreviewScene {
         scene: Scene,
@@ -183,6 +197,8 @@ struct CloseReady {
 
 pub(super) struct Session {
     alice: super::alice::Session,
+    alice_bindings: Result<super::alice::Bindings, String>,
+    manual_apply: super::alice::ManualApply,
     close_request: Option<CloseRequest>,
     close_id: u32,
     close_ready: Option<CloseReady>,
@@ -214,9 +230,13 @@ pub(super) struct Session {
 }
 impl Session {
     fn new(app: &App) -> Result<Self, String> {
-        let catalog_path = app.state_dir.join("scene-library.json");
-        let catalog = Catalog::load(&catalog_path, &app.runtime.project().scene)?;
-        let draft_path = app.state_dir.join("editor-scene-draft.json");
+        Self::load(&app.state_dir, &app.runtime.project().scene)
+    }
+
+    fn load(state_dir: &std::path::Path, current: &Scene) -> Result<Self, String> {
+        let catalog_path = state_dir.join("scene-library.json");
+        let catalog = Catalog::load(&catalog_path, current)?;
+        let draft_path = state_dir.join("editor-scene-draft.json");
         let draft = Draft::load(&draft_path)?;
         let catalog_view = catalog
             .entries
@@ -233,6 +253,8 @@ impl Session {
             .collect();
         let mut result = Self {
             alice: Default::default(),
+            alice_bindings: super::alice::Bindings::load(state_dir),
+            manual_apply: Default::default(),
             catalog_view,
             built_in_cards,
             card_motion: None,
@@ -266,10 +288,54 @@ impl Session {
             .draft
             .as_ref()
             .map(|draft| draft.scene.clone())
-            .unwrap_or_else(|| app.runtime.project().scene.clone());
+            .unwrap_or_else(|| current.clone());
         result.configure_preview(scene)?;
         Ok(result)
     }
+
+    fn configure_scene_lamp(
+        &mut self,
+        id: &str,
+        selection: Option<LampSelection>,
+    ) -> Result<(), String> {
+        let entry = self
+            .catalog
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .ok_or("Сохранённая сцена не найдена.")?;
+        let bindings = self
+            .alice_bindings
+            .as_mut()
+            .map_err(|error| error.clone())?;
+        let binding = selection
+            .map(|selection| {
+                self.alice
+                    .binding(
+                        &selection.ticket,
+                        selection.lamp,
+                        selection.brightness,
+                        selection.allow_power_on,
+                    )?
+                    .for_entry(entry)
+            })
+            .transpose()?;
+        let adding = binding.is_some();
+        if adding && !self.catalog_path.try_exists().map_err(|e| e.to_string())? {
+            // Seeded scenes must become durable before saving a reference to one.
+            self.catalog.persist(&self.catalog_path)?;
+        }
+        let state_dir = self
+            .catalog_path
+            .parent()
+            .ok_or("Нет папки библиотеки сцен.")?;
+        bindings.set(state_dir, id, binding)?;
+        if adding {
+            self.alice.keep_for_scenes();
+        }
+        Ok(())
+    }
+
     fn persist_draft(&mut self, scene: Scene, origin: Option<Origin>) -> Result<(), String> {
         self.close_ready = None;
         let draft = Draft::new(scene, origin)?;
@@ -902,11 +968,21 @@ fn snapshot(state: &State) -> Result<Value, String> {
         .catalog
         .entries
         .iter()
-        .filter_map(|entry| session.catalog_view.get(&entry.id))
-        .chain(&session.built_in_cards)
+        .filter_map(|entry| {
+            let card = session.catalog_view.get(&entry.id)?;
+            let mut card = card.clone();
+            if let Some(binding) = session.alice_bindings.as_ref().ok()
+                .and_then(|bindings| bindings.get(entry))
+            {
+                card["aliceLamp"] = json!({"label":binding.label(),"brightness":binding.brightness,"allowPowerOn":binding.allow_power_on});
+            }
+            Some(card)
+        })
+        .chain(session.built_in_cards.iter().cloned())
         .collect::<Vec<_>>();
     let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":library,"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
     value["state"]["startupDiscoveryRetry"] = json!(app.can_retry_startup_discovery());
+    value["state"]["lastSceneApplyRequest"] = json!(session.manual_apply.last());
     let effects = Effect::ALL
         .iter()
         .copied()
@@ -1035,6 +1111,13 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                 )?;
                 return Ok(false);
             }
+            if let Command::ConfigureSceneLamp { id, .. } = &command {
+                send(
+                    state,
+                    &json!({"kind":"alice_binding","id":id,"error":"Дождитесь завершения текущей операции."}),
+                )?;
+                return Ok(false);
+            }
             return Err("Дождитесь завершения текущей операции".into());
         }
     }
@@ -1050,6 +1133,26 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             };
             send(state, &message)?;
             return Ok(false);
+        }
+        Command::ConfigureSceneLamp { id, selection } => {
+            let result = (|| {
+                let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
+                let app = slot.as_ref().ok_or("Нет сессии")?;
+                let mut sessions = state.modern_session.borrow_mut();
+                let session = sessions.as_mut().ok_or("Нет интерфейса")?;
+                if selection.is_some() && app.native_lighting.is_none() {
+                    return Err(
+                        "Привязка лампы доступна в основном режиме, вне предпросмотра.".into(),
+                    );
+                }
+                session.configure_scene_lamp(&id, selection)
+            })();
+            let reply = match &result {
+                Ok(()) => json!({"kind":"alice_binding","id":id}),
+                Err(error) => json!({"kind":"alice_binding","id":id,"error":error}),
+            };
+            send(state, &reply)?;
+            return Ok(result.is_ok());
         }
         Command::CloseReady {
             id,
@@ -1329,6 +1432,15 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
         Command::DeleteScene { id } => {
             let mut s = state.modern_session.borrow_mut();
             let s = s.as_mut().ok_or("Нет интерфейса")?;
+            let state_dir = s
+                .catalog_path
+                .parent()
+                .ok_or("Нет папки библиотеки сцен.")?;
+            // Scene IDs can be reused. Remove the permission before releasing an ID.
+            s.alice_bindings
+                .as_mut()
+                .map_err(|error| error.clone())?
+                .set(state_dir, &id, None)?;
             s.catalog.remove(&s.catalog_path, &id)?;
             s.catalog_view.remove(&id);
         }
@@ -1381,13 +1493,28 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                     stage_native(a, &fields)?;
                     native_forms::set_field(a, id, &value)?;
                 }
-                Command::ApplyScene { scene, request } => {
-                    if a.editor_dirty {
-                        return Err("Примените или сбросьте параметры устройств".into());
-                    }
-                    a.update_scene(scene, true)?;
+                Command::ApplyScene { scene, request, id } => {
+                    let mut sessions = state.modern_session.borrow_mut();
+                    let session = sessions.as_mut().ok_or("Нет интерфейса")?;
+                    let native = a.native_lighting.is_some();
+                    let ManualScene::Applied(binding) = apply_manual_scene(
+                        session,
+                        request,
+                        id.as_deref(),
+                        scene,
+                        native,
+                        |scene| {
+                            if a.editor_dirty {
+                                return Err("Примените или сбросьте параметры устройств".into());
+                            }
+                            a.update_scene(scene, true)
+                        },
+                    )?
+                    else {
+                        return Ok(false);
+                    };
                     if let Some(request) = request {
-                        let message = if a.native_lighting.is_none() {
+                        let message = if !native {
                             Some("Режим предпросмотра.")
                         } else if !a.runtime.group_on(Target::Pc)
                             && !a.runtime.group_on(Target::Door)
@@ -1396,9 +1523,19 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                         } else {
                             None
                         };
+                        let lamp = match binding {
+                            Ok(Some(binding)) => {
+                                match session.alice.apply_bound(request, binding) {
+                                    Ok(()) => Some("Применяем яркость лампы сцены…".to_owned()),
+                                    Err(error) => Some(error),
+                                }
+                            }
+                            Ok(None) => None,
+                            Err(error) => Some(error),
+                        };
                         send(
                             state,
-                            &json!({"kind":"scene_activation","request":request,"status":"applied","message":message}),
+                            &json!({"kind":"scene_activation","request":request,"status":"applied","message":message,"lamp":lamp}),
                         )?;
                     }
                 }
@@ -1510,6 +1647,48 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
     }
     Ok(true)
 }
+
+enum ManualScene {
+    Duplicate,
+    Applied(Result<Option<super::alice::Binding>, String>),
+}
+
+fn apply_manual_scene(
+    session: &mut Session,
+    request: Option<u32>,
+    id: Option<&str>,
+    scene: Scene,
+    native: bool,
+    local_apply: impl FnOnce(Scene) -> Result<(), String>,
+) -> Result<ManualScene, String> {
+    if let Some(request) = request
+        && !session.manual_apply.claim(request)
+    {
+        return Ok(ManualScene::Duplicate);
+    }
+    let saved = match id {
+        Some(id) if request.is_some() => Some(
+            session
+                .catalog
+                .entries
+                .iter()
+                .find(|entry| entry.id == id && entry.scene == scene)
+                .ok_or("Сцена изменилась. Откройте её из библиотеки и примените снова.")?,
+        ),
+        _ => None,
+    };
+    local_apply(scene)?;
+    let binding = match saved.filter(|_| native) {
+        Some(entry) => session
+            .alice_bindings
+            .as_ref()
+            .map(|bindings| bindings.get(entry).cloned())
+            .map_err(Clone::clone),
+        None => Ok(None),
+    };
+    Ok(ManualScene::Applied(binding))
+}
+
 fn scene_activation_request(command: Option<&Command>, raw: &str) -> Option<u32> {
     match command {
         Some(Command::ApplyScene { request, .. }) => *request,
@@ -1581,6 +1760,17 @@ pub(super) fn maintain(state: &State) {
     }
     retry_output::maintain(state);
     argb_channels::maintain(state);
+    let lamp_result = state
+        .modern_session
+        .borrow_mut()
+        .as_mut()
+        .and_then(|session| session.alice.take_scene_result());
+    if let Some((request, message)) = lamp_result {
+        let _ = send(
+            state,
+            &json!({"kind":"scene_lamp","request":request,"message":message}),
+        );
+    }
     if let (Ok(slot), Ok(mut sessions)) = (
         state.app.try_borrow(),
         state.modern_session.try_borrow_mut(),
@@ -1796,6 +1986,212 @@ mod tests {
             scene_activation_request(None, r#"{"op":"apply_scene","request":"42"}"#),
             None
         );
+    }
+
+    #[test]
+    fn saved_scene_lamp_uses_the_manual_ipc_path_once_after_local_apply() {
+        use crate::ui::windows::alice::{apply_binding, lamp_fixture};
+        use std::{cell::Cell, sync::mpsc};
+
+        let dir = std::env::temp_dir().join(format!(
+            "prismestra-alice-scene-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let scene = crate::ui::catalog::plum_dawn().scene;
+        let mut editor = Session::load(&dir, &scene).unwrap();
+        editor.alice.synthetic_login();
+        let configure = json!({"op":"configure_scene_lamp","id":"current","selection":{
+            "ticket":"fixture-ticket","lamp":1,"brightness":40,"allow_power_on":true}});
+        let Command::ConfigureSceneLamp { id, selection } =
+            serde_json::from_value(configure).unwrap()
+        else {
+            panic!("expected scene lamp configuration");
+        };
+        editor.configure_scene_lamp(&id, selection).unwrap();
+        let modal_closed = editor
+            .alice
+            .handle(super::super::alice::Action::Cancel)
+            .unwrap();
+        assert_eq!(modal_closed["ticket"], "fixture-ticket");
+        let raw = std::fs::read_to_string(dir.join("alice-scene-bindings.json")).unwrap();
+        assert!(!raw.contains("fixture-token") && !raw.contains("fixture-ticket"));
+        assert!(
+            !std::fs::read_to_string(dir.join("scene-library.json"))
+                .unwrap()
+                .contains("allow_power_on")
+        );
+        drop(editor);
+
+        // Reloading the catalog and draft at startup cannot start a lamp operation.
+        let mut editor = Session::load(&dir, &scene).unwrap();
+        assert!(editor.alice.take_scene_result().is_none());
+        editor.alice.synthetic_login();
+        let plain = editor
+            .catalog
+            .entries
+            .iter()
+            .find(|entry| entry.id == "noise")
+            .unwrap()
+            .scene
+            .clone();
+        let local_calls = Cell::new(0);
+        let local = |_: Scene| {
+            local_calls.set(local_calls.get() + 1);
+            Ok(())
+        };
+        assert!(matches!(
+            apply_manual_scene(&mut editor, Some(1), Some("noise"), plain, true, local),
+            Ok(ManualScene::Applied(Ok(None)))
+        ));
+        assert!(matches!(
+            apply_manual_scene(
+                &mut editor,
+                Some(2),
+                Some("current"),
+                scene.clone(),
+                false,
+                local
+            ),
+            Ok(ManualScene::Applied(Ok(None)))
+        ));
+        assert!(matches!(
+            apply_manual_scene(&mut editor, None, None, scene.clone(), true, local),
+            Ok(ManualScene::Applied(Ok(None)))
+        ));
+        assert!(
+            apply_manual_scene(
+                &mut editor,
+                Some(3),
+                Some("current"),
+                scene.clone(),
+                true,
+                |_| Err("local failure".into())
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            apply_manual_scene(
+                &mut editor,
+                Some(3),
+                Some("current"),
+                scene.clone(),
+                true,
+                |_| unreachable!()
+            ),
+            Ok(ManualScene::Duplicate)
+        ));
+
+        let envelope = json!({"op":"apply_scene","id":"current","scene":scene,"request":4});
+        let Command::ApplyScene {
+            scene: requested,
+            id,
+            request,
+        } = serde_json::from_value(envelope).unwrap()
+        else {
+            panic!("expected manual apply");
+        };
+        let ManualScene::Applied(Ok(Some(binding))) =
+            apply_manual_scene(&mut editor, request, id.as_deref(), requested, true, local)
+                .unwrap()
+        else {
+            panic!("expected approval for current scene");
+        };
+        assert_eq!(local_calls.get(), 4);
+        let (sender, received) = mpsc::channel();
+        editor.alice.apply_bound_with(4, binding, move |token, binding, _| {
+            assert_eq!(token, Some("fixture-token"));
+            apply_binding(binding, |path, body| {
+                match path {
+                    "/v1.0/user/info" => Ok(lamp_fixture()),
+                    "/v1.0/devices/b" => Ok(json!({"status":"ok","id":"b","room":"r","state":"online",
+                        "capabilities":[{"type":"devices.capabilities.on_off","state":{"value":false}},
+                            {"type":"devices.capabilities.range","state":{"instance":"brightness","value":70}}]})),
+                    "/v1.0/devices/actions" => {
+                        sender.send(serde_json::from_slice::<Value>(body.unwrap()).unwrap()).unwrap();
+                        Ok(json!({"status":"ok","devices":[{"id":"b","capabilities":[
+                            {"type":"devices.capabilities.on_off","state":{"instance":"on","action_result":{"status":"DONE"}}},
+                            {"type":"devices.capabilities.range","state":{"instance":"brightness","action_result":{"status":"DONE"}}}
+                        ]}]}))
+                    }
+                    _ => panic!("unexpected lamp request: {path}"),
+                }
+            })
+        }).unwrap();
+        let body = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(body["devices"].as_array().unwrap().len(), 1);
+        assert_eq!(body["devices"][0]["id"], "b");
+        assert_eq!(body["devices"][0]["actions"][0]["state"]["value"], true);
+        assert_eq!(body["devices"][0]["actions"][1]["state"]["value"], 40);
+        assert!(matches!(
+            apply_manual_scene(
+                &mut editor,
+                Some(4),
+                Some("current"),
+                scene.clone(),
+                true,
+                |_| unreachable!()
+            ),
+            Ok(ManualScene::Duplicate)
+        ));
+        assert!(matches!(
+            received.recv_timeout(Duration::from_secs(2)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (request, message) = loop {
+            if let Some(result) = editor.alice.take_scene_result() {
+                break result;
+            }
+            assert!(Instant::now() < deadline, "confirmed scene lamp reply");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(request, 4);
+        assert!(message.contains("подтвердил"));
+        assert!(editor.alice.take_scene_result().is_none());
+        let mut edited = scene.clone();
+        edited.brightness = 32;
+        editor
+            .catalog
+            .save_entry(
+                &editor.catalog_path,
+                Some("current"),
+                "Моя сцена".into(),
+                edited.clone(),
+            )
+            .unwrap();
+        assert!(
+            apply_manual_scene(
+                &mut editor,
+                Some(5),
+                Some("current"),
+                scene.clone(),
+                true,
+                |_| unreachable!()
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            apply_manual_scene(
+                &mut editor,
+                Some(6),
+                Some("current"),
+                edited.clone(),
+                true,
+                local
+            ),
+            Ok(ManualScene::Applied(Ok(None)))
+        ));
+        editor.configure_scene_lamp("current", None).unwrap();
+        let mut editor = Session::load(&dir, &scene).unwrap();
+        assert!(matches!(
+            apply_manual_scene(&mut editor, Some(1), Some("current"), edited, true, local),
+            Ok(ManualScene::Applied(Ok(None)))
+        ));
+        std::fs::remove_file(dir.join("alice-scene-bindings.json")).unwrap();
+        std::fs::remove_file(dir.join("scene-library.json")).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]
