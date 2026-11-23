@@ -525,6 +525,13 @@ fn assemble(
             continue;
         }
         let controller = rows.into_iter().next().unwrap();
+        if controller.kind.eq_ignore_ascii_case("unknown") {
+            issues.push(format!(
+                "{}: OpenRGB не определил тип устройства. Для ручной настройки откройте «Подключения».",
+                controller_label(&controller),
+            ));
+            continue;
+        }
         if !controller.supports_direct || controller.kind.eq_ignore_ascii_case("virtual") {
             continue;
         }
@@ -2246,6 +2253,68 @@ mod tests {
         let points = &plan.document.lighting.setup.canvas.points;
         assert!(points[0..3].iter().all(|p| p.x < 60));
         assert!(points[3..6].iter().all(|p| p.x >= 60));
+    }
+
+    #[test]
+    fn first_light_preserves_saved_output_and_skips_ambiguous_or_unknown_types() {
+        let (document, local) = empty();
+        let saved = controller("Fixture");
+        let original = assemble(
+            document,
+            local,
+            endpoint(),
+            Discovery {
+                controllers: vec![saved.clone()],
+                ..Default::default()
+            },
+            || unreachable!(),
+        )
+        .unwrap();
+        let (mut document, local) = (original.document, original.local);
+        document.lighting.setup.devices[0].enabled = false;
+        let saved_device = document.lighting.setup.devices[0].clone();
+        let saved_binding = local.devices[&saved_device.id].clone();
+        let saved_points = document.lighting.setup.canvas.points.clone();
+
+        let mut duplicate = saved.clone();
+        duplicate.serial = "duplicate".into();
+        let mut duplicate_again = duplicate.clone();
+        duplicate_again.id += 1;
+        let mut independent = saved.clone();
+        independent.serial = "independent".into();
+        let mut unknown = saved.clone();
+        unknown.serial = "unknown".into();
+        unknown.kind = "Unknown".into();
+        let independent_id = logical_id("auto-rgb", &devices::openrgb::identity(&independent));
+        let plan = assemble(
+            document,
+            local,
+            endpoint(),
+            Discovery {
+                controllers: vec![duplicate, unknown, independent, saved, duplicate_again],
+                ..Default::default()
+            },
+            || unreachable!(),
+        )
+        .unwrap();
+
+        let setup = &plan.document.lighting.setup;
+        assert_eq!(setup.devices.len(), 2);
+        assert_eq!(setup.devices[0], saved_device);
+        assert_eq!(setup.devices[1].id, independent_id);
+        assert_eq!(plan.local.devices.len(), 2);
+        assert!(plan.local.devices.contains_key(&independent_id));
+        assert_eq!(plan.local.devices[&saved_device.id], saved_binding);
+        assert!(setup.canvas.points.starts_with(&saved_points));
+        assert!(
+            plan.issues
+                .iter()
+                .any(|issue| issue.contains("неоднозначн"))
+        );
+        assert!(plan.issues.iter().any(|issue| {
+            issue.contains("Fixture: OpenRGB не определил тип устройства")
+                && issue.contains("«Подключения»")
+        }));
     }
 
     #[test]
