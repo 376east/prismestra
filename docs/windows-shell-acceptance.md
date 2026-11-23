@@ -41,7 +41,7 @@ For an expected Prismestra exit, keep the regular trace running. Take the reside
 python scripts/capture_console_windows.py --disposable-guest --duration-seconds 30 --output resident-exit.json --expect-pid <pid> --expect-created-filetime <win32-creation-filetime> --expect-image '<full-executable-path>'
 ```
 
-Attach the receipt with `--process-exit-receipt resident-exit.json` on the normalizer command. It adds `identified_process_exit` when the armed and exit times fit the measured interval. The observation covers that process instance. Any missing start or stop in the general trace still leaves its control incomplete.
+Attach the receipt by adding `--process-exit-receipt resident-exit.json`, `--expect-exit-pid`, `--expect-exit-created-filetime` and `--expect-exit-image` to the normalizer command. Supply the three identity values from the verified launch receipt for this run. The normalizer adds `identified_process_exit` only if that identity matches the exit receipt and its armed and exit times fit the measured interval. Any missing start or stop in the general trace still leaves its control incomplete.
 
 ```powershell
 python scripts/shell_acceptance.py evidence.json --scenario uninstall --revision <commit> --artifact-sha256 <sha256>

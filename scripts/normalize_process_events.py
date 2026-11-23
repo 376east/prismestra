@@ -29,14 +29,17 @@ def image_path(value):
     return ntpath.normcase(ntpath.normpath(value))
 
 
+def process_identity(record):
+    return (process_id(record['pid']), filetime(record['created_filetime']),
+            image_path(record['image']))
+
+
 def verify_process_exit(receipt):
     if (receipt['format'] != 'prismestra-windows-process-exit-v1'
             or receipt['status'] != 'confirmed'):
         raise ValueError('Expected a confirmed process handle exit receipt')
     expected, observed = receipt['expected'], receipt['observed']
-    if (process_id(expected['pid']) != process_id(observed['pid'])
-            or filetime(expected['created_filetime']) != filetime(observed['created_filetime'])
-            or image_path(expected['image']) != image_path(observed['image'])):
+    if process_identity(expected) != process_identity(observed):
         raise ValueError('Process handle does not match the expected identity')
     if not (filetime(observed['created_filetime']) <= filetime(receipt['armed_filetime'])
             <= filetime(receipt['exit_filetime']) <= filetime(receipt['confirmed_filetime'])):
@@ -58,7 +61,7 @@ def verify_control(control, event_index, harness_pid):
 
 
 def normalize(capture, scenario, revision, artifact, product_roots, harness_roots=(),
-              process_exit_receipt=None):
+              process_exit_receipt=None, expected_exit=None):
     if capture['format'] != 'prismestra-windows-process-events-v1':
         raise ValueError('Unsupported Windows process event capture')
     if scenario not in SCENARIOS or not SHA.fullmatch(revision) or not SHA256.fullmatch(artifact):
@@ -125,8 +128,12 @@ def normalize(capture, scenario, revision, artifact, product_roots, harness_root
         'controls': {'process_start_stop': not gaps, 'visible_console': False, 'full_scenario': False},
         'processes': list(processes.values()), 'windows': [], 'process_capture_gaps': gaps,
     }
+    if (process_exit_receipt is None) != (expected_exit is None):
+        raise ValueError('Process exit receipt requires a separate expected launch identity')
     if process_exit_receipt is not None:
         receipt = verify_process_exit(process_exit_receipt)
+        if process_identity(receipt['observed']) != process_identity(expected_exit):
+            raise ValueError('Process exit receipt does not match the current launch identity')
         if not started <= filetime(receipt['armed_filetime']) <= filetime(receipt['exit_filetime']) < ended:
             raise ValueError('Identified process exit is outside the capture interval')
         # A handle proves only this process exited. It cannot replace a trace event.
@@ -143,15 +150,25 @@ def main():
     parser.add_argument('--product-root', required=True, action='append')
     parser.add_argument('--harness-root', default=[], action='append')
     parser.add_argument('--process-exit-receipt', type=Path)
+    parser.add_argument('--expect-exit-pid', type=int)
+    parser.add_argument('--expect-exit-created-filetime')
+    parser.add_argument('--expect-exit-image')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
+    expected_exit = {'pid': args.expect_exit_pid, 'created_filetime': args.expect_exit_created_filetime,
+                     'image': args.expect_exit_image}
+    if args.process_exit_receipt is None:
+        if any(value is not None for value in expected_exit.values()):
+            parser.error('Expected launch identity fields require --process-exit-receipt')
+        expected_exit = None
+    elif any(value is None for value in expected_exit.values()):
+        parser.error('Supply all three expected launch identity fields with --process-exit-receipt')
     try:
         capture = json.loads(args.capture.read_text(encoding='utf-8-sig'))
         process_exit = (None if args.process_exit_receipt is None else
-                        verify_process_exit(json.loads(
-                            args.process_exit_receipt.read_text(encoding='utf-8-sig'))))
+                        json.loads(args.process_exit_receipt.read_text(encoding='utf-8-sig')))
         result = normalize(capture, args.scenario, args.revision, args.artifact_sha256,
-                           args.product_root, args.harness_root, process_exit)
+                           args.product_root, args.harness_root, process_exit, expected_exit)
         if args.output is not None:
             with args.output.open('x', encoding='utf-8') as output:
                 json.dump(result, output, indent=2)

@@ -258,15 +258,38 @@ class ProcessExitCaptureTests(unittest.TestCase):
         data = capture()
         data['events'].remove(event('stop', 2, 190, 'Setup.exe'))
         data['events'].append(event('start', 2, 150, 'setup2.exe', 1))
-        trace = normalize(data, 'setup', REVISION, ARTIFACT, ['2:110'], process_exit_receipt=receipt)
+        # The independent Win32 creation time is 108. The WMI start event is 110.
+        launch = {'pid': 2, 'created_filetime': '108', 'image': self.image.lower()}
+        trace = normalize(data, 'setup', REVISION, ARTIFACT, ['2:110'],
+                          process_exit_receipt=receipt, expected_exit=launch)
         self.assertEqual(trace['identified_process_exit'], receipt)
         self.assertEqual(trace['process_capture_gaps'], ['PID 2 was reused without a captured stop'])
         self.assertFalse(trace['controls']['process_start_stop'])
         self.assertEqual(check_trace(trace, REVISION, ARTIFACT)['status'], 'inconclusive')
-        # A receipt cannot be reassigned to the other lifetime of the same PID.
         receipt['expected']['created_filetime'] = '150'
         with self.assertRaisesRegex(ValueError, 'match the expected identity'):
-            normalize(data, 'setup', REVISION, ARTIFACT, ['2:110'], process_exit_receipt=receipt)
+            normalize(data, 'setup', REVISION, ARTIFACT, ['2:110'],
+                      process_exit_receipt=receipt, expected_exit=launch)
+
+    def test_internally_valid_exit_requires_the_independent_launch_identity(self):
+        launch = {'pid': 2, 'created_filetime': '108', 'image': self.image}
+        for unrelated in (
+            dict(launch, pid=3),
+            dict(launch, created_filetime='150'),
+            dict(launch, image=r'C:\Other\Prismestra.exe'),
+        ):
+            with self.subTest(unrelated=unrelated):
+                receipt = {
+                    'format': 'prismestra-windows-process-exit-v1', 'status': 'confirmed',
+                    'expected': unrelated.copy(), 'observed': unrelated.copy(),
+                    'armed_filetime': '160', 'exit_filetime': '170', 'confirmed_filetime': '180',
+                }
+                with self.assertRaisesRegex(ValueError, 'separate expected launch identity'):
+                    normalize(capture(), 'setup', REVISION, ARTIFACT, ['2:110'],
+                              process_exit_receipt=receipt)
+                with self.assertRaisesRegex(ValueError, 'current launch identity'):
+                    normalize(capture(), 'setup', REVISION, ARTIFACT, ['2:110'],
+                              process_exit_receipt=receipt, expected_exit=launch)
 
     def test_reused_pid_and_unverified_image_never_arm(self):
         for observer in (self.fake_observer(creation=109),
