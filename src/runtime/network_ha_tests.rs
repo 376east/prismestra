@@ -839,7 +839,7 @@ fn assert_ha_authorization_recovery(
         if initial {
             "Кадры отправлены"
         } else {
-            "Выключено"
+            "Команда выключения отправлена"
         }
     );
     assert_eq!(activity(&runtime)["reasons"], serde_json::json!({}));
