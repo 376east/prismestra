@@ -590,6 +590,34 @@ console.log('PASS: candidate identity, applied precedence, metadata replacement,
  console.log('PASS: one rescan from an empty profile; late candidate becomes an applied device');
 }
 {
+ const applied={...foundRgb,leds:1};
+ const partial={...initial,devices:[applied],draftDevices:[applied],startupDiscoveryRetry:false,
+  nativeAux:{page:'devices',fields:[{id:714,label:'Тип',kind:'select',enabled:true,value:'openrgb',choices:[]}],actions:[],notes:[]},
+  editor:{page:'devices',index:0,deviceId:applied.id,targets:[applied.label],fields:[],dirty:false}};
+ const hint=/OpenRGB не определил тип.*«Добавить устройство».*«Подключениях»/;
+ const guidance=find('#startup-discovery-help');
+ vm.runInContext('view="devices";pendingView=null',context);
+ receiveDeviceState('snapshot',partial);
+ assert.equal(guidance.hidden,true);
+ receiveDeviceState('status',{startupDiscoveryUnknownController:true});
+ assert.equal(guidance.hidden,false);
+ assert.match(mainMarkup,hint);
+ assert.match(mainMarkup,/data-device-id=/,'Already applied outputs stay available');
+ assert.doesNotMatch(mainMarkup,/data-action="retry-startup-discovery"/);
+ const add=new Node();
+ add.dataset={action:'focus-device-setup'};
+ const before=commands.length;
+ events.click({target:{closest:()=>add}});
+ assert.equal(document.activeElement,find('[data-native-field="714"]'));
+ assert.equal(commands.length,before,'Manual setup starts locally without targeting the working output');
+ vm.runInContext('view="devices";pendingView=null',context);
+ receiveDeviceState('snapshot',{...partial,startupDiscoveryUnknownController:true});
+ assert.equal(guidance.hidden,false);
+ receiveDeviceState('status',{startupDiscoveryUnknownController:false});
+ assert.equal(guidance.hidden,true,'A new scan or profile can clear stale guidance');
+ console.log('PASS: partial startup discovery explains an unknown OpenRGB type and leads to manual setup');
+}
+{
  const pending={...foundState,pending:true,deviceCandidates:[foundRgb],nativeAux:{
   page:'devices',fields:[{id:714,label:'Семейство',kind:'select',enabled:true,value:'openrgb',choices:[]}],actions:[],notes:[],
  }};

@@ -51,6 +51,7 @@ pub(super) struct Startup {
     report: Vec<u8>,
     reported_phase: &'static str,
     discovery_issues: Vec<String>,
+    unknown_openrgb_controller: bool,
     enabled: bool,
     initialized: bool,
     handover: Option<JoinHandle<Result<(), String>>>,
@@ -76,6 +77,7 @@ impl Startup {
             report: Vec::new(),
             reported_phase: "",
             discovery_issues: Vec::new(),
+            unknown_openrgb_controller: false,
             enabled,
             initialized: false,
             handover: None,
@@ -95,6 +97,7 @@ impl Startup {
     }
     pub(super) fn cancel(&mut self) {
         self.enabled = false;
+        self.unknown_openrgb_controller = false;
         self.phase = "cancelled";
         self.worker.cancel();
     }
@@ -139,6 +142,7 @@ impl Startup {
         self.enabled = true;
         self.phase = "discovering";
         self.discovery_issues.clear();
+        self.unknown_openrgb_controller = false;
     }
 
     fn search_due(&self, now: Instant) -> bool {
@@ -178,6 +182,12 @@ impl Startup {
 }
 
 impl App {
+    pub(super) fn startup_discovery_unknown_controller(&self) -> bool {
+        self.first_run.unknown_openrgb_controller
+            && self.path == self.first_run.path
+            && self.context_revision == self.first_run.context
+    }
+
     pub(super) fn can_retry_startup_discovery(&self) -> bool {
         self.first_run.can_retry_search(Instant::now())
             && self.runtime.document().lighting.setup.devices.is_empty()
@@ -471,6 +481,7 @@ impl App {
         if let Some(result) = self.first_run.worker.poll() {
             let plan = result?;
             self.first_run.discovery_issues = plan.issues.clone();
+            self.first_run.unknown_openrgb_controller = plan.unknown_openrgb_controller;
             if !plan.changed {
                 if !self.first_run.worker.is_idle() {
                     self.first_run.phase = "discovering";

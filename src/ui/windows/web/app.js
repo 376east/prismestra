@@ -252,6 +252,8 @@ function syncControls(keepRetryFocus) {
  }
  syncOutputStatuses();
  syncOutputRetries(keepRetryFocus);
+ const discoveryHelp=$('#startup-discovery-help');
+ if(discoveryHelp)discoveryHelp.hidden=state?.startupDiscoveryUnknownController!==true;
  $('#save-status').textContent=busy()&&state?'Выполняется…':state?.dirty?'Профиль изменён':'Локальный профиль';
  if(draft){$('#master-brightness').value=draft.brightness;$('#master-value').textContent=draft.brightness+'%';}
  const status=$('.scene-status');if(status)status.textContent=changed()?'Изменения ещё не применены':sourceNeedsApply()?'Для источника нужно применить сцену':'Эта версия применена';
@@ -559,6 +561,7 @@ function renderDevices(candidates) {
   ? (candidates.length===1?'Prismestra добавляет найденное устройство в профиль.':'Prismestra добавляет найденные устройства в профиль.')
   : 'Изменения действуют после «Применить». Профиль сохраняется отдельно.';
  return heading('Устройства',description,shortcuts)
+  + '<p id="startup-discovery-help" class="device-summary" hidden>OpenRGB не определил тип одного из устройств. Проверьте, есть ли подходящий тип в «Добавить устройство». После применения можно настроить привязку в «Подключениях».</p>'
   + `<div class="device-list">${entries}</div>`
   + (firstSetup?'':`<div id="device-properties" style="margin-top:24px">${nativeProperties()}</div>`);
 }
