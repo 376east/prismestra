@@ -10,6 +10,7 @@ use crate::{
     capture::ambient::Mode,
     lighting::ambient::Rect,
 };
+use std::borrow::Cow;
 const SCENE_EDGES: &str = "@scene_edges";
 #[derive(Clone, Debug)]
 pub struct Field {
@@ -17,21 +18,21 @@ pub struct Field {
     pub label: &'static str,
     pub value: String,
     pub choices: Vec<(String, String)>,
-    pub hint: &'static str,
+    pub hint: Cow<'static, str>,
     pub file: bool,
 }
 fn field(
     key: &'static str,
     label: &'static str,
     value: impl ToString,
-    hint: &'static str,
+    hint: impl Into<Cow<'static, str>>,
 ) -> Field {
     Field {
         key,
         label,
         value: value.to_string(),
         choices: vec![],
-        hint,
+        hint: hint.into(),
         file: false,
     }
 }
@@ -957,6 +958,21 @@ impl Editor {
             .into_iter()
             .map(|(_, key, label)| (label.into(), key.into()))
             .collect();
+        let sources = &self.document.temperatures.sources;
+        let source_hint: Cow<'static, str> = if sources.is_empty() {
+            "Сначала добавьте источник в разделе «Температуры».".into()
+        } else {
+            let example = sources
+                .iter()
+                .take(2)
+                .map(|source| format!("{}={}", source.key, source.key.to_ascii_uppercase()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!(
+                "Слева ключ из раздела «Температуры», справа подпись на LCD. Разделяйте показатели точкой с запятой. В этом профиле можно ввести «{example}»."
+            )
+            .into()
+        };
         vec![
             boolean(
                 "enabled",
@@ -988,7 +1004,7 @@ impl Editor {
                     .map(|s| format!("{}={}", s.key, s.label))
                     .collect::<Vec<_>>()
                     .join("; "),
-                "Пример: cpu=CPU; gpu=GPU; ram=RAM; liquid=Liquid. Источники настраиваются на странице температур.",
+                source_hint,
             ),
         ]
     }
@@ -1617,6 +1633,50 @@ mod tests {
         assert!(editor.document.lcd[0].config.media.is_none());
         editor.set("enabled", "false").unwrap();
         editor.document.validate().unwrap();
+    }
+
+    #[test]
+    fn lcd_source_hint_uses_profile_keys_and_multiple_assignments_round_trip() {
+        let current = document();
+        let mut editor = Editor {
+            document: current.clone(),
+            page: Page::Lcd,
+            index: 0,
+        };
+        let source_hint = |editor: &Editor| {
+            editor
+                .fields()
+                .into_iter()
+                .find(|field| field.key == "sources")
+                .unwrap()
+                .hint
+        };
+        assert!(source_hint(&editor).contains("«a=A; b=B»"));
+        assert!(!source_hint(&editor).contains("cpu=CPU"));
+
+        editor.set("enabled", "true").unwrap();
+        editor.set("overlay", "true").unwrap();
+        editor.set("sources", "b=GPU; a=CPU").unwrap();
+        let saved = editor.merged(&current).unwrap().encode().unwrap();
+        let reopened = Document::decode(&saved).unwrap();
+        let labels: Vec<_> = reopened.lcd[0]
+            .config
+            .sources
+            .iter()
+            .map(|source| (source.key.as_str(), source.label.as_str()))
+            .collect();
+        assert_eq!(labels, [("b", "GPU"), ("a", "CPU")]);
+
+        editor.set("sources", "").unwrap();
+        assert_eq!(
+            editor.merged(&current).unwrap_err(),
+            "Выберите хотя бы один показатель для панели температур."
+        );
+        editor.document.temperatures.sources.clear();
+        assert_eq!(
+            source_hint(&editor),
+            "Сначала добавьте источник в разделе «Температуры»."
+        );
     }
 
     #[test]
