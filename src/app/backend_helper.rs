@@ -129,6 +129,49 @@ struct Proxy {
 }
 
 impl Backend {
+    #[cfg(all(test, windows))]
+    pub(super) fn fixture_with_status_reader(
+        endpoint: SocketAddr,
+        state_dir: &Path,
+        mut before_read: impl FnMut() -> Result<(), String> + Send + 'static,
+    ) -> Self {
+        let owner_path = state_dir.join("owner-request.json");
+        let mut initial_owner = None;
+        let polls = start_status_worker(move |_, installed| {
+            assert!(installed);
+            let owner = read_json::<Request>(&owner_path)?;
+            let original = initial_owner.get_or_insert_with(|| owner.clone());
+            assert!(same_owner_request(&owner, original));
+            before_read()?;
+            Ok(Some(Status {
+                version: clock::PROTOCOL,
+                clock_domain: clock::DOMAIN.into(),
+                nonce: original.nonce.clone(),
+                parent: original.parent.clone(),
+                helper: original.parent.clone(),
+                timestamp_ms: now_ms()?,
+                ready_generation: 1,
+                ready: true,
+                backend_pid: Some(original.parent.pid),
+                detail: "Fixture SDK ready".into(),
+            }))
+        })
+        .unwrap();
+        let proxy = Proxy::start_with(
+            state_dir,
+            &state_dir.join("outbox"),
+            "fixture".into(),
+            polls,
+            |_, _| panic!("the fixture must never launch a task"),
+        )
+        .unwrap();
+        Self {
+            endpoint,
+            inner: Inner::Task(proxy),
+            ownership: Arc::new(()),
+        }
+    }
+
     #[cfg(test)]
     pub fn software_ready(endpoint: SocketAddr, generation: u64) -> Self {
         Self {
@@ -487,14 +530,20 @@ fn proxy_loop(
         if let Some(status) = status {
             failure_detail.clear();
             report_launch_result = false;
-            let key = (
-                status.helper.created,
-                status.helper.pid,
-                status.ready_generation,
-            );
-            if status.ready && previous != Some(key) {
-                generation = generation.saturating_add(1);
-                previous = Some(key);
+            if status.ready {
+                let key = (
+                    status.helper.created,
+                    status.helper.pid,
+                    status.ready_generation,
+                );
+                // A verified ready after expiry restores output eligibility
+                // even if the helper itself has not restarted.
+                if previous.is_none_or(|(last_key, last_ready_ms)| {
+                    last_key != key || now.saturating_sub(last_ready_ms) > FRESH_MS
+                }) {
+                    generation = generation.saturating_add(1);
+                }
+                previous = Some((key, status.timestamp_ms));
             }
             snapshot = Snapshot {
                 ready_generation: generation,
@@ -2821,11 +2870,13 @@ mod tests {
                     ended.send(()).unwrap();
                 });
                 reading.recv_timeout(Duration::from_secs(2)).unwrap();
-                assert_eq!(
-                    reading.recv_timeout(POLL * 2),
-                    Err(mpsc::RecvTimeoutError::Timeout),
-                    "new status reads must wait for the pending one"
-                );
+                if change != "owner change" {
+                    assert_eq!(
+                        reading.recv_timeout(POLL * 2),
+                        Err(mpsc::RecvTimeoutError::Timeout),
+                        "new status reads must wait for the pending one"
+                    );
+                }
                 match change {
                     "pause" => control.restarting.store(false, Ordering::SeqCst),
                     "cancel" => {
@@ -2848,7 +2899,9 @@ mod tests {
                     control.stop.store(true, Ordering::SeqCst);
                 }
                 if change != "cancel" {
-                    exits.recv_timeout(Duration::from_secs(2)).unwrap();
+                    let exited = exits.recv_timeout(Duration::from_secs(2));
+                    control.stop.store(true, Ordering::SeqCst);
+                    assert_eq!(exited, Ok(()), "{change} failed to stop the owner");
                 }
                 assert!(attempts.try_recv().is_err(), "{change} allowed a launch");
             });
