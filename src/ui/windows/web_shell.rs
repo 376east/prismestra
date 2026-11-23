@@ -99,6 +99,7 @@ impl WebShell {
         user_data: &UserDataFolder,
         state_dir: &Path,
         assets: Assets,
+        language: super::locale::Language,
     ) -> Result<Self, String> {
         if hwnd.is_null() {
             return Err("WebView parent HWND is null".into());
@@ -132,11 +133,15 @@ impl WebShell {
             browser_failed: Rc::new(Cell::new(false)),
             _apartment: apartment,
         };
-        shell.configure(assets).map_err(error)?;
+        shell.configure(assets, language).map_err(error)?;
         Ok(shell)
     }
 
-    fn configure(&self, assets: Assets) -> windows::core::Result<()> {
+    fn configure(
+        &self,
+        assets: Assets,
+        language: super::locale::Language,
+    ) -> windows::core::Result<()> {
         unsafe {
             let settings = self.core.Settings()?;
             settings.SetIsScriptEnabled(true)?;
@@ -305,11 +310,21 @@ impl WebShell {
             )?;
         }
         let core = self.core.clone();
+        let bootstrap = HSTRING::from(format!(
+            "Object.defineProperty(window,'prismestraLanguage',{{value:'{}'}});document.documentElement?.setAttribute('lang','{}');Object.defineProperty(window,'ipc',{{value:Object.freeze({{postMessage:s=>window.chrome.webview.postMessage(s)}})}});",
+            language.tag(),
+            language.tag(),
+        ));
         AddScriptToExecuteOnDocumentCreatedCompletedHandler::wait_for_async_operation(
             Box::new(move |handler| unsafe {
-                core.AddScriptToExecuteOnDocumentCreated(w!("Object.defineProperty(window,'ipc',{value:Object.freeze({postMessage:s=>window.chrome.webview.postMessage(s)})});"), &handler).map_err(Into::into)
-            }), Box::new(|result, _| result),
-        ).map_err(|e| windows::core::Error::new(windows::core::HRESULT(0x80004005u32 as i32), e.to_string()))?;
+                core.AddScriptToExecuteOnDocumentCreated(&bootstrap, &handler)
+                    .map_err(Into::into)
+            }),
+            Box::new(|result, _| result),
+        )
+        .map_err(|e| {
+            windows::core::Error::new(windows::core::HRESULT(0x80004005u32 as i32), e.to_string())
+        })?;
         unsafe {
             self.controller.SetIsVisible(true)?;
             self.core

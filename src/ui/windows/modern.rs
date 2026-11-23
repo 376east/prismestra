@@ -45,6 +45,9 @@ struct LampSelection {
 enum Command {
     Snapshot,
     RetryStartupDiscovery,
+    SetUiLanguage {
+        language: locale::Language,
+    },
     Alice {
         sequence: u32,
         request: super::alice::Action,
@@ -568,14 +571,20 @@ pub(super) fn open(state: &State) -> Result<(), String> {
     // WebView initialization pumps COM/Win32 messages. No App borrow is held here.
     #[cfg(debug_assertions)]
     let _ = std::fs::write(state_dir.join("webview-stage.txt"), "initializing");
-    let shell = web_shell::WebShell::new(hwnd, &state.webview_user_data, &state_dir, assets)
-        .inspect_err(|_error| {
-            #[cfg(debug_assertions)]
-            let _ = std::fs::write(
-                state_dir.join("webview-stage.txt"),
-                format!("failed: {_error}"),
-            );
-        })?;
+    let shell = web_shell::WebShell::new(
+        hwnd,
+        &state.webview_user_data,
+        &state_dir,
+        assets,
+        state.language,
+    )
+    .inspect_err(|_error| {
+        #[cfg(debug_assertions)]
+        let _ = std::fs::write(
+            state_dir.join("webview-stage.txt"),
+            format!("failed: {_error}"),
+        );
+    })?;
     // WebView creation pumps Win32 messages, including a pending editor close.
     if state.editor_window.get() != hwnd {
         return Err("Окно было закрыто при открытии редактора".into());
@@ -686,7 +695,7 @@ pub(super) fn close_failed(state: &State, message: &str) {
     let _ = send(state, &json!({"kind":"error","message":message}));
 }
 
-fn confirm_unapplied_close(hwnd: HWND, exit: bool) -> Result<bool, String> {
+fn confirm_unapplied_close(hwnd: HWND, exit: bool, language: Language) -> Result<bool, String> {
     use windows_sys::Win32::UI::Controls::{
         TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TDF_ALLOW_DIALOG_CANCELLATION,
     };
@@ -695,18 +704,20 @@ fn confirm_unapplied_close(hwnd: HWND, exit: bool) -> Result<bool, String> {
         System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW},
     };
     const DISCARD: i32 = 100;
-    let title = wide(if exit {
-        "Выход из Prismestra"
+    let title = if exit {
+        ShellText::ExitTitle
     } else {
-        "Закрытие редактора"
-    });
-    let content = wide("Неприменённые значения настроек будут потеряны.");
-    let keep = wide("Вернуться к правкам");
-    let discard = wide(if exit {
-        "Выйти без применения"
+        ShellText::CloseEditorTitle
+    };
+    let discard = if exit {
+        ShellText::ExitWithoutApplying
     } else {
-        "Закрыть без применения"
-    });
+        ShellText::CloseWithoutApplying
+    };
+    let title = wide(title.get(language));
+    let content = wide(ShellText::EditsWillBeLost.get(language));
+    let keep = wide(ShellText::ReturnToEdits.get(language));
+    let discard = wide(discard.get(language));
     let buttons = [
         TASKDIALOG_BUTTON {
             nButtonID: IDCANCEL,
@@ -987,7 +998,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
     let mut session = state.modern_session.borrow_mut();
     let session = session.as_mut().ok_or("Нет интерфейса")?;
     let draft_map_revision = session.draft_map.observe(draft_map_input(app));
-    let editor=app.editor.as_ref().map(|e|json!({"page":page_name(e.page),"index":e.index,"deviceId":e.selected_connection_device(),"targets":super::super::editor::Editor::targets(&e.document,e.page),"fields":e.fields().iter().map(|f|json!({"key":f.key,"label":f.label,"value":f.value,"hint":f.hint,"file":f.file,"choices":f.choices.iter().map(|(label,value)|json!({"label":if f.key=="group"{match value.as_str(){"pc"=>"Основной свет","door"=>"Дополнительный свет",_=>label.as_str()}}else{label.as_str()},"value":value})).collect::<Vec<_>>()})).collect::<Vec<_>>(),"dirty":app.editor_dirty}));
+    let editor=app.editor.as_ref().map(|e|json!({"page":page_name(e.page),"index":e.index,"deviceId":e.selected_connection_device(),"targets":super::super::editor::Editor::targets(&e.document,e.page),"fields":e.fields().iter().map(|f|json!({"key":f.key,"label":f.label,"value":f.value,"hint":f.hint,"file":f.file,"choices":f.choices.iter().map(|(label,value)|json!({"label":if f.key=="preset" && state.language==Language::En {native_forms::english_device_preset_label(value).unwrap_or(label)}else if f.key=="group"{match value.as_str(){"pc"=>"Основной свет","door"=>"Дополнительный свет",_=>label.as_str()}}else{label.as_str()},"value":value})).collect::<Vec<_>>()})).collect::<Vec<_>>(),"dirty":app.editor_dirty}));
     let library = session
         .catalog
         .entries
@@ -1006,7 +1017,8 @@ fn snapshot(state: &State) -> Result<Value, String> {
         })
         .chain(session.built_in_cards.iter().cloned())
         .collect::<Vec<_>>();
-    let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":library,"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
+    let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":library,"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app, state.language),"nativeAux":native_forms::aux_snapshot(app, state.language),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
+    value["state"]["preferredUiLanguage"] = json!(locale::Language::load(&app.state_dir));
     value["state"]["startupDiscoveryRetry"] = json!(app.can_retry_startup_discovery());
     value["state"]["startupEmptySearchResult"] = json!(app.startup_empty_search_result());
     value["state"]["startupStatus"] = json!(app.first_run_status_label());
@@ -1240,7 +1252,7 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                 (request, ask, clean_draft)
             };
             if ask {
-                let discard = confirm_unapplied_close(hwnd, request.exit);
+                let discard = confirm_unapplied_close(hwnd, request.exit, state.language);
                 let mut sessions = state.modern_session.borrow_mut();
                 let Some(session) = sessions
                     .as_mut()
@@ -1292,6 +1304,13 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                 stage_native(app, &fields)?;
             }
             native_forms::action(state, id)?;
+        }
+        Command::SetUiLanguage { language } => {
+            let slot = state.app.try_borrow().map_err(|_| "Editor is busy")?;
+            let app = slot.as_ref().ok_or("No editor session")?;
+            language
+                .save(&app.state_dir)
+                .map_err(|error| error.to_string())?;
         }
         Command::Snapshot => {
             if let Some(session) = state.modern_session.borrow_mut().as_mut() {
@@ -1798,6 +1817,7 @@ pub(super) fn maintain(state: &State) {
         let command = serde_json::from_str::<Command>(&message);
         let request = scene_activation_request(command.as_ref().ok(), &message);
         let retries_discovery = matches!(&command, Ok(Command::RetryStartupDiscovery));
+        let changes_language = matches!(&command, Ok(Command::SetUiLanguage { .. }));
         let result = command
             .map_err(|e| format!("Некорректная команда интерфейса: {e}"))
             .and_then(|c| execute(state, c));
@@ -1807,6 +1827,8 @@ pub(super) fn maintain(state: &State) {
                 snapshot_needed = true;
                 let reply = if let Some(request) = request {
                     json!({"kind":"scene_activation","request":request,"status":"failed","message":message})
+                } else if changes_language {
+                    json!({"kind":"error","code":"uiLanguage","message":message})
                 } else if retries_discovery {
                     json!({"kind":"error","code":"startupDiscoveryRetry","message":message})
                 } else {
@@ -1935,7 +1957,7 @@ pub(super) fn maintain(state: &State) {
                 value["state"]["unconfiguredArgb"] = json!(app.startup_unconfigured_argb());
             }
             value["state"]["mapConnection"] = map_connection(app);
-            if let Some(form) = native_forms::snapshot(app) {
+            if let Some(form) = native_forms::snapshot(app, state.language) {
                 value["state"]["nativeForm"] = form;
             }
         }

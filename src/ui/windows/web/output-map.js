@@ -13,9 +13,9 @@ window.outputMap = (() => {
   const connectionNote = document.getElementById('output-map-connection');
   const closeButton = document.getElementById('output-map-close');
   const connectionMessages = {
-    connecting: 'Выход подключается…',
-    offline: 'Выход отключён.',
-    disabled: 'Выход выключен в применённом профиле.',
+    connecting: ['Выход подключается…','Connecting output…'],
+    offline: ['Выход отключён.','The output is disconnected.'],
+    disabled: ['Выход выключен в применённом профиле.','The output is off in the applied profile.'],
   };
   let device = null;
   let draft = null;
@@ -32,16 +32,21 @@ window.outputMap = (() => {
     return state.mapConnection?.device === device ? state.mapConnection.state : null;
   }
 
+  function connectionMessage() {
+    const message = connectionMessages[connection];
+    return message && ui(...message);
+  }
+
   function showSource() {
     mode.hidden = applied.hidden = !draft;
     description.textContent = draft
-      ? 'Локальный предпросмотр черновика. Вывод изменится после применения.'
-      : 'Снимок цветов сцены по применённой карте. Индексы и координаты начинаются с нуля.';
+      ? ui('Локальный предпросмотр черновика. Вывод изменится после применения.','Local draft preview. The output changes when you apply the draft.')
+      : ui('Снимок цветов сцены по применённой карте. Индексы и координаты начинаются с нуля.','Scene colors on the applied map. LED indices and coordinates start at zero.');
     showConnection();
   }
 
   function showConnection() {
-    const message = connectionMessages[connection];
+    const message = connectionMessage();
     connectionNote.hidden = !draft || !message;
     connectionNote.textContent = message ?? '';
   }
@@ -51,15 +56,16 @@ window.outputMap = (() => {
     offset = page;
     back.disabled = next.disabled = true;
     table.hidden = true;
-    const unavailable = connectionMessages[connection] ??
-      (connection === 'no_map' ? 'У выбранного выхода нет применённой LED-карты.' : null);
+    status.title = '';
+    const unavailable = connectionMessage() ??
+      (connection === 'no_map' ? ui('У выбранного выхода нет применённой LED-карты.','The selected output has no applied LED map.') : null);
     if (!draft && unavailable) {
       status.textContent = unavailable;
       return;
     }
-    status.textContent = 'Получаем кадр…';
+    status.textContent = ui('Получаем кадр…','Getting the frame…');
     if (!send({op: 'preview_output', request, device, offset, source: 'applied', ...draft})) {
-      status.textContent = 'Не удалось запросить кадр.';
+      status.textContent = ui('Не удалось запросить кадр.','Could not request the frame.');
     }
   }
 
@@ -68,11 +74,13 @@ window.outputMap = (() => {
         message.source !== (draft?.source ?? 'applied') ||
         (draft && message.revision !== draft.revision)) return;
     if (draft && message.availability !== 'ready') {
-      status.textContent = message.error ?? 'Предпросмотр черновика недоступен.';
+      status.textContent = ui(message.error ?? 'Предпросмотр черновика недоступен.','Draft preview is unavailable.');
+      status.title = english ? message.error ?? '' : '';
       return;
     }
     if (message.error) {
-      status.textContent = message.error;
+      status.textContent = ui(message.error,'Could not preview the LED map.');
+      status.title = english ? message.error : '';
       return;
     }
     const {label, width, height, total, entries} = message.preview;
@@ -81,7 +89,8 @@ window.outputMap = (() => {
     if (offset === 0) pageSize = entries.length;
     back.disabled = offset === 0;
     next.disabled = offset + entries.length >= total;
-    status.textContent = `${label} · холст ${width} × ${height} · LED ${offset}–${offset + entries.length - 1} из ${total}`;
+    status.textContent = ui(`${label} · холст ${width} × ${height} · LED ${offset}–${offset + entries.length - 1} из ${total}`,
+      `${label} · canvas ${width} × ${height} · LEDs ${offset}–${offset + entries.length - 1} of ${total}`);
     const rows = entries.map(({led, x, y, color}) => {
       const row = document.createElement('tr');
       for (const value of [led, x, y]) row.insertCell().textContent = value;
@@ -108,7 +117,7 @@ window.outputMap = (() => {
     if (state.profilePath !== profile || selectedDevice(state)?.id !== device) {
       selectionValid = false;
       applied.disabled = true;
-      invalidate('Выбран другой выход. Откройте предпросмотр снова.');
+      invalidate(ui('Выбран другой выход. Откройте предпросмотр снова.','The selected output changed. Reopen the preview.'));
       return;
     }
     const nextConnection = connectionFor(state);
@@ -119,7 +128,7 @@ window.outputMap = (() => {
     }
     if (draft && !refresh.disabled &&
         (state.pending || state.draftMapRevision !== draft.revision)) {
-      invalidate('Черновик изменился. Откройте предпросмотр снова.');
+      invalidate(ui('Черновик изменился. Откройте предпросмотр снова.','The draft changed. Reopen the preview.'));
     }
   }
 
@@ -160,10 +169,10 @@ window.outputMap = (() => {
       buttons.push(node);
     }
     if (state.devices.some(item => item.id === selected.id && item.role === 'canvas' && item.leds > 0)) {
-      button('output-map-open', 'Проверить применённую LED-карту', false);
+      button('output-map-open', ui('Проверить применённую LED-карту','Inspect applied LED map'), false);
     }
     if (state.draftMapRevision && selected.role === 'canvas') {
-      button('draft-output-map-open', 'Предпросмотр черновой LED-карты', true);
+      button('draft-output-map-open', ui('Предпросмотр черновой LED-карты','Preview draft LED map'), true);
     }
     target.after(...buttons);
   }

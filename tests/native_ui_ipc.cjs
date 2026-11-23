@@ -721,7 +721,7 @@ mapNode('native-target').after = (...buttons) => {
  for (const button of buttons) mapNodes.set(button.id, button);
 };
 const mapWindow = {};
-vm.runInNewContext(outputMapSource, {window: mapWindow, document: mapDocument});
+vm.runInNewContext(outputMapSource, {window: mapWindow, document: mapDocument, ui: ru=>ru, english:false});
 const map = mapWindow.outputMap;
 const strip = {id: 'strip', role: 'canvas', leds: 1};
 const other = {...strip, id: 'other'};
@@ -1064,7 +1064,17 @@ console.log('PASS: 80 effect choices in provider order, shared escaped labels an
  find('#footer-apply').onclick();
  assert.equal(commands.at(-1).op,'apply_scene');
  assert.equal(commands.at(-1).scene.effect,'camera_color');
+ const request=commands.at(-1).request;
+ assert.ok(Number.isInteger(request));
  receiveDeviceState('snapshot',{...initial,scene:camera,draftScene:null,effects,native:true,captureAuthorized:true});
+ const status=find('.scene-status');
+ assert.equal(status.textContent,'','a snapshot alone does not confirm the requested Apply');
+ const reply=request=>vm.runInContext(
+  'window.prismestraReceive('+JSON.stringify({kind:'scene_activation',request,status:'applied',output:'no_active_rgb'})+')',context);
+ reply(request+1);
+ assert.equal(status.textContent,'','stale scene replies do not confirm Apply');
+ reply(request);
+ assert.equal(status.textContent,'Сцена применена. Нет активных RGB-выходов.');
  assert.equal(find('#footer-apply').disabled,true,'an applied unchanged scene needs no second click');
 }
 console.log('PASS: restored capture is inert and can be explicitly applied without editing the effect');
@@ -1245,8 +1255,12 @@ console.log('PASS: Alice uses saved access, distinguishes identical lamp names b
  const lampStatus=find('#scene-activation-lamp-scene');
  const editorStatus=find('#editor-lamp-status');
  acceptScene(editorApply.request);
+ const localStatus=find('.scene-status');
+ assert.equal(localStatus.textContent,'Сцена применена.');
+ assert.equal(editorStatus.textContent,'Применяем яркость лампы сцены…');
  confirmLamp(editorApply.request);
- assert.match(editorStatus.textContent,/Яндекс подтвердил/);
+ assert.equal(localStatus.textContent,'Сцена применена.','the lamp receipt leaves the local acknowledgement unchanged');
+ assert.equal(editorStatus.textContent,'Яндекс подтвердил команду лампе.');
  const edited={...light,scene:{...scene,brightness:58},aliceLampStale:true};
  receiveDeviceState('snapshot',{...withLibrary,library:[edited,plain]});
  assert.doesNotMatch(lampStatus.textContent,/Яндекс подтвердил/,'editing a saved scene invalidates the old lamp confirmation');
@@ -1458,6 +1472,7 @@ console.log('PASS: an unconfigured ARGB controller opens a local preview without
  evaluate('window.prismestraReceive(payload)');
  assert.equal(evaluate('view'),'editor');
  assert.equal(evaluate('selectedId'),created.id);
+ assert.equal(find('.scene-status').textContent,'Сохранено в библиотеку.');
  assert.equal(document.activeElement,find('#scene-effect'));
  assert.equal(commands.at(-1).origin.id,created.id);
  assert.equal(commands.slice(firstSave).some(command=>command.op==='apply_scene'),false);
@@ -1667,13 +1682,13 @@ function checkSearchRetryRecovery(testContext, label) {
  click('retry-document');
  assert.deepEqual(commands.at(-1),{op:'retry_document'});
 }
-function checkEnglishStartupPreview() {
+function checkEnglishApplicationLanguage() {
  checkSearchRetryRecovery(context,'Повторить поиск');
  document.documentElement={lang:'ru'};
  document.activeElement=null;
  const preview=vm.createContext({
   document,window:{addEventListener:(name,fn)=>events[name]=fn,
-   ipc:{postMessage:value=>commands.push(JSON.parse(value))},location:{protocol:'file:',search:'?lang=en'}},
+   ipc:{postMessage:value=>commands.push(JSON.parse(value))},location:{protocol:'http:',search:'?lang=ru'},prismestraLanguage:'en'},
   requestAnimationFrame:fn=>rafQueue.push(fn),CSS:{escape:value=>value},URLSearchParams,
   structuredClone,setTimeout:()=>1,clearTimeout(){},console
  });
@@ -1711,9 +1726,45 @@ function checkEnglishStartupPreview() {
  assert.match(find('#player-status').textContent,/Automatic setup could not finish/);
  assert.equal(find('#player-status').title,'Сбой SDK');
  receive('status',{startupStatus:null,status:'Сцена сохранена'});
- assert.equal(find('#player-status').textContent,'Сцена сохранена','unscoped native statuses keep their own text');
+ assert.equal(find('#player-status').textContent,'Scene saved');
+ const device={id:'output1',label:'Личный RGB',role:'rgb',enabled:true,driver:{type:'open_rgb'},leds:8,rate_hz:30};
+ receive('snapshot',{...initial,devices:[device],deviceActivity:{labels:{output1:'Кадры отправлены'}},
+  editor:{page:'devices',index:0,targets:['Личный RGB'],fields:[]}});
+ assert.match(mainMarkup,/Личный RGB.*Frames sent/s,'user labels are preserved and output activity is localized');
+ events.click({target:{closest:()=>({dataset:{view:'settings'}})}});
+ assert.deepEqual(commands.at(-1),{op:'page',page:'settings'});
+ receive('snapshot',{...initial,preferredUiLanguage:'en'});
+ assert.match(mainMarkup,/Application language.*value="en" lang="en" selected/s);
+ const select=find('#ui-language');
+ select.id='ui-language';
+ select.value='ru';
+ const beforeLanguage=commands.length;
+ events.change({target:select});
+ events.change({target:select});
+ assert.deepEqual(commands.slice(beforeLanguage),[{op:'set_ui_language',language:'ru'}]);
+ preview.payload={kind:'error',code:'uiLanguage',message:'Write failed'};
+ vm.runInContext('window.prismestraReceive(payload)',preview);
+ assert.equal(select.value,'en');
+ assert.match(find('#native-error').innerHTML,/Could not save the application language/);
+ assert.doesNotMatch(find('#native-error').innerHTML,/retry-document/);
+ select.value='ru';
+ events.change({target:select});
+ receive('snapshot',{...initial,preferredUiLanguage:'ru'});
+ assert.match(mainMarkup,/value="ru" lang="ru" selected/);
+ assert.match(mainMarkup,/Exit Prismestra completely/);
+ assert.equal(document.documentElement.lang,'en','the running shell keeps its language until reopen');
+ const sample={id:'builtin:blue-hour',builtIn:true,name:'Синий час',scene:initial.scene};
+ vm.runInContext('view="library"',preview);
+ receive('snapshot',{...initial,library:[sample,{...sample,id:'my-scene',builtIn:false,name:'Моя сцена'}]});
+ assert.match(mainMarkup,/Blue hour.*Apply scene.*Моя сцена/s);
+ events.click({target:{closest:()=>({dataset:{apply:sample.id},getAttribute:()=>null})}});
+ const activate=commands.at(-1);
+ assert.equal(activate.op,'apply_scene');
+ preview.payload={kind:'scene_activation',request:activate.request,status:'applied',output:'no_active_rgb'};
+ vm.runInContext('window.prismestraReceive(payload)',preview);
+ assert.match(find('#scene-activation-'+sample.id).textContent,/applied.*No active RGB outputs/);
  checkSearchRetryRecovery(preview,'Retry search');
- console.log('PASS: English browser preview translates navigation and startup IPC with original command IDs');
+ console.log('PASS: English native bootstrap, scenes, device status and application language persistence IPC');
  console.log('PASS: rejected discovery retries only discovery in Russian and English; other errors retain document recovery');
 }
-checkOutputStatusCopy().then(checkEnglishStartupPreview).catch(error=>{console.error(error);process.exitCode=1;});
+checkOutputStatusCopy().then(checkEnglishApplicationLanguage).catch(error=>{console.error(error);process.exitCode=1;});

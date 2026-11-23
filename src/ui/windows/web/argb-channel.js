@@ -15,14 +15,14 @@ window.argbChannel = (() => {
   const save = element('save');
   const close = element('close');
   const catalog = [
-    {id:'custom', label:'Точное число LED'},
-    {id:'fan', label:'Универсальный вентилятор', shape:'fan'},
-    {id:'fan-8', label:'Вентилятор · 8 LED', shape:'fan', leds:8},
-    {id:'fan-12', label:'Вентилятор · 12 LED', shape:'fan', leds:12},
-    {id:'strip', label:'Универсальная лента', shape:'strip'},
-    {id:'strip-10', label:'Лента · 10 LED', shape:'strip', leds:10},
-    {id:'strip-30', label:'Лента · 30 LED', shape:'strip', leds:30},
-    {id:'strip-60', label:'Лента · 60 LED', shape:'strip', leds:60},
+    {id:'custom', label:['Точное число LED','Exact LED count']},
+    {id:'fan', label:['Универсальный вентилятор','Generic fan'], shape:'fan'},
+    {id:'fan-8', label:['Вентилятор · 8 LED','Fan · 8 LEDs'], shape:'fan', leds:8},
+    {id:'fan-12', label:['Вентилятор · 12 LED','Fan · 12 LEDs'], shape:'fan', leds:12},
+    {id:'strip', label:['Универсальная лента','Generic strip'], shape:'strip'},
+    {id:'strip-10', label:['Лента · 10 LED','Strip · 10 LEDs'], shape:'strip', leds:10},
+    {id:'strip-30', label:['Лента · 30 LED','Strip · 30 LEDs'], shape:'strip', leds:30},
+    {id:'strip-60', label:['Лента · 60 LED','Strip · 60 LEDs'], shape:'strip', leds:60},
   ];
   let context = null, pending = null, channels = [], request = 0, saved = false, revision = null;
   let exactCount = '';
@@ -80,23 +80,23 @@ window.argbChannel = (() => {
       count.min = limits.min;
       count.max = limits.max;
       count.value = item.leds >= limits.min && item.leds <= limits.max ? item.leds : '';
-      element('current').textContent = `Сейчас в канале: ${item.leds} LED.`;
+      element('current').textContent = ui(`Сейчас в канале: ${item.leds} LED.`,`Current count: ${item.leds} LEDs.`);
       exactCount = count.value;
       template.replaceChildren(...catalog.map(item => {
         const option = document.createElement('option');
         option.value = item.id;
-        option.textContent = item.label;
+        option.textContent = ui(...item.label);
         option.disabled = item.leds !== undefined && (item.leds < limits.min || item.leds > limits.max);
         return option;
       }));
       template.value = 'custom';
-      element('range').textContent = `Допустимое число LED: ${limits.min}–${limits.max}.`;
+      element('range').textContent = ui(`Допустимое число LED: ${limits.min}–${limits.max}.`,`Allowed LED count: ${limits.min}–${limits.max}.`);
       status.textContent = '';
     } else {
       count.value = '';
       status.textContent = item?.mode === 'autoUnsupported'
-        ? `Текущий размер: ${item.leds} LED. Ручная настройка для этой зоны недоступна.`
-        : 'Выберите канал.';
+        ? ui(`Текущий размер: ${item.leds} LED. Ручная настройка для этой зоны недоступна.`,`Current count: ${item.leds} LEDs. This zone cannot be configured manually.`)
+        : ui('Выберите канал.','Choose a channel.');
     }
     render();
   }
@@ -104,11 +104,12 @@ window.argbChannel = (() => {
   function start(operation, data={}) {
     const id = ++request;
     pending = {id, operation, ...data};
-    status.textContent = operation === 'list' ? 'Загружаем каналы…' : 'Сохраняем настройки канала…';
+    status.title = '';
+    status.textContent = operation === 'list' ? ui('Загружаем каналы…','Loading channels…') : ui('Сохраняем настройки канала…','Saving channel settings…');
     render();
     if (!context.api[operation]({device:context.device,request:id,...data})) {
       pending = null;
-      status.textContent = 'Не удалось отправить запрос. Повторите попытку.';
+      status.textContent = ui('Не удалось отправить запрос. Повторите попытку.','Could not send the request. Try again.');
       render();
     }
   }
@@ -125,7 +126,7 @@ window.argbChannel = (() => {
         && typeof context.api.save === 'function' ? message.revision : null;
       const placeholder = document.createElement('option');
       placeholder.value = '';
-      placeholder.textContent = 'Выберите канал…';
+      placeholder.textContent = ui('Выберите канал…','Choose a channel…');
       placeholder.disabled = true;
       channel.replaceChildren(placeholder, ...channels.map(item => {
         const option = document.createElement('option');
@@ -135,7 +136,7 @@ window.argbChannel = (() => {
       }));
       channel.value = '';
       selectChannel();
-      if (!channels.length) status.textContent = 'Контроллер не сообщил доступных каналов.';
+      if (!channels.length) status.textContent = ui('Контроллер не сообщил доступных каналов.','The controller reported no available channels.');
       else if (document.activeElement === close) channel.focus({preventScroll:true});
     } else if (operation === 'save' && message.status === 'saved') {
       if (message.zone !== pending.zone || message.leds !== pending.leds ||
@@ -143,14 +144,15 @@ window.argbChannel = (() => {
       pending = null;
       saved = true;
       current().leds = message.leds;
-      element('current').textContent = `Сейчас в канале: ${message.leds} LED.`;
-      status.textContent = message.message || 'Настройки канала сохранены.';
+      element('current').textContent = ui(`Сейчас в канале: ${message.leds} LED.`,`Current count: ${message.leds} LEDs.`);
+      status.textContent = ui(message.message || 'Настройки канала сохранены.','Channel settings saved.');
       render();
       if (document.activeElement === save) close.focus({preventScroll:true});
     } else if (message.status === 'failed') {
       pending = null;
       if (operation === 'save' && message.refresh === true) revision = null;
-      status.textContent = message.message || 'Не удалось настроить канал.';
+      status.textContent = ui(message.message || 'Не удалось настроить канал.','Could not configure the channel.');
+      status.title = english ? message.message || '' : '';
       render();
     }
   }

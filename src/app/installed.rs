@@ -54,6 +54,10 @@ pub struct InstalledLaunch {
 }
 
 impl InstalledLaunch {
+    pub fn startup_failure_summary(&self) -> &'static str {
+        windows::installed_startup_failure_summary(Some(&self.user_root.join("state")))
+    }
+
     pub fn run(self) -> Result<(), String> {
         windows::run_installed(self.args, self.instance, self.user_root)
     }

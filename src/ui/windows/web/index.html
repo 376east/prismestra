@@ -11,142 +11,142 @@
 </aside>
 
 <dialog id="scene-file-dialog" aria-labelledby="scene-file-title">
-  <h2 id="scene-file-title">Переносимая сцена</h2>
-  <p id="scene-file-scope">В файл входят название, размер холста, слои и назначения дисплея и ленты. Привязки и данные устройств остаются в профиле. Открытый файл показывается в предпросмотре.</p>
+  <h2 id="scene-file-title" data-en="Portable scene">Переносимая сцена</h2>
+  <p id="scene-file-scope" data-en="The file includes the name, canvas size, layers, and device display and strip assignments. Device data and connections stay in the profile. Opening a file shows a preview.">В файл входят название, размер холста, слои и назначения дисплея и ленты. Привязки и данные устройств остаются в профиле. Открытый файл показывается в предпросмотре.</p>
   <div class="scene-file-actions">
-    <button class="button" id="scene-file-open">Открыть файл…</button>
-    <button class="button primary" id="scene-file-save" aria-describedby="scene-file-scope">Сохранить файл…</button>
+    <button class="button" id="scene-file-open" data-en="Open file…">Открыть файл…</button>
+    <button class="button primary" id="scene-file-save" aria-describedby="scene-file-scope" data-en="Save file…">Сохранить файл…</button>
   </div>
   <p id="scene-file-status" role="status"></p>
   <fieldset id="scene-file-controls">
     <div class="scene-file-layout">
       <div>
         <div class="scene-file-stage">
-          <canvas id="scene-file-canvas" aria-label="Холст сцены"></canvas>
+          <canvas id="scene-file-canvas" aria-label="Холст сцены" data-en-aria-label="Scene canvas"></canvas>
           <div id="scene-file-outline" aria-hidden="true" hidden></div>
         </div>
         <div class="scene-file-output-preview">
-          <div><h3>Дисплей устройства</h3><canvas id="scene-file-lcd" aria-label="Область дисплея" hidden></canvas><p id="scene-file-lcd-note"></p></div>
-          <div><h3>Лента</h3><canvas id="scene-file-strip" aria-label="Цвета кромок" hidden></canvas><p id="scene-file-strip-note"></p></div>
+          <div><h3 data-en="Device display">Дисплей устройства</h3><canvas id="scene-file-lcd" aria-label="Область дисплея" data-en-aria-label="Display region" hidden></canvas><p id="scene-file-lcd-note"></p></div>
+          <div><h3 data-en="Strip">Лента</h3><canvas id="scene-file-strip" aria-label="Цвета кромок" data-en-aria-label="Edge colors" hidden></canvas><p id="scene-file-strip-note"></p></div>
         </div>
-        <button type="button" class="button" id="scene-file-lcd-layout-toggle" aria-expanded="false" aria-controls="scene-file-lcd-layout" hidden>Демо оформления дисплея</button>
+        <button type="button" class="button" id="scene-file-lcd-layout-toggle" aria-expanded="false" aria-controls="scene-file-lcd-layout" hidden data-en="Display layout demo">Демо оформления дисплея</button>
         <div id="scene-file-lcd-layout" hidden>
-          <p id="scene-file-lcd-demo-note">Встроенная анимация и условная температура. Данные датчиков здесь не используются.</p>
+          <p id="scene-file-lcd-demo-note" data-en="Built-in animation and sample temperature. This demo uses no sensor data.">Встроенная анимация и условная температура. Данные датчиков здесь не используются.</p>
           <div id="scene-file-lcd-layout-stage">
-            <canvas id="scene-file-lcd-layout-canvas" aria-label="Демонстрационный кадр дисплея" aria-describedby="scene-file-lcd-demo-note"></canvas>
-            <button type="button" id="scene-file-lcd-layout-card" aria-label="Демонстрационная карточка температуры. Перемещение стрелками" aria-describedby="scene-file-lcd-demo-note scene-file-lcd-layout-status"></button>
+            <canvas id="scene-file-lcd-layout-canvas" aria-label="Демонстрационный кадр дисплея" data-en-aria-label="Demo display frame" aria-describedby="scene-file-lcd-demo-note"></canvas>
+            <button type="button" id="scene-file-lcd-layout-card" aria-label="Демонстрационная карточка температуры. Перемещение стрелками" data-en-aria-label="Demo temperature card. Use the arrow keys to move it." aria-describedby="scene-file-lcd-demo-note scene-file-lcd-layout-status"></button>
           </div>
           <p id="scene-file-lcd-layout-status" role="status"></p>
-          <p>Позиция действует до закрытия эскиза.</p>
+          <p data-en="The position is kept until this preview closes.">Позиция действует до закрытия эскиза.</p>
         </div>
       </div>
       <div class="scene-file-fields">
-        <label for="scene-file-name">Название</label><input id="scene-file-name" type="text" maxlength="48">
-        <h3>Слои</h3>
+        <label for="scene-file-name" data-en="Name">Название</label><input id="scene-file-name" type="text" maxlength="48">
+        <h3 data-en="Layers">Слои</h3>
         <div id="scene-file-layers"></div>
-        <button class="button" id="scene-file-add-color">Добавить цвет</button>
-        <h3>Выходы</h3>
-        <label for="scene-file-lcd-mode">Дисплей устройства</label>
-        <select id="scene-file-lcd-mode"><option value="off">Выключен</option><option value="full">Весь холст</option><option value="crop">Область холста</option></select>
+        <button class="button" id="scene-file-add-color" data-en="Add color">Добавить цвет</button>
+        <h3 data-en="Outputs">Выходы</h3>
+        <label for="scene-file-lcd-mode" data-en="Device display">Дисплей устройства</label>
+        <select id="scene-file-lcd-mode"><option value="off" data-en="Off">Выключен</option><option value="full" data-en="Full canvas">Весь холст</option><option value="crop" data-en="Canvas region">Область холста</option></select>
         <div class="scene-file-region" id="scene-file-region" hidden>
-          <label>Слева, % <input id="scene-file-x" type="number" min="0" max="99.99" step="0.01"></label>
-          <label>Сверху, % <input id="scene-file-y" type="number" min="0" max="99.99" step="0.01"></label>
-          <label>Ширина, % <input id="scene-file-width" type="number" min="0.01" max="100" step="0.01"></label>
-          <label>Высота, % <input id="scene-file-height" type="number" min="0.01" max="100" step="0.01"></label>
+          <label><span data-en="Left, %">Слева, %</span> <input id="scene-file-x" type="number" min="0" max="99.99" step="0.01"></label>
+          <label><span data-en="Top, %">Сверху, %</span> <input id="scene-file-y" type="number" min="0" max="99.99" step="0.01"></label>
+          <label><span data-en="Width, %">Ширина, %</span> <input id="scene-file-width" type="number" min="0.01" max="100" step="0.01"></label>
+          <label><span data-en="Height, %">Высота, %</span> <input id="scene-file-height" type="number" min="0.01" max="100" step="0.01"></label>
         </div>
         <fieldset id="scene-file-edges">
-          <legend>Кромки ленты</legend>
-          <label><input type="checkbox" value="top"> Верх</label>
-          <label><input type="checkbox" value="right"> Справа</label>
-          <label><input type="checkbox" value="bottom"> Низ</label>
-          <label><input type="checkbox" value="left"> Слева</label>
+          <legend data-en="Strip edges">Кромки ленты</legend>
+          <label><input type="checkbox" value="top"> <span data-en="Top">Верх</span></label>
+          <label><input type="checkbox" value="right"> <span data-en="Right">Справа</span></label>
+          <label><input type="checkbox" value="bottom"> <span data-en="Bottom">Низ</span></label>
+          <label><input type="checkbox" value="left"> <span data-en="Left">Слева</span></label>
         </fieldset>
-        <label class="native-group"><input id="scene-file-reverse" type="checkbox"> Развернуть обход</label>
+        <label class="native-group"><input id="scene-file-reverse" type="checkbox"> <span data-en="Reverse direction">Развернуть обход</span></label>
       </div>
     </div>
   </fieldset>
   <div class="dialog-actions">
-    <button class="button" id="scene-file-revert">Отменить правки</button>
-    <button class="button" id="scene-file-close">Закрыть</button>
+    <button class="button" id="scene-file-revert" data-en="Discard changes">Отменить правки</button>
+    <button class="button" id="scene-file-close" data-en="Close">Закрыть</button>
   </div>
 </dialog>
 <script src="scene-file.js"></script>
-<div class="shell"><header class="topbar"><div class="project-context"><span>Локальный профиль</span><small>Prismestra</small></div><div class="breadcrumb" id="breadcrumb" hidden>Библиотека</div><span class="save-status" id="save-status">Подключение…</span></header><section id="native-error" class="notice" role="alert" hidden></section><main id="main"></main></div>
+<div class="shell"><header class="topbar"><div class="project-context"><span data-en="Local profile">Локальный профиль</span><small>Prismestra</small></div><div class="breadcrumb" id="breadcrumb" hidden data-en="Scenes">Библиотека</div><span class="save-status" id="save-status" data-en="Connecting…">Подключение…</span></header><section id="native-error" class="notice" role="alert" hidden></section><main id="main"></main></div>
 <dialog id="output-map" aria-labelledby="output-map-title" aria-describedby="output-map-description output-map-mode output-map-connection output-map-status">
-  <h2 id="output-map-title">Проверка LED-карты</h2>
+  <h2 id="output-map-title" data-en="Inspect LED map">Проверка LED-карты</h2>
   <p id="output-map-description"></p>
-  <p id="output-map-mode" hidden><strong>Не применено</strong></p>
+  <p id="output-map-mode" hidden><strong data-en="Not applied">Не применено</strong></p>
   <p id="output-map-connection" role="status" hidden></p>
   <p id="output-map-status" role="status"></p>
   <table id="output-map-table" hidden>
-    <thead><tr><th scope="col">LED</th><th scope="col">X</th><th scope="col">Y</th><th scope="col">Цвет</th></tr></thead>
+    <thead><tr><th scope="col">LED</th><th scope="col">X</th><th scope="col">Y</th><th scope="col" data-en="Color">Цвет</th></tr></thead>
     <tbody></tbody>
   </table>
   <div class="dialog-actions">
-    <button type="button" class="button" id="output-map-applied" hidden>К применённому кадру</button>
-    <button type="button" class="button" id="output-map-back" disabled>Назад</button>
-    <button type="button" class="button" id="output-map-next" disabled>Далее</button>
-    <button type="button" class="button" id="output-map-refresh">Обновить</button>
-    <button type="button" class="button primary" id="output-map-close" autofocus>Закрыть</button>
+    <button type="button" class="button" id="output-map-applied" hidden data-en="Back to applied frame">К применённому кадру</button>
+    <button type="button" class="button" id="output-map-back" disabled data-en="Back">Назад</button>
+    <button type="button" class="button" id="output-map-next" disabled data-en="Next">Далее</button>
+    <button type="button" class="button" id="output-map-refresh" data-en="Refresh">Обновить</button>
+    <button type="button" class="button primary" id="output-map-close" autofocus data-en="Close">Закрыть</button>
   </div>
 </dialog>
 <script src="output-map.js"></script>
 <dialog id="alice-dialog" aria-labelledby="alice-title">
-  <h2 id="alice-title">Управление лампами</h2>
+  <h2 id="alice-title" data-en="Lamp controls">Управление лампами</h2>
   <div id="alice-login" hidden>
-    <label class="alice-remember"><input type="checkbox" id="alice-remember"> Запомнить вход на этом ПК</label>
-    <button type="button" class="button" data-action="alice-sign-in">Войти через Яндекс ID</button>
-    <p>Яндекс запросит доступ к списку ламп и управлению светом.</p>
+    <label class="alice-remember"><input type="checkbox" id="alice-remember"> <span data-en="Stay signed in on this PC">Запомнить вход на этом ПК</span></label>
+    <button type="button" class="button" data-action="alice-sign-in" data-en="Sign in with Yandex ID">Войти через Яндекс ID</button>
+    <p data-en="Yandex requests access to list and control lights.">Яндекс запросит доступ к списку ламп и управлению светом.</p>
   </div>
   <div class="alice-actions">
-    <button type="button" class="button" data-action="alice-retry" hidden>Повторить подключение</button>
-    <button type="button" class="button" data-action="alice-sign-out" hidden>Выйти из Алисы</button>
+    <button type="button" class="button" data-action="alice-retry" hidden data-en="Retry connection">Повторить подключение</button>
+    <button type="button" class="button" data-action="alice-sign-out" hidden data-en="Sign out of Alice">Выйти из Алисы</button>
   </div>
   <p id="alice-status" role="status" aria-live="polite"></p>
   <p id="alice-bound-lamp" hidden></p>
-  <button type="button" class="button primary" id="alice-reconfigure" data-action="alice-reconfigure" hidden>Выбрать лампу заново</button>
+  <button type="button" class="button primary" id="alice-reconfigure" data-action="alice-reconfigure" hidden data-en="Choose a lamp again">Выбрать лампу заново</button>
   <div id="alice-choice" hidden>
-    <label for="alice-lamp">Лампа</label>
-    <select id="alice-lamp" class="native-target"><option value="">Выберите лампу</option></select>
-    <label for="alice-brightness">Яркость, %</label>
+    <label for="alice-lamp" data-en="Light">Лампа</label>
+    <select id="alice-lamp" class="native-target"><option value="" data-en="Choose a light">Выберите лампу</option></select>
+    <label for="alice-brightness" data-en="Brightness, %">Яркость, %</label>
     <input id="alice-brightness" type="number" min="1" max="100" step="1" value="40">
     <div class="alice-actions" id="alice-direct-actions">
-      <button type="button" class="button" id="alice-turn-on" data-action="alice-turn-on" disabled>Включить</button>
-      <button type="button" class="button" id="alice-turn-off" data-action="alice-turn-off" disabled>Выключить</button>
-      <button type="button" class="button primary" id="alice-apply" data-action="alice-apply" disabled>Применить яркость</button>
+      <button type="button" class="button" id="alice-turn-on" data-action="alice-turn-on" disabled data-en="Turn on">Включить</button>
+      <button type="button" class="button" id="alice-turn-off" data-action="alice-turn-off" disabled data-en="Turn off">Выключить</button>
+      <button type="button" class="button primary" id="alice-apply" data-action="alice-apply" disabled data-en="Apply brightness">Применить яркость</button>
     </div>
     <div id="alice-scene-actions" hidden>
-      <label class="alice-remember"><input type="checkbox" id="alice-allow-power"> Включать лампу при применении сцены</label>
-      <button type="button" class="button primary" id="alice-bind" data-action="alice-bind" disabled>Сохранить привязку</button>
+      <label class="alice-remember"><input type="checkbox" id="alice-allow-power"> <span data-en="Turn on the lamp when applying the scene">Включать лампу при применении сцены</span></label>
+      <button type="button" class="button primary" id="alice-bind" data-action="alice-bind" disabled data-en="Save binding">Сохранить привязку</button>
     </div>
   </div>
-  <div class="dialog-actions"><button type="button" class="button" id="alice-unbind" data-action="alice-unbind" hidden>Убрать лампу из сцены</button><button type="button" class="button" data-action="alice-close">Закрыть</button></div>
+  <div class="dialog-actions"><button type="button" class="button" id="alice-unbind" data-action="alice-unbind" hidden data-en="Remove lamp from scene">Убрать лампу из сцены</button><button type="button" class="button" data-action="alice-close" data-en="Close">Закрыть</button></div>
 </dialog>
 <dialog id="argb-dialog" aria-labelledby="argb-title" aria-describedby="argb-label">
-  <h2 id="argb-title">Каналы ARGB</h2>
+  <h2 id="argb-title" data-en="ARGB channels">Каналы ARGB</h2>
   <p id="argb-label"></p>
   <form id="argb-form">
-    <label for="argb-channel">Канал контроллера</label>
+    <label for="argb-channel" data-en="Controller channel">Канал контроллера</label>
     <select id="argb-channel" class="native-target"></select>
     <div id="argb-options" hidden>
       <p id="argb-current"></p>
-      <label for="argb-template">Шаблон устройства</label>
+      <label for="argb-template" data-en="Device template">Шаблон устройства</label>
       <select id="argb-template" class="native-target"></select>
-      <label for="argb-count">Число адресуемых LED</label>
+      <label for="argb-count" data-en="Addressable LED count">Число адресуемых LED</label>
       <input id="argb-count" type="number" step="1" required aria-describedby="argb-range argb-splitter">
       <p id="argb-range"></p>
-      <p id="argb-splitter">Сплиттер передаёт один сигнал на все ветки. Укажите число адресов самой длинной ветки. Цвета на одинаковых позициях повторятся.</p>
+      <p id="argb-splitter" data-en="A splitter sends the same signal to every branch. Enter the LED count of the longest branch. LEDs at the same position show the same color.">Сплиттер передаёт один сигнал на все ветки. Укажите число адресов самой длинной ветки. Цвета на одинаковых позициях повторятся.</p>
     </div>
     <div id="argb-preview" hidden>
-      <p>Схема адресации</p>
+      <p data-en="Address preview">Схема адресации</p>
       <div id="argb-dots" aria-hidden="true"></div>
       <p id="argb-summary"></p>
     </div>
-    <p id="argb-read-only" hidden>Доступен предпросмотр. Сохранение числа LED пока недоступно.</p>
+    <p id="argb-read-only" hidden data-en="You can preview the layout. Saving the LED count is unavailable.">Доступен предпросмотр. Сохранение числа LED пока недоступно.</p>
     <p id="argb-status" role="status" aria-atomic="true"></p>
     <div class="dialog-actions">
-      <button id="argb-close" type="button" class="button" autofocus>Закрыть</button>
-      <button id="argb-save" type="submit" class="button primary" hidden>Сохранить</button>
+      <button id="argb-close" type="button" class="button" autofocus data-en="Close">Закрыть</button>
+      <button id="argb-save" type="submit" class="button primary" hidden data-en="Save">Сохранить</button>
     </div>
   </form>
 </dialog>
@@ -154,25 +154,25 @@
 <dialog id="library-preview-dialog" aria-labelledby="library-preview-title" aria-describedby="library-preview-description">
   <h2 id="library-preview-title"></h2>
   <div id="library-preview-art" class="art-wrap"></div>
-  <p id="library-preview-description">Предпросмотр сцены</p>
-  <form method="dialog" class="dialog-actions"><button class="button primary" autofocus>Закрыть</button></form>
+  <p id="library-preview-description" data-en="Scene preview">Предпросмотр сцены</p>
+  <form method="dialog" class="dialog-actions"><button class="button primary" autofocus data-en="Close">Закрыть</button></form>
 </dialog>
-<footer class="player" aria-label="Воспроизведение сцены">
-  <button class="player-scene" id="open-active" title="Открыть запущенную сцену"><canvas id="player-art" width="104" height="72"></canvas><span><strong id="player-name"></strong><small id="player-status"></small></span></button>
-  <div class="transport"><button class="button" id="play">Выключить свет</button></div>
-  <label class="master-brightness"><span id="sun-icon"></span><input id="master-brightness" type="range" min="0" max="100" aria-label="Яркость сцены (черновик)"><output id="master-value"></output></label><button class="button primary" id="footer-apply" disabled>Применить</button>
+<footer class="player" aria-label="Воспроизведение сцены" data-en-aria-label="Scene playback">
+  <button class="player-scene" id="open-active" title="Открыть запущенную сцену" data-en-title="Open the active scene"><canvas id="player-art" width="104" height="72"></canvas><span><strong id="player-name"></strong><small id="player-status"></small></span></button>
+  <div class="transport"><button class="button" id="play" data-en="Turn lights off">Выключить свет</button></div>
+  <label class="master-brightness"><span id="sun-icon"></span><input id="master-brightness" type="range" min="0" max="100" aria-label="Яркость сцены (черновик)" data-en-aria-label="Scene brightness (draft)"><output id="master-value"></output></label><button class="button primary" id="footer-apply" disabled data-en="Apply">Применить</button>
 </footer>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <div id="device-discovery-announcement" class="sr-only" role="status" aria-atomic="true"></div>
 <div id="device-status-announcement" class="sr-only" role="status" aria-atomic="true"></div>
-<dialog id="name-dialog" aria-labelledby="dialog-title"><form id="name-form"><h2 id="dialog-title">Новая сцена</h2><label>Название<input id="scene-name" maxlength="48" required autocomplete="off"></label><p class="muted">Сцена сохраняет параметры RGB. Настройки устройств и LCD сохраняются отдельно в профиле.</p><div class="dialog-actions"><button type="button" id="cancel-name" class="button">Отмена</button><button type="submit" class="button primary">Сохранить</button></div></form></dialog>
+<dialog id="name-dialog" aria-labelledby="dialog-title"><form id="name-form"><h2 id="dialog-title" data-en="New scene">Новая сцена</h2><label><span data-en="Name">Название</span><input id="scene-name" maxlength="48" required autocomplete="off"></label><p class="muted" data-en="A scene saves RGB settings. Device and LCD settings are saved separately in the profile.">Сцена сохраняет параметры RGB. Настройки устройств и LCD сохраняются отдельно в профиле.</p><div class="dialog-actions"><button type="button" id="cancel-name" class="button" data-en="Cancel">Отмена</button><button type="submit" class="button primary" data-en="Save">Сохранить</button></div></form></dialog>
 <dialog id="draft-switch" aria-labelledby="draft-switch-title" aria-describedby="draft-switch-description">
-  <h2 id="draft-switch-title">Несохранённые изменения</h2>
+  <h2 id="draft-switch-title" data-en="Unsaved changes">Несохранённые изменения</h2>
   <p id="draft-switch-description"></p>
   <div class="dialog-actions">
-    <button type="button" class="button" id="draft-stay" autofocus>Остаться</button>
-    <button type="button" class="button" id="draft-discard" data-mutation>Отбросить</button>
-    <button type="button" class="button primary" id="draft-save" data-mutation>Сохранить</button>
+    <button type="button" class="button" id="draft-stay" autofocus data-en="Stay">Остаться</button>
+    <button type="button" class="button" id="draft-discard" data-mutation data-en="Discard">Отбросить</button>
+    <button type="button" class="button primary" id="draft-save" data-mutation data-en="Save">Сохранить</button>
   </div>
 </dialog>
 <script src="app.js"></script><script src="theme.js"></script></body></html>
