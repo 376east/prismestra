@@ -35,6 +35,7 @@ pub(crate) struct Plan {
     pub(crate) document: Document,
     pub(crate) local: Local,
     pub(crate) issues: Vec<String>,
+    pub(crate) unknown_openrgb_controller: bool,
     pub(crate) changed: bool,
     baseline: Option<Baseline>,
 }
@@ -512,6 +513,7 @@ fn assemble(
     let setup = &mut document.lighting.setup;
     let mut reconciled = false;
     let mut mapped = Vec::new();
+    let mut unknown_openrgb_controller = false;
     let mut remaining_points = MAX_POINTS.saturating_sub(setup.canvas.points.len());
     for (identity, rows) in by_identity {
         if local_routes.contains(&format!("openrgb:{identity}")) {
@@ -526,8 +528,9 @@ fn assemble(
         }
         let controller = rows.into_iter().next().unwrap();
         if controller.kind.eq_ignore_ascii_case("unknown") {
+            unknown_openrgb_controller = true;
             issues.push(format!(
-                "{}: OpenRGB не определил тип устройства. Для ручной настройки откройте «Подключения».",
+                "{}: OpenRGB не определил тип устройства. Проверьте доступные типы через «Добавить устройство».",
                 controller_label(&controller),
             ));
             continue;
@@ -729,6 +732,7 @@ fn assemble(
         document,
         local,
         issues,
+        unknown_openrgb_controller,
         changed,
         baseline: None,
     })
@@ -2270,6 +2274,7 @@ mod tests {
             || unreachable!(),
         )
         .unwrap();
+        assert!(!original.unknown_openrgb_controller);
         let (mut document, local) = (original.document, original.local);
         document.lighting.setup.devices[0].enabled = false;
         let saved_device = document.lighting.setup.devices[0].clone();
@@ -2306,6 +2311,7 @@ mod tests {
         assert!(plan.local.devices.contains_key(&independent_id));
         assert_eq!(plan.local.devices[&saved_device.id], saved_binding);
         assert!(setup.canvas.points.starts_with(&saved_points));
+        assert!(plan.unknown_openrgb_controller);
         assert!(
             plan.issues
                 .iter()
@@ -2313,7 +2319,7 @@ mod tests {
         );
         assert!(plan.issues.iter().any(|issue| {
             issue.contains("Fixture: OpenRGB не определил тип устройства")
-                && issue.contains("«Подключения»")
+                && issue.contains("«Добавить устройство»")
         }));
     }
 
