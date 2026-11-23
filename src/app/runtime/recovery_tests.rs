@@ -183,6 +183,7 @@ struct E1Link {
     attempt: usize,
     inject_reconnect_faults: bool,
     traces: Arc<Mutex<Vec<Attempt>>>,
+    first_frame_release: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 impl Drop for E1Link {
@@ -243,11 +244,21 @@ impl ble::Link for E1Link {
             self.max_pdu()?,
             control,
             &mut |packet, _| {
-                let mut traces = self.traces.lock().unwrap();
-                let packets = &mut traces[self.attempt].packets;
-                packets.push(packet.to_vec());
-                if self.inject_reconnect_faults && self.attempt == 0 && packets.len() == 2 {
-                    return Err("Fixture disconnected during fragment 2".into());
+                let count = {
+                    let mut traces = self.traces.lock().unwrap();
+                    let packets = &mut traces[self.attempt].packets;
+                    packets.push(packet.to_vec());
+                    packets.len()
+                };
+                if count == 2 {
+                    if let Some(release) = self.first_frame_release.take() {
+                        release
+                            .recv_timeout(Duration::from_secs(5))
+                            .map_err(|error| error.to_string())?;
+                    }
+                    if self.inject_reconnect_faults && self.attempt == 0 {
+                        return Err("Fixture disconnected during fragment 2".into());
+                    }
                 }
                 Ok(())
             },
@@ -304,6 +315,7 @@ fn surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame() {
                     attempt,
                     inject_reconnect_faults: true,
                     traces: factory_traces.clone(),
+                    first_frame_release: None,
                 };
                 Ok(Box::new(Ble::with_e1(link, 1, 83, PIXEL_LEDS, &cancel)?))
             }),
@@ -529,6 +541,7 @@ fn surplife_first_light_after_adapter_arrival(exhaust_budget: bool) {
                         attempt,
                         inject_reconnect_faults: false,
                         traces: traces.clone(),
+                        first_frame_release: None,
                     };
                     Ok(Box::new(Ble::with_e1(link, 1, 83, PIXEL_LEDS, &cancel)?))
                 }
@@ -611,6 +624,136 @@ fn surplife_first_light_after_adapter_arrival(exhaust_budget: bool) {
     assert!(restored.packets.len() >= 5);
     assert_eq!(&restored.packets[0][..4], &[0x40, 0, 0, 0]);
     assert_eq!(&restored.packets[4][..4], &[0x40, 0, 0x80, 4]);
+}
+
+#[test]
+fn surplife_backpressure_after_adapter_arrival_keeps_rgb_and_lcd_live() {
+    let (document, dir) = arrival_lcd_document(
+        Document::from_lighting(surplife_project()).unwrap(),
+        "ble-backpressure",
+        ARRIVAL_LCD_MEDIA,
+    );
+    let mut runtime = Runtime::new(document, None).unwrap();
+    let (release, gate) = std::sync::mpsc::channel();
+    let gate = Mutex::new(Some(gate));
+    let present = Arc::new(AtomicBool::new(false));
+    let traces = Arc::new(Mutex::new(vec![Attempt::default()]));
+    runtime
+        .attach_rgb(
+            "a",
+            vec!["ble:1".into()],
+            Arc::new({
+                let present = present.clone();
+                let traces = traces.clone();
+                move |cancel| {
+                    if !present.load(Ordering::SeqCst) {
+                        return Err("Stand adapter unavailable".into());
+                    }
+                    let link = E1Link {
+                        attempt: 0,
+                        inject_reconnect_faults: false,
+                        traces: traces.clone(),
+                        first_frame_release: gate.lock().unwrap().take(),
+                    };
+                    Ok(Box::new(Ble::with_e1(link, 1, 83, PIXEL_LEDS, &cancel)?))
+                }
+            }),
+        )
+        .unwrap();
+    let rgb = Arc::new(Link::default());
+    runtime.attach_rgb("b", vec![], factory(&rgb)).unwrap();
+    runtime
+        .attach_lcd(
+            "lcd",
+            vec![],
+            Arc::new({
+                let dir = dir.clone();
+                let link = Arc::new(Link::default());
+                move |config, _| {
+                    Ok((
+                        lcd::Controller::new(config, &Assets::new(dir.clone())?)?,
+                        Box::new(Reports(link.clone())),
+                    ))
+                }
+            }),
+        )
+        .unwrap();
+    runtime.enable_registered_output_recovery();
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.lcd_status("lcd").unwrap().frames_sent > 0
+    });
+    let rgb_generation = runtime.host.status("b").unwrap().generation;
+    let lcd_generation = runtime.lcd_status("lcd").unwrap().generation;
+    let set_color = |runtime: &mut Runtime, color| {
+        let mut scene = runtime.document().lighting.scene.clone();
+        scene.colors.fill(color);
+        runtime.set_scene(scene).unwrap();
+    };
+    set_color(&mut runtime, 0x0000ff);
+    tick(&mut runtime, &mut now);
+    assert!(traces.lock().unwrap()[0].packets.is_empty());
+
+    present.store(true, Ordering::SeqCst);
+    runtime.bluetooth_adapter_arrived();
+    now += 1_000_000;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        traces.lock().unwrap()[0].packets.len() == 2
+    });
+    let lcd_before = runtime.lcd_status("lcd").unwrap().frames_sent;
+    for (scene_color, expected) in [
+        (0x00ff00, Rgb::new(0, 255, 0)),
+        (0xffff00, Rgb::new(255, 255, 0)),
+    ] {
+        set_color(&mut runtime, scene_color);
+        tick(&mut runtime, &mut now);
+        wait(|| {
+            rgb.frames
+                .lock()
+                .unwrap()
+                .last()
+                .is_some_and(|frame| frame == &[expected])
+        });
+    }
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.lcd_status("lcd").unwrap().frames_sent >= lcd_before + 2
+    });
+    assert_eq!(runtime.host.status("b").unwrap().generation, rgb_generation);
+    assert_eq!(
+        runtime.lcd_status("lcd").unwrap().generation,
+        lcd_generation
+    );
+    let blocked = runtime.host.status("a").unwrap();
+    assert_eq!(blocked.submitted, 0);
+    assert!(blocked.replaced > 0);
+    assert_eq!(traces.lock().unwrap()[0].packets.len(), 2);
+    let newest = runtime.host.requested("a").unwrap();
+
+    release.send(()).unwrap();
+    wait(|| runtime.host.status("a").unwrap().last_submitted == Some(newest));
+    drain(&mut runtime);
+    let expected_packets: Vec<_> = [Rgb::new(0, 0, 255), Rgb::new(255, 255, 0)]
+        .into_iter()
+        .enumerate()
+        .flat_map(|(sequence, color)| {
+            crate::lighting::door::pixel_fragments_for_points(
+                &[color; PIXEL_LEDS],
+                83,
+                sequence as u8,
+                200,
+                PIXEL_LEDS,
+            )
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(traces.lock().unwrap()[0].packets, expected_packets);
+    remove_lcd_assets(runtime, dir);
 }
 
 #[cfg(windows)]
