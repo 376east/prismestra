@@ -2952,7 +2952,19 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn pending_status_read_cannot_launch_after_pause_cancel_or_owner_change() {
-        use std::{cell::Cell, sync::mpsc};
+        use std::{
+            cell::Cell,
+            os::windows::fs::{FileExt, OpenOptionsExt},
+            sync::mpsc,
+        };
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        struct StopOnDrop<'a>(&'a AtomicBool);
+        impl Drop for StopOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
 
         for change in ["pause", "cancel", "owner change"] {
             let (directory, request, _) = sharing_fixture("pending-status-control");
@@ -2972,6 +2984,7 @@ mod tests {
                 let directory = &directory;
                 let request = &request;
                 let control = &control;
+                let _stop_on_failure = StopOnDrop(&control.stop);
                 scope.spawn(move || {
                     let first_read = Cell::new(true);
                     let polls = start_status_worker(move |_, _| {
@@ -3010,20 +3023,46 @@ mod tests {
                         "new status reads must wait for the pending one"
                     );
                 }
-                match change {
-                    "pause" => control.restarting.store(false, Ordering::SeqCst),
+                let _protected_replacement = match change {
+                    "pause" => {
+                        control.restarting.store(false, Ordering::SeqCst);
+                        None
+                    }
                     "cancel" => {
                         control.stop.store(true, Ordering::SeqCst);
                         exits.recv_timeout(Duration::from_secs(2)).unwrap();
                         assert_eq!(Arc::strong_count(&control.client_lock), 1);
+                        None
                     }
                     "owner change" => {
-                        let mut replacement = request.clone();
-                        replacement.nonce.push_str("-new");
-                        write_json(&owner_path, &replacement).unwrap();
+                        assert!(client_lock(directory).is_err());
+                        // Force an out-of-band owner change despite the client lock.
+                        // Keep readers allowed, but prevent a heartbeat that already
+                        // read the old nonce from replacing the fixture's record.
+                        let mut owner = fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .share_mode(FILE_SHARE_READ)
+                            .open(&owner_path)
+                            .unwrap();
+                        let mut bytes = Vec::new();
+                        owner.read_to_end(&mut bytes).unwrap();
+                        let field = format!(r#""nonce":"{}""#, request.nonce);
+                        let nonce_offset = bytes
+                            .windows(field.len())
+                            .position(|window| window == field.as_bytes())
+                            .unwrap()
+                            + b"\"nonce\":\"".len();
+                        // A single byte change leaves the JSON valid for concurrent readers.
+                        assert_eq!(owner.seek_write(b"X", nonce_offset as u64).unwrap(), 1);
+                        assert!(write_live_record(&owner_path, request).is_err());
+                        let replaced: Request = read_json(&owner_path).unwrap();
+                        assert_eq!(replaced.parent, request.parent);
+                        assert_ne!(replaced.nonce, request.nonce);
+                        Some(owner)
                     }
                     _ => unreachable!(),
-                }
+                };
                 release.send(()).unwrap();
                 if change == "pause" {
                     // Await consumption of the delayed absent status. A pause
