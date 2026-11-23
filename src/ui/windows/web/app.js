@@ -587,7 +587,7 @@ function renderSettings() {
  return heading('Настройки','Настройки локального профиля.')
   + `<div class="settings-sections">
     <section class="parameter-panel"><h2>Диагностика</h2><div class="settings-links">${pageButton('temperatures')}${pageButton('connections')}${pageButton('sources','Источники температур')}</div></section>
-    <section class="parameter-panel"><h2>Алиса</h2><div class="settings-links"><button class="button" data-action="alice-open">Лампа кабинета</button></div></section>
+    <section class="parameter-panel"><h2>Алиса</h2><div class="settings-links"><button class="button" data-action="alice-open">Управление лампами</button></div></section>
     <section class="parameter-panel"><h2>Расписание</h2><p class="parameter-note">${schedule}</p><div class="settings-links">${pageButton('schedule','Управлять расписанием')}</div></section>
   </div>`;
 }

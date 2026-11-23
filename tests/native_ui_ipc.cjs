@@ -1079,7 +1079,10 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
 {
  const aliceDialog=find('#alice-dialog');
  aliceDialog.querySelector=find;
- find('#alice-lamp').replaceChildren=()=>{};
+ const picker=find('#alice-lamp');
+ const options=[];
+ picker.replaceChildren=()=>{options.length=0;picker.value='';};
+ picker.append=option=>options.push([option.value,option.textContent]);
  find('#alice-brightness').checkValidity=()=>true;
  const click=action=>events.click({target:{closest:()=>({dataset:{action},hasAttribute:()=>false})}});
  const reply=(sequence,state)=>{context.aliceReply={kind:'alice',sequence,state};vm.runInContext('window.prismestraReceive(aliceReply)',context);};
@@ -1087,11 +1090,21 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
  click('alice-open');
  const open=commands.at(-1);
  assert.equal(open.request.action,'open');
- const ready={saved:true,needsLogin:false,lamps:['Настольная'],ticket:'fixture-ticket',message:'Выберите лампу',busy:false};
+ const ready={saved:true,needsLogin:false,lamps:['Дом · Рабочая · Настольная · ab','Дом · Мастерская · Настольная · cd'],ticket:'fixture-ticket',message:'Выберите лампу',busy:false};
  reply(open.sequence,ready);
  assert.equal(find('#alice-login').hidden,true,'cold open with a valid saved grant skips sign-in');
  assert.equal(find('#alice-choice').hidden,false);
  assert.deepEqual(commands.slice(before).map(command=>command.request.action),['open']);
+ assert.deepEqual(options.slice(1),[['0',ready.lamps[0]],['1',ready.lamps[1]]]);
+ click('alice-apply');
+ assert.equal(commands.at(-1),open,'catalog entries are inert until a lamp is explicitly selected');
+ picker.value='1';
+ find('#alice-brightness').value='40';
+ click('alice-apply');
+ const apply=commands.at(-1);
+ assert.deepEqual(apply.request,{action:'apply',ticket:'fixture-ticket',lamp:1,brightness:40});
+ reply(apply.sequence,{...ready,ticket:'next-ticket'});
+ assert.equal(picker.value,'1','the selected room and lamp stay selected after a command');
  click('alice-sign-out');
  const signOut=commands.at(-1);
  assert.equal(signOut.request.action,'sign_out');
@@ -1104,7 +1117,7 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
  assert.notEqual(open.sequence,signOut.sequence);
  aliceDialog.close();
 }
-console.log('PASS: Alice cold open uses saved access and ignores a late catalog reply after sign-out');
+console.log('PASS: Alice uses saved access, distinguishes identical lamp names by room, and ignores a late reply after sign-out');
 
 {
  const controller={id:'argb-controller',label:'Контроллер ARGB',role:'canvas',driver:{type:'openrgb'},leds:1,rate_hz:25,enabled:true};
