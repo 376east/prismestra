@@ -14,6 +14,7 @@ import openrgb_cache
 from build_openrgb_component import POWERSHELL, REPO, build_component, checkout, read, recipe, run
 from component_archive import sha256
 from package_installer import WEBVIEW_PROBE
+from package_release import retain_binary_zip
 from pinned_setup_download import fetch
 
 
@@ -75,6 +76,7 @@ def package_candidate(root, commit, version, component, prerequisites, iscc, paw
            "--component", component, "--pawnio-source-tree", pawnio, "--output", sources)
     (candidate / "SHA256SUMS.txt").write_text(
         "".join(f"{sha256(path)}  {path.name}\n" for path in sorted(candidate.iterdir())), encoding="utf-8")
+    retain_binary_zip(release, root / "portable", manifest)
     print(f"Compiled Setup SHA-256: {receipt['installer_sha256']}", flush=True)
 
     # These two builds exercise repair and version transitions in a disposable

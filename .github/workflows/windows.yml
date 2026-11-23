@@ -48,6 +48,8 @@ jobs:
         run: python scripts/test_openrgb_cache.py
       - name: Check pinned Setup downloads
         run: python scripts/test_pinned_setup_download.py
+      - name: Check release packaging boundaries
+        run: python scripts/test_package_release.py
 
   software:
     name: Full software checks
@@ -64,8 +66,6 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           rustup default stable
-      - name: Check release packaging boundaries
-        run: python scripts/test_package_release.py
       - name: Check installer packaging boundaries
         run: python scripts/test_package_installer.py
       - name: Test native installer policy checks
@@ -243,6 +243,15 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+      - name: Retain the matching portable ZIP for QA
+        if: inputs.validation == 'setup'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: prismestra-portable-candidate-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/prismestra-candidate/portable/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
       - name: Retain component build diagnostics
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

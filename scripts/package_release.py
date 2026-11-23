@@ -82,6 +82,18 @@ def copy_launch_files(source, binary):
     return {name: sha256(binary / name) for name in sorted(files)}
 
 
+def retain_binary_zip(release, destination, manifest):
+    """Keep the original portable ZIP and its checksum for candidate QA."""
+    stem = f"prismestra-{manifest['version']}-{manifest['commit'][:12]}"
+    archive = release / f"{stem}-{manifest['target']}.zip"
+    checksum = f"{sha256(archive)}  {archive.name}"
+    if checksum not in (release / "SHA256SUMS.txt").read_text(encoding="utf-8").splitlines():
+        raise ValueError(f"Portable ZIP checksum mismatch: {archive.name}")
+    destination.mkdir()
+    shutil.copyfile(archive, destination / archive.name)
+    (destination / "SHA256SUMS.txt").write_text(checksum + "\n", encoding="utf-8")
+
+
 def notice_files(root):
     paths = set()
     for child in root.iterdir():
