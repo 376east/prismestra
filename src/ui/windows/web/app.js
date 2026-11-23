@@ -131,7 +131,8 @@ const changed = () => !!draft && !!state && !same(draft,state.scene);
 const sourceNeedsApply = () => !!state?.native && !!draft
  && ['camera','keys'].includes(reactiveEffects.get(draft.effect))
  && (draft.effect!==state.scene.effect || !state.captureAuthorized);
-const applyNeeded = () => changed() || sourceNeedsApply();
+const savedDraft = () => selectedId && state?.library.find(item=>item.id===selectedId && same(item.scene,draft));
+const applyNeeded = () => changed() || sourceNeedsApply() || Boolean(state?.native && savedDraft()?.aliceLamp);
 let placementOpen=false, placementDrag=null, placementSelection=null;
 let placementLimited=false;
 const placementHelp=()=>placementLimited
@@ -260,6 +261,8 @@ function syncControls(keepRetryFocus) {
  playerStatus.title=startupStatus?state?.status||'':'';
  const runtimeDetail=$('#native-runtime-detail');if(runtimeDetail)runtimeDetail.textContent=state?.detail||'';
  if(sceneActivation)syncSceneActivation(sceneActivation.id,sceneActivation);
+ const editorLamp=$('#editor-lamp-status');
+ if(editorLamp)editorLamp.textContent=sceneActivation?.editor && sceneActivation.id===selectedId && same(sceneActivation.scene,draft) ? sceneActivationMessage(sceneActivation) : '';
  const audioSource=$('#scene-audio-source');
  if(audioSource)audioSource.textContent=state?.native
   ? state.audioError&&audioEffects.has(state.scene.effect)?'Системный звук недоступен. Повторяю подключение.'
@@ -332,6 +335,7 @@ function renderLibrary() {
      <button class="icon-button" data-edit="${esc(item.id)}" aria-label="Редактировать: ${esc(item.name)}" title="Редактировать" data-mutation ${disabled()}>${icon('edit')}</button>
      ${item.builtIn?'':`<button class="icon-button" data-remove="${esc(item.id)}" aria-label="Удалить: ${esc(item.name)}" data-mutation ${disabled()}>${icon('trash')}</button>`}
     </div>
+    ${item.builtIn||(!state.native&&!item.aliceLampStale)?'':`<button class="button" data-alice-scene="${esc(item.id)}" data-mutation ${disabled()}>${item.aliceLampStale?'Привязка лампы устарела':item.aliceLamp?'Лампа · '+esc(item.aliceLamp.label):'Добавить лампу'}</button>`}
     <div id="scene-activation-${esc(item.id)}" class="scene-activation-status" role="status" aria-atomic="true"></div>
     <button id="scene-devices-${esc(item.id)}" class="button scene-devices" data-view="devices" hidden>Проверить устройства</button>
    </div>
@@ -422,7 +426,7 @@ function reorderPalette(actionCode) {
 function renderScene() {
  const effectIds=Object.keys(effects);
  if(!Object.hasOwn(effects,draft.effect))effectIds.unshift(draft.effect);
- return heading(draftName,'Изменения остаются в черновике до нажатия «Применить».',action('Сохранить сцену','save-scene')+action('Создать копию','clone')+(selectedId?action('Переименовать','rename'):'')+action('Применить','apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status"></p><div class="editor-layout"><section class="preview-panel" aria-label="Предпросмотр"><div class="stage"><canvas id="stage" aria-label="Предпросмотр сцены из движка Prismestra"></canvas><div class="stage-bar"><span class="stage-chip">Предпросмотр</span></div><div class="stage-caption">Кадр движка · черновик</div>${renderPlacementObjects()}</div>${renderPlacementControls()}<p class="preview-description">Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.</p><div class="native-field"><label for="scene-effect">Эффект</label><select id="scene-effect" data-mutation ${disabled()}>${effectIds.map(id=>effectOption(id,draft.effect)).join('')}</select></div><div class="parameter-panel" style="margin-top:20px"><h2>Выходы</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> Основной свет · RGB и LCD</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> Дополнительный свет</label><button class="button" data-view="devices">Устройства и свойства</button></div></section><aside class="parameter-panel" id="scene-parameters" aria-label="Параметры сцены">${sceneParameters()}</aside></div>`;
+ return heading(draftName,'Изменения остаются в черновике до нажатия «Применить».',action('Сохранить сцену','save-scene')+action('Создать копию','clone')+(selectedId?action('Переименовать','rename'):'')+action('Применить','apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status"></p><p id="editor-lamp-status" class="scene-activation-status" role="status"></p><div class="editor-layout"><section class="preview-panel" aria-label="Предпросмотр"><div class="stage"><canvas id="stage" aria-label="Предпросмотр сцены из движка Prismestra"></canvas><div class="stage-bar"><span class="stage-chip">Предпросмотр</span></div><div class="stage-caption">Кадр движка · черновик</div>${renderPlacementObjects()}</div>${renderPlacementControls()}<p class="preview-description">Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.</p><div class="native-field"><label for="scene-effect">Эффект</label><select id="scene-effect" data-mutation ${disabled()}>${effectIds.map(id=>effectOption(id,draft.effect)).join('')}</select></div><div class="parameter-panel" style="margin-top:20px"><h2>Выходы</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> Основной свет · RGB и LCD</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> Дополнительный свет</label><button class="button" data-view="devices">Устройства и свойства</button></div></section><aside class="parameter-panel" id="scene-parameters" aria-label="Параметры сцены">${sceneParameters()}</aside></div>`;
 }
 function placementLabel(object,objects) {
  return objects.some(other=>other.id!==object.id&&other.label===object.label)
@@ -816,23 +820,41 @@ function previewLibraryEntry(entry) {
  if(entry.preview)paintPixels($('#library-preview-art canvas'),entry.preview);
  $('#library-preview-dialog').showModal();
 }
-function activateLibraryEntry(entry) {
+function activateLibraryEntry(entry,editor=false) {
  if(busy())return;
  const request=++sceneActivationRequest;
- if(!send({op:'apply_scene',scene:clone(entry.scene),request}))return;
+ const command={op:'apply_scene',scene:clone(entry.scene),request};
+ if(!entry.builtIn)command.id=entry.id;
+ if(!send(command))return;
  if(sceneActivation)syncSceneActivation(sceneActivation.id,null);
- sceneActivation={request,id:entry.id,name:entry.name,pending:true,message:`Применяем «${entry.name}»…`};
+ sceneActivation={request,id:entry.id,name:entry.name,scene:entry.scene,binding:entry.aliceLamp,profileRevision:state.profileRevision,editor,pending:true,message:`Применяем «${entry.name}»…`};
  syncControls();
+}
+function sceneActivationMessage(result) {
+ return result?.lampMessage ? result.message+' '+result.lampMessage : result?.message||'';
+}
+function clearSceneLamp(id) {
+ if(!sceneActivation?.binding || sceneActivation.id!==id)return false;
+ sceneActivation.binding=null;
+ sceneActivation.lampMessage='';
+ return true;
+}
+function reconcileSceneLamp() {
+ if(!sceneActivation?.binding)return;
+ const {id,name,scene,binding,profileRevision,applied}=sceneActivation;
+ const entry=state.library.find(item=>item.id===id);
+ if(profileRevision!==state.profileRevision || !state.native || !entry || entry.name!==name || !same(entry.scene,scene) || !same(entry.aliceLamp,binding) ||
+    (applied && !same(state.scene,scene)))clearSceneLamp(id);
 }
 function syncSceneActivation(id,result) {
  const key=CSS.escape(id);
  const status=$('#scene-activation-'+key);
- const message=result?.message||'';
+ const message=sceneActivationMessage(result);
  if(status&&status.textContent!==message)status.textContent=message;
  const devices=$('#scene-devices-'+key);
  if(devices)devices.hidden=!(result?.applied&&state?.native);
 }
-function receiveSceneActivation({request,status,output,message}) {
+function receiveSceneActivation({request,status,output,message,lamp}) {
  if(!sceneActivation?.pending||request!==sceneActivation.request)return;
  if(status==='applied'){
   const detail=output==='preview_only'?' Режим предпросмотра.':output==='no_active_rgb'?' Нет активных RGB-выходов для этой сцены.':'';
@@ -842,7 +864,19 @@ function receiveSceneActivation({request,status,output,message}) {
  else return;
  sceneActivation.pending=false;
  sceneActivation.applied=status==='applied';
+ if(sceneActivation.applied&&sceneActivation.binding)sceneActivation.lampMessage=lamp;
  syncControls();
+}
+function receiveSceneLamp({request,message}) {
+ if(sceneActivation?.request!==request||!sceneActivation.applied||!sceneActivation.binding)return;
+ sceneActivation.lampMessage=message;
+ syncControls();
+}
+function applyEditorScene() {
+ if(!draft||placementDirty())return;
+ const entry=savedDraft();
+ if(state?.native && entry?.aliceLamp)activateLibraryEntry(entry,true);
+ else send({op:'apply_scene',scene:clone(draft)},true);
 }
 function closeDraftSwitch() {
  const id=draftSwitchId;
@@ -868,7 +902,15 @@ function nameDialog(mode) {
 window.prismestraReceive = message => {
  try {
   if(typeof message==='string')message=JSON.parse(message);
-  if(message.kind==='alice'){if(message.sequence===aliceSequence)receiveAlice(message);return;}
+  if(message.kind==='alice'){
+   if(alicePickerStarted&&message.sequence===aliceSequence){
+    if(aliceAction==='sign_out'&&!message.error&&clearSceneLamp(sceneActivation?.id))syncControls();
+    receiveAlice(message);
+   }
+   return;
+  }
+  if(message.kind==='alice_binding'){receiveAliceBinding(message);return;}
+  if(message.kind==='scene_lamp'){receiveSceneLamp(message);return;}
   if(message.kind==='output_preview'){window.outputMap?.receive(message);return;}
   if(message.kind==='argb_channels'||message.kind==='argb_channel_saved'){window.argbChannel?.receive(message);return;}
   if(message.kind==='output_retry'){receiveOutputRetry(message);return;}
@@ -898,6 +940,8 @@ window.prismestraReceive = message => {
    const acknowledged=awaitingCommandAck;awaitingCommandAck=false;completeStageAck();
    if(retryScope()!==message.state.deviceActivity?.retryScope)outputRetries.clear();
    state=message.state;
+   reconcileSceneLamp();
+   sceneActivationRequest=Math.max(sceneActivationRequest,state.lastSceneApplyRequest??0);
    if(Array.isArray(state.effects)){
     effects=Object.create(null);
     audioEffects=new Set(state.effects.filter(effect=>effect.audio).map(effect=>effect.id));
@@ -950,6 +994,7 @@ window.prismestraReceive = message => {
    const nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));
    if(message.state.deviceActivity&&retryScope()!==message.state.deviceActivity.retryScope)outputRetries.clear();
    Object.assign(state,message.state);
+   reconcileSceneLamp();
    reconcileRetryActivity(message.state.deviceActivity);
    if(state.pending||Object.hasOwn(message.state,'mapConnection'))window.outputMap?.update(state);
    followActiveScene();
@@ -963,10 +1008,11 @@ window.prismestraReceive = message => {
   syncControls();
  }
 };
-let aliceTimer, aliceState, aliceSequence=0;
+let aliceTimer, aliceState, aliceSequence=0, aliceAction, aliceScene, aliceBindingPending=false, alicePickerStarted=false;
 let aliceLamps=[];
 function aliceRequest(action, options={}) {
  clearTimeout(aliceTimer);
+ aliceAction=action;
  if(!send({op:'alice',sequence:++aliceSequence,request:{action,...options}}) && action!=='cancel')
   receiveAlice({error:'Не удалось связаться с Prismestra.'});
 }
@@ -982,6 +1028,48 @@ function aliceSelection() {
  $('#alice-turn-on').disabled=!chosen;
  $('#alice-turn-off').disabled=!chosen;
  $('#alice-apply').disabled=!chosen || !level.value || !level.checkValidity();
+ $('#alice-bind').disabled=aliceBindingPending || $('#alice-apply').disabled;
+ $('#alice-unbind').disabled=aliceBindingPending;
+}
+function openAlice(scene) {
+ aliceScene=scene;
+ aliceBindingPending=false;
+ alicePickerStarted=false;
+ $('#alice-title').textContent=scene ? 'Лампа сцены «'+scene.name+'»' : ui('Управление лампами','Lamp controls');
+ const binding=scene?.aliceLamp;
+ const stale=scene?.aliceLampStale;
+ $('#alice-bound-lamp').textContent=stale ? 'Сцена изменилась. Лампа не будет участвовать, пока вы заново не сохраните привязку.' : binding ? 'Выбрана лампа «'+binding.label+'».' : '';
+ $('#alice-bound-lamp').hidden=!binding&&!stale;
+ $('#alice-unbind').hidden=!binding&&!stale;
+ $('#alice-reconfigure').hidden=!stale||!state.native;
+ $('#alice-direct-actions').hidden=Boolean(scene);
+ $('#alice-scene-actions').hidden=!scene;
+ $('#alice-lamp').value='';
+ $('#alice-brightness').value=String(binding?.brightness??40);
+ $('#alice-allow-power').checked=binding?.allowPowerOn??false;
+ $('#alice-dialog').showModal();
+ if(stale)receiveAlice({state:{busy:false,lamps:[],needsLogin:false,message:''}});
+ else startAlicePicker();
+}
+function startAlicePicker() {
+ if(alicePickerStarted)return;
+ alicePickerStarted=true;
+ $('#alice-reconfigure').hidden=true;
+ receiveAlice({state:{busy:true,lamps:[],needsLogin:true,message:'Проверяем вход…'}});
+ aliceRequest('open');
+}
+function configureAliceBinding(selection) {
+ if(!aliceScene||aliceBindingPending)return;
+ if(!send({op:'configure_scene_lamp',id:aliceScene.id,selection}))return;
+ aliceBindingPending=true;
+ aliceSelection();
+}
+function receiveAliceBinding({id,error}) {
+ if(!error&&clearSceneLamp(id))syncControls();
+ if(!aliceScene||aliceScene.id!==id)return;
+ aliceBindingPending=false;
+ if(error){$('#alice-status').textContent=error;aliceSelection();return;}
+ $('#alice-dialog').close();
 }
 function receiveAlice(message) {
  const dialog=$('#alice-dialog');
@@ -1020,10 +1108,13 @@ function receiveAlice(message) {
 $('#alice-dialog')?.addEventListener('close',()=>{
  clearTimeout(aliceTimer);
  aliceState=undefined;
+ aliceScene=undefined;
+ aliceBindingPending=false;
  $('#alice-lamp').value='';
  $('#alice-choice').hidden=true;
  $('#alice-remember').checked=false;
- aliceRequest('cancel');
+ if(alicePickerStarted)aliceRequest('cancel');
+ alicePickerStarted=false;
 });
 $('#alice-lamp')?.addEventListener('change',aliceSelection);
 $('#alice-brightness')?.addEventListener('input',aliceSelection);
@@ -1050,6 +1141,7 @@ document.addEventListener('click',event=>{
  if(b.dataset.preview!==undefined){const entry=state?.library.find(e=>e.id===b.dataset.preview);if(entry)previewLibraryEntry(entry);return;}
  if(b.dataset.edit){const entry=state.library.find(e=>e.id===b.dataset.edit);if(entry)openEntry(entry);return;}
  if(b.dataset.apply){const entry=state.library.find(e=>e.id===b.dataset.apply);if(entry)activateLibraryEntry(entry);return;}
+ if(b.dataset.aliceScene){const entry=state.library.find(e=>e.id===b.dataset.aliceScene);if(entry&&!entry.builtIn)openAlice(entry);return;}
  if(b.dataset.remove){const entry=state.library.find(e=>e.id===b.dataset.remove);if(entry&&!entry.builtIn){dialogReturn=focusKey();$('#remove-description').textContent=`Удалить сцену «${entry.name}» из профиля? Запущенный эффект продолжит работать.`;$('#remove-dialog').dataset.id=entry.id;$('#remove-dialog').showModal();$('#cancel-remove').focus();}return;}
  if(b.dataset.removeColor!==undefined){
   if(draft.colors.length>1){
@@ -1073,12 +1165,9 @@ document.addEventListener('click',event=>{
  }
  switch(b.dataset.action){
  case 'copy-output-status':void copyOutputStatus(b.dataset.copyOutput);break;
- case 'alice-open':
-  $('#alice-dialog').showModal();
-  receiveAlice({state:{busy:true,lamps:[],needsLogin:true,message:'Проверяем вход…'}});
-  aliceRequest('open');
-  break;
+ case 'alice-open':openAlice();break;
  case 'alice-close':$('#alice-dialog').close();break;
+ case 'alice-reconfigure':if(aliceScene?.aliceLampStale&&state.native)startAlicePicker();break;
  case 'alice-sign-in':
  case 'alice-retry':
  case 'alice-sign-out':
@@ -1089,15 +1178,21 @@ document.addEventListener('click',event=>{
   break;
  case 'alice-turn-on':
  case 'alice-turn-off':
+ case 'alice-bind':
  case 'alice-apply':{
   const ticket=aliceState?.ticket;
   if(!ticket||aliceState.busy||$('#alice-lamp').value==='')break;
   const lamp=Number($('#alice-lamp').value);
+  if(b.dataset.action==='alice-bind'){
+   configureAliceBinding({ticket,lamp,brightness:Number($('#alice-brightness').value),allow_power_on:$('#alice-allow-power').checked});
+   break;
+  }
   receiveAlice({state:{...aliceState,busy:true}});
   if(b.dataset.action!=='alice-apply')aliceRequest('power',{ticket,lamp,on:b.dataset.action==='alice-turn-on'});
   else aliceRequest('apply',{ticket,lamp,brightness:Number($('#alice-brightness').value)});
   break;
  }
+ case 'alice-unbind':configureAliceBinding(null);break;
  case 'preview-argb': {
   const index=Number(b.dataset.argbIndex);
   const controller=state?.unconfiguredArgb?.[index];
@@ -1117,7 +1212,7 @@ document.addEventListener('click',event=>{
  case 'retry-startup-discovery':if(!controlDisabled(b))send({op:'retry_startup_discovery'},true);break;
  case 'new':case 'clone':case 'rename':return nameDialog(b.dataset.action);
  case 'save-scene':return nameDialog('save');
- case 'apply-scene':send({op:'apply_scene',scene:clone(draft)},true);break;
+ case 'apply-scene':applyEditorScene();break;
  case 'open-placement':openPlacement();break;
  case 'focus-placement':document.getElementById('placement-'+$('#placement-picker')?.value)?.focus();break;
  case 'apply-placement':showPlacementLimit(false);send({op:'apply_document'},true);break;
@@ -1183,7 +1278,7 @@ document.addEventListener('change',event=>{
  if(input.dataset.sceneSelect){draft[input.dataset.sceneSelect]=input.value;if(input.dataset.sceneSelect==='noise_palette')render();editDraft();}
 });
 $('#play').onclick=()=>{if(!state)return;const on=!(state.groups.pc||state.groups.door);send({op:'groups',pc:on,door:on},true);};
-$('#footer-apply').onclick=()=>{if(draft&&!placementDirty())send({op:'apply_scene',scene:clone(draft)},true);};
+$('#footer-apply').onclick=applyEditorScene;
 $('#open-active').onclick=()=>changeView('editor');
 $('.brand').onclick=event=>{event.preventDefault();changeView('library');};
 $('#sun-icon').innerHTML=icon('sun');
