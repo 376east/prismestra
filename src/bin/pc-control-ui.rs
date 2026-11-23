@@ -41,33 +41,66 @@ fn main() -> std::process::ExitCode {
         }
     };
     #[cfg(windows)]
-    match result {
-        Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("{error}");
-            if installed_requested {
-                use windows_sys::Win32::UI::WindowsAndMessaging::{
-                    MB_ICONERROR, MB_OK, MessageBoxW,
-                };
-                let message = format!("Prismestra could not start.\n\n{error}\0")
-                    .encode_utf16()
-                    .collect::<Vec<_>>();
-                let title = "Prismestra\0".encode_utf16().collect::<Vec<_>>();
-                unsafe {
-                    MessageBoxW(
-                        std::ptr::null_mut(),
-                        message.as_ptr(),
-                        title.as_ptr(),
-                        MB_ICONERROR | MB_OK,
-                    );
-                }
+    {
+        finish_startup(result, installed_requested, |message| {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+            let message = format!("{message}\0").encode_utf16().collect::<Vec<_>>();
+            let title = "Prismestra\0".encode_utf16().collect::<Vec<_>>();
+            unsafe {
+                MessageBoxW(
+                    std::ptr::null_mut(),
+                    message.as_ptr(),
+                    title.as_ptr(),
+                    MB_ICONERROR | MB_OK,
+                );
             }
-            std::process::ExitCode::FAILURE
-        }
+        })
     }
     #[cfg(not(windows))]
     {
         eprintln!("Native UI currently requires Windows");
         std::process::ExitCode::FAILURE
+    }
+}
+
+#[cfg(windows)]
+fn finish_startup(
+    result: Result<(), String>,
+    installed_requested: bool,
+    show_error: impl FnOnce(&str),
+) -> std::process::ExitCode {
+    let Err(error) = result else {
+        return std::process::ExitCode::SUCCESS;
+    };
+    eprintln!("{error}");
+    if installed_requested {
+        show_error(&format!("Prismestra couldn’t start.\n\n{error}"));
+    }
+    std::process::ExitCode::FAILURE
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::process::ExitCode;
+
+    #[test]
+    fn installed_startup_has_one_dialog_with_diagnostic_detail() {
+        let mut displayed = Vec::new();
+        let outcome = finish_startup(Err("Fixture failure".into()), true, |message| {
+            displayed.push(message.to_owned());
+        });
+        assert_eq!(outcome, ExitCode::FAILURE);
+        assert_eq!(displayed, ["Prismestra couldn’t start.\n\nFixture failure"]);
+        assert_eq!(
+            finish_startup(Ok(()), true, |_| panic!("Unexpected startup dialog")),
+            ExitCode::SUCCESS,
+        );
+        assert_eq!(
+            finish_startup(Err("Standalone fixture".into()), false, |_| {
+                panic!("Unexpected second startup dialog")
+            }),
+            ExitCode::FAILURE,
+        );
     }
 }
