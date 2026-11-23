@@ -21,7 +21,9 @@ In **Devices and properties**, enable the route you want and disable the other o
 
 ## Alice pilot
 
-The WebView2 editor has a foreground Alice pilot under **Settings**. It uses the Prismestra Desktop Pilot OAuth registration with `iot:view`, `iot:control` and the redirect `http://127.0.0.1:45183/alice/callback`. Select **Sign in with Yandex ID** and confirm access in the system browser. Return to Prismestra, select one lamp from the room named «Кабинет», and explicitly apply one brightness value. The sign-in and selection never send a command. The session keeps the grant in memory and consumes it on the apply attempt. The pilot has no scene or scheduler integration. [Yandex OAuth](https://yandex.ru/dev/id/doc/ru/codes/code-url) · [Yandex Smart Home API](https://yandex.ru/dev/dialogs/smart-home/doc/ru/concepts/platform-protocol)
+The WebView2 editor has a foreground Alice pilot under **Settings → Lamp controls**. On the first visit, sign in with Yandex ID and confirm catalog and lamp access in the system browser. **Remember sign-in on this PC** stores the access token and expiry in Windows Credential Manager. Opening the dialog with a valid saved sign-in loads the catalog automatically. Sign in again when access expires or is revoked. **Sign out of Alice** clears the local grant. [Yandex OAuth](https://yandex.ru/dev/id/doc/ru/codes/code-url) · [Token revocation](https://yandex.ru/dev/id/doc/ru/tokens/token-invalidate)
+
+Select a supported lamp from any available room. The catalog displays the home, room and lamp names so that lamps with the same name can be told apart. Then turn the selected lamp on or off, or apply brightness to an already lit lamp. Opening the catalog and selecting a lamp only read data. The selection stays in place between commands. Every explicit command rechecks the selected lamp's ID, home and room and is sent once. A lost response requires checking the lamp before issuing another command. [Yandex Smart Home API](https://yandex.ru/dev/dialogs/smart-home/doc/ru/concepts/platform-protocol)
 
 ## Discovery boundaries
 

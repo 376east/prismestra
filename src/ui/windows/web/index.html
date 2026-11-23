@@ -12,7 +12,7 @@
 
 <dialog id="scene-file-dialog" aria-labelledby="scene-file-title">
   <h2 id="scene-file-title" data-en="Portable scene">Переносимая сцена</h2>
-  <p id="scene-file-scope" data-en="The file includes the name, canvas size, layers, and LCD and strip assignments. Device data and connections stay in the profile. Opening a file shows a preview.">В файл входят название, размер холста, слои и назначения LCD и ленты. Привязки и данные устройств остаются в профиле. Открытый файл показывается в предпросмотре.</p>
+  <p id="scene-file-scope" data-en="The file includes the name, canvas size, layers, and device display and strip assignments. Device data and connections stay in the profile. Opening a file shows a preview.">В файл входят название, размер холста, слои и назначения дисплея и ленты. Привязки и данные устройств остаются в профиле. Открытый файл показывается в предпросмотре.</p>
   <div class="scene-file-actions">
     <button class="button" id="scene-file-open" data-en="Open file…">Открыть файл…</button>
     <button class="button primary" id="scene-file-save" aria-describedby="scene-file-scope" data-en="Save file…">Сохранить файл…</button>
@@ -26,15 +26,15 @@
           <div id="scene-file-outline" aria-hidden="true" hidden></div>
         </div>
         <div class="scene-file-output-preview">
-          <div><h3>LCD</h3><canvas id="scene-file-lcd" aria-label="Область LCD" data-en-aria-label="LCD region" hidden></canvas><p id="scene-file-lcd-note"></p></div>
+          <div><h3 data-en="Device display">Дисплей устройства</h3><canvas id="scene-file-lcd" aria-label="Область дисплея" data-en-aria-label="Display region" hidden></canvas><p id="scene-file-lcd-note"></p></div>
           <div><h3 data-en="Strip">Лента</h3><canvas id="scene-file-strip" aria-label="Цвета кромок" data-en-aria-label="Edge colors" hidden></canvas><p id="scene-file-strip-note"></p></div>
         </div>
-        <button type="button" class="button" id="scene-file-lcd-layout-toggle" aria-expanded="false" aria-controls="scene-file-lcd-layout" hidden data-en="GIF and temperature">GIF и температура</button>
+        <button type="button" class="button" id="scene-file-lcd-layout-toggle" aria-expanded="false" aria-controls="scene-file-lcd-layout" hidden data-en="Display layout demo">Демо оформления дисплея</button>
         <div id="scene-file-lcd-layout" hidden>
-          <p data-en="Prismestra Player preview · 51 °C sample value">Эскиз Prismestra Player · 51 °C, тестовое значение</p>
+          <p id="scene-file-lcd-demo-note" data-en="Built-in animation and sample temperature. This demo uses no sensor data.">Встроенная анимация и условная температура. Данные датчиков здесь не используются.</p>
           <div id="scene-file-lcd-layout-stage">
-            <canvas id="scene-file-lcd-layout-canvas" aria-label="Предпросмотр GIF и температуры" data-en-aria-label="GIF and temperature preview"></canvas>
-            <button type="button" id="scene-file-lcd-layout-card" aria-label="Температурная карточка. Перемещение стрелками" data-en-aria-label="Temperature card. Use the arrow keys to move it." aria-describedby="scene-file-lcd-layout-status"></button>
+            <canvas id="scene-file-lcd-layout-canvas" aria-label="Демонстрационный кадр дисплея" data-en-aria-label="Demo display frame" aria-describedby="scene-file-lcd-demo-note"></canvas>
+            <button type="button" id="scene-file-lcd-layout-card" aria-label="Демонстрационная карточка температуры. Перемещение стрелками" data-en-aria-label="Demo temperature card. Use the arrow keys to move it." aria-describedby="scene-file-lcd-demo-note scene-file-lcd-layout-status"></button>
           </div>
           <p id="scene-file-lcd-layout-status" role="status"></p>
           <p data-en="The position is kept until this preview closes.">Позиция действует до закрытия эскиза.</p>
@@ -46,7 +46,7 @@
         <div id="scene-file-layers"></div>
         <button class="button" id="scene-file-add-color" data-en="Add color">Добавить цвет</button>
         <h3 data-en="Outputs">Выходы</h3>
-        <label for="scene-file-lcd-mode">LCD</label>
+        <label for="scene-file-lcd-mode" data-en="Device display">Дисплей устройства</label>
         <select id="scene-file-lcd-mode"><option value="off" data-en="Off">Выключен</option><option value="full" data-en="Full canvas">Весь холст</option><option value="crop" data-en="Canvas region">Область холста</option></select>
         <div class="scene-file-region" id="scene-file-region" hidden>
           <label><span data-en="Left, %">Слева, %</span> <input id="scene-file-x" type="number" min="0" max="99.99" step="0.01"></label>
@@ -92,16 +92,27 @@
 </dialog>
 <script src="output-map.js"></script>
 <dialog id="alice-dialog" aria-labelledby="alice-title">
-  <h2 id="alice-title" data-en="Alice · Office">Алиса · Кабинет</h2>
-  <button type="button" class="button" data-action="alice-sign-in" data-en="Sign in with Yandex ID">Войти через Яндекс ID</button>
-  <p data-en="Yandex requests access to list and control devices. Prismestra sends the command only to the light you select.">Яндекс запросит чтение каталога и управление. Из Prismestra команда уйдёт только выбранной лампе.</p>
+  <h2 id="alice-title" data-en="Lamp controls">Управление лампами</h2>
+  <div id="alice-login" hidden>
+    <label class="alice-remember"><input type="checkbox" id="alice-remember"> <span data-en="Stay signed in on this PC">Запомнить вход на этом ПК</span></label>
+    <button type="button" class="button" data-action="alice-sign-in" data-en="Sign in with Yandex ID">Войти через Яндекс ID</button>
+    <p data-en="Yandex requests access to list and control lights.">Яндекс запросит доступ к списку ламп и управлению светом.</p>
+  </div>
+  <div class="alice-actions">
+    <button type="button" class="button" data-action="alice-retry" hidden data-en="Retry connection">Повторить подключение</button>
+    <button type="button" class="button" data-action="alice-sign-out" hidden data-en="Sign out of Alice">Выйти из Алисы</button>
+  </div>
   <p id="alice-status" role="status" aria-live="polite"></p>
   <div id="alice-choice" hidden>
     <label for="alice-lamp" data-en="Light">Лампа</label>
-    <select id="alice-lamp"><option value="" data-en="Choose a light">Выберите лампу</option></select>
+    <select id="alice-lamp" class="native-target"><option value="" data-en="Choose a light">Выберите лампу</option></select>
     <label for="alice-brightness" data-en="Brightness, %">Яркость, %</label>
     <input id="alice-brightness" type="number" min="1" max="100" step="1" value="40">
-    <button type="button" class="button primary" id="alice-apply" data-action="alice-apply" disabled data-en="Set brightness once">Установить яркость один раз</button>
+    <div class="alice-actions">
+      <button type="button" class="button" id="alice-turn-on" data-action="alice-turn-on" disabled data-en="Turn on">Включить</button>
+      <button type="button" class="button" id="alice-turn-off" data-action="alice-turn-off" disabled data-en="Turn off">Выключить</button>
+      <button type="button" class="button primary" id="alice-apply" data-action="alice-apply" disabled data-en="Apply brightness">Применить яркость</button>
+    </div>
   </div>
   <div class="dialog-actions"><button type="button" class="button" data-action="alice-close" data-en="Close">Закрыть</button></div>
 </dialog>

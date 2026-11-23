@@ -339,6 +339,7 @@ mod tests {
 
     struct Fixture {
         tasks: RefCell<BTreeMap<String, Task>>,
+        fail_second_disable: bool,
         edit_during_failure: bool,
         restore_failure: Option<RestoreFailure>,
         writes: RefCell<Vec<(String, bool)>>,
@@ -379,7 +380,7 @@ mod tests {
                     _ => {}
                 }
             }
-            if snapshot.name == "second" && !enable {
+            if self.fail_second_disable && snapshot.name == "second" && !enable {
                 if self.edit_during_failure {
                     tasks.get_mut("first").unwrap().security = "different ACL".into();
                 }
@@ -388,6 +389,52 @@ mod tests {
                 (true, Ok(()))
             }
         }
+    }
+
+    #[test]
+    fn disables_both_recognized_roles_and_leaves_the_neighbour_untouched() {
+        let console = task("first");
+        let mut backend = task("second");
+        let backend_launch = backend.launch.as_mut().unwrap();
+        backend_launch.elevated = true;
+        *backend_launch.arguments.last_mut().unwrap() = "-BackendOnly".into();
+        let mut neighbour = task("foreign");
+        neighbour.launch.as_mut().unwrap().principal_sid = "S-1-5-21-1-2-3-1002".into();
+        let tasks = [console, backend, neighbour.clone()];
+        let prove = |task: &Task| recognize(task, SID, &shell(), |_| Some(hint()));
+        let owned: Vec<_> = tasks
+            .iter()
+            .filter_map(|task| {
+                prove(task).map(|hint| OwnedTask {
+                    task: task.clone(),
+                    hint,
+                })
+            })
+            .collect();
+        let fixture = Fixture {
+            tasks: RefCell::new(
+                tasks
+                    .into_iter()
+                    .map(|task| (task.name.clone(), task))
+                    .collect(),
+            ),
+            fail_second_disable: false,
+            edit_during_failure: false,
+            restore_failure: None,
+            writes: RefCell::new(Vec::new()),
+        };
+        let disabled = disable(&fixture, &owned, prove, || true, Path::new("safe.json")).unwrap();
+        assert_eq!(disabled, ["first", "second"]);
+        for entry in &owned {
+            let current = fixture.read(&entry.task.name).unwrap();
+            assert!(!current.enabled);
+            assert!(unchanged_definition(&current, &entry.task));
+        }
+        assert_eq!(fixture.read("foreign").unwrap(), neighbour);
+        assert_eq!(
+            *fixture.writes.borrow(),
+            [("first".into(), false), ("second".into(), false)]
+        );
     }
 
     #[test]
@@ -404,6 +451,7 @@ mod tests {
                         .map(|name| (name.into(), task(name)))
                         .collect(),
                 ),
+                fail_second_disable: true,
                 edit_during_failure: changed,
                 restore_failure: None,
                 writes: RefCell::new(Vec::new()),
@@ -419,7 +467,10 @@ mod tests {
             assert!(error.contains("safe.json"));
             assert_eq!(error.contains("Rollback needs attention"), changed);
             assert_eq!(fixture.read("first").unwrap().enabled, !changed);
-            assert!(fixture.read("second").unwrap().enabled);
+            assert_eq!(fixture.read("second").unwrap(), task("second"));
+            if !changed {
+                assert_eq!(fixture.read("first").unwrap(), task("first"));
+            }
             assert_eq!(fixture.read("foreign").unwrap(), task("foreign"));
             let writes = fixture.writes.borrow();
             assert_eq!(
@@ -452,6 +503,7 @@ mod tests {
                         .map(|name| (name.into(), task(name)))
                         .collect(),
                 ),
+                fail_second_disable: true,
                 edit_during_failure: false,
                 restore_failure: Some(failure),
                 writes: RefCell::new(Vec::new()),
@@ -503,6 +555,7 @@ mod tests {
                     .map(|name| (name.into(), task(name)))
                     .collect(),
             ),
+            fail_second_disable: true,
             edit_during_failure: false,
             restore_failure: None,
             writes: RefCell::new(Vec::new()),
