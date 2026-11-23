@@ -1229,6 +1229,7 @@ console.log('PASS: an unconfigured ARGB controller opens a local preview without
  evaluate('window.prismestraReceive(payload)');
  assert.equal(evaluate('view'),'editor');
  assert.equal(evaluate('selectedId'),created.id);
+ assert.equal(find('.scene-status').textContent,'Сохранено в библиотеку.');
  assert.equal(document.activeElement,find('#scene-effect'));
  assert.equal(commands.at(-1).origin.id,created.id);
  assert.equal(commands.slice(firstSave).some(command=>command.op==='apply_scene'),false);

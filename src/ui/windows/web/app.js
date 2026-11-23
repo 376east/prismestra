@@ -879,8 +879,8 @@ function checkDraftOrigin() {
  if(entry?.name===draftOrigin.name&&same(entry.scene,draft))setDraftOrigin(entry);
  else if(entry?.name!==draftOrigin.name||!same(entry.scene,draftOrigin.scene))setDraftOrigin({...draftOrigin,id:null});
 }
-function loadEntry(entry) {
- editorSceneResult=null;
+function loadEntry(entry, message=null) {
+ editorSceneResult=message?{scene:entry.scene,message}:null;
  draft=clone(entry.scene);
  setDraftOrigin({id:entry.builtIn?null:entry.id,name:entry.name,scene:entry.scene});
  if(view==='editor')render();else changeView('editor');
@@ -1033,8 +1033,9 @@ window.prismestraReceive = message => {
     const saved=state.library.find(item=>(id?item.id===id:!ids.includes(item.id))&&item.name===name&&same(item.scene,scene));
     if(saved){
      savedSceneRequest=null;
+     const savedMessage=ui('Сохранено в библиотеку.','Saved to your library.');
      if(editCreatedFrom===view){
-      loadEntry(saved);
+      loadEntry(saved,savedMessage);
       $('#scene-effect')?.focus();
       return;
      }
@@ -1042,7 +1043,7 @@ window.prismestraReceive = message => {
      requestPreview();
      const next=state.library.find(item=>item.id===nextId);
      if(next){loadEntry(next);return;}
-     editorSceneResult={scene:saved.scene,message:ui('Сохранено в библиотеку.','Saved to your library.')};
+     editorSceneResult={scene:saved.scene,message:savedMessage};
     }
    }
    checkDraftOrigin();
