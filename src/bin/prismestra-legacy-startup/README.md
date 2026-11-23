@@ -12,6 +12,8 @@ Keep the command line limited to the phase and the SID. Setup supplies the EXE p
 
 The helper exits 0 and prints one JSON object. `prepared` confirms the source hint, `disabled` confirms the named tasks and returns the receipt path, and `verified` means there was no active verified legacy task. `unchanged_*` records a deferral for an unverified original logon, ambiguous sources, unconfirmed import or insufficient protection of the task or root folder. A nonzero exit reports an operation failure on stderr and includes a protected receipt path when one was created. Capture both streams.
 
+With `unchanged_task_protection_required`, the `protection_block` field identifies the check as `scheduler_root` or `registered_task`. A deferral can follow successful profile import and leaves all tasks enabled as before.
+
 ## Ownership and rollback
 
 Prepare verifies the original SID in the task principal and its single enabled logon trigger, and checks the inbox action, argument list, launcher hash, release pointer and profile under the ordinary token. If the linked token is limited to Identification, the helper obtains the interactive desktop shell’s limited primary token only after matching the SID, session and logon LUID. A missing or mismatched desktop token defers retirement.

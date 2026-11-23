@@ -41,6 +41,8 @@ struct Report {
     unchanged_tasks: Vec<String>,
     disabled: Vec<String>,
     rollback: Option<std::path::PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protection_block: Option<ProtectionBlock>,
 }
 
 #[cfg(windows)]
@@ -52,8 +54,33 @@ impl Report {
             unchanged_tasks: Vec::new(),
             disabled: Vec::new(),
             rollback: None,
+            protection_block: None,
         }
     }
+}
+
+#[cfg(windows)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ProtectionBlock {
+    SchedulerRoot,
+    RegisteredTask,
+}
+
+#[cfg(windows)]
+fn protection_block<'a>(
+    root: Result<bool, String>,
+    tasks: impl IntoIterator<Item = &'a str>,
+) -> Option<ProtectionBlock> {
+    if !root.is_ok_and(|protected| protected) {
+        return Some(ProtectionBlock::SchedulerRoot);
+    }
+    tasks
+        .into_iter()
+        .any(|security| {
+            !native::protected_mutation(security, false).is_ok_and(|protected| protected)
+        })
+        .then_some(ProtectionBlock::RegisteredTask)
 }
 
 #[cfg(windows)]
@@ -149,12 +176,11 @@ fn run(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Report, Str
         return Ok(report);
     }
 
-    if !scheduler.protected_root().is_ok_and(|protected| protected)
-        || owned.iter().any(|entry| {
-            !native::protected_mutation(&entry.task.security, false)
-                .is_ok_and(|protected| protected)
-        })
-    {
+    report.protection_block = protection_block(
+        scheduler.protected_root(),
+        owned.iter().map(|entry| entry.task.security.as_str()),
+    );
+    if report.protection_block.is_some() {
         report.status = "unchanged_task_protection_required";
         return Ok(report);
     }
@@ -176,6 +202,43 @@ fn run(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Report, Str
     report.rollback = Some(receipt);
     report.status = "disabled";
     Ok(report)
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn attributes_task_retirement_deferral_to_the_guest_scheduler_root() {
+    const GUEST_ROOT: &str = concat!(
+        "O:SYG:SYD:PAI(A;CI;FA;;;BA)(A;OI;0x1f019f;;;BA)",
+        "(A;CI;FA;;;SY)(A;OI;0x1f019f;;;SY)",
+        "(A;CI;FW;;;AU)(A;CI;FW;;;NS)(A;CI;FW;;;LS)(A;OICIIO;FA;;;CO)",
+    );
+    const GUEST_TASK: &str = "O:BAG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)";
+    let tasks = [GUEST_TASK, GUEST_TASK];
+    let allowed_root = native::protected_mutation("O:SYD:(A;;FA;;;SY)(A;;FA;;;BA)", true);
+    assert_eq!(protection_block(allowed_root.clone(), tasks), None);
+    let mut report = Report::new("unchanged_task_protection_required");
+    report.protection_block = protection_block(native::protected_mutation(GUEST_ROOT, true), tasks);
+    assert_eq!(
+        report.protection_block,
+        Some(ProtectionBlock::SchedulerRoot)
+    );
+    let json = serde_json::to_value(report).unwrap();
+    assert_eq!(json["status"], "unchanged_task_protection_required");
+    assert_eq!(json["protection_block"], "scheduler_root");
+    assert_eq!(json["disabled"], serde_json::json!([]));
+    assert!(json["rollback"].is_null());
+
+    let task_with_write = "O:BAG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;FW;;;AU)";
+    assert_eq!(
+        protection_block(allowed_root, [GUEST_TASK, task_with_write]),
+        Some(ProtectionBlock::RegisteredTask)
+    );
+    assert!(
+        serde_json::to_value(Report::new("verified"))
+            .unwrap()
+            .get("protection_block")
+            .is_none()
+    );
 }
 
 #[cfg(all(test, windows))]
