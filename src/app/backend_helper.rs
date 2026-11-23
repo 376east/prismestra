@@ -306,7 +306,7 @@ impl Proxy {
             task_name,
             recovery_endpoint,
             polls.clone(),
-            move |name, stop| launch_task(name, stop, installed),
+            move |name, permission| launch_task(name, permission, installed),
         )
     }
 
@@ -316,7 +316,7 @@ impl Proxy {
         task_name: String,
         recovery_endpoint: Option<SocketAddr>,
         polls: SyncSender<StatusPoll>,
-        launcher: impl Fn(&str, &AtomicBool) -> Result<(), String> + Clone + Send + 'static,
+        launcher: impl Fn(&str, LaunchPermission<'_>) -> Result<(), String> + Clone + Send + 'static,
     ) -> Result<Self, String> {
         let client_lock = client_lock(state_dir)?;
         let parent = identity(std::process::id())?;
@@ -428,6 +428,26 @@ struct StatusPoll {
 
 type LaunchWorker = JoinHandle<Option<Result<(), String>>>;
 
+struct LaunchPermission<'a> {
+    stop: &'a AtomicBool,
+    restarting: &'a AtomicBool,
+}
+
+impl LaunchPermission<'_> {
+    fn allowed(&self) -> bool {
+        self.restarting.load(Ordering::SeqCst) && !self.stop.load(Ordering::SeqCst)
+    }
+
+    #[cfg(any(windows, test))]
+    fn submit<T>(&self, spawn: impl FnOnce() -> T) -> Option<T> {
+        // This is the dispatch boundary. After it, CreateProcess and the
+        // scheduler may deliver the request even if Pause or Exit arrives.
+        // helper_owner_at independently rechecks owner, cancel and pause
+        // before the installed action can start the backend manager.
+        self.allowed().then(spawn)
+    }
+}
+
 fn start_status_worker(
     mut read: impl FnMut(&Path, bool) -> Result<Option<Status>, String> + Send + 'static,
 ) -> Result<SyncSender<StatusPoll>, String> {
@@ -456,7 +476,7 @@ fn proxy_loop(
     request: &Request,
     output: &Mutex<Snapshot>,
     control: &ProxyControl,
-    launcher: impl Fn(&str, &AtomicBool) -> Result<(), String> + Clone + Send + 'static,
+    launcher: impl Fn(&str, LaunchPermission<'_>) -> Result<(), String> + Clone + Send + 'static,
     polls: &SyncSender<StatusPoll>,
 ) {
     let stop = &control.stop;
@@ -659,10 +679,14 @@ fn proxy_loop(
                         // The drain probe does not retain the client lock. An
                         // actual scheduler call retains it through completion.
                         let _lock = lock.or_else(|| reserve_lock.upgrade())?;
-                        if cancelled.load(Ordering::SeqCst) || !may_restart.load(Ordering::SeqCst) {
+                        let permission = LaunchPermission {
+                            stop: &cancelled,
+                            restarting: &may_restart,
+                        };
+                        if !permission.allowed() {
                             return reserve.is_none().then_some(Ok(()));
                         }
-                        Some(launcher(&task_name, &cancelled))
+                        Some(launcher(&task_name, permission))
                     }) {
                     Ok(worker) => {
                         launch = Some(worker);
@@ -1649,7 +1673,11 @@ fn client_lock(_: &Path) -> Result<File, String> {
 }
 
 #[cfg(windows)]
-fn launch_task(name: &str, stop: &AtomicBool, installed: bool) -> Result<(), String> {
+fn launch_task(
+    name: &str,
+    permission: LaunchPermission<'_>,
+    installed: bool,
+) -> Result<(), String> {
     use std::{
         os::windows::process::CommandExt,
         process::{Command, Stdio},
@@ -1692,21 +1720,26 @@ fn launch_task(name: &str, stop: &AtomicBool, installed: bool) -> Result<(), Str
     use std::os::windows::ffi::OsStringExt;
     let executable =
         PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])).join("schtasks.exe");
-    if stop.load(Ordering::SeqCst) {
-        report("launch_result", "cancelled_before_spawn", None);
-        return Err("Authorized backend task launch cancelled".into());
-    }
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(["/Run", "/TN", name])
         .creation_flags(0x0800_0000)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| {
-            report("launch_result", "spawn_failed", e.raw_os_error());
-            e.to_string()
-        })?;
+        .stderr(Stdio::null());
+    let Some(child) = permission.submit(|| command.spawn()) else {
+        let result = if permission.stop.load(Ordering::SeqCst) {
+            "cancelled_before_spawn"
+        } else {
+            "paused_before_spawn"
+        };
+        report("launch_result", result, None);
+        return Err("Authorized backend task launch cancelled or paused".into());
+    };
+    let mut child = child.map_err(|e| {
+        report("launch_result", "spawn_failed", e.raw_os_error());
+        e.to_string()
+    })?;
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         match child.try_wait() {
@@ -1726,7 +1759,7 @@ fn launch_task(name: &str, stop: &AtomicBool, installed: bool) -> Result<(), Str
             }
             Ok(None) => {}
         }
-        let cancelled = stop.load(Ordering::SeqCst);
+        let cancelled = permission.stop.load(Ordering::SeqCst);
         if cancelled || Instant::now() >= deadline {
             report(
                 "launch_result",
@@ -1745,7 +1778,7 @@ fn launch_task(name: &str, stop: &AtomicBool, installed: bool) -> Result<(), Str
     }
 }
 #[cfg(not(windows))]
-fn launch_task(_: &str, _: &AtomicBool, _: bool) -> Result<(), String> {
+fn launch_task(_: &str, _: LaunchPermission<'_>, _: bool) -> Result<(), String> {
     Err("Backend task requires Windows".into())
 }
 
@@ -2767,6 +2800,37 @@ mod tests {
         let _ = fs::remove_file(directory.join("backend-events.json"));
         fs::remove_dir(directory).unwrap();
     }
+    #[test]
+    fn task_dispatch_rechecks_pause_and_exit_after_preparation() {
+        for exit in [false, true] {
+            let stop = AtomicBool::new(false);
+            let restarting = AtomicBool::new(true);
+            let permission = LaunchPermission {
+                stop: &stop,
+                restarting: &restarting,
+            };
+            assert!(permission.allowed());
+            // The worker had passed its first check. Pause or Exit now
+            // arrives while it is preparing the command.
+            if exit {
+                stop.store(true, Ordering::SeqCst);
+            } else {
+                restarting.store(false, Ordering::SeqCst);
+            }
+            assert_eq!(
+                permission.submit(|| panic!("must not spawn schtasks")),
+                None::<()>
+            );
+        }
+        let stop = AtomicBool::new(false);
+        let restarting = AtomicBool::new(true);
+        let permission = LaunchPermission {
+            stop: &stop,
+            restarting: &restarting,
+        };
+        assert_eq!(permission.submit(|| 1), Some(1));
+    }
+
     #[cfg(windows)]
     #[test]
     fn installed_proxy_waits_for_outbox_before_requesting_a_launch() {
@@ -3208,7 +3272,7 @@ mod tests {
         })
         .unwrap();
         let launch_owner = owner_path.clone();
-        let launch = move |_: &str, _: &AtomicBool| {
+        let launch = move |_: &str, _: LaunchPermission<'_>| {
             let owner = read_json::<Request>(&launch_owner)?;
             launched.send(owner.nonce.clone()).unwrap();
             *active.lock().unwrap() = Some(owner);

@@ -101,7 +101,7 @@ impl RecoveryCredit {
 impl Generation {
     pub(super) fn has_drained(self, endpoint: SocketAddr) -> bool {
         self.drained_with(old_processes_absent, || {
-            super::super::managed_backend::listener_owner(endpoint)
+            super::super::managed_backend::reserve_listener_conflict(endpoint)
         })
     }
 

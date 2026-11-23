@@ -1107,6 +1107,38 @@ fn probe_sdk(endpoint: SocketAddr, cancelled: &impl Fn() -> bool) -> Result<(), 
 // closes the bind-to-spawn race: a foreign listener can never make us ready.
 #[cfg(windows)]
 pub fn listener_owner(endpoint: SocketAddr) -> Result<Option<u32>, String> {
+    query_listener(endpoint, false)
+}
+
+// Retry needs a free endpoint. A wildcard listener is a conflict, never
+// evidence that an OpenRGB child owns the exact address.
+#[cfg(windows)]
+pub(super) fn reserve_listener_conflict(endpoint: SocketAddr) -> Result<Option<u32>, String> {
+    reserve_listener_conflict_with(endpoint, query_listener)
+}
+
+#[cfg(windows)]
+fn reserve_listener_conflict_with(
+    endpoint: SocketAddr,
+    mut query: impl FnMut(SocketAddr, bool) -> Result<Option<u32>, String>,
+) -> Result<Option<u32>, String> {
+    let conflict = query(endpoint, true)?;
+    if let (None, SocketAddr::V4(v4)) = (conflict, endpoint) {
+        // The IPv6 table does not expose IPV6_V6ONLY. Treat a same-port
+        // IPv6 wildcard conservatively when retrying an IPv4 listener.
+        let mapped = SocketAddr::new(v4.ip().to_ipv6_mapped().into(), v4.port());
+        return query(mapped, true);
+    }
+    Ok(conflict)
+}
+
+#[cfg(not(windows))]
+pub(super) fn reserve_listener_conflict(_: SocketAddr) -> Result<Option<u32>, String> {
+    Err("Listener ownership requires Windows".into())
+}
+
+#[cfg(windows)]
+fn query_listener(endpoint: SocketAddr, accept_wildcard: bool) -> Result<Option<u32>, String> {
     #[link(name = "iphlpapi")]
     unsafe extern "system" {
         fn GetExtendedTcpTable(
@@ -1119,7 +1151,7 @@ pub fn listener_owner(endpoint: SocketAddr) -> Result<Option<u32>, String> {
         ) -> u32;
     }
     let family = if endpoint.is_ipv4() { 2 } else { 23 };
-    read_listener_owner(endpoint, |buffer, size| {
+    read_listener_owner(endpoint, accept_wildcard, |buffer, size| {
         let table = if buffer.is_empty() {
             std::ptr::null_mut()
         } else {
@@ -1133,6 +1165,7 @@ pub fn listener_owner(endpoint: SocketAddr) -> Result<Option<u32>, String> {
 #[cfg(windows)]
 fn read_listener_owner(
     endpoint: SocketAddr,
+    accept_wildcard: bool,
     mut read_table: impl FnMut(&mut [u32], &mut u32) -> u32,
 ) -> Result<Option<u32>, String> {
     use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
@@ -1165,7 +1198,7 @@ fn read_listener_owner(
                 let bytes = unsafe {
                     std::slice::from_raw_parts(aligned.as_ptr().cast::<u8>(), size as usize)
                 };
-                return parse_listener_owner(endpoint, bytes);
+                return parse_listener_owner(endpoint, accept_wildcard, bytes);
             }
             ERROR_INSUFFICIENT_BUFFER if size > capacity && size <= MAX_TABLE_SIZE => {}
             ERROR_INSUFFICIENT_BUFFER => {
@@ -1184,7 +1217,11 @@ fn read_listener_owner(
 }
 
 #[cfg(windows)]
-fn parse_listener_owner(endpoint: SocketAddr, bytes: &[u8]) -> Result<Option<u32>, String> {
+fn parse_listener_owner(
+    endpoint: SocketAddr,
+    accept_wildcard: bool,
+    bytes: &[u8],
+) -> Result<Option<u32>, String> {
     let Some(count) = bytes.get(..4) else {
         return Err("Invalid OpenRGB listener ownership table".into());
     };
@@ -1209,7 +1246,11 @@ fn parse_listener_owner(endpoint: SocketAddr, bytes: &[u8]) -> Result<Option<u32
                     52,
                 )
             };
-        let matches = address == endpoint.ip()
+        let wildcard = accept_wildcard
+            && (address.is_unspecified()
+                || (endpoint.ip().to_canonical().is_ipv4()
+                    && address.to_canonical().is_unspecified()));
+        let matches = (address == endpoint.ip() || wildcard)
             && u16::from_be_bytes(row[port_offset..port_offset + 2].try_into().unwrap())
                 == endpoint.port();
         matches.then(|| u32::from_ne_bytes(row[pid_offset..pid_offset + 4].try_into().unwrap()))
@@ -1571,12 +1612,88 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    fn reserve_detects_wildcards_without_claiming_exact_ownership() {
+        fn table_for(address: SocketAddr) -> Vec<u8> {
+            let mut table = vec![0u8; if address.is_ipv4() { 28 } else { 60 }];
+            table[..4].copy_from_slice(&1u32.to_ne_bytes());
+            let (port, pid) = match address.ip() {
+                std::net::IpAddr::V4(ip) => {
+                    table[8..12].copy_from_slice(&ip.octets());
+                    (12, 24)
+                }
+                std::net::IpAddr::V6(ip) => {
+                    table[4..20].copy_from_slice(&ip.octets());
+                    (24, 56)
+                }
+            };
+            table[port..port + 2].copy_from_slice(&address.port().to_be_bytes());
+            table[pid..pid + 4].copy_from_slice(&42u32.to_ne_bytes());
+            table
+        }
+
+        for (endpoint, wildcard) in [
+            ("127.0.0.1:6742", "0.0.0.0:6742"),
+            ("[::1]:6742", "[::]:6742"),
+        ] {
+            let endpoint = endpoint.parse().unwrap();
+            let mut wildcard: SocketAddr = wildcard.parse().unwrap();
+            assert_eq!(
+                parse_listener_owner(endpoint, false, &table_for(wildcard)),
+                Ok(None)
+            );
+            assert_eq!(
+                parse_listener_owner(endpoint, true, &table_for(wildcard)),
+                Ok(Some(42))
+            );
+            wildcard.set_port(6743);
+            assert_eq!(
+                parse_listener_owner(endpoint, true, &table_for(wildcard)),
+                Ok(None)
+            );
+            assert_eq!(
+                parse_listener_owner(endpoint, false, &table_for(endpoint)),
+                Ok(Some(42))
+            );
+        }
+        let endpoint = "127.0.0.1:6742".parse().unwrap();
+        let unrelated = table_for("192.0.2.1:6742".parse().unwrap());
+        assert_eq!(parse_listener_owner(endpoint, true, &unrelated), Ok(None));
+        for address in [
+            "[::]:6742",
+            "[::ffff:0.0.0.0]:6742",
+            "[::ffff:127.0.0.1]:6742",
+        ] {
+            let ipv6 = table_for(address.parse().unwrap());
+            assert_eq!(
+                reserve_listener_conflict_with(endpoint, |target, wildcard| {
+                    if target.is_ipv4() {
+                        return Ok(None);
+                    }
+                    parse_listener_owner(target, wildcard, &ipv6)
+                }),
+                Ok(Some(42))
+            );
+        }
+        assert!(
+            reserve_listener_conflict_with(endpoint, |target, _| {
+                if target.is_ipv4() {
+                    Ok(None)
+                } else {
+                    Err("IPv6 table unavailable".into())
+                }
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
     fn listener_table_retries_growth_and_checks_the_returned_size() {
         use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
 
         let endpoint = "127.0.0.1:6742".parse().unwrap();
         let mut calls = 0;
-        let owner = read_listener_owner(endpoint, |buffer, size| {
+        let owner = read_listener_owner(endpoint, false, |buffer, size| {
             calls += 1;
             match calls {
                 1 => {
@@ -1611,7 +1728,7 @@ mod tests {
             (5, 4),
         ] {
             let mut reads = 0;
-            let result = read_listener_owner(endpoint, |buffer, returned| {
+            let result = read_listener_owner(endpoint, false, |buffer, returned| {
                 if buffer.is_empty() {
                     *returned = 4;
                     return ERROR_INSUFFICIENT_BUFFER;
@@ -1625,7 +1742,7 @@ mod tests {
         }
 
         let mut reads = 0;
-        let result = read_listener_owner(endpoint, |buffer, size| {
+        let result = read_listener_owner(endpoint, false, |buffer, size| {
             reads += usize::from(!buffer.is_empty());
             *size += 4;
             ERROR_INSUFFICIENT_BUFFER
