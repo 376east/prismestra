@@ -230,6 +230,13 @@ class ProcessExitCaptureTests(unittest.TestCase):
         observer.handle_pid = Mock(return_value=2)
         observer.wait_process = Mock(side_effect=wait)
 
+        ticks = iter((120, 145))
+
+        def clock_tick(target):
+            target._obj.dwLowDateTime = next(ticks)
+
+        observer.precise_utc = Mock(side_effect=clock_tick)
+
         def copy_image(_handle, _flags, name, _size):
             name.value = image or self.image
             return True
@@ -246,8 +253,12 @@ class ProcessExitCaptureTests(unittest.TestCase):
     def test_waits_on_the_same_live_handle_and_does_not_fill_a_missing_stop(self):
         observer = self.fake_observer()
         armed = Mock()
-        with patch('capture_console_windows.utc_filetime', side_effect=('120', '145')):
+        # A coarse Python clock returning 139 would precede the kernel exit at
+        # 140 even though the same live handle signaled. Bypass that clock.
+        with patch('capture_console_windows.utc_filetime', side_effect=('120', '139')) as clock:
             receipt = observer.watch_process_exit(2, '108', self.image, 3, armed)
+        clock.assert_not_called()
+        self.assertEqual(observer.precise_utc.call_count, 2)
         armed.assert_called_once_with()
         observer.open_process.assert_called_once()
         observer.close_handle.assert_called_once_with(42)

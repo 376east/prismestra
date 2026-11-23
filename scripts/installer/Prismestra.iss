@@ -32,7 +32,7 @@ SetupLogging=yes
 Name: "autostart"; Description: "Start Prismestra when I sign in"
 Name: "launch"; Description: "Open Prismestra after installation"
 #ifdef IncludePawnIO
-Name: "pawnio"; Description: "Enable supported RAM and motherboard lighting (shared PawnIO driver)"
+Name: "pawnio"; Description: "Install the shared PawnIO driver if missing (for supported PC lighting)"
 #endif
 
 [Files]

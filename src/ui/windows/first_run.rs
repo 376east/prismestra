@@ -50,8 +50,11 @@ pub(super) struct Startup {
     phase: &'static str,
     report: Vec<u8>,
     reported_phase: &'static str,
+    status_label: Option<(&'static str, String)>,
     discovery_issues: Vec<String>,
+    unconfigured_argb: Vec<crate::transport::openrgb::UnconfiguredArgb>,
     unknown_openrgb_controller: bool,
+    completed_empty_pass: bool,
     enabled: bool,
     initialized: bool,
     handover: Option<JoinHandle<Result<(), String>>>,
@@ -76,8 +79,11 @@ impl Startup {
             phase: if enabled { "starting" } else { "disabled" },
             report: Vec::new(),
             reported_phase: "",
+            status_label: None,
             discovery_issues: Vec::new(),
+            unconfigured_argb: Vec::new(),
             unknown_openrgb_controller: false,
+            completed_empty_pass: false,
             enabled,
             initialized: false,
             handover: None,
@@ -97,6 +103,7 @@ impl Startup {
     }
     pub(super) fn cancel(&mut self) {
         self.enabled = false;
+        self.unconfigured_argb.clear();
         self.unknown_openrgb_controller = false;
         self.phase = "cancelled";
         self.worker.cancel();
@@ -138,6 +145,7 @@ impl Startup {
             self.attempts = 0;
             self.search_limit = 1;
             self.next = now;
+            self.completed_empty_pass = false;
         }
         self.enabled = true;
         self.phase = "discovering";
@@ -150,6 +158,7 @@ impl Startup {
     }
 
     fn record_search_started(&mut self) {
+        self.unconfigured_argb.clear();
         if self.manual_between_passes {
             self.manual_started_since_automatic = true;
             self.early_manual_starts = self.early_manual_starts.saturating_add(1);
@@ -158,6 +167,21 @@ impl Startup {
             self.attempts += 1;
         }
         self.phase = "discovering";
+    }
+
+    fn record_search_result(&mut self, empty: bool, now: Instant) {
+        self.phase = "discovered";
+        self.completed_empty_pass = empty;
+        self.schedule_next_search(now);
+    }
+
+    fn empty_search_result(&self) -> Option<&'static str> {
+        match self.phase {
+            "complete" => Some("complete"),
+            "discovered" if self.attempts >= self.search_limit => Some("complete"),
+            _ if self.enabled && self.completed_empty_pass => Some("continuing"),
+            _ => None,
+        }
     }
 
     fn schedule_next_search(&mut self, now: Instant) {
@@ -182,6 +206,40 @@ impl Startup {
 }
 
 impl App {
+    pub(super) fn startup_unconfigured_argb(
+        &self,
+    ) -> &[crate::transport::openrgb::UnconfiguredArgb] {
+        if self.path != self.first_run.path || self.context_revision != self.first_run.context {
+            return &[];
+        }
+        &self.first_run.unconfigured_argb
+    }
+
+    fn set_first_run_status(&mut self, label: &'static str, message: impl Into<String>) {
+        self.status = message.into();
+        self.first_run.status_label = Some((label, self.status.clone()));
+    }
+
+    pub(super) fn first_run_status_label(&self) -> Option<&'static str> {
+        // Other routes also write the shared status line.
+        self.first_run
+            .status_label
+            .as_ref()
+            .filter(|(_, message)| message == &self.status)
+            .map(|(label, _)| *label)
+    }
+
+    pub(super) fn startup_empty_search_result(&self) -> Option<&'static str> {
+        if self.path != self.first_run.path
+            || self.context_revision != self.first_run.context
+            || !self.runtime.document().lighting.setup.devices.is_empty()
+            || !self.first_run.unconfigured_argb.is_empty()
+        {
+            return None;
+        }
+        self.first_run.empty_search_result()
+    }
+
     pub(super) fn startup_discovery_unknown_controller(&self) -> bool {
         self.first_run.unknown_openrgb_controller
             && self.path == self.first_run.path
@@ -214,7 +272,7 @@ impl App {
             self.context_revision,
             Instant::now(),
         );
-        self.status = "Ищу поддерживаемые устройства…".into();
+        self.set_first_run_status("searching", "Ищу поддерживаемые устройства…");
         Ok(())
     }
 
@@ -253,7 +311,7 @@ impl App {
             Err(error) => {
                 self.first_run.cancel();
                 self.first_run.phase = "error";
-                self.status = format!("Автонастройка: {error}");
+                self.set_first_run_status("failed", format!("Автонастройка: {error}"));
                 true
             }
         };
@@ -322,7 +380,10 @@ impl App {
                     })
                     .map_err(|e| e.to_string())?,
             );
-            self.status = "Восстанавливаю сохранённую сцену и подключения…".into();
+            self.set_first_run_status(
+                "restoring",
+                "Восстанавливаю сохранённую сцену и подключения…",
+            );
             return Ok(true);
         }
         if let Some(job) = &self.first_run.handover {
@@ -346,9 +407,10 @@ impl App {
                 || !self.connections.scan.is_idle()
             {
                 self.first_run.cancel();
-                self.status =
-                    "Автовключение отменено: вы изменили профиль. Правки остаются в редакторе."
-                        .into();
+                self.set_first_run_status(
+                    "cancelled",
+                    "Автовключение отменено: вы изменили профиль. Правки остаются в редакторе.",
+                );
                 return Ok(true);
             }
             // The bootstrap deliberately loaded migrated live sessions in preview until drain.
@@ -388,9 +450,10 @@ impl App {
             if !self.source_scope_inputs()?.1.is_empty() {
                 self.start_bound_sources()?;
             }
-            self.status =
-                "Сохранённые подключения восстановлены. Статусы передачи доступны в устройствах."
-                    .into();
+            self.set_first_run_status(
+                "restored",
+                "Сохранённые подключения восстановлены. Статусы передачи доступны в устройствах.",
+            );
             return Ok(true);
         }
         if self.first_run.applying.is_none()
@@ -404,7 +467,10 @@ impl App {
                 || !self.connections.scan.is_idle())
         {
             self.first_run.cancel();
-            self.status = "Автонастройка остановлена: сохраняю ваши текущие правки.".into();
+            self.set_first_run_status(
+                "cancelled",
+                "Автонастройка остановлена: сохраняю ваши текущие правки.",
+            );
             return Ok(true);
         }
         if let Some(pending) = &self.first_run.applying {
@@ -417,7 +483,7 @@ impl App {
                     self.dirty = true;
                 }
                 self.first_run.cancel();
-                self.status = "Автонастройка остановлена. Ваши правки остаются в редакторе; профиль не перезаписан.".into();
+                self.set_first_run_status("cancelled", "Автонастройка остановлена. Ваши правки остаются в редакторе; профиль не перезаписан.");
                 return Ok(true);
             }
             if self.runtime.pending_configuration() {
@@ -466,7 +532,7 @@ impl App {
                 self.open_connections()?;
             }
             self.refresh_connections();
-            self.status = format!(
+            self.set_first_run_status("applied", format!(
                 "На карте устройств: {}. Карта и сцена сохранены; проверяйте статусы передачи.{}",
                 self.runtime.document().lighting.setup.devices.len(),
                 if applied.plan.issues.is_empty() {
@@ -474,7 +540,7 @@ impl App {
                 } else {
                     format!(" {}", applied.plan.issues.join("; "))
                 }
-            );
+            ));
             self.first_run.schedule_next_search(Instant::now());
             return Ok(true);
         }
@@ -485,11 +551,17 @@ impl App {
             if !plan.changed {
                 if !self.first_run.worker.is_idle() {
                     self.first_run.phase = "discovering";
-                    self.status = "Ищу остальные поддерживаемые устройства…".into();
+                    self.set_first_run_status(
+                        "searchingMore",
+                        "Ищу остальные поддерживаемые устройства…",
+                    );
                     return Ok(true);
                 }
-                self.first_run.phase = "discovered";
-                self.status = if self.runtime.document().lighting.setup.devices.is_empty() {
+                let empty = self.runtime.document().lighting.setup.devices.is_empty();
+                let needs_argb_setup = empty && !self.first_run.unconfigured_argb.is_empty();
+                let message = if needs_argb_setup {
+                    "Найдены контроллеры ARGB без настроенных LED. Откройте «Каналы ARGB» на вкладке «Устройства».".into()
+                } else if empty {
                     format!(
                         "Поддерживаемые устройства пока не найдены. {}",
                         plan.issues.join("; ")
@@ -499,7 +571,15 @@ impl App {
                 } else {
                     format!("Поиск устройств: {}", plan.issues.join("; "))
                 };
-                self.first_run.schedule_next_search(Instant::now());
+                let label = if needs_argb_setup {
+                    "unconfiguredArgb"
+                } else if empty {
+                    "empty"
+                } else {
+                    "noNewDevices"
+                };
+                self.set_first_run_status(label, message);
+                self.first_run.record_search_result(empty, Instant::now());
                 return Ok(true);
             }
             let outputs = plan.local.prepare(&plan.document, &self.asset_root)?;
@@ -521,11 +601,14 @@ impl App {
                 context: self.context_revision,
             });
             self.first_run.phase = "applying";
-            self.status = "Устройства найдены. Подключаю к общей сцене…".into();
+            self.set_first_run_status("applying", "Устройства найдены. Подключаю к общей сцене…");
             return Ok(true);
         }
         let endpoint = "127.0.0.1:17422".parse().unwrap();
         if let Some(inventory) = self.first_run.worker.poll_inventory() {
+            self.first_run
+                .unconfigured_argb
+                .clone_from(&inventory.unconfigured_argb);
             let local = self
                 .native_lighting
                 .clone()
@@ -547,10 +630,13 @@ impl App {
             return Ok(false);
         }
         if self.first_run.complete_search() {
-            self.status = format!(
-                "Автопоиск завершён. Устройств на карте: {}. {}",
-                self.runtime.document().lighting.setup.devices.len(),
-                self.first_run.discovery_issues.join("; ")
+            self.set_first_run_status(
+                "complete",
+                format!(
+                    "Автопоиск завершён. Устройств на карте: {}. {}",
+                    self.runtime.document().lighting.setup.devices.len(),
+                    self.first_run.discovery_issues.join("; ")
+                ),
             );
             return Ok(true);
         }
@@ -572,7 +658,10 @@ impl App {
             .worker
             .start(endpoint, guard, local, progressive)?;
         self.first_run.record_search_started();
-        self.status = "Ищу поддерживаемые устройства. Сцена включится автоматически…".into();
+        self.set_first_run_status(
+            "searching",
+            "Ищу поддерживаемые устройства. Сцена включится автоматически…",
+        );
         Ok(true)
     }
 }
@@ -581,6 +670,42 @@ impl App {
 mod tests {
     use super::*;
     use crate::devices::Driver;
+
+    #[test]
+    fn empty_result_is_visible_before_the_automatic_search_finishes() {
+        let mut startup = Startup::new(true);
+        startup.initialized = true;
+        let start = startup.next;
+        // Model the empty SDK inventory window, without sleeping or opening adapters.
+        let probe_time = Duration::from_secs(6);
+        let mut pass_start = start;
+
+        assert_eq!(startup.empty_search_result(), None);
+        for attempt in 1..=STARTUP_SEARCHES {
+            assert!(startup.search_due(pass_start));
+            startup.record_search_started();
+            assert_eq!(startup.attempts, attempt);
+            assert_eq!(
+                startup.empty_search_result(),
+                (attempt > 1).then_some("continuing"),
+                "a later in-flight pass keeps the earlier empty observation"
+            );
+            let finished = pass_start + probe_time;
+            startup.record_search_result(true, finished);
+            if attempt < STARTUP_SEARCHES {
+                assert_eq!(startup.empty_search_result(), Some("continuing"));
+                assert!(startup.can_retry_search(finished));
+                assert!(!startup.complete_search());
+                pass_start = finished + STARTUP_SEARCH_INTERVAL;
+                assert!(!startup.search_due(pass_start - Duration::from_millis(1)));
+            } else {
+                assert_eq!(startup.empty_search_result(), Some("complete"));
+                assert!(startup.complete_search());
+                assert!(startup.can_retry_search(finished));
+                assert_eq!(finished - start, Duration::from_secs(78));
+            }
+        }
+    }
 
     #[test]
     fn early_click_is_admitted_when_the_automatic_pass_is_due_but_has_not_started() {
@@ -626,14 +751,14 @@ mod tests {
         let first_finished = startup.next + Duration::from_secs(6);
         startup.initialized = true;
         startup.record_search_started();
-        startup.phase = "discovered";
-        startup.schedule_next_search(first_finished);
+        startup.record_search_result(true, first_finished);
         let second_automatic = first_finished + Duration::from_secs(30);
 
         assert!(startup.can_retry_search(first_finished));
         assert!(startup.can_retry_search(second_automatic));
         assert!(!startup.search_due(second_automatic - Duration::from_millis(1)));
         startup.retry_search(&document, &profile, 1, first_finished);
+        assert_eq!(startup.empty_search_result(), Some("continuing"));
         assert!(!startup.can_retry_search(first_finished));
         assert!(startup.search_due(first_finished));
         startup.record_search_started();

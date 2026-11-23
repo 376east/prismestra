@@ -97,7 +97,7 @@ fn controller_layout(
         effects_only,
         zone_layout,
         mode,
-        None,
+        &[],
     )
 }
 
@@ -108,7 +108,7 @@ fn controller_layout_with_manual_zone(
     effects_only: bool,
     zone_layout: Option<&[(&str, u32)]>,
     mode: &str,
-    manual_zone: Option<(usize, u32)>,
+    manual_zones: &[(usize, u32)],
 ) -> Vec<u8> {
     let mut b = vec![0; 4];
     u32v(&mut b, if future { 99 } else { 14 });
@@ -145,9 +145,9 @@ fn controller_layout_with_manual_zone(
     let mut outputs = 0;
     for (zone, matrix) in matrices.iter().enumerate() {
         let (name, count) = zone_layout.map_or(("Zone", 2), |layout| layout[zone]);
-        let manual_max = manual_zone
-            .filter(|(index, _)| *index == zone)
-            .map(|(_, max)| max);
+        let manual_max = manual_zones
+            .iter()
+            .find_map(|&(index, max)| (index == zone).then_some(max));
         outputs += count;
         string(&mut b, name);
         for value in [
@@ -599,6 +599,13 @@ fn matrix_server(payloads: Vec<Vec<u8>>) -> (SocketAddr, Captured, thread::JoinH
 fn matrix_server_sessions(
     sessions: Vec<Vec<Vec<u8>>>,
 ) -> (SocketAddr, Captured, thread::JoinHandle<()>) {
+    matrix_server_with_controllers(&[7], sessions)
+}
+
+fn matrix_server_with_controllers(
+    controller_ids: &'static [u32],
+    sessions: Vec<Vec<Vec<u8>>>,
+) -> (SocketAddr, Captured, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let calls: Captured = Arc::new(Mutex::new(vec![]));
@@ -608,14 +615,19 @@ fn matrix_server_sessions(
             for payloads in sessions {
                 let (s, _) = listener.accept().unwrap();
                 let saved = saved.clone();
-                scope.spawn(move || serve_matrix_session(s, payloads, &saved));
+                scope.spawn(move || serve_matrix_session(s, controller_ids, payloads, &saved));
             }
         });
     });
     (addr, calls, h)
 }
 
-fn serve_matrix_session(mut s: TcpStream, payloads: Vec<Vec<u8>>, saved: &Captured) {
+fn serve_matrix_session(
+    mut s: TcpStream,
+    controller_ids: &[u32],
+    payloads: Vec<Vec<u8>>,
+    saved: &Captured,
+) {
     s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
     let mut descriptors = payloads.into_iter();
     while let Some((device, id, body)) = read(&mut s) {
@@ -625,8 +637,10 @@ fn serve_matrix_session(mut s: TcpStream, payloads: Vec<Vec<u8>>, saved: &Captur
             52 => packet(&mut s, device, 53, &1u32.to_le_bytes()),
             0 => {
                 let mut ids = vec![];
-                u32v(&mut ids, 1);
-                u32v(&mut ids, 7);
+                u32v(&mut ids, controller_ids.len() as u32);
+                for &id in controller_ids {
+                    u32v(&mut ids, id);
+                }
                 packet(&mut s, device, id, &ids);
             }
             1 => packet(
@@ -734,7 +748,7 @@ fn argb_inventory_reads_empty_manual_and_fixed_zones_without_writes() {
         false,
         Some(&[("ARGB 1/3", 0), ("Fixed", 2)]),
         "Direct",
-        Some((0, 64)),
+        &[(0, 64)],
     );
     let (endpoint, calls, server) = matrix_server(vec![payload.clone(), payload]);
     let mut session = OpenRgbSession::connect(endpoint, deadline(), &|| false).unwrap();
@@ -767,6 +781,84 @@ fn argb_inventory_reads_empty_manual_and_fixed_zones_without_writes() {
             .iter()
             .all(|(_, id, _)| matches!(id, 0 | 1 | 40 | 52))
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn discovery_previews_zero_led_argb_without_applying_a_binding() {
+    use crate::app::{
+        device_setup,
+        lighting_bindings::discovery::{Target, openrgb_factory},
+    };
+
+    let payload = controller_layout_with_manual_zone(
+        "EMPTY-ARGB",
+        false,
+        &[None, None],
+        false,
+        Some(&[("Header A", 0), ("Header B", 0)]),
+        "Direct",
+        &[(0, 64), (1, 120)],
+    );
+    let target = Target::Device(
+        device_setup::preset("openrgb-controller")
+            .unwrap()
+            .device("fixture")
+            .unwrap(),
+    );
+    for duplicate in [false, true] {
+        let rows = if duplicate {
+            vec![payload.clone(); 2]
+        } else {
+            vec![payload.clone()]
+        };
+        let ids = if duplicate { &[7, 8][..] } else { &[7][..] };
+        let (endpoint, calls, server) = matrix_server_with_controllers(ids, vec![rows]);
+        let inventory = openrgb_factory(endpoint)(target.clone(), Default::default()).unwrap();
+        assert!(inventory.candidates.is_empty());
+        if duplicate {
+            assert!(inventory.unconfigured_argb.is_empty());
+            assert!(
+                inventory
+                    .issues
+                    .iter()
+                    .any(|issue| issue.contains("неоднозначная"))
+            );
+        } else {
+            let [preview] = &inventory.unconfigured_argb[..] else {
+                panic!("expected one read-only controller")
+            };
+            assert_eq!(preview.label, "Fixture");
+            let channels: Vec<_> = preview
+                .channels
+                .iter()
+                .map(|zone| {
+                    (
+                        zone.label.as_str(),
+                        zone.leds,
+                        zone.mode,
+                        zone.min,
+                        zone.max,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                channels,
+                [
+                    ("Header A", 0, "manual", 1, 64),
+                    ("Header B", 0, "manual", 1, 120)
+                ]
+            );
+        }
+        server.join().unwrap();
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(_, id, _)| matches!(id, 0 | 1 | 40 | 52))
+        );
+    }
 }
 
 #[test]

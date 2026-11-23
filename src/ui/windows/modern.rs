@@ -917,6 +917,8 @@ fn snapshot(state: &State) -> Result<Value, String> {
         .collect::<Vec<_>>();
     let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":library,"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
     value["state"]["startupDiscoveryRetry"] = json!(app.can_retry_startup_discovery());
+    value["state"]["startupEmptySearchResult"] = json!(app.startup_empty_search_result());
+    value["state"]["startupStatus"] = json!(app.first_run_status_label());
     value["state"]["startupDiscoveryUnknownController"] =
         json!(app.startup_discovery_unknown_controller());
     let effects = Effect::ALL
@@ -938,6 +940,7 @@ fn snapshot(state: &State) -> Result<Value, String> {
     value["state"]["captureAuthorized"] = json!(app.runtime.read(Runtime::capture_authorized));
     value["state"]["mapConnection"] = map_connection(app);
     value["state"]["argbDevice"] = json!(argb_channels::available(app));
+    value["state"]["unconfiguredArgb"] = json!(app.startup_unconfigured_argb());
     let schedule = &app.runtime.project().schedule;
     value["state"]["schedule"] = json!({"enabled":schedule.enabled,"paused":schedule.paused});
     Ok(value)
@@ -1420,18 +1423,16 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                     }
                     a.update_scene(scene, true)?;
                     if let Some(request) = request {
-                        let message = if a.native_lighting.is_none() {
-                            Some("Режим предпросмотра.")
-                        } else if !a.runtime.group_on(Target::Pc)
-                            && !a.runtime.group_on(Target::Door)
-                        {
-                            Some("Свет выключен. Включите его в панели воспроизведения.")
+                        let output = if a.native_lighting.is_none() {
+                            "preview_only"
+                        } else if a.runtime.read(Runtime::has_active_scene_rgb) {
+                            "active_rgb"
                         } else {
-                            None
+                            "no_active_rgb"
                         };
                         send(
                             state,
-                            &json!({"kind":"scene_activation","request":request,"status":"applied","message":message}),
+                            &json!({"kind":"scene_activation","request":request,"status":"applied","output":output}),
                         )?;
                     }
                 }
@@ -1596,6 +1597,7 @@ pub(super) fn maintain(state: &State) {
     for message in messages {
         let command = serde_json::from_str::<Command>(&message);
         let request = scene_activation_request(command.as_ref().ok(), &message);
+        let retries_discovery = matches!(&command, Ok(Command::RetryStartupDiscovery));
         let result = command
             .map_err(|e| format!("Некорректная команда интерфейса: {e}"))
             .and_then(|c| execute(state, c));
@@ -1605,6 +1607,8 @@ pub(super) fn maintain(state: &State) {
                 snapshot_needed = true;
                 let reply = if let Some(request) = request {
                     json!({"kind":"scene_activation","request":request,"status":"failed","message":message})
+                } else if retries_discovery {
+                    json!({"kind":"error","code":"startupDiscoveryRetry","message":message})
                 } else {
                     json!({"kind":"error","message":message})
                 };
@@ -1695,6 +1699,7 @@ pub(super) fn maintain(state: &State) {
             None
         };
         let mut value = json!({"kind":"status","state":{"scene":app.runtime.project().scene,"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error())}});
+        value["state"]["startupStatus"] = json!(app.first_run_status_label());
         if let Some(preview) = preview {
             value["state"]["preview"] = preview;
         }
@@ -1711,11 +1716,13 @@ pub(super) fn maintain(state: &State) {
             session.last_native_send = Instant::now();
             value["state"]["deviceCandidates"] = json!(device_candidates(app));
             value["state"]["startupDiscoveryRetry"] = json!(app.can_retry_startup_discovery());
+            value["state"]["startupEmptySearchResult"] = json!(app.startup_empty_search_result());
             if app.page == Page::Devices {
                 value["state"]["startupDiscoveryUnknownController"] =
                     json!(app.startup_discovery_unknown_controller());
                 value["state"]["deviceActivity"] = device_activity(app);
                 value["state"]["argbDevice"] = json!(argb_channels::available(app));
+                value["state"]["unconfiguredArgb"] = json!(app.startup_unconfigured_argb());
             }
             value["state"]["mapConnection"] = map_connection(app);
             if let Some(form) = native_forms::snapshot(app) {

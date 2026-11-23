@@ -12,7 +12,27 @@ let reactiveEffects = new Map();
 let directEffects = new Set();
 const effectLabel = id => effects[id] ?? id;
 const effectOption = (id, selected) => `<option value="${esc(id)}" ${id===selected?'selected':''}>${esc(effectLabel(id))}</option>`;
-const pages = {library:'Сцены',editor:'Редактор',devices:'Устройства',lcd:'LCD',ambient:'Экран',settings:'Настройки',temperatures:'Температуры',connections:'Подключения',sources:'Источники',schedule:'Расписание'};
+// Only the local browser stand opts into this partial translation.
+const englishPreview=window.location?.protocol==='file:'&&new URLSearchParams(window.location.search).get('lang')==='en';
+const ui=(ru,en)=>englishPreview?en:ru;
+const pages = {library:ui('Сцены','Scenes'),editor:ui('Редактор','Editor'),devices:ui('Устройства','Devices'),
+ lcd:'LCD',ambient:ui('Экран','Screen lighting'),settings:ui('Настройки','Settings'),
+ temperatures:ui('Температуры','Temperatures'),connections:ui('Подключения','Connections'),
+ sources:ui('Источники','Sources'),schedule:ui('Расписание','Schedule')};
+const englishStartupStatus = new Map([
+ ['restoring','Restoring the saved scene and connections…'],
+ ['restored','Saved connections restored. Check output status in Devices.'],
+ ['searching','Looking for supported devices. Any devices found will be set up automatically.'],
+ ['searchingMore','Looking for more supported devices…'],
+ ['empty','No supported devices found yet.'],
+ ['unconfiguredArgb','Found ARGB controllers with no LEDs configured. Open ARGB channels on the Devices page.'],
+ ['noNewDevices','No new devices found. Check Connections for details.'],
+ ['applying','Devices found. Adding them to the shared scene…'],
+ ['applied','Devices added to the profile. Check their output status in Devices.'],
+ ['complete','Automatic discovery finished.'],
+ ['cancelled','Automatic setup stopped. Your edits are still in the editor.'],
+ ['failed','Automatic setup could not finish. Check Connections or try searching again when available.'],
+]);
 const settingsPages = ['temperatures','connections','sources','schedule'];
 const devicePresetField = 714;
 const glyphs = {
@@ -196,7 +216,14 @@ function nativeControlDisabled(node) {
   field.enabled && field.kind==='text' && formStages.has(stageKey('native',field.id)));
  return closing || commandPending || !(item?.enabled || staged);
 }
-function showError(message,fromCommand=false) {errorIsCommand=fromCommand;error=String(message);const box=$('#native-error');box.hidden=false;box.innerHTML=`<button class="icon-button" data-action="dismiss-error" aria-label="Закрыть сообщение">×</button><p>${esc(error)}</p>${stagedDirty()?'<button class="button" data-action="discard-fields">Отменить незавершённый ввод</button>':''}<button class="button" data-action="retry-document" data-mutation>Повторить</button>`;}
+function showError(message,fromCommand=false,{detail='',retrySearch=false}={}) {
+ errorIsCommand=fromCommand;error=String(message);const box=$('#native-error');box.hidden=false;
+ const recovery=retrySearch
+  ?action(ui('Повторить поиск','Retry search'),'retry-startup-discovery',false,'id="startup-discovery-retry-error"')
+  :'<button class="button" data-action="retry-document" data-mutation>'+ui('Повторить','Retry')+'</button>';
+ const details=detail?`<details><summary>${ui('Технические подробности','Technical details')}</summary><p>${esc(detail)}</p></details>`:'';
+ box.innerHTML=`<button class="icon-button" data-action="dismiss-error" aria-label="${ui('Закрыть сообщение','Dismiss message')}">×</button><p>${esc(error)}</p>${stagedDirty()?'<button class="button" data-action="discard-fields">Отменить незавершённый ввод</button>':''}${recovery}${details}`;
+}
 function send(command, mutation=false) {
  if(closing)return false;
  if(outputPage(view)&&['apply_fields','set_field','asset'].includes(command.op)&&
@@ -225,9 +252,12 @@ function syncControls(keepRetryFocus) {
  $('#master-brightness').disabled=busy()||!draft;
  $('#footer-apply').disabled=busy()||placementDirty()||!applyNeeded();
  $('#play').disabled=busy();
- const light=!!(state?.groups?.pc||state?.groups?.door);$('#play').textContent=light?'Выключить свет':'Включить свет';
+ const light=!!(state?.groups?.pc||state?.groups?.door);$('#play').textContent=light?ui('Выключить свет','Turn lights off'):ui('Включить свет','Turn lights on');
  $('#player-name').textContent=state?effectLabel(state.scene.effect):'Prismestra';
- $('#player-status').textContent=state?.status||'Подключение к приложению…';
+ const startupStatus=englishPreview?englishStartupStatus.get(state?.startupStatus):null;
+ const playerStatus=$('#player-status');
+ playerStatus.textContent=startupStatus||state?.status||ui('Подключение к приложению…','Connecting to the app…');
+ playerStatus.title=startupStatus?state?.status||'':'';
  const runtimeDetail=$('#native-runtime-detail');if(runtimeDetail)runtimeDetail.textContent=state?.detail||'';
  if(sceneActivation)syncSceneActivation(sceneActivation.id,sceneActivation);
  const audioSource=$('#scene-audio-source');
@@ -254,7 +284,15 @@ function syncControls(keepRetryFocus) {
  syncOutputRetries(keepRetryFocus);
  const discoveryHelp=$('#startup-discovery-help');
  if(discoveryHelp)discoveryHelp.hidden=state?.startupDiscoveryUnknownController!==true;
- $('#save-status').textContent=busy()&&state?'Выполняется…':state?.dirty?'Профиль изменён':'Локальный профиль';
+ const emptySearch=$('#startup-empty-search');
+ if(emptySearch){
+  const result=!state?.devices.length&&!state?.deviceCandidates?.length ? state?.startupEmptySearchResult : null;
+  const message=result==='continuing'?ui('Поддерживаемые устройства пока не найдены. Автопоиск продолжится в фоне.','No supported devices found yet. Automatic discovery will continue in the background.')
+   :result==='complete'?ui('Автопоиск завершён. Поддерживаемые устройства не найдены.','Automatic discovery finished. No supported devices found.'):'';
+  emptySearch.hidden=!message;
+  if(emptySearch.textContent!==message)emptySearch.textContent=message;
+ }
+ $('#save-status').textContent=busy()&&state?ui('Выполняется…','Working…'):state?.dirty?ui('Профиль изменён','Profile modified'):ui('Локальный профиль','Local profile');
  if(draft){$('#master-brightness').value=draft.brightness;$('#master-value').textContent=draft.brightness+'%';}
  const status=$('.scene-status');if(status)status.textContent=changed()?'Изменения ещё не применены':sourceNeedsApply()?'Для источника нужно применить сцену':'Эта версия применена';
  const apply=$('[data-action="apply-scene"]');if(apply)apply.textContent=applyNeeded()?'Применить':'Применено';
@@ -290,7 +328,7 @@ function renderLibrary() {
     <span class="scene-preview-label">Предпросмотр</span>
    </button></div>
    <div class="scene-body"><div class="scene-title"><h2>${esc(item.name)}</h2><small class="muted">${item.builtIn?'Шаблон · ':''}${esc(effectLabel(item.scene.effect))}${item.audioDemo?' · Тестовый сигнал':''}</small></div>
-    <div class="card-actions"><button class="button primary" data-apply="${esc(item.id)}" aria-label="Включить сцену: ${esc(item.name)}" aria-disabled="${!!busy()}" data-mutation>Включить сцену</button>
+    <div class="card-actions"><button class="button primary" data-apply="${esc(item.id)}" aria-label="Применить сцену: ${esc(item.name)}" aria-disabled="${!!busy()}" data-mutation>Применить сцену</button>
      <button class="icon-button" data-edit="${esc(item.id)}" aria-label="Редактировать: ${esc(item.name)}" title="Редактировать" data-mutation ${disabled()}>${icon('edit')}</button>
      ${item.builtIn?'':`<button class="icon-button" data-remove="${esc(item.id)}" aria-label="Удалить: ${esc(item.name)}" data-mutation ${disabled()}>${icon('trash')}</button>`}
     </div>
@@ -300,16 +338,16 @@ function renderLibrary() {
   </article>`).join('');
  const description=lcdOnly
   ? 'В профиле только LCD. Фон и показания температуры настраиваются отдельно от RGB-сцен.'
-  : 'Сцены сохраняют параметры RGB. Устройства и LCD сохраняются в профиле.';
+  : ui('Сцены сохраняют параметры RGB. Устройства и LCD сохраняются в профиле.','Scenes store RGB settings. Devices and LCDs belong to the profile.');
  const outputAction=lcdOnly?pageButton('lcd','Настроить LCD',true):startupDiscoveryAction();
- return heading('Сцены',description,outputAction+action(icon('plus')+' Новая сцена','new',!lcdOnly&&!state.startupDiscoveryRetry))+`
+ return heading(pages.library,description,outputAction+action(icon('plus')+' '+ui('Новая сцена','New scene'),'new',!lcdOnly&&!state.startupDiscoveryRetry))+startupSearchSummary+`
   <div class="toolbar">
-   <select id="library-effect" aria-label="Тип эффекта"><option value="">Все эффекты</option>${options}</select>
-   <output class="muted" aria-live="polite">Показано ${Math.min(libraryLimit,list.length)} из ${list.length}</output>
-   <label class="search"><input id="search" placeholder="Название сцены или эффект" aria-label="Поиск по названию сцены или эффекту" value="${esc(search)}"></label>
+   <select id="library-effect" aria-label="${ui('Тип эффекта','Effect type')}"><option value="">${ui('Все эффекты','All effects')}</option>${options}</select>
+   <output class="muted" aria-live="polite">${ui('Показано','Showing')} ${Math.min(libraryLimit,list.length)} ${ui('из','of')} ${list.length}</output>
+   <label class="search"><input id="search" placeholder="${ui('Название сцены или эффект','Scene name or effect')}" aria-label="${ui('Поиск по названию сцены или эффекту','Search by scene name or effect')}" value="${esc(search)}"></label>
   </div>
-  <div class="library-grid">${cards||'<div class="empty"><h2>Сцен не найдено</h2><p>Измените запрос или выберите другой тип эффекта.</p></div>'}</div>
-  ${list.length>libraryLimit?'<button class="button" id="library-more">Показать ещё</button>':''}`;
+  <div class="library-grid">${cards||`<div class="empty"><h2>${ui('Сцен не найдено','No scenes found')}</h2><p>${ui('Измените запрос или выберите другой тип эффекта.','Change your search or select another effect type.')}</p></div>`}</div>
+  ${list.length>libraryLimit?`<button class="button" id="library-more">${ui('Показать ещё','Show more')}</button>`:''}`;
 }
 function range(key,label,min,max,step=1,suffix='') {
  const value=key.startsWith('noise.')?draft.noise[key.slice(6)]:draft[key];
@@ -519,8 +557,8 @@ function announceDeviceDiscovery(candidates) {
   if(region.textContent)region.textContent='';
  } else if(newCandidates.length){
   region.textContent=newCandidates.length===1
-   ? `Найдено устройство: ${newCandidates[0].label}.`
-   : `Найдено устройств: ${newCandidates.length}.`;
+   ? ui(`Найдено устройство: ${newCandidates[0].label}.`,`Device found: ${newCandidates[0].label}.`)
+   : ui(`Найдено устройств: ${newCandidates.length}.`,`Devices found: ${newCandidates.length}.`);
  }
 }
 function pageButton(page, label=pages[page], primary=false) {
@@ -532,8 +570,9 @@ function outputPageAvailable(page) {
 }
 
 function startupDiscoveryAction() {
- return state.startupDiscoveryRetry ? action('Найти устройства','retry-startup-discovery',true) : '';
+ return state.startupDiscoveryRetry ? action(ui('Найти устройства','Find devices'),'retry-startup-discovery',true) : '';
 }
+const startupSearchSummary='<p id="startup-empty-search" class="device-summary" role="status" aria-atomic="true" hidden></p>';
 
 function renderDevices(candidates) {
  const firstSetup=state.pending===true && !state.devices.length && candidates.length>0 && !pageHasEdits();
@@ -553,20 +592,27 @@ function renderDevices(candidates) {
  const found=candidates.map(candidate=>`<article class="device" data-candidate-id="${esc(candidate.id)}">
   <div class="device-symbol">${icon('devices')}</div>
   <div class="device-info"><h2>${esc(candidate.label)}</h2><p>${esc(candidate.role)}</p></div>
-  <div class="device-meta"><small>${firstSetup?'Настраивается автоматически':'Найдено'}</small></div>
+  <div class="device-meta"><small>${firstSetup?ui('Настраивается автоматически','Setting up automatically'):ui('Найдено','Found')}</small></div>
  </article>`);
- const entries=[...devices,...found].join('')||`<div class="empty"><h2>В профиле нет устройств</h2><p>${state.startupDiscoveryRetry?'Подключите устройство и запустите поиск.':'Добавьте устройство в свойствах профиля.'}</p></div>`;
+ const argbLabel=ui('Каналы ARGB','ARGB channels');
+ const unconfigured=(state.unconfiguredArgb??[]).map((controller,index)=>`<article class="device">
+  <div class="device-symbol">${icon('devices')}</div>
+  <div class="device-info"><h2>${esc(controller.label)}</h2><p>OpenRGB · ${ui('нет настроенных LED','no LEDs configured')}</p></div>
+  <button id="preview-argb-${index}" class="button" data-action="preview-argb" data-argb-index="${index}" aria-label="${argbLabel}: ${esc(controller.label)}">${argbLabel}</button>
+ </article>`);
+ const entries=[...devices,...found,...unconfigured].join('')||`<div class="empty"><h2>${ui('В профиле нет устройств','No devices in this profile')}</h2><p>${state.startupDiscoveryRetry?ui('Подключите устройство и запустите поиск.','Connect a device and start a search.'):ui('Добавьте устройство в свойствах профиля.','You can add a device in the profile properties.')}</p></div>`;
  const add = !firstSetup && state.nativeAux?.page==='devices' && state.nativeAux.fields.some(field=>field.id===devicePresetField && field.enabled)
-  ? action('Добавить устройство','focus-device-setup',true)
+  ? action(ui('Добавить устройство','Add device'),'focus-device-setup',true)
   : '';
  const shortcuts = startupDiscoveryAction() + add + pageButton('connections')
   + (outputPageAvailable('lcd') ? pageButton('lcd','Настроить LCD') : '')
   + (outputPageAvailable('ambient') ? pageButton('ambient','Настроить экран') : '');
  const description=firstSetup
-  ? (candidates.length===1?'Prismestra добавляет найденное устройство в профиль.':'Prismestra добавляет найденные устройства в профиль.')
-  : 'Изменения действуют после «Применить». Профиль сохраняется отдельно.';
- return heading('Устройства',description,shortcuts)
-  + '<p id="startup-discovery-help" class="device-summary" hidden>OpenRGB не определил тип одного из устройств. Проверьте, есть ли подходящий тип в «Добавить устройство». После применения можно настроить привязку в «Подключениях».</p>'
+  ? (candidates.length===1?ui('Prismestra добавляет найденное устройство в профиль.','Prismestra is adding the device to this profile.'):ui('Prismestra добавляет найденные устройства в профиль.','Prismestra is adding the devices to this profile.'))
+  : ui('Изменения действуют после «Применить». Профиль сохраняется отдельно.','Choose Apply to use your changes. The profile is saved separately.');
+ return heading(pages.devices,description,shortcuts)
+  + startupSearchSummary
+  + `<p id="startup-discovery-help" class="device-summary" hidden>${ui('OpenRGB не определил тип одного из устройств. Проверьте, есть ли подходящий тип в «Добавить устройство». После применения можно настроить привязку в «Подключениях».','OpenRGB could not identify a device type. Look for a matching type under Add device. After applying it, configure the binding in Connections.')}</p>`
   + `<div class="device-list">${entries}</div>`
   + (firstSetup?'':`<div id="device-properties" style="margin-top:24px">${nativeProperties()}</div>`);
 }
@@ -584,10 +630,10 @@ function renderSettings() {
  const schedule = state.schedule?.enabled
   ? (state.schedule.paused ? 'Расписание на паузе' : 'Расписание активно')
   : 'Расписание выключено';
- return heading('Настройки','Настройки локального профиля.')
+ return heading(pages.settings,ui('Настройки локального профиля.','Settings for the local profile.'))
   + `<div class="settings-sections">
-    <section class="parameter-panel"><h2>Диагностика</h2><div class="settings-links">${pageButton('temperatures')}${pageButton('connections')}${pageButton('sources','Источники температур')}</div></section>
-    <section class="parameter-panel"><h2>Алиса</h2><div class="settings-links"><button class="button" data-action="alice-open">Управление лампами</button></div></section>
+    <section class="parameter-panel"><h2>${ui('Диагностика','Diagnostics')}</h2><div class="settings-links">${pageButton('temperatures')}${pageButton('connections')}${pageButton('sources',ui('Источники температур','Temperature sources'))}</div></section>
+    <section class="parameter-panel"><h2>${ui('Алиса','Alice')}</h2><div class="settings-links"><button class="button" data-action="alice-open">${ui('Управление лампами','Lamp controls')}</button></div></section>
     <section class="parameter-panel"><h2>Расписание</h2><p class="parameter-note">${schedule}</p><div class="settings-links">${pageButton('schedule','Управлять расписанием')}</div></section>
   </div>`;
 }
@@ -605,7 +651,7 @@ function renderProfilePage() {
   return heading(pages[view],available?'Настройки локального профиля.':'В применённом профиле нет такого выхода.',actions)
    + nativeProperties();
  }
- return heading(pages[view],'Настройки локального профиля.',pageButton('settings','К настройкам'))
+ return heading(pages[view],ui('Настройки локального профиля.','Settings for the local profile.'),pageButton('settings',ui('К настройкам','Back to Settings')))
   + (advancedPage()?renderNativeForm():nativeProperties());
 }
 
@@ -630,8 +676,8 @@ function render() {
  const appliedIds = new Set(view==='devices' ? state?.devices.map(device=>device.id) : []);
  const candidates = view==='devices' ? (state?.deviceCandidates??[]).filter(candidate=>!appliedIds.has(candidate.id)) : [];
  $('nav').innerHTML=Object.entries(pages).filter(([key])=>!settingsPages.includes(key)&&outputPageAvailable(key)).map(([key,title])=>`<button data-view="${key}" class="${selectedPage===key?'active':''}" aria-label="${title}" title="${title}" ${selectedPage===key?'aria-current="page"':''}>${icon(key)}<span>${title}</span></button>`).join('');
- if(!state)$('#main').innerHTML='<div class="native-wait"><h1>Подключение к Prismestra…</h1><p>Ожидание локального профиля.</p></div>';
- else {$('#main').innerHTML=view==='library'?renderLibrary():view==='editor'?renderScene():view==='devices'?renderDevices(candidates):renderProfilePage();$('.project-context').innerHTML=`<span>Локальный профиль</span><small title="${esc(state.profilePath||'')}">${esc(state.profilePath?.split(/[\\/]/).pop()||'Не сохранён')}</small>`;}
+ if(!state)$('#main').innerHTML=`<div class="native-wait"><h1>${ui('Подключение к Prismestra…','Connecting to Prismestra…')}</h1><p>${ui('Ожидание локального профиля.','Waiting for the local profile.')}</p></div>`;
+ else {$('#main').innerHTML=view==='library'?renderLibrary():view==='editor'?renderScene():view==='devices'?renderDevices(candidates):renderProfilePage();$('.project-context').innerHTML=`<span>${ui('Локальный профиль','Local profile')}</span><small title="${esc(state.profilePath||'')}">${esc(state.profilePath?.split(/[\\/]/).pop()||ui('Не сохранён','Not saved'))}</small>`;}
  document.querySelectorAll('[data-native-kind="secret"]').forEach(input=>{const staged=formStages.get(stageKey('native',input.dataset.nativeField));if(staged)input.value=staged.value;});
  if(view==='devices')window.outputMap?.mount(state,send,currentGenericStages);
  stopCardMotion();syncControls(node?.dataset?.outputRetry);paintPreview();paintLibraryPreviews();
@@ -775,7 +821,7 @@ function activateLibraryEntry(entry) {
  const request=++sceneActivationRequest;
  if(!send({op:'apply_scene',scene:clone(entry.scene),request}))return;
  if(sceneActivation)syncSceneActivation(sceneActivation.id,null);
- sceneActivation={request,id:entry.id,name:entry.name,pending:true,message:`Включаем «${entry.name}»…`};
+ sceneActivation={request,id:entry.id,name:entry.name,pending:true,message:`Применяем «${entry.name}»…`};
  syncControls();
 }
 function syncSceneActivation(id,result) {
@@ -786,10 +832,13 @@ function syncSceneActivation(id,result) {
  const devices=$('#scene-devices-'+key);
  if(devices)devices.hidden=!(result?.applied&&state?.native);
 }
-function receiveSceneActivation({request,status,message}) {
+function receiveSceneActivation({request,status,output,message}) {
  if(!sceneActivation?.pending||request!==sceneActivation.request)return;
- if(status==='applied')sceneActivation.message=`Сцена «${sceneActivation.name}» применена.${message?' '+message:''}`;
- else if(status==='failed')sceneActivation.message=`Не удалось включить «${sceneActivation.name}».${message?' '+message:''}`;
+ if(status==='applied'){
+  const detail=output==='preview_only'?' Режим предпросмотра.':output==='no_active_rgb'?' Нет активных RGB-выходов для этой сцены.':'';
+  sceneActivation.message=`Сцена «${sceneActivation.name}» применена.${detail}`;
+ }
+ else if(status==='failed')sceneActivation.message=`Не удалось применить «${sceneActivation.name}».${message?' '+message:''}`;
  else return;
  sceneActivation.pending=false;
  sceneActivation.applied=status==='applied';
@@ -835,7 +884,15 @@ window.prismestraReceive = message => {
   }
   if(message.kind==='close_cancelled'){closing=false;syncControls();return;}
   if(message.kind==='draft_error'){showError(message.message,true);syncControls();return;}
-  if(message.kind==='error'){if(state?.editor?.page!=='devices')placementOpen=false;awaitingCommandAck=false;closing=false;submittedStages=[];savedSceneRequest=null;commandPending=false;nativeAwaitingAck=false;if(pendingView){view=pendingView.previous;pendingView=null;render();focusHeading();}showError(message.message,true);syncControls();return;}
+  if(message.kind==='error'){
+   if(state?.editor?.page!=='devices')placementOpen=false;awaitingCommandAck=false;closing=false;submittedStages=[];savedSceneRequest=null;commandPending=false;nativeAwaitingAck=false;
+   if(pendingView){view=pendingView.previous;pendingView=null;render();focusHeading();}
+   if(message.code==='startupDiscoveryRetry'){
+    showError(ui('Не удалось повторить поиск устройств. Попробуйте снова, когда поиск станет доступен.',
+     'Could not start device search. Try again when search is available.'),true,{detail:message.message,retrySearch:true});
+   }else showError(message.message,true);
+   syncControls();return;
+  }
   if(['scene_file','scene_file_frame','scene_file_lcd_frame'].includes(message.kind)){window.sceneFile?.receive(message);return;}
   if(message.kind==='snapshot') {
    const acknowledged=awaitingCommandAck;awaitingCommandAck=false;completeStageAck();
@@ -887,6 +944,7 @@ window.prismestraReceive = message => {
     && Object.hasOwn(message.state,'pending')&&state.pending!==message.state.pending;
    const foundChanged=view==='devices'&&(
     (Object.hasOwn(message.state,'deviceCandidates')&&!same(state.deviceCandidates,message.state.deviceCandidates)) ||
+     (Object.hasOwn(message.state,'unconfiguredArgb')&&!same(state.unconfiguredArgb,message.state.unconfiguredArgb)) ||
     (Object.hasOwn(message.state,'argbDevice')&&state.argbDevice!==message.state.argbDevice)
    );
    const nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));
@@ -1039,6 +1097,12 @@ document.addEventListener('click',event=>{
   if(b.dataset.action!=='alice-apply')aliceRequest('power',{ticket,lamp,on:b.dataset.action==='alice-turn-on'});
   else aliceRequest('apply',{ticket,lamp,brightness:Number($('#alice-brightness').value)});
   break;
+ }
+ case 'preview-argb': {
+  const index=Number(b.dataset.argbIndex);
+  const controller=state?.unconfiguredArgb?.[index];
+  if(controller&&view==='devices')window.argbChannel?.openPreview(controller,()=>restoreFocus(`#preview-argb-${index}`));
+  return;
  }
  case 'open-argb': {
   const device=state?.devices.find(item=>item.id===state.argbDevice);
@@ -1228,4 +1292,12 @@ window.addEventListener('blur',()=>{stopCardMotion();finishPlacementDrag();point
 document.addEventListener('toggle',event=>{if(event.target.id==='advanced-scene')advancedOpen=event.target.open;},true);
 window.addEventListener('pagehide',()=>flushPreview(true));
 window.addEventListener('beforeunload',()=>flushPreview(true));
+if(englishPreview){
+ document.documentElement.lang='en';
+ $('nav').setAttribute('aria-label','Main navigation');
+ $('.brand').setAttribute('aria-label','Prismestra, scene library');
+ $('#appearance-toggle').setAttribute('aria-label','Appearance');
+ $('#appearance-toggle').title='Appearance';
+ $('#appearance-toggle span').textContent='Appearance';
+}
 render();send({op:'snapshot'});

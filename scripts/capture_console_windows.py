@@ -80,6 +80,7 @@ class WindowCapture:
         times = ctypes.POINTER(wt.FILETIME)
         self.process_times = self.bind(self.kernel.GetProcessTimes, wt.BOOL, wt.HANDLE,
                                       times, times, times, times)
+        self.precise_utc = self.bind(self.kernel.GetSystemTimePreciseAsFileTime, None, times)
         self.handle_pid = self.bind(self.kernel.GetProcessId, wt.DWORD, wt.HANDLE)
         self.handle_image = self.bind(self.kernel.QueryFullProcessImageNameW, wt.BOOL,
                                       wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD))
@@ -174,7 +175,7 @@ class WindowCapture:
             if (observed['pid'] != pid or observed['created_filetime'] != created
                     or image_path(observed['image']) != expected_image):
                 raise RuntimeError('Process handle does not match the expected identity')
-            armed = utc_filetime()
+            armed = self.process_utc_filetime()
             initial = self.wait_process(process, 0)
             if initial == WAIT_FAILED:
                 raise ctypes.WinError(ctypes.get_last_error())
@@ -194,10 +195,17 @@ class WindowCapture:
                 'format': 'prismestra-windows-process-exit-v1', 'status': 'confirmed',
                 'expected': {'pid': pid, 'created_filetime': created, 'image': image},
                 'observed': observed, 'armed_filetime': armed,
-                'exit_filetime': filetime_text(times[1]), 'confirmed_filetime': utc_filetime(),
+                'exit_filetime': filetime_text(times[1]), 'confirmed_filetime': self.process_utc_filetime(),
             })
         finally:
             self.close_handle(process)
+
+    def process_utc_filetime(self):
+        # Older Python time.time_ns uses the coarse Windows system clock.
+        # Its value can lag the exit FILETIME even after the handle signals.
+        now = wt.FILETIME()
+        self.precise_utc(ctypes.byref(now))
+        return filetime_text(now)
 
     def on_show(self, _hook, _event, hwnd, object_id, child_id, _thread_id, event_tick):
         try:
