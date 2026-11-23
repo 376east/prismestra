@@ -27,6 +27,15 @@ const PEACH_SURF: Preset = preset!(
     12
 );
 
+const QUIET_SHORE: Preset = preset!(
+    "quiet-shore",
+    "Тихий берег",
+    [0x6a789a, 0x879c73, 0xe7be96],
+    62,
+    16,
+    10
+);
+
 impl Preset {
     fn scene(&self, effect: Effect, base: &super::Scene) -> super::Scene {
         super::Scene {
@@ -275,7 +284,14 @@ const MOTION_EXAMPLES: &[(Effect, Preset)] = &[
 
 pub(crate) fn built_in() -> Vec<Entry> {
     let plum = plum_dawn();
-    let mut entries = vec![plum.clone()];
+    let mut entries = vec![
+        plum.clone(),
+        Entry {
+            id: format!("builtin:{}", QUIET_SHORE.id),
+            name: QUIET_SHORE.name.into(),
+            scene: QUIET_SHORE.scene(Effect::GradientWave, &plum.scene),
+        },
+    ];
     entries.extend(MOTION_EXAMPLES.iter().map(|(effect, preset)| Entry {
         id: format!("builtin:{}", preset.id),
         name: preset.name.into(),
@@ -309,7 +325,7 @@ fn built_in_library_contains_legacy_presets_and_one_scene_for_each_new_motion() 
     use std::collections::BTreeSet;
 
     let entries = built_in();
-    assert_eq!(entries.len(), 101 + MOTION_EXAMPLES.len());
+    assert_eq!(entries.len(), 102 + MOTION_EXAMPLES.len());
     for (effect, preset) in MOTION_EXAMPLES {
         assert_eq!(effect.label(), preset.name);
         assert_eq!(
@@ -366,5 +382,85 @@ fn built_in_library_contains_legacy_presets_and_one_scene_for_each_new_motion() 
             "dark scene {}",
             entry.name
         );
+    }
+}
+
+#[test]
+fn quiet_shore_is_visible_and_loops_smoothly_on_three_geometries() {
+    use crate::{
+        devices::{Canvas, Point},
+        lighting::color::Rgb,
+        runtime::scene::Renderer,
+    };
+    let entries = built_in();
+    let shore = entries
+        .iter()
+        .find(|entry| entry.id == "builtin:quiet-shore")
+        .unwrap();
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.id == shore.id || entry.scene.colors != shore.scene.colors)
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        first_light_scene(),
+        entries
+            .iter()
+            .find(|entry| entry.id == "builtin:peach-surf")
+            .unwrap()
+            .scene
+    );
+    let distance = |a: Rgb, b: Rgb| {
+        a.r.abs_diff(b.r)
+            .max(a.g.abs_diff(b.g))
+            .max(a.b.abs_diff(b.b))
+    };
+    let period = 160 * u32::from(shore.scene.fps) / shore.scene.speed as u32;
+    for (width, height, coordinates) in [
+        (8, 1, (0..8).map(|x| (x, 0)).collect::<Vec<_>>()),
+        (13, 9, vec![(1, 1), (12, 3), (6, 8), (2, 6)]),
+        (
+            7,
+            5,
+            (0..5).flat_map(|y| (0..7).map(move |x| (x, y))).collect(),
+        ),
+    ] {
+        let canvas = Canvas {
+            width,
+            height,
+            points: coordinates
+                .into_iter()
+                .enumerate()
+                .map(|(led, (x, y))| Point {
+                    device: "fixture".into(),
+                    led,
+                    x,
+                    y,
+                })
+                .collect(),
+        };
+        let mut renderer = Renderer::new(shore.scene.clone()).unwrap();
+        let first = renderer.step(&canvas).unwrap();
+        assert!(first.iter().all(|c| c.r.max(c.g).max(c.b) >= 75));
+        assert!(first.iter().any(|color| distance(*color, first[0]) >= 20));
+        let mut previous = first.clone();
+        let mut moved = false;
+        for _ in 0..period {
+            let frame = renderer.step(&canvas).unwrap();
+            assert!(
+                frame
+                    .iter()
+                    .zip(&previous)
+                    .all(|(a, b)| distance(*a, *b) <= 3)
+            );
+            moved |= frame
+                .iter()
+                .zip(&first)
+                .any(|(a, b)| distance(*a, *b) >= 20);
+            previous = frame;
+        }
+        assert!(moved, "{width}×{height}");
+        assert_eq!(previous, first, "{width}×{height}");
     }
 }
