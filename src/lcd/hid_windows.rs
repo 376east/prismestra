@@ -7,6 +7,7 @@ use super::{
 use std::{
     mem::{offset_of, size_of},
     ptr::{null, null_mut},
+    sync::{Arc, Mutex, Weak},
 };
 use windows_sys::Win32::{
     Devices::{DeviceAndDriverInstallation::*, HumanInterfaceDevice::*},
@@ -224,23 +225,89 @@ pub(crate) fn metadata_paths(mut accept: impl FnMut(&str) -> bool) -> Result<Vec
     Err("HID interface list exceeds limit".into())
 }
 fn enumerate(kind: Kind) -> Result<Vec<Descriptor>, String> {
-    let mut candidates = Vec::new();
-    for path in metadata_paths(|path| matching_hint(kind, path))? {
-        let name = wide(&path)?;
-        let query = handle(unsafe {
-            CreateFileW(
-                name.as_ptr(),
-                0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                null(),
-                OPEN_EXISTING,
-                0,
-                null_mut(),
-            )
-        })?;
-        candidates.push(inspect(query.0, &path)?);
+    metadata_paths(|path| matching_hint(kind, path))?
+        .iter()
+        .map(|path| {
+            probe_descriptor(path).map_err(|error| {
+                if error.raw_os_error().is_some() {
+                    format!("Open TT HID handle: {error}")
+                } else {
+                    error.to_string()
+                }
+            })
+        })
+        .collect()
+}
+
+fn probe_descriptor(path: &str) -> Result<Descriptor, std::io::Error> {
+    let name = wide(path).map_err(std::io::Error::other)?;
+    let raw = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            null(),
+            OPEN_EXISTING,
+            0,
+            null_mut(),
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE || raw.is_null() {
+        return Err(std::io::Error::last_os_error());
     }
-    Ok(candidates)
+    let query = Handle(raw);
+    inspect(query.0, path).map_err(std::io::Error::other)
+}
+
+static OWNED_DISPLAY_DESCRIPTORS: Mutex<Vec<Weak<Descriptor>>> = Mutex::new(Vec::new());
+
+pub(crate) fn discover_displays() -> Result<(Vec<Descriptor>, Vec<String>), String> {
+    let paths = metadata_paths(|path| matching_hint(Kind::Display, path))?;
+    Ok(discover_display_paths(
+        paths,
+        probe_descriptor,
+        &OWNED_DISPLAY_DESCRIPTORS,
+    ))
+}
+
+pub(crate) fn discover_display_paths(
+    paths: Vec<String>,
+    mut probe: impl FnMut(&str) -> Result<Descriptor, std::io::Error>,
+    owned: &Mutex<Vec<Weak<Descriptor>>>,
+) -> (Vec<Descriptor>, Vec<String>) {
+    let mut candidates = Vec::new();
+    let mut issues = Vec::new();
+    for path in paths {
+        let descriptor = match probe(&path) {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                // Only an enumerated path with a still-live, validated owner
+                // can stand in for a metadata open denied by sharing.
+                let known = if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) {
+                    owned
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .iter()
+                        .filter_map(Weak::upgrade)
+                        .find(|entry| entry.path.eq_ignore_ascii_case(&path))
+                        .map(|entry| (*entry).clone())
+                } else {
+                    None
+                };
+                let Some(mut descriptor) = known else {
+                    issues.push(format!("Проверка TT LCD: {error}"));
+                    continue;
+                };
+                descriptor.path = path;
+                descriptor
+            }
+        };
+        match hid_policy::validate(Kind::Display, &descriptor) {
+            Ok(()) => candidates.push(descriptor),
+            Err(error) => issues.push(error),
+        }
+    }
+    (candidates, issues)
 }
 fn process_names() -> Result<Vec<String>, String> {
     let snapshot = handle(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) })?;
@@ -274,6 +341,7 @@ fn process_names() -> Result<Vec<String>, String> {
 }
 pub struct NativeBackend;
 pub struct NativeLink {
+    _discovery_descriptor: Option<Arc<Descriptor>>,
     handle: Handle,
     path: String,
     kind: Kind,
@@ -307,7 +375,17 @@ impl Backend for NativeBackend {
         })?;
         let descriptor = inspect(handle.0, path)?;
         hid_policy::validate(kind, &descriptor)?;
+        let discovery_descriptor = (kind == Kind::Display).then(|| {
+            let descriptor = Arc::new(descriptor);
+            let mut owners = OWNED_DISPLAY_DESCRIPTORS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            owners.retain(|entry| entry.strong_count() > 0);
+            owners.push(Arc::downgrade(&descriptor));
+            descriptor
+        });
         Ok(NativeLink {
+            _discovery_descriptor: discovery_descriptor,
             handle,
             path: path.into(),
             kind,
@@ -444,6 +522,59 @@ mod tests {
     use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
     use windows_sys::Win32::System::Pipes::*;
 
+    #[test]
+    fn display_search_keeps_only_the_live_exact_owner_on_sharing_violation() {
+        let path = |instance| format!(r"\\?\hid#vid_264a&pid_233c&mi_01#{instance}");
+        let active = path("owned");
+        let foreign = path("foreign");
+        let free = path("free");
+        let descriptor = |path: String| Descriptor {
+            path,
+            vid: 0x264a,
+            pid: 0x233c,
+            usage_page: 0xff06,
+            usage: 1,
+            input_len: 17,
+            output_len: 1025,
+            feature_len: 0,
+            input_buttons: 0,
+            output_buttons: 0,
+            input_ids: vec![0],
+            output_ids: vec![0],
+        };
+        let owner = Arc::new(descriptor(active.to_ascii_uppercase()));
+        let owned = Mutex::new(vec![Arc::downgrade(&owner)]);
+        let paths = vec![foreign, active.clone(), free.clone()];
+        let probe = |path: &str| {
+            if path == free {
+                Ok(descriptor(path.to_owned()))
+            } else {
+                Err(std::io::Error::from_raw_os_error(
+                    ERROR_SHARING_VIOLATION as i32,
+                ))
+            }
+        };
+        let (candidates, issues) = discover_display_paths(paths.clone(), probe, &owned);
+        assert_eq!(
+            candidates,
+            [descriptor(active.clone()), descriptor(free.clone())]
+        );
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("32"));
+        let denied = |_: &str| {
+            Err(std::io::Error::from_raw_os_error(
+                ERROR_ACCESS_DENIED as i32,
+            ))
+        };
+        let (candidates, issues) = discover_display_paths(vec![active], denied, &owned);
+        assert!(candidates.is_empty());
+        assert_eq!(issues.len(), 1);
+        drop(owner);
+        let (candidates, issues) = discover_display_paths(paths, probe, &owned);
+        assert_eq!(candidates, [descriptor(free)]);
+        assert_eq!(issues.len(), 2);
+    }
+
     // Exercise the actual overlapped transfer on owned pipes, never on HID.
     // The descriptor/command policy is tested separately with fake Backends.
     fn pipe_link(
@@ -501,6 +632,7 @@ mod tests {
         let (done, finished) = mpsc::channel();
         let thread = std::thread::spawn(move || {
             let mut server = NativeLink {
+                _discovery_descriptor: None,
                 handle: Handle(raw as HANDLE),
                 path: String::new(),
                 kind: Kind::Display,
@@ -566,6 +698,7 @@ mod tests {
         });
         (
             NativeLink {
+                _discovery_descriptor: None,
                 handle: client,
                 path,
                 kind: Kind::Display,

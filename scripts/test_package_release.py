@@ -70,6 +70,28 @@ class PackageChecks(unittest.TestCase):
                 self.assertEqual(package.read(f"{source.name}/scripts/portable/Configure OpenRGB.ps1"),
                                  b"Configure OpenRGB.ps1")
 
+    def test_retain_binary_zip_copies_the_checked_archive_without_repacking(self):
+        manifest = {"version": "0.1.0", "commit": "a" * 40, "target": "x86_64-pc-windows-msvc"}
+        filename = "prismestra-0.1.0-aaaaaaaaaaaa-x86_64-pc-windows-msvc.zip"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "portable"
+            archive = root / filename
+            with zipfile.ZipFile(archive, "w") as package:
+                package.writestr("Prismestra/Prismestra.exe", b"matching Setup payload")
+            original = archive.read_bytes()
+            checksum = f"{release.sha256(archive)}  {filename}\n"
+            (root / "SHA256SUMS.txt").write_text(checksum + "old  source.zip\n", encoding="utf-8")
+            release.retain_binary_zip(root, output, manifest)
+            self.assertEqual({p.name for p in output.iterdir()}, {filename, "SHA256SUMS.txt"})
+            self.assertEqual((output / filename).read_bytes(), original)
+            self.assertEqual((output / "SHA256SUMS.txt").read_text(encoding="utf-8"), checksum)
+            archive.write_bytes(original + b"changed")
+            rejected = root / "rejected"
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                release.retain_binary_zip(root, rejected, manifest)
+            self.assertFalse(rejected.exists())
+
     def test_missing_portable_launch_file_fails_before_partial_copy(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

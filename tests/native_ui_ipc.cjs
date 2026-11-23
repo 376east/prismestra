@@ -248,17 +248,17 @@ vm.runInContext('window.prismestraReceive(payload)',context);
 assert.doesNotMatch(find('#main').innerHTML,/data-native-action="1822"/);
 console.log('PASS: portable OpenRGB setup appears and dispatches through the native action bridge');
 
-const helperNotice='Настройки локального OpenRGB заблокированы существующей авторизацией. Ссылка на задачу находится в data/state/backend-task.json в папке Prismestra. Для замены OpenRGB обратитесь к администратору, который авторизовал задачу.';
+const helperNotice='Настройки OpenRGB закреплены за задачей. Для смены EXE попросите администратора проверить новый файл и обновить пин в задаче. Затем подтвердите файл через --reauthorize-portable-openrgb. Инструкция в managed-openrgb.md.';
 const linkedForm={page:'connections',fields:[],actions:[],notes:[],notice:helperNotice};
 context.payload={kind:'status',state:{nativeForm:linkedForm}};
 const beforeHelperHint=commands.length;
 vm.runInContext('window.prismestraReceive(payload)',context);
-assert.match(find('#main').innerHTML,/<p class="parameter-note" role="status">[^<]*заблокированы[^<]*data\/state\/backend-task\.json[^<]*обратитесь к администратору[^<]*<\/p><div class="native-form">/);
+assert.match(find('#main').innerHTML,/<p class="parameter-note" role="status">[^<]*администратора[^<]*--reauthorize-portable-openrgb[^<]*<\/p><div class="native-form">/);
 assert.doesNotMatch(find('#main').innerHTML,/data-native-action="1822"/);
 assert.equal(commands.length,beforeHelperHint,'helper notice is read-only');
 context.payload={kind:'status',state:{nativeForm:{...linkedForm,notice:undefined}}};
 vm.runInContext('window.prismestraReceive(payload)',context);
-assert.doesNotMatch(find('#main').innerHTML,/backend-task\.json/);
+assert.doesNotMatch(find('#main').innerHTML,/--reauthorize-portable-openrgb/);
 console.log('PASS: linked portable OpenRGB explains the block and its safe next step above the form');
 
 // The selected LCD can have a different index from its binding.
@@ -588,6 +588,34 @@ console.log('PASS: candidate identity, applied precedence, metadata replacement,
  assert.ok(!hasCandidate(foundRgb.id),'committed device replaces the late proposal');
  assert.match(mainMarkup,new RegExp(`data-device-id="${foundRgb.id}"`));
  console.log('PASS: one rescan from an empty profile; late candidate becomes an applied device');
+}
+{
+ const applied={...foundRgb,leds:1};
+ const partial={...initial,devices:[applied],draftDevices:[applied],startupDiscoveryRetry:false,
+  nativeAux:{page:'devices',fields:[{id:714,label:'Тип',kind:'select',enabled:true,value:'openrgb',choices:[]}],actions:[],notes:[]},
+  editor:{page:'devices',index:0,deviceId:applied.id,targets:[applied.label],fields:[],dirty:false}};
+ const hint=/OpenRGB не определил тип.*«Добавить устройство».*«Подключениях»/;
+ const guidance=find('#startup-discovery-help');
+ vm.runInContext('view="devices";pendingView=null',context);
+ receiveDeviceState('snapshot',partial);
+ assert.equal(guidance.hidden,true);
+ receiveDeviceState('status',{startupDiscoveryUnknownController:true});
+ assert.equal(guidance.hidden,false);
+ assert.match(mainMarkup,hint);
+ assert.match(mainMarkup,/data-device-id=/,'Already applied outputs stay available');
+ assert.doesNotMatch(mainMarkup,/data-action="retry-startup-discovery"/);
+ const add=new Node();
+ add.dataset={action:'focus-device-setup'};
+ const before=commands.length;
+ events.click({target:{closest:()=>add}});
+ assert.equal(document.activeElement,find('[data-native-field="714"]'));
+ assert.equal(commands.length,before,'Manual setup starts locally without targeting the working output');
+ vm.runInContext('view="devices";pendingView=null',context);
+ receiveDeviceState('snapshot',{...partial,startupDiscoveryUnknownController:true});
+ assert.equal(guidance.hidden,false);
+ receiveDeviceState('status',{startupDiscoveryUnknownController:false});
+ assert.equal(guidance.hidden,true,'A new scan or profile can clear stale guidance');
+ console.log('PASS: partial startup discovery explains an unknown OpenRGB type and leads to manual setup');
 }
 {
  const pending={...foundState,pending:true,deviceCandidates:[foundRgb],nativeAux:{
@@ -1041,11 +1069,11 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
  assert.doesNotMatch(mainMarkup,/id="open-argb"/);
  receiveDeviceState('status',{argbDevice:controller.id});
  assert.match(mainMarkup,/id="open-argb"[^>]*>Каналы ARGB/);
- let reply;
+ let reply, save;
  context.window.argbChannel={
   open(device,label,api){
    assert.equal(label,controller.label);
-   assert.equal(api.save,undefined,'read-only editor registers no write callback');
+   save=api.save;
    return api.list({device,request:31});
   },
   receive(message){reply=message;},
@@ -1054,13 +1082,18 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
   dataset:{action:'open-argb'},hasAttribute:name=>name==='data-mutation',
  })}});
  assert.deepEqual(commands.at(-1),{op:'argb_channels',device:controller.id,request:31});
+ save({device:controller.id,request:32,revision:'confirmed-inventory',zone:0,leds:27});
+ assert.deepEqual(commands.at(-1),{op:'argb_channel_save',device:controller.id,request:32,revision:'confirmed-inventory',zone:0,leds:27});
  const inventory={kind:'argb_channels',device:controller.id,request:31,status:'ready',writable:false,channels:[]};
  vm.runInContext('window.prismestraReceive('+JSON.stringify(inventory)+')',context);
  assert.deepEqual(JSON.parse(JSON.stringify(reply)),inventory);
+ const rejected={kind:'argb_channel_saved',device:controller.id,request:32,revision:'confirmed-inventory',status:'failed'};
+ vm.runInContext('window.prismestraReceive('+JSON.stringify(rejected)+')',context);
+ assert.deepEqual(JSON.parse(JSON.stringify(reply)),rejected);
  receiveDeviceState('status',{argbDevice:null});
  assert.doesNotMatch(mainMarkup,/id="open-argb"/);
 }
-console.log('PASS: selected managed ARGB device exposes a read-only IPC route and removes it when unavailable');
+console.log('PASS: managed ARGB editor routes typed inventory/save IPC and correlated save errors');
 
 {
  restoreDraft(draftState);

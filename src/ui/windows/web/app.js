@@ -252,6 +252,8 @@ function syncControls(keepRetryFocus) {
  }
  syncOutputStatuses();
  syncOutputRetries(keepRetryFocus);
+ const discoveryHelp=$('#startup-discovery-help');
+ if(discoveryHelp)discoveryHelp.hidden=state?.startupDiscoveryUnknownController!==true;
  $('#save-status').textContent=busy()&&state?'Выполняется…':state?.dirty?'Профиль изменён':'Локальный профиль';
  if(draft){$('#master-brightness').value=draft.brightness;$('#master-value').textContent=draft.brightness+'%';}
  const status=$('.scene-status');if(status)status.textContent=changed()?'Изменения ещё не применены':sourceNeedsApply()?'Для источника нужно применить сцену':'Эта версия применена';
@@ -559,6 +561,7 @@ function renderDevices(candidates) {
   ? (candidates.length===1?'Prismestra добавляет найденное устройство в профиль.':'Prismestra добавляет найденные устройства в профиль.')
   : 'Изменения действуют после «Применить». Профиль сохраняется отдельно.';
  return heading('Устройства',description,shortcuts)
+  + '<p id="startup-discovery-help" class="device-summary" hidden>OpenRGB не определил тип одного из устройств. Проверьте, есть ли подходящий тип в «Добавить устройство». После применения можно настроить привязку в «Подключениях».</p>'
   + `<div class="device-list">${entries}</div>`
   + (firstSetup?'':`<div id="device-properties" style="margin-top:24px">${nativeProperties()}</div>`);
 }
@@ -813,13 +816,13 @@ window.prismestraReceive = message => {
   if(typeof message==='string')message=JSON.parse(message);
   if(message.kind==='alice'){receiveAlice(message);return;}
   if(message.kind==='output_preview'){window.outputMap?.receive(message);return;}
-  if(message.kind==='argb_channels'){window.argbChannel?.receive(message);return;}
+  if(message.kind==='argb_channels'||message.kind==='argb_channel_saved'){window.argbChannel?.receive(message);return;}
   if(message.kind==='output_retry'){receiveOutputRetry(message);return;}
   if(message.kind==='scene_activation'){receiveSceneActivation(message);return;}
   if(message.kind==='card_preview'){receiveCardFrame(message);return;}
   if(message.kind==='flush'){
    if(!Number.isSafeInteger(message.id)||message.id<0)throw Error('Некорректный запрос закрытия');
-   if(window.sceneFile?.blockClose()){
+   if(window.sceneFile?.blockClose()||window.argbChannel?.blockClose?.()){
     window.ipc.postMessage(JSON.stringify({op:'close_ready',id:message.id,scene:null,blocked:true}));return;
    }
    stageText(document.activeElement);closing=true;clearTimeout(previewTimer);previewTimer=null;previewQueued=false;syncControls();
@@ -1035,6 +1038,7 @@ document.addEventListener('click',event=>{
   const device=state?.devices.find(item=>item.id===state.argbDevice);
   if(device&&view==='devices')window.argbChannel?.open(device.id,device.label,{
    list: request=>send({op:'argb_channels',...request}),
+   save: request=>send({op:'argb_channel_save',...request}),
    restoreFocus: ()=>restoreFocus('#open-argb'),
   });
   break;

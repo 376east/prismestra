@@ -43,6 +43,13 @@ enum Command {
         request: u32,
         device: String,
     },
+    ArgbChannelSave {
+        request: u32,
+        device: String,
+        revision: String,
+        zone: usize,
+        leds: usize,
+    },
     PreviewOutput {
         request: u32,
         device: String,
@@ -211,6 +218,7 @@ pub(super) struct Session {
     draft_map: output_preview::DraftRevision,
     output_retries: BTreeMap<String, retry_output::Pending>,
     argb_channels: Option<argb_channels::Pending>,
+    argb_save: argb_channels::save::Session,
 }
 impl Session {
     fn new(app: &App) -> Result<Self, String> {
@@ -261,6 +269,7 @@ impl Session {
             draft_map: Default::default(),
             output_retries: BTreeMap::new(),
             argb_channels: None,
+            argb_save: Default::default(),
         };
         let scene = result
             .draft
@@ -907,6 +916,8 @@ fn snapshot(state: &State) -> Result<Value, String> {
         .collect::<Vec<_>>();
     let mut value = json!({"kind":"snapshot","state":{"scene":app.runtime.project().scene,"draftScene":session.draft.as_ref().map(|draft| &draft.scene),"draftOrigin":session.draft.as_ref().and_then(|draft| draft.origin.as_ref()),"library":library,"devices":app.runtime.document().lighting.setup.devices,"deviceCandidates":device_candidates(app),"deviceActivity":device_activity(app),"groups":{"pc":app.runtime.group_on(Target::Pc),"door":app.runtime.group_on(Target::Door)},"native":app.native_lighting.is_some(),"pending":busy(app),"dirty":app.dirty,"status":app.status,"detail":app.detail,"error":app.runtime.configuration_error().or_else(||app.runtime.error()),"profilePath":app.path.as_ref().map(|p|p.to_string_lossy()),"editor":editor,"nativeForm":native_forms::snapshot(app),"nativeAux":native_forms::aux_snapshot(app),"draftDevices":app.editor.as_ref().filter(|e|e.page==Page::Devices).map(|e|&e.document.lighting.setup.devices)}});
     value["state"]["startupDiscoveryRetry"] = json!(app.can_retry_startup_discovery());
+    value["state"]["startupDiscoveryUnknownController"] =
+        json!(app.startup_discovery_unknown_controller());
     let effects = Effect::ALL
         .iter()
         .copied()
@@ -994,6 +1005,26 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
     let hwnd = state.editor_window.get();
     if let Command::ArgbChannels { request, device } = command {
         argb_channels::request(state, device, request)?;
+        return Ok(false);
+    }
+    if let Command::ArgbChannelSave {
+        request,
+        device,
+        revision,
+        zone,
+        leds,
+    } = command
+    {
+        argb_channels::save::request(
+            state,
+            argb_channels::save::Request {
+                request,
+                device,
+                revision,
+                zone,
+                leds,
+            },
+        )?;
         return Ok(false);
     }
     if let Command::RetryOutput {
@@ -1581,6 +1612,7 @@ pub(super) fn maintain(state: &State) {
     }
     retry_output::maintain(state);
     argb_channels::maintain(state);
+    argb_channels::save::maintain(state);
     if let (Ok(slot), Ok(mut sessions)) = (
         state.app.try_borrow(),
         state.modern_session.try_borrow_mut(),
@@ -1678,6 +1710,8 @@ pub(super) fn maintain(state: &State) {
             value["state"]["deviceCandidates"] = json!(device_candidates(app));
             value["state"]["startupDiscoveryRetry"] = json!(app.can_retry_startup_discovery());
             if app.page == Page::Devices {
+                value["state"]["startupDiscoveryUnknownController"] =
+                    json!(app.startup_discovery_unknown_controller());
                 value["state"]["deviceActivity"] = device_activity(app);
                 value["state"]["argbDevice"] = json!(argb_channels::available(app));
             }

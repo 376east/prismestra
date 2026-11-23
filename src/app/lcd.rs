@@ -35,6 +35,8 @@ pub struct Config {
     pub overlay_enabled: bool,
     #[serde(default, skip_serializing_if = "overlay::GaugeStyle::is_default")]
     pub gauge_style: overlay::GaugeStyle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_position: Option<overlay::CardPosition>,
     pub interval_seconds: u8,
     pub sources: Vec<OverlaySource>,
 }
@@ -47,6 +49,7 @@ impl Default for Config {
             rotation: 0,
             overlay_enabled: false,
             gauge_style: overlay::GaugeStyle::default(),
+            card_position: None,
             interval_seconds: 5,
             sources: vec![],
         }
@@ -78,6 +81,9 @@ impl Config {
         }
         if self.overlay_enabled && self.sources.is_empty() {
             return Err("Выберите хотя бы один показатель для панели температур.".into());
+        }
+        if let Some(position) = self.card_position {
+            position.validate()?;
         }
         Ok(())
     }
@@ -162,7 +168,10 @@ impl Controller {
                     Some(id) => store.read(id, FONT_LIMIT)?,
                     None => include_bytes!("../ui/windows/web/assets/SourceSans3.ttf").to_vec(),
                 };
-                let renderer = overlay::Renderer::new(font)?.with_style(config.gauge_style);
+                let mut renderer = overlay::Renderer::new(font)?.with_style(config.gauge_style);
+                if let Some(position) = config.card_position {
+                    renderer = renderer.with_card_position(position)?;
+                }
                 player::Player::new(prepared, renderer)?
             } else {
                 // Optional unselected font references do not cause any read or parse.
@@ -639,6 +648,164 @@ mod tests {
         json["media"] = serde_json::json!("A".repeat(64));
         assert!(serde_json::from_value::<Config>(json).is_err());
     }
+    #[cfg(windows)]
+    #[test]
+    fn saved_lcd_position_and_gauge_reach_the_gif_player_and_survive_owned_discovery() {
+        use crate::{
+            app::{
+                config::{Groups, Project},
+                device_setup,
+                document::{Document, Lcd},
+                sensors,
+            },
+            devices::{Canvas, Setup},
+            lcd::{hid_policy::Descriptor, hid_windows::discover_display_paths},
+            ui::{Page, editor::Editor},
+        };
+        use std::sync::Mutex;
+
+        let stand = Stand::new();
+        let mut device = device_setup::preset("tt-lcd")
+            .unwrap()
+            .device("lcd")
+            .unwrap();
+        device.enabled = true;
+        let document = Document {
+            version: 1,
+            lighting: Project {
+                version: 1,
+                setup: Setup {
+                    version: 1,
+                    devices: vec![device],
+                    canvas: Canvas {
+                        width: 1,
+                        height: 1,
+                        points: vec![],
+                    },
+                },
+                scene: crate::runtime::scene::example(),
+                schedule: Default::default(),
+                groups: Groups {
+                    pc: vec!["lcd".into()],
+                    door: vec![],
+                },
+            },
+            lcd: vec![Lcd {
+                device: "lcd".into(),
+                config: Config {
+                    enabled: true,
+                    media: Some(
+                        stand
+                            .store
+                            .put(media::BUILTIN_KALEIDOSCOPE_GIF, media::MAX_SOURCE)
+                            .unwrap(),
+                    ),
+                    rotation: 90,
+                    ..Config::default()
+                },
+            }],
+            ambient: Default::default(),
+            temperatures: sensors::Config {
+                sources: vec![sensors::Source {
+                    key: "cpu".into(),
+                    value: sensors::Value::Sensor {
+                        input: "cpu-fixture".into(),
+                    },
+                }],
+            },
+        };
+        let mut editor = Editor {
+            document: document.clone(),
+            page: Page::Lcd,
+            index: 0,
+        };
+        editor.set("overlay", "true").unwrap();
+        editor.set("sources", "cpu=CPU").unwrap();
+        editor.set("gauge_style", "arc").unwrap();
+        editor.set("card_position", "293, 300").unwrap();
+        assert!(editor.merged(&document).is_err());
+        editor.set("card_position", "156, 300").unwrap();
+        let path = stand.root.join("positioned-profile.json");
+        editor.merged(&document).unwrap().save(&path).unwrap();
+        let reopened = Document::load(&path).unwrap();
+        fs::remove_file(path).unwrap();
+        let saved = reopened.lcd[0].config.clone();
+        assert_eq!(
+            saved.card_position,
+            Some(overlay::CardPosition { x: 156, y: 300 })
+        );
+        assert_eq!(saved.gauge_style, overlay::GaugeStyle::Arc);
+
+        let mut player = Controller::new(saved, &stand.store).unwrap();
+        let mut receiver = Fake::default();
+        let samples = [Sample {
+            key: "cpu".into(),
+            celsius: 58.,
+            observed_ms: receiver.now,
+        }];
+        let mut renderer = overlay::Renderer::new(
+            include_bytes!("../ui/windows/web/assets/SourceSans3.ttf").to_vec(),
+        )
+        .unwrap()
+        .with_style(overlay::GaugeStyle::Arc);
+        let mut frames = media::decoded_frames(Arc::from(media::BUILTIN_KALEIDOSCOPE_GIF)).unwrap();
+        let mut expected = || {
+            let (rgba, _) = frames.next().unwrap().unwrap();
+            let upright = media::canvas(&rgba, 480, 480, false, 0).unwrap();
+            let composed = renderer
+                .render_blocks(
+                    &upright,
+                    &[overlay::Block {
+                        x: 156,
+                        y: 300,
+                        label: "CPU",
+                        celsius: 58.,
+                    }],
+                )
+                .unwrap();
+            media::encode_jpeg(&image::imageops::rotate90(&composed)).unwrap()
+        };
+        assert!(
+            player
+                .poll(&mut receiver, true, &samples)
+                .unwrap()
+                .unwrap()
+                .overlay_applied
+        );
+        let first = expected();
+        assert_eq!(player.preview(), first);
+
+        let owner = Arc::new(Descriptor {
+            path: r"\\?\hid#vid_264a&pid_233c&mi_01#software-lcd".into(),
+            vid: 0x264a,
+            pid: 0x233c,
+            usage_page: 0xff06,
+            usage: 1,
+            input_len: 17,
+            output_len: 1025,
+            feature_len: 0,
+            input_buttons: 0,
+            output_buttons: 0,
+            input_ids: vec![0],
+            output_ids: vec![0],
+        });
+        let (candidates, issues) = discover_display_paths(
+            vec![owner.path.clone()],
+            |_| Err(std::io::Error::from_raw_os_error(32)),
+            &Mutex::new(vec![Arc::downgrade(&owner)]),
+        );
+        assert!(issues.is_empty());
+        assert_eq!(candidates.as_slice(), std::slice::from_ref(owner.as_ref()));
+        assert_eq!(player.preview(), first);
+        receiver.now = player.next_due_ms().unwrap();
+        let next = player.poll(&mut receiver, true, &samples).unwrap().unwrap();
+        assert_eq!(next.frame_index, Some(1));
+        assert!(next.overlay_applied);
+        assert_eq!(player.preview(), expected());
+        assert_ne!(player.preview(), first);
+        assert_eq!(receiver.acks, 2);
+    }
+
     #[cfg(windows)]
     #[test]
     fn live_gauge_composes_over_the_licensed_builtin_gif() {

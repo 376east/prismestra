@@ -5,6 +5,8 @@ use crate::{
 };
 use std::{sync::Arc, thread::JoinHandle};
 
+pub(super) mod save;
+
 pub(super) struct Pending {
     device: String,
     request: u32,
@@ -61,9 +63,10 @@ fn start(state: &State, device: &str, request: u32) -> Result<(), String> {
         .try_borrow_mut()
         .map_err(|_| "Интерфейс занят")?;
     let session = slot.as_mut().ok_or("Нет интерфейса")?;
-    if session.argb_channels.is_some() {
+    if session.argb_channels.is_some() || session.argb_save.pending() {
         return Err("Предыдущий запрос ещё завершается. Откройте настройки снова.".into());
     }
+    session.argb_save.invalidate();
     let endpoint = *endpoint;
     let identity = identity.clone();
     let thread = std::thread::Builder::new()
@@ -134,10 +137,14 @@ pub(super) fn maintain(state: &State) {
             "Выбранный выход изменился. Откройте настройки снова.",
         ),
         Err(message) => failure(&device, request, &message),
-        Ok(inventory) => json!({
-            "kind":"argb_channels","device":device,"request":request,"status":"ready",
-            "channels":inventory.channels,"topology":inventory.topology,"writable":false
-        }),
+        Ok(inventory) => {
+            let mut slot = state.modern_session.borrow_mut();
+            let Some(session) = slot.as_mut() else { return };
+            // The protected owner must supply the writer for this revision.
+            session
+                .argb_save
+                .inventory(device, request, context, expected, inventory, None)
+        }
     };
     let _ = send(state, &reply);
 }

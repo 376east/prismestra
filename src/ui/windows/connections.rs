@@ -38,7 +38,7 @@ const ACTIVE_STATUS: i32 = 1820;
 const SAVE_KEY: i32 = 1821;
 pub(super) const CONFIGURE_PORTABLE_OPENRGB: i32 = 1822;
 const PORTABLE_HELPER_NOTE: i32 = 1823;
-const PORTABLE_HELPER_MESSAGE: &str = "Настройки локального OpenRGB заблокированы существующей авторизацией. Ссылка на задачу находится в data/state/backend-task.json в папке Prismestra. Для замены OpenRGB обратитесь к администратору, который авторизовал задачу.";
+const PORTABLE_HELPER_MESSAGE: &str = "Настройки OpenRGB закреплены за задачей. Для смены EXE попросите администратора проверить новый файл и обновить пин в задаче. Затем подтвердите файл через --reauthorize-portable-openrgb. Инструкция в managed-openrgb.md.";
 type PlanFactory = std::sync::Arc<
     dyn Fn(
             &crate::app::lighting_outputs::Local,

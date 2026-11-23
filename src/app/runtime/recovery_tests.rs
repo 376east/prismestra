@@ -183,6 +183,7 @@ struct E1Link {
     attempt: usize,
     inject_reconnect_faults: bool,
     traces: Arc<Mutex<Vec<Attempt>>>,
+    first_frame_release: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 impl Drop for E1Link {
@@ -243,11 +244,21 @@ impl ble::Link for E1Link {
             self.max_pdu()?,
             control,
             &mut |packet, _| {
-                let mut traces = self.traces.lock().unwrap();
-                let packets = &mut traces[self.attempt].packets;
-                packets.push(packet.to_vec());
-                if self.inject_reconnect_faults && self.attempt == 0 && packets.len() == 2 {
-                    return Err("Fixture disconnected during fragment 2".into());
+                let count = {
+                    let mut traces = self.traces.lock().unwrap();
+                    let packets = &mut traces[self.attempt].packets;
+                    packets.push(packet.to_vec());
+                    packets.len()
+                };
+                if count == 2 {
+                    if let Some(release) = self.first_frame_release.take() {
+                        release
+                            .recv_timeout(Duration::from_secs(5))
+                            .map_err(|error| error.to_string())?;
+                    }
+                    if self.inject_reconnect_faults && self.attempt == 0 {
+                        return Err("Fixture disconnected during fragment 2".into());
+                    }
                 }
                 Ok(())
             },
@@ -304,6 +315,7 @@ fn surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame() {
                     attempt,
                     inject_reconnect_faults: true,
                     traces: factory_traces.clone(),
+                    first_frame_release: None,
                 };
                 Ok(Box::new(Ble::with_e1(link, 1, 83, PIXEL_LEDS, &cancel)?))
             }),
@@ -403,6 +415,102 @@ fn surplife_adapter_arrival_recovers_after_the_automatic_budget() {
     surplife_first_light_after_adapter_arrival(true);
 }
 
+#[test]
+fn surplife_adapter_arrival_during_the_final_attempt_survives_its_failure() {
+    check_surplife_arrival_during_last_attempt(false);
+}
+
+#[test]
+fn surplife_adapter_arrival_during_the_final_attempt_is_spent_if_it_succeeds() {
+    check_surplife_arrival_during_last_attempt(true);
+}
+
+fn check_surplife_arrival_during_last_attempt(final_attempt_succeeds: bool) {
+    let mut document = runtime().document().clone();
+    document.lighting.setup.devices[0].driver = Driver::SurplifeE1Pixels;
+    let mut runtime = Runtime::new(document, None).unwrap();
+    let ble = Arc::new(Link::default());
+    let adapter = Arc::new(AtomicBool::new(false));
+    let (release, final_attempt) = std::sync::mpsc::channel();
+    let final_attempt = Mutex::new(final_attempt);
+    runtime
+        .attach_rgb(
+            "a",
+            vec!["ble:1".into()],
+            Arc::new({
+                let ble = ble.clone();
+                let adapter = adapter.clone();
+                move |_| {
+                    let present = adapter.load(Ordering::SeqCst);
+                    let final_normal_attempt = ble.calls.fetch_add(1, Ordering::SeqCst) == 3;
+                    if final_normal_attempt {
+                        final_attempt
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(8))
+                            .map_err(|error| error.to_string())?;
+                    }
+                    if !(present || (final_normal_attempt && final_attempt_succeeds)) {
+                        return Err("Stand adapter was absent when the probe started".into());
+                    }
+                    Ok(Box::new(RgbLink(ble.clone(), Driver::SurplifeE1Pixels)))
+                }
+            }),
+        )
+        .unwrap();
+    let wled = Arc::new(Link::default());
+    runtime.attach_rgb("b", vec![], factory(&wled)).unwrap();
+    runtime.enable_registered_output_recovery();
+    let mut now = 0;
+    tick(&mut runtime, &mut now);
+    wait(|| runtime.host.status("b").unwrap().submitted > 0);
+    let neighbor = runtime.host.status("b").unwrap().generation;
+
+    for (calls, delay) in [(1, 1_000_000), (2, 5_000_000), (3, 15_000_000)] {
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            ble.calls.load(Ordering::SeqCst) == calls
+                && runtime.host.status("a").unwrap().phase == Phase::Failed
+                && runtime.host.output_reaped("a")
+        });
+        now += delay;
+        tick(&mut runtime, &mut now);
+    }
+    wait(|| ble.calls.load(Ordering::SeqCst) == 4);
+    let pending = runtime.host.status("a").unwrap();
+    assert_eq!(pending.phase, Phase::Connecting);
+    adapter.store(true, Ordering::SeqCst);
+    runtime.bluetooth_adapter_arrived();
+    tick(&mut runtime, &mut now);
+    assert_eq!(
+        runtime.host.status("a").unwrap().generation,
+        pending.generation
+    );
+    assert_eq!(ble.calls.load(Ordering::SeqCst), 4);
+    release.send(()).unwrap();
+
+    working(&mut runtime, "a", &mut now);
+    if final_attempt_succeeds {
+        assert_eq!(
+            runtime.host.status("a").unwrap().generation,
+            pending.generation
+        );
+        disconnected(&mut runtime, &ble, "a", &mut now);
+        now += 60_000_000;
+        tick(&mut runtime, &mut now);
+        assert_eq!(
+            runtime.host.status("a").unwrap().generation,
+            pending.generation
+        );
+        assert_eq!(ble.calls.load(Ordering::SeqCst), 4);
+    } else {
+        assert_eq!(ble.calls.load(Ordering::SeqCst), 5);
+    }
+    assert_eq!(runtime.host.status("b").unwrap().generation, neighbor);
+    assert_eq!(wled.calls.load(Ordering::SeqCst), 1);
+    drain(&mut runtime);
+}
+
 fn surplife_first_light_after_adapter_arrival(exhaust_budget: bool) {
     const NO_ADAPTER: &str = "Windows не обнаружила Bluetooth-адаптер.";
     let mut runtime =
@@ -433,6 +541,7 @@ fn surplife_first_light_after_adapter_arrival(exhaust_budget: bool) {
                         attempt,
                         inject_reconnect_faults: false,
                         traces: traces.clone(),
+                        first_frame_release: None,
                     };
                     Ok(Box::new(Ble::with_e1(link, 1, 83, PIXEL_LEDS, &cancel)?))
                 }
@@ -515,6 +624,136 @@ fn surplife_first_light_after_adapter_arrival(exhaust_budget: bool) {
     assert!(restored.packets.len() >= 5);
     assert_eq!(&restored.packets[0][..4], &[0x40, 0, 0, 0]);
     assert_eq!(&restored.packets[4][..4], &[0x40, 0, 0x80, 4]);
+}
+
+#[test]
+fn surplife_backpressure_after_adapter_arrival_keeps_rgb_and_lcd_live() {
+    let (document, dir) = arrival_lcd_document(
+        Document::from_lighting(surplife_project()).unwrap(),
+        "ble-backpressure",
+        ARRIVAL_LCD_MEDIA,
+    );
+    let mut runtime = Runtime::new(document, None).unwrap();
+    let (release, gate) = std::sync::mpsc::channel();
+    let gate = Mutex::new(Some(gate));
+    let present = Arc::new(AtomicBool::new(false));
+    let traces = Arc::new(Mutex::new(vec![Attempt::default()]));
+    runtime
+        .attach_rgb(
+            "a",
+            vec!["ble:1".into()],
+            Arc::new({
+                let present = present.clone();
+                let traces = traces.clone();
+                move |cancel| {
+                    if !present.load(Ordering::SeqCst) {
+                        return Err("Stand adapter unavailable".into());
+                    }
+                    let link = E1Link {
+                        attempt: 0,
+                        inject_reconnect_faults: false,
+                        traces: traces.clone(),
+                        first_frame_release: gate.lock().unwrap().take(),
+                    };
+                    Ok(Box::new(Ble::with_e1(link, 1, 83, PIXEL_LEDS, &cancel)?))
+                }
+            }),
+        )
+        .unwrap();
+    let rgb = Arc::new(Link::default());
+    runtime.attach_rgb("b", vec![], factory(&rgb)).unwrap();
+    runtime
+        .attach_lcd(
+            "lcd",
+            vec![],
+            Arc::new({
+                let dir = dir.clone();
+                let link = Arc::new(Link::default());
+                move |config, _| {
+                    Ok((
+                        lcd::Controller::new(config, &Assets::new(dir.clone())?)?,
+                        Box::new(Reports(link.clone())),
+                    ))
+                }
+            }),
+        )
+        .unwrap();
+    runtime.enable_registered_output_recovery();
+    wait(|| runtime.host.status("a").unwrap().phase == Phase::Failed);
+
+    let mut now = 0;
+    working(&mut runtime, "b", &mut now);
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.lcd_status("lcd").unwrap().frames_sent > 0
+    });
+    let rgb_generation = runtime.host.status("b").unwrap().generation;
+    let lcd_generation = runtime.lcd_status("lcd").unwrap().generation;
+    let set_color = |runtime: &mut Runtime, color| {
+        let mut scene = runtime.document().lighting.scene.clone();
+        scene.colors.fill(color);
+        runtime.set_scene(scene).unwrap();
+    };
+    set_color(&mut runtime, 0x0000ff);
+    tick(&mut runtime, &mut now);
+    assert!(traces.lock().unwrap()[0].packets.is_empty());
+
+    present.store(true, Ordering::SeqCst);
+    runtime.bluetooth_adapter_arrived();
+    now += 1_000_000;
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        traces.lock().unwrap()[0].packets.len() == 2
+    });
+    let lcd_before = runtime.lcd_status("lcd").unwrap().frames_sent;
+    for (scene_color, expected) in [
+        (0x00ff00, Rgb::new(0, 255, 0)),
+        (0xffff00, Rgb::new(255, 255, 0)),
+    ] {
+        set_color(&mut runtime, scene_color);
+        tick(&mut runtime, &mut now);
+        wait(|| {
+            rgb.frames
+                .lock()
+                .unwrap()
+                .last()
+                .is_some_and(|frame| frame == &[expected])
+        });
+    }
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.lcd_status("lcd").unwrap().frames_sent >= lcd_before + 2
+    });
+    assert_eq!(runtime.host.status("b").unwrap().generation, rgb_generation);
+    assert_eq!(
+        runtime.lcd_status("lcd").unwrap().generation,
+        lcd_generation
+    );
+    let blocked = runtime.host.status("a").unwrap();
+    assert_eq!(blocked.submitted, 0);
+    assert!(blocked.replaced > 0);
+    assert_eq!(traces.lock().unwrap()[0].packets.len(), 2);
+    let newest = runtime.host.requested("a").unwrap();
+
+    release.send(()).unwrap();
+    wait(|| runtime.host.status("a").unwrap().last_submitted == Some(newest));
+    drain(&mut runtime);
+    let expected_packets: Vec<_> = [Rgb::new(0, 0, 255), Rgb::new(255, 255, 0)]
+        .into_iter()
+        .enumerate()
+        .flat_map(|(sequence, color)| {
+            crate::lighting::door::pixel_fragments_for_points(
+                &[color; PIXEL_LEDS],
+                83,
+                sequence as u8,
+                200,
+                PIXEL_LEDS,
+            )
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(traces.lock().unwrap()[0].packets, expected_packets);
+    remove_lcd_assets(runtime, dir);
 }
 
 #[cfg(windows)]
@@ -1110,6 +1349,153 @@ fn recovery_stop_cancels_pending_initial_connection_retry() {
     assert!(runtime.tick(now, 1_800_000_000).is_err());
     assert_eq!(link.calls.load(Ordering::SeqCst), 1);
     drain(&mut runtime);
+}
+
+#[cfg(windows)]
+#[test]
+fn fresh_status_from_same_helper_restores_frames_after_exhausted_retries() {
+    struct GuardedLink(RgbLink, Cancellation);
+    impl RgbDriver for GuardedLink {
+        fn protocol(&self) -> Driver {
+            Driver::OpenRgb
+        }
+        fn leds(&self) -> usize {
+            self.0.leds()
+        }
+        fn write(&mut self, colors: &[Rgb], cancel: &Cancellation) -> Result<WriteResult, String> {
+            if self.1.cancelled() {
+                return Err("Managed backend status expired".into());
+            }
+            self.0.write(colors, cancel)
+        }
+    }
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let state = std::env::temp_dir().join(format!(
+        "prismestra-same-helper-{}-{}",
+        std::process::id(),
+        crate::clock::monotonic_us()
+    ));
+    std::fs::create_dir(&state).unwrap();
+    let block_read = Arc::new(AtomicBool::new(false));
+    let read_gate = block_read.clone();
+    let deny_acl = Arc::new(AtomicBool::new(false));
+    let acl_gate = deny_acl.clone();
+    let (entered, blocked) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let backend = crate::app::backend_helper::Backend::fixture_with_status_reader(
+        listener.local_addr().unwrap(),
+        &state,
+        move || {
+            if read_gate.swap(false, Ordering::SeqCst) {
+                entered.send(()).unwrap();
+                resume
+                    .recv_timeout(Duration::from_secs(12))
+                    .map_err(|error| error.to_string())?;
+            }
+            if acl_gate.load(Ordering::SeqCst) {
+                return Err("Fixture status ACL denied".into());
+            }
+            Ok(())
+        },
+    );
+    wait(|| backend.snapshot().ready);
+    let original = backend.snapshot();
+    assert_eq!(original.ready_generation, 1);
+    let mut document = runtime().document().clone();
+    document.lighting.setup.devices[0].driver = Driver::OpenRgb;
+    let mut runtime = Runtime::new(document, None).unwrap();
+    runtime.managed_backend_ids.insert("a".into());
+    runtime.managed_backend = Some(backend);
+    let link = Arc::new(Link::default());
+    let driver_link = link.clone();
+    runtime
+        .attach_rgb(
+            "a",
+            Vec::new(),
+            Arc::new(move |guarded_cancel| {
+                driver_link.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(GuardedLink(
+                    RgbLink(driver_link.clone(), Driver::OpenRgb),
+                    guarded_cancel.clone(),
+                )))
+            }),
+        )
+        .unwrap();
+    runtime.enable_output_recovery("a").unwrap();
+    let mut now = 0;
+    working(&mut runtime, "a", &mut now);
+
+    block_read.store(true, Ordering::SeqCst);
+    blocked.recv_timeout(Duration::from_secs(2)).unwrap();
+    wait(|| {
+        tick(&mut runtime, &mut now);
+        runtime.host.status("a").unwrap().phase == Phase::Failed
+            && !runtime.managed_backend.as_ref().unwrap().snapshot().ready
+    });
+    for delay in [1_000_000, 5_000_000, 15_000_000] {
+        tick(&mut runtime, &mut now);
+        let previous = runtime.host.status("a").unwrap().generation;
+        now += delay;
+        tick(&mut runtime, &mut now);
+        wait(|| {
+            runtime.tick(now, 1_800_000_000).unwrap();
+            let status = runtime.host.status("a").unwrap();
+            status.generation != previous && status.phase == Phase::Failed
+        });
+    }
+    tick(&mut runtime, &mut now);
+    let exhausted = runtime.host.status("a").unwrap().generation;
+    now += 60_000_000;
+    tick(&mut runtime, &mut now);
+    assert_eq!(runtime.host.status("a").unwrap().generation, exhausted);
+    let before = link.frames.lock().unwrap().len();
+    assert!(before > 0);
+
+    deny_acl.store(true, Ordering::SeqCst);
+    release.send(()).unwrap();
+    wait(|| {
+        let snapshot = runtime.managed_backend.as_ref().unwrap().snapshot();
+        !snapshot.ready && snapshot.detail.contains("Fixture status ACL denied")
+    });
+    tick(&mut runtime, &mut now);
+    assert_eq!(runtime.host.status("a").unwrap().generation, exhausted);
+    assert_eq!(link.frames.lock().unwrap().len(), before);
+    deny_acl.store(false, Ordering::SeqCst);
+    wait(|| runtime.managed_backend.as_ref().unwrap().snapshot().ready);
+    let restored = runtime.managed_backend.as_ref().unwrap().snapshot();
+    assert_eq!(restored.backend_pid, original.backend_pid);
+    eprintln!(
+        "exhausted output generation {exhausted}, {} frames before recovery, same backend PID, client ready generation {} -> {}",
+        before, original.ready_generation, restored.ready_generation
+    );
+    tick(&mut runtime, &mut now);
+    // Let the recovery delay elapse on the runtime clock without a manual retry.
+    now += 1_000_000;
+    working(&mut runtime, "a", &mut now);
+    assert_eq!(restored.ready_generation, original.ready_generation + 1);
+    assert!(link.frames.lock().unwrap().len() > before);
+    assert_eq!(link.calls.load(Ordering::SeqCst), 2);
+    let stable = runtime.host.status("a").unwrap().generation;
+    std::thread::sleep(Duration::from_millis(450));
+    tick(&mut runtime, &mut now);
+    assert_eq!(
+        runtime.managed_backend_generation,
+        restored.ready_generation
+    );
+    assert_eq!(runtime.host.status("a").unwrap().generation, stable);
+
+    drain(&mut runtime);
+    runtime.release_managed_backend();
+    for file in [
+        "owner-pause.json",
+        "owner-cancel.json",
+        "owner-request.json",
+        "backend-client.lock",
+    ] {
+        std::fs::remove_file(state.join(file)).unwrap();
+    }
+    std::fs::remove_dir(state).unwrap();
 }
 
 #[test]

@@ -24,7 +24,7 @@ window.argbChannel = (() => {
     {id:'strip-30', label:'Лента · 30 LED', shape:'strip', leds:30},
     {id:'strip-60', label:'Лента · 60 LED', shape:'strip', leds:60},
   ];
-  let context = null, pending = null, channels = [], request = 0, saved = false, writable = false;
+  let context = null, pending = null, channels = [], request = 0, saved = false, revision = null;
   let exactCount = '';
 
   const current = () => channels.find(item => item.id === channel.value);
@@ -58,6 +58,7 @@ window.argbChannel = (() => {
     const item = current();
     const limits = bounds(item);
     const canPreview = validCount(limits);
+    const writable = !!revision && item?.canSave === true;
     channel.disabled = !!pending || saved || !channels.length;
     options.hidden = !limits;
     template.disabled = !!pending || saved || !limits;
@@ -102,7 +103,7 @@ window.argbChannel = (() => {
 
   function start(operation, data={}) {
     const id = ++request;
-    pending = {id, operation};
+    pending = {id, operation, ...data};
     status.textContent = operation === 'list' ? 'Загружаем каналы…' : 'Сохраняем настройки канала…';
     render();
     if (!context.api[operation]({device:context.device,request:id,...data})) {
@@ -115,10 +116,13 @@ window.argbChannel = (() => {
   function receive(message) {
     if (!dialog.open || !pending || context.device !== message.device || pending.id !== message.request) return;
     const {operation} = pending;
+    if (operation === 'list' && message.kind !== 'argb_channels') return;
+    if (operation === 'save' && (message.kind !== 'argb_channel_saved' || pending.revision !== message.revision)) return;
     if (operation === 'list' && message.status === 'ready') {
       pending = null;
       channels = message.channels;
-      writable = message.writable === true && typeof context.api.save === 'function';
+      revision = message.writable === true && typeof message.revision === 'string' && message.revision
+        && typeof context.api.save === 'function' ? message.revision : null;
       const placeholder = document.createElement('option');
       placeholder.value = '';
       placeholder.textContent = 'Выберите канал…';
@@ -134,13 +138,18 @@ window.argbChannel = (() => {
       if (!channels.length) status.textContent = 'Контроллер не сообщил доступных каналов.';
       else if (document.activeElement === close) channel.focus({preventScroll:true});
     } else if (operation === 'save' && message.status === 'saved') {
+      if (message.zone !== pending.zone || message.leds !== pending.leds ||
+          !/^[0-9a-f]{64}$/.test(message.topology ?? '')) return;
       pending = null;
       saved = true;
+      current().leds = message.leds;
+      element('current').textContent = `Сейчас в канале: ${message.leds} LED.`;
       status.textContent = message.message || 'Настройки канала сохранены.';
       render();
       if (document.activeElement === save) close.focus({preventScroll:true});
     } else if (message.status === 'failed') {
       pending = null;
+      if (operation === 'save' && message.refresh === true) revision = null;
       status.textContent = message.message || 'Не удалось настроить канал.';
       render();
     }
@@ -149,7 +158,8 @@ window.argbChannel = (() => {
   function open(device, label, api) {
     context = {device, api};
     channels = [];
-    saved = writable = false;
+    saved = false;
+    revision = null;
     channel.replaceChildren();
     count.value = '';
     element('label').textContent = label;
@@ -178,8 +188,10 @@ window.argbChannel = (() => {
   form.onsubmit = event => {
     event.preventDefault();
     const item = current();
-    if (!writable || pending || saved || !validCount(bounds(item))) return;
-    start('save', {channel:item.id,leds:count.valueAsNumber});
+    if (!revision || item?.canSave !== true || pending || saved || !validCount(bounds(item))) return;
+    const zone = Number(item.id);
+    if (!Number.isSafeInteger(zone) || zone<0 || String(zone)!==item.id) return;
+    start('save', {revision,zone,leds:count.valueAsNumber});
   };
   save.onclick = event => {
     if (save.getAttribute('aria-disabled') === 'true') event.preventDefault();
@@ -189,5 +201,5 @@ window.argbChannel = (() => {
     event.preventDefault();
     dismiss();
   });
-  return {open, receive};
+  return {open, receive, blockClose: () => pending?.operation === 'save'};
 })();

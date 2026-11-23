@@ -593,38 +593,135 @@ fn cancellation_while_waiting_for_reply_closes_socket() {
 }
 
 fn matrix_server(payloads: Vec<Vec<u8>>) -> (SocketAddr, Captured, thread::JoinHandle<()>) {
+    matrix_server_sessions(vec![payloads])
+}
+
+fn matrix_server_sessions(
+    sessions: Vec<Vec<Vec<u8>>>,
+) -> (SocketAddr, Captured, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let calls: Captured = Arc::new(Mutex::new(vec![]));
     let saved = calls.clone();
     let h = thread::spawn(move || {
-        let (mut s, _) = listener.accept().unwrap();
-        s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        let mut descriptors = payloads.into_iter();
-        while let Some((device, id, body)) = read(&mut s) {
-            saved.lock().unwrap().push((device, id, body));
-            match id {
-                40 => packet(&mut s, device, id, &6u32.to_le_bytes()),
-                52 => packet(&mut s, device, 53, &1u32.to_le_bytes()),
-                0 => {
-                    let mut ids = vec![];
-                    u32v(&mut ids, 1);
-                    u32v(&mut ids, 7);
-                    packet(&mut s, device, id, &ids);
-                }
-                1 => packet(
-                    &mut s,
-                    device,
-                    id,
-                    &descriptors.next().expect("unexpected descriptor read"),
-                ),
-                1101 | 1050 => (),
-                _ => panic!("unexpected write"),
+        thread::scope(|scope| {
+            for payloads in sessions {
+                let (s, _) = listener.accept().unwrap();
+                let saved = saved.clone();
+                scope.spawn(move || serve_matrix_session(s, payloads, &saved));
             }
-            ack(&mut s, device, id);
-        }
+        });
     });
     (addr, calls, h)
+}
+
+fn serve_matrix_session(mut s: TcpStream, payloads: Vec<Vec<u8>>, saved: &Captured) {
+    s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let mut descriptors = payloads.into_iter();
+    while let Some((device, id, body)) = read(&mut s) {
+        saved.lock().unwrap().push((device, id, body));
+        match id {
+            40 => packet(&mut s, device, id, &6u32.to_le_bytes()),
+            52 => packet(&mut s, device, 53, &1u32.to_le_bytes()),
+            0 => {
+                let mut ids = vec![];
+                u32v(&mut ids, 1);
+                u32v(&mut ids, 7);
+                packet(&mut s, device, id, &ids);
+            }
+            1 => packet(
+                &mut s,
+                device,
+                id,
+                &descriptors.next().expect("unexpected descriptor read"),
+            ),
+            1101 | 1050 => (),
+            _ => panic!("unexpected write"),
+        }
+        ack(&mut s, device, id);
+    }
+}
+
+#[test]
+fn discovery_direct_warning_does_not_cancel_an_open_output() {
+    use crate::{
+        app::{device_setup, lighting_bindings::discovery},
+        devices::openrgb::{identity, topology},
+        lighting::color::Rgb,
+        runtime::{
+            network::OpenRgb,
+            output::{Cancellation, RgbDriver, WriteResult},
+        },
+    };
+
+    let descriptor =
+        |mode| controller_layout("KEYBOARD-FIXTURE", false, &[None], false, None, mode);
+    let direct = descriptor("Direct");
+    let (endpoint, calls, server) = matrix_server_sessions(vec![
+        vec![direct.clone()],
+        vec![direct.clone(), direct],
+        vec![descriptor("Static")],
+    ]);
+
+    let mut session = OpenRgbSession::connect(endpoint, deadline(), &|| false).unwrap();
+    let saved = session.scan(deadline(), &|| false).unwrap().remove(0);
+    drop(session);
+
+    let cancel = Cancellation::default();
+    let mut output = OpenRgb::connect(
+        endpoint,
+        &identity(&saved),
+        &topology(&saved),
+        saved.leds,
+        &cancel,
+    )
+    .unwrap();
+    let before = vec![Rgb { r: 1, g: 2, b: 3 }; saved.leds];
+    assert!(matches!(
+        output.write(&before, &cancel).unwrap(),
+        WriteResult::Submitted
+    ));
+
+    let device = device_setup::preset("openrgb-controller")
+        .unwrap()
+        .device_with_leds("keyboard", saved.leds)
+        .unwrap();
+    let inventory =
+        discovery::openrgb_factory(endpoint)(discovery::Target::Device(device), cancel.clone())
+            .unwrap();
+    assert!(inventory.candidates.is_empty());
+    assert!(
+        inventory
+            .issues
+            .iter()
+            .any(|issue| issue.contains("нет полного Direct-вывода"))
+    );
+
+    let after = vec![Rgb { r: 4, g: 5, b: 6 }; saved.leds];
+    if let WriteResult::Deferred(delay) = output.write(&after, &cancel).unwrap() {
+        thread::sleep(delay);
+        assert!(matches!(
+            output.write(&after, &cancel).unwrap(),
+            WriteResult::Submitted
+        ));
+    }
+    drop(output);
+    server.join().unwrap();
+
+    let calls = calls.lock().unwrap();
+    let writes = calls
+        .iter()
+        .filter(|(_, kind, _)| matches!(kind, 1101 | 1050))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        writes
+            .iter()
+            .map(|(id, kind, _)| (*id, *kind))
+            .collect::<Vec<_>>(),
+        [(7, 1101), (7, 1050), (7, 1050)]
+    );
+    assert_eq!(&writes[1].2[6..10], &[1, 2, 3, 0]);
+    assert_eq!(&writes[2].2[6..10], &[4, 5, 6, 0]);
 }
 
 #[test]

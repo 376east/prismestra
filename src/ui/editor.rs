@@ -989,6 +989,14 @@ impl Editor {
                 "Показания выводятся только пока они свежие.",
             ),
             gauge,
+            field(
+                "card_position",
+                "Позиция карточки",
+                c.card_position
+                    .map(|p| format!("{}, {}", p.x, p.y))
+                    .unwrap_or_default(),
+                "Укажите X от 0 до 292 и Y от 0 до 404 через запятую. Пустое поле оставляет стандартную позицию.",
+            ),
             font,
             field(
                 "interval",
@@ -1180,6 +1188,19 @@ impl Editor {
             }
             "rotation" => c.rotation = parse(value)?,
             "overlay" => c.overlay_enabled = boolean_value(value)?,
+            "card_position" => {
+                c.card_position = if value.trim().is_empty() {
+                    None
+                } else {
+                    let (x, y) = value
+                        .split_once(',')
+                        .ok_or("Введите X и Y через запятую.")?;
+                    Some(crate::lcd::overlay::CardPosition {
+                        x: parse(x)?,
+                        y: parse(y)?,
+                    })
+                };
+            }
             "media" if value.trim().is_empty() => c.media = None,
             "gauge_style" => {
                 c.gauge_style = crate::lcd::overlay::GaugeStyle::OPTIONS

@@ -506,12 +506,9 @@ pub fn surplife_factory(address: u64) -> Factory {
     })
 }
 fn native(target: Target, cancel: Cancellation) -> Result<Inventory, String> {
-    use crate::{
-        lcd::{hid_adapter::Backend as _, hid_policy::Kind},
-        transport::{
-            feature_hid::{Backend as _, Family},
-            serial::Backend as _,
-        },
+    use crate::transport::{
+        feature_hid::{Backend as _, Family},
+        serial::Backend as _,
     };
     let mut out = Inventory::empty(target.clone());
     if cancel.cancelled() {
@@ -535,8 +532,9 @@ fn native(target: Target, cancel: Cancellation) -> Result<Inventory, String> {
             d.validate()?;
             match &d.driver {
                 Driver::TtLcd=>{
-                    for descriptor in crate::lcd::hid_windows::NativeBackend.candidates(Kind::Display)? {
-                        if let Err(e)=crate::lcd::hid_policy::validate(Kind::Display,&descriptor){out.issues.push(e);continue;}
+                    let (descriptors, issues)=crate::lcd::hid_windows::discover_displays()?;
+                    out.issues.extend(issues);
+                    for descriptor in descriptors {
                         out.candidates.push(Candidate{wled: None,controller: None,label:format!("TT display MI01 · {}",descriptor.path.chars().take(100).collect::<String>()),draft:Draft{endpoint:descriptor.path,..Default::default()}});
                     }
                 }
