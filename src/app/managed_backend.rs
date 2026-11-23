@@ -209,6 +209,16 @@ pub struct Snapshot {
     pub detail: String,
     pub ready: bool,
     pub backend_pid: Option<u32>,
+    pub(super) populated_inventory_at: Option<Instant>,
+}
+
+impl Snapshot {
+    pub(super) fn has_recent_inventory(&self) -> bool {
+        self.ready
+            && self
+                .populated_inventory_at
+                .is_some_and(|at| at.elapsed() <= Duration::from_secs(10))
+    }
 }
 
 struct Shared {
@@ -758,6 +768,7 @@ fn run(config: Config, installed: Option<&InstalledLaunch>, state: &Shared) {
         {
             let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
             snapshot.ready = false;
+            snapshot.populated_inventory_at = None;
             if exited {
                 snapshot.backend_pid = None;
             }
@@ -863,6 +874,7 @@ fn monitor_owned(
             {
                 let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
                 snapshot.ready = false;
+                snapshot.populated_inventory_at = None;
                 snapshot.detail = format!("Managed OpenRGB SDK unavailable: {reason}");
             }
             ready = false;
@@ -897,10 +909,17 @@ fn monitor_owned(
                     {
                         inventory.observe(count, fingerprint, state)
                     }
-                    Err(e) if !state.cancel.load(Ordering::SeqCst) => state.detail(format!(
-                        "Managed OpenRGB SDK ready; inventory scan unavailable: {e}"
-                    )),
-                    _ => {}
+                    result => {
+                        let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
+                        snapshot.populated_inventory_at = None;
+                        if let Err(e) = result
+                            && !state.cancel.load(Ordering::SeqCst)
+                        {
+                            snapshot.detail = format!(
+                                "Managed OpenRGB SDK ready; inventory scan unavailable: {e}"
+                            );
+                        }
+                    }
                 }
             }
             if began.elapsed() >= Duration::from_secs(60) {
@@ -979,6 +998,7 @@ impl InventoryWatch {
     fn observe(&mut self, count: usize, fingerprint: [u8; 32], state: &Shared) {
         self.ever_populated |= count > 0;
         let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
+        snapshot.populated_inventory_at = (count > 0).then(Instant::now);
         if self.last != fingerprint {
             self.last = fingerprint;
             snapshot.ready_generation = snapshot.ready_generation.saturating_add(1);
