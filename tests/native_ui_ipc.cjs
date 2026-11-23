@@ -1804,6 +1804,8 @@ function checkEnglishApplicationLanguage() {
  checkSearchRetryRecovery(preview,'Retry search');
  checkOutputPageLanguage(preview,true);
  checkOutputPageLanguage(context,false);
+ assert.equal(vm.runInContext("outputStatusLabel('Команда выключения отправлена')",preview),'Off command sent');
+ assert.equal(vm.runInContext("outputStatusLabel('Команда выключения отправлена')",context),'Команда выключения отправлена');
  console.log('PASS: English native bootstrap, scenes, device status and application language persistence IPC');
  console.log('PASS: rejected discovery retries only discovery in Russian and English; other errors retain document recovery');
 }

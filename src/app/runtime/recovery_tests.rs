@@ -887,7 +887,7 @@ fn startup_isolates_endpoint_contention_and_retries_the_returned_output() {
     assert_eq!(a.frames.lock().unwrap()[before_retry], [Rgb::default()]);
     assert!(matches!(
         runtime.output_activity(device),
-        OutputActivity::Off
+        OutputActivity::OffSubmitted
     ));
     drain(&mut runtime);
 }

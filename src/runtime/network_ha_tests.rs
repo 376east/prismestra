@@ -1075,7 +1075,7 @@ fn saved_scene_ha_opt_in_off_during_outage_and_explicit_reselect() {
     });
     assert!(matches!(
         runtime.output_activity(&runtime.document().lighting.setup.devices[0]),
-        crate::app::runtime::OutputActivity::Off
+        crate::app::runtime::OutputActivity::OffSubmitted
     ));
     runtime.request_outputs(plan("light.reselected")).unwrap();
     wait(&mut runtime, "new binding while off", &|runtime| {
@@ -1241,7 +1241,7 @@ fn ha_off_status_waits_for_a_new_submission_after_a_color_frame() {
     assert!(after.sequence > previous.sequence);
     assert!(matches!(
         runtime.output_activity(&device),
-        OutputActivity::Off
+        OutputActivity::OffSubmitted
     ));
     // No color frame is submitted between these intents. HA's cached black
     // must not stand in for delivery of the next explicit Off.
@@ -1258,7 +1258,7 @@ fn ha_off_status_waits_for_a_new_submission_after_a_color_frame() {
     );
     assert!(matches!(
         runtime.output_activity(&device),
-        OutputActivity::Off
+        OutputActivity::OffSubmitted
     ));
     runtime.stop();
     let requests = peer.join().unwrap();

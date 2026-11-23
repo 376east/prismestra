@@ -3080,6 +3080,7 @@ fn output_activity_label(activity: &crate::app::runtime::OutputActivity) -> &'st
     match activity {
         OutputActivity::Off => "Выключено",
         OutputActivity::TurningOff => "Выключается",
+        OutputActivity::OffSubmitted => "Команда выключения отправлена",
         OutputActivity::Connecting => "Подключается",
         OutputActivity::Retrying(_) => "Ожидает повтора",
         OutputActivity::Sent(_) => "Кадры отправлены",
