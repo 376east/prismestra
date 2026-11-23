@@ -2297,6 +2297,7 @@ struct State {
     snapshot: bool,
     resident: Cell<bool>,
     editor_window: Rc<Cell<HWND>>,
+    tray_scene_ready: Cell<bool>,
     shell_window: Cell<HWND>,
     activation_message: Cell<u32>,
     activation_requested: Cell<bool>,
@@ -3156,6 +3157,7 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
         snapshot: o.snapshot.is_some(),
         resident: Cell::new(resident_mode),
         editor_window: Rc::new(Cell::new(null_mut())),
+        tray_scene_ready: Cell::new(false),
         shell_window: Cell::new(null_mut()),
         activation_message: Cell::new(0),
         activation_requested: Cell::new(false),
@@ -3308,6 +3310,10 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
     // are destroyed, including a control-construction failure.
     state.app.replace(Some(app));
     built?;
+    #[cfg(test)]
+    if let Some(result) = resident::tray_scene_fixture(&state) {
+        return result;
+    }
     let _shell = if resident_mode {
         Some(resident::Shell::create(&state, true)?)
     } else {
