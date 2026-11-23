@@ -322,6 +322,7 @@ exit 0
         self.assertIn("old Prismestra sign-in tasks", finish)
         self.assertIn("entries whose actions reference the folder", finish)
         self.assertIn("See the Setup log", finish)
+        self.assertNotRegex(finish, r"(?m)^\s*#[0-9]")
 
     @unittest.skipUnless(os.name == "nt", "Requires the x64 Windows Rust toolchain")
     def test_builds_webview_probe_without_a_redistributable_and_checks_versions(self):

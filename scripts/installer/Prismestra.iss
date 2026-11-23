@@ -456,8 +456,7 @@ begin
 #ifndef LifecycleTest
   if (Step = ssDone) and not WizardSilent and LegacyStartupPermissionsDeferred then
     SuppressibleMsgBox(
-      'Your Prismestra profile was imported. Setup kept the old Prismestra sign-in tasks enabled because it could not verify Task Scheduler permissions.' +
-      #13#10#13#10 +
+      'Your Prismestra profile was imported. Setup kept the old Prismestra sign-in tasks enabled because it could not verify Task Scheduler permissions.'#13#10#13#10 +
       'In Task Scheduler, review only the entries whose actions reference the folder where you ran the previous version of Prismestra. See the Setup log for the exact reason.',
       mbInformation, MB_OK, IDOK);
 #endif
