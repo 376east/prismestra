@@ -117,6 +117,7 @@ fn late_inventory_after_startup_budget_advances_generation_without_restarting_ch
     until(|| manager.snapshot().ready && manager.snapshot().detail.contains("0 controllers"));
     let empty = manager.snapshot();
     assert_eq!(empty.ready_generation, 1);
+    assert!(!empty.has_recent_inventory());
     thread::sleep(Duration::from_millis(350)); // Longer than the same startup budget used by monitor.
     assert!(scans(&directory.0) >= 2);
     assert_eq!(manager.snapshot().backend_pid, empty.backend_pid);
@@ -128,6 +129,7 @@ fn late_inventory_after_startup_budget_advances_generation_without_restarting_ch
     assert_eq!(populated.ready_generation, empty.ready_generation + 1);
     assert_eq!(populated.backend_pid, empty.backend_pid);
     assert!(populated.detail.contains("inventory 1 controllers"));
+    assert!(populated.has_recent_inventory());
     let stable_scan_target = scans(&directory.0) + 5;
     until(|| scans(&directory.0) >= stable_scan_target);
     assert_eq!(
@@ -155,6 +157,7 @@ fn late_inventory_after_startup_budget_advances_generation_without_restarting_ch
             .contains("inventory scan unavailable")
     });
     assert!(manager.snapshot().ready);
+    assert!(!manager.snapshot().has_recent_inventory());
     assert_eq!(manager.snapshot().backend_pid, empty.backend_pid);
     assert_eq!(
         manager.snapshot().ready_generation,

@@ -4,6 +4,7 @@
 use super::installed_policy::{HelperAuthority, InstalledPolicy};
 use super::managed_backend::{Config, Manager};
 mod clock;
+mod retry;
 use clock::{ActiveClock, Clock};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
@@ -97,6 +98,8 @@ struct Status {
     ready_generation: u64,
     ready: bool,
     backend_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    inventory_confirmed: bool,
     detail: String,
 }
 #[derive(Clone, Debug, Default)]
@@ -153,6 +156,7 @@ impl Backend {
                 ready_generation: 1,
                 ready: true,
                 backend_pid: Some(original.parent.pid),
+                inventory_confirmed: false,
                 detail: "Fixture SDK ready".into(),
             }))
         })
@@ -161,6 +165,7 @@ impl Backend {
             state_dir,
             &state_dir.join("outbox"),
             "fixture".into(),
+            None,
             polls,
             |_, _| panic!("the fixture must never launch a task"),
         )
@@ -200,7 +205,7 @@ impl Backend {
                 let task: TaskConfig = read_json(&task_path)?;
                 task.validate()?;
                 if task.version == 1 {
-                    Inner::Task(Proxy::start(state_dir, state_dir, task.task_name)?)
+                    Inner::Task(Proxy::start(state_dir, state_dir, task.task_name, None)?)
                 } else {
                     #[cfg(windows)]
                     if let Some(policy) = resolve_installed_task(state_dir, &config, &task) {
@@ -211,6 +216,7 @@ impl Backend {
                                 state_dir,
                                 &policy.outbox,
                                 policy.task_name,
+                                Some(endpoint),
                             )?),
                         }));
                     }
@@ -282,7 +288,12 @@ impl Backend {
 }
 
 impl Proxy {
-    fn start(state_dir: &Path, status_dir: &Path, task_name: String) -> Result<Self, String> {
+    fn start(
+        state_dir: &Path,
+        status_dir: &Path,
+        task_name: String,
+        recovery_endpoint: Option<SocketAddr>,
+    ) -> Result<Self, String> {
         static STATUS_POLLS: OnceLock<Result<SyncSender<StatusPoll>, String>> = OnceLock::new();
         let polls = STATUS_POLLS
             .get_or_init(|| start_status_worker(read_status))
@@ -293,8 +304,9 @@ impl Proxy {
             state_dir,
             status_dir,
             task_name,
+            recovery_endpoint,
             polls.clone(),
-            move |name, stop| launch_task(name, stop, installed),
+            move |name, permission| launch_task(name, permission, installed),
         )
     }
 
@@ -302,8 +314,9 @@ impl Proxy {
         state_dir: &Path,
         status_dir: &Path,
         task_name: String,
+        recovery_endpoint: Option<SocketAddr>,
         polls: SyncSender<StatusPoll>,
-        launcher: impl Fn(&str, &AtomicBool) -> Result<(), String> + Clone + Send + 'static,
+        launcher: impl Fn(&str, LaunchPermission<'_>) -> Result<(), String> + Clone + Send + 'static,
     ) -> Result<Self, String> {
         let client_lock = client_lock(state_dir)?;
         let parent = identity(std::process::id())?;
@@ -343,6 +356,7 @@ impl Proxy {
                     ProxyPaths {
                         directory: &directory,
                         status_dir: &status_dir,
+                        recovery_endpoint,
                     },
                     &task_name,
                     &request,
@@ -403,12 +417,35 @@ struct ProxyControl {
 struct ProxyPaths<'a> {
     directory: &'a Path,
     status_dir: &'a Path,
+    recovery_endpoint: Option<SocketAddr>,
 }
 
 struct StatusPoll {
     path: PathBuf,
     installed: bool,
     reply: SyncSender<Result<Option<Status>, String>>,
+}
+
+type LaunchWorker = JoinHandle<Option<Result<(), String>>>;
+
+struct LaunchPermission<'a> {
+    stop: &'a AtomicBool,
+    restarting: &'a AtomicBool,
+}
+
+impl LaunchPermission<'_> {
+    fn allowed(&self) -> bool {
+        self.restarting.load(Ordering::SeqCst) && !self.stop.load(Ordering::SeqCst)
+    }
+
+    #[cfg(any(windows, test))]
+    fn submit<T>(&self, spawn: impl FnOnce() -> T) -> Option<T> {
+        // This is the dispatch boundary. After it, CreateProcess and the
+        // scheduler may deliver the request even if Pause or Exit arrives.
+        // helper_owner_at independently rechecks owner, cancel and pause
+        // before the installed action can start the backend manager.
+        self.allowed().then(spawn)
+    }
 }
 
 fn start_status_worker(
@@ -433,12 +470,13 @@ fn proxy_loop(
     ProxyPaths {
         directory,
         status_dir,
+        recovery_endpoint,
     }: ProxyPaths<'_>,
     task_name: &str,
     request: &Request,
     output: &Mutex<Snapshot>,
     control: &ProxyControl,
-    launcher: impl Fn(&str, &AtomicBool) -> Result<(), String> + Clone + Send + 'static,
+    launcher: impl Fn(&str, LaunchPermission<'_>) -> Result<(), String> + Clone + Send + 'static,
     polls: &SyncSender<StatusPoll>,
 ) {
     let stop = &control.stop;
@@ -448,12 +486,14 @@ fn proxy_loop(
     let (status_result, status_results) = mpsc::sync_channel(1);
     let mut pending = false;
     let mut attempts = VecDeque::new();
+    let mut recovery = retry::RecoveryCredit::default();
     let mut next_attempt = Instant::now();
     let mut generation = 0u64;
     let mut previous = None;
     let mut failure_detail = String::new();
     let mut heartbeat = Instant::now();
-    let mut launch: Option<thread::JoinHandle<Result<(), String>>> = None;
+    let mut launch: Option<LaunchWorker> = None;
+    let mut reserved_launch = None;
     let mut report_launch_result = false;
     while !stop.load(Ordering::SeqCst) {
         if heartbeat.elapsed() >= Duration::from_millis(600) {
@@ -478,9 +518,28 @@ fn proxy_loop(
                 .take()
                 .unwrap()
                 .join()
-                .unwrap_or_else(|_| Err("Backend helper launch worker panicked".into()));
-            if report_launch_result {
-                failure_detail = result.err().unwrap_or_default();
+                .unwrap_or_else(|_| Some(Err("Backend helper launch worker panicked".into())));
+            let reserve = reserved_launch.take();
+            if let Some(result) = result {
+                if let Some(reserve) = reserve {
+                    recovery.spend(reserve);
+                    // A slow drain check must not age the scheduler request
+                    // out of the window before it has actually been sent.
+                    if let Some(at) = attempts.back_mut() {
+                        *at = Instant::now();
+                    }
+                }
+                if report_launch_result {
+                    failure_detail = result.err().unwrap_or_default();
+                }
+            } else {
+                // Drain was not proven. The worker did not call Task Scheduler.
+                attempts.pop_back();
+                next_attempt = Instant::now() + Duration::from_secs(3);
+                if report_launch_result && restarting.load(Ordering::SeqCst) {
+                    failure_detail =
+                        "Waiting for the previous helper and SDK listener to exit".into();
+                }
             }
         }
         if !pending {
@@ -544,6 +603,9 @@ fn proxy_loop(
             ..Snapshot::default()
         };
         if let Some(status) = status {
+            if recovery_endpoint.is_some() {
+                recovery.observe(&status);
+            }
             failure_detail.clear();
             report_launch_result = false;
             if status.ready {
@@ -575,16 +637,24 @@ fn proxy_loop(
             && Instant::now() >= next_attempt
         {
             let now = Instant::now();
-            while attempts
-                .front()
-                .is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(600))
-            {
-                attempts.pop_front();
-            }
-            if attempts.len() < 6 {
+            let reserve = recovery_endpoint.zip(recovery.available());
+            if let Some(slot) = retry::launch_slot(&mut attempts, now, reserve) {
+                let reserve = match slot {
+                    retry::LaunchSlot::Ordinary => None,
+                    retry::LaunchSlot::Reserve(endpoint, generation) => {
+                        Some((endpoint, generation))
+                    }
+                };
                 attempts.push_back(now);
                 let task_name = task_name.to_owned();
-                let lock = control.client_lock.clone();
+                let lock = if reserve.is_none() {
+                    Some(control.client_lock.clone())
+                } else {
+                    None
+                };
+                let reserve_lock = Arc::downgrade(&control.client_lock);
+                let reserve_owner =
+                    reserve.map(|_| (directory.join("owner-request.json"), request.clone()));
                 let cancelled = stop.clone();
                 let may_restart = restarting.clone();
                 let launcher = launcher.clone();
@@ -592,19 +662,43 @@ fn proxy_loop(
                 match thread::Builder::new()
                     .name("backend-helper-launch".into())
                     .spawn(move || {
-                        // Retain the client lease until any in-flight call finishes.
-                        // A new proxy must not race a delayed request from this one.
-                        let _lock = lock;
-                        if cancelled.load(Ordering::SeqCst) || !may_restart.load(Ordering::SeqCst) {
-                            return Ok(());
+                        if let Some((endpoint, generation)) = reserve
+                            && !generation.has_drained(endpoint)
+                        {
+                            return None;
                         }
-                        launcher(&task_name, &cancelled)
+                        if let Some((path, expected)) = reserve_owner
+                            && !read_json_typed::<Request>(&path).is_ok_and(|current| {
+                                current.restarting
+                                    && same_owner_request(&current, &expected)
+                                    && now_ms().is_ok_and(|now| live_request(&current, now))
+                            })
+                        {
+                            return None;
+                        }
+                        // The drain probe does not retain the client lock. An
+                        // actual scheduler call retains it through completion.
+                        let _lock = lock.or_else(|| reserve_lock.upgrade())?;
+                        let permission = LaunchPermission {
+                            stop: &cancelled,
+                            restarting: &may_restart,
+                        };
+                        if !permission.allowed() {
+                            return reserve.is_none().then_some(Ok(()));
+                        }
+                        Some(launcher(&task_name, permission))
                     }) {
                     Ok(worker) => {
                         launch = Some(worker);
+                        reserved_launch = reserve.map(|(_, generation)| generation);
                         report_launch_result = true;
                     }
-                    Err(error) => failure_detail = error.to_string(),
+                    Err(error) => {
+                        if let Some((_, generation)) = reserve {
+                            recovery.spend(generation);
+                        }
+                        failure_detail = error.to_string();
+                    }
                 }
                 next_attempt = now + Duration::from_secs((1u64 << attempts.len().min(5)).max(3));
             } else {
@@ -1375,6 +1469,8 @@ fn supervise_channels(
                     ready_generation: snapshot.ready_generation,
                     ready: snapshot.ready,
                     backend_pid: snapshot.backend_pid,
+                    inventory_confirmed: output != channels.input
+                        && snapshot.has_recent_inventory(),
                     detail: snapshot.detail.chars().take(1000).collect(),
                 };
                 let status_path = output.join("helper-status.json");
@@ -1577,7 +1673,11 @@ fn client_lock(_: &Path) -> Result<File, String> {
 }
 
 #[cfg(windows)]
-fn launch_task(name: &str, stop: &AtomicBool, installed: bool) -> Result<(), String> {
+fn launch_task(
+    name: &str,
+    permission: LaunchPermission<'_>,
+    installed: bool,
+) -> Result<(), String> {
     use std::{
         os::windows::process::CommandExt,
         process::{Command, Stdio},
@@ -1620,21 +1720,26 @@ fn launch_task(name: &str, stop: &AtomicBool, installed: bool) -> Result<(), Str
     use std::os::windows::ffi::OsStringExt;
     let executable =
         PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])).join("schtasks.exe");
-    if stop.load(Ordering::SeqCst) {
-        report("launch_result", "cancelled_before_spawn", None);
-        return Err("Authorized backend task launch cancelled".into());
-    }
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(["/Run", "/TN", name])
         .creation_flags(0x0800_0000)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| {
-            report("launch_result", "spawn_failed", e.raw_os_error());
-            e.to_string()
-        })?;
+        .stderr(Stdio::null());
+    let Some(child) = permission.submit(|| command.spawn()) else {
+        let result = if permission.stop.load(Ordering::SeqCst) {
+            "cancelled_before_spawn"
+        } else {
+            "paused_before_spawn"
+        };
+        report("launch_result", result, None);
+        return Err("Authorized backend task launch cancelled or paused".into());
+    };
+    let mut child = child.map_err(|e| {
+        report("launch_result", "spawn_failed", e.raw_os_error());
+        e.to_string()
+    })?;
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         match child.try_wait() {
@@ -1654,7 +1759,7 @@ fn launch_task(name: &str, stop: &AtomicBool, installed: bool) -> Result<(), Str
             }
             Ok(None) => {}
         }
-        let cancelled = stop.load(Ordering::SeqCst);
+        let cancelled = permission.stop.load(Ordering::SeqCst);
         if cancelled || Instant::now() >= deadline {
             report(
                 "launch_result",
@@ -1673,7 +1778,7 @@ fn launch_task(name: &str, stop: &AtomicBool, installed: bool) -> Result<(), Str
     }
 }
 #[cfg(not(windows))]
-fn launch_task(_: &str, _: &AtomicBool, _: bool) -> Result<(), String> {
+fn launch_task(_: &str, _: LaunchPermission<'_>, _: bool) -> Result<(), String> {
     Err("Backend task requires Windows".into())
 }
 
@@ -2589,6 +2694,7 @@ mod tests {
             ready_generation: 1,
             ready: true,
             backend_pid: Some(44),
+            inventory_confirmed: false,
             detail: "ready".into(),
         };
         (request, status)
@@ -2694,6 +2800,37 @@ mod tests {
         let _ = fs::remove_file(directory.join("backend-events.json"));
         fs::remove_dir(directory).unwrap();
     }
+    #[test]
+    fn task_dispatch_rechecks_pause_and_exit_after_preparation() {
+        for exit in [false, true] {
+            let stop = AtomicBool::new(false);
+            let restarting = AtomicBool::new(true);
+            let permission = LaunchPermission {
+                stop: &stop,
+                restarting: &restarting,
+            };
+            assert!(permission.allowed());
+            // The worker had passed its first check. Pause or Exit now
+            // arrives while it is preparing the command.
+            if exit {
+                stop.store(true, Ordering::SeqCst);
+            } else {
+                restarting.store(false, Ordering::SeqCst);
+            }
+            assert_eq!(
+                permission.submit(|| panic!("must not spawn schtasks")),
+                None::<()>
+            );
+        }
+        let stop = AtomicBool::new(false);
+        let restarting = AtomicBool::new(true);
+        let permission = LaunchPermission {
+            stop: &stop,
+            restarting: &restarting,
+        };
+        assert_eq!(permission.submit(|| 1), Some(1));
+    }
+
     #[cfg(windows)]
     #[test]
     fn installed_proxy_waits_for_outbox_before_requesting_a_launch() {
@@ -2712,6 +2849,7 @@ mod tests {
                     ProxyPaths {
                         directory: &directory,
                         status_dir: &outbox,
+                        recovery_endpoint: None,
                     },
                     "fixture",
                     &request,
@@ -2802,6 +2940,7 @@ mod tests {
                     ProxyPaths {
                         directory: &directory,
                         status_dir: &directory,
+                        recovery_endpoint: None,
                     },
                     "fixture",
                     &request,
@@ -2886,6 +3025,7 @@ mod tests {
                     ProxyPaths {
                         directory: directory_ref,
                         status_dir: outbox_ref,
+                        recovery_endpoint: None,
                     },
                     "fixture",
                     request_ref,
@@ -3006,6 +3146,7 @@ mod tests {
                         ProxyPaths {
                             directory,
                             status_dir: &outbox,
+                            recovery_endpoint: None,
                         },
                         "fixture",
                         request,
@@ -3113,6 +3254,7 @@ mod tests {
             ready_generation: 1,
             ready: true,
             backend_pid: Some(owner.parent.pid),
+            inventory_confirmed: false,
             detail: owner.nonce.clone(),
         };
         let reader_owner = owner_path.clone();
@@ -3130,7 +3272,7 @@ mod tests {
         })
         .unwrap();
         let launch_owner = owner_path.clone();
-        let launch = move |_: &str, _: &AtomicBool| {
+        let launch = move |_: &str, _: LaunchPermission<'_>| {
             let owner = read_json::<Request>(&launch_owner)?;
             launched.send(owner.nonce.clone()).unwrap();
             *active.lock().unwrap() = Some(owner);
@@ -3141,6 +3283,7 @@ mod tests {
                 &directory,
                 &outbox,
                 "fixture".into(),
+                None,
                 polls.clone(),
                 launch.clone(),
             )
