@@ -115,6 +115,23 @@ fn label(app: &App, id: i32, hwnd: HWND, kind: Kind, language: Language) -> Stri
             _ => {}
         }
     }
+    if language == Language::En {
+        let output_label = match (app.page, id) {
+            (Page::Lcd, E_ADD) => Some("Add TT LCD"),
+            (Page::Ambient, E_ROUTE_DEVICE) => Some("Lighting output"),
+            (Page::Ambient, E_ROUTE_SOURCE) => Some("Capture source"),
+            (Page::Ambient, E_ADD) => Some("Add route"),
+            (Page::Ambient, E_REMOVE) => Some("Remove route"),
+            (Page::Ambient, E_TEST) if app.native_lighting.is_some() => {
+                Some("Check capture source")
+            }
+            (Page::Ambient, E_TEST) => Some("Show test pattern"),
+            _ => None,
+        };
+        if let Some(label) = output_label {
+            return label.into();
+        }
+    }
     if kind == Kind::Action || kind == Kind::Checkbox {
         return text(hwnd);
     }
@@ -328,6 +345,12 @@ fn form_snapshot(
             };
             let options = if kind == Kind::Select {
                 let mut options = choices(hwnd);
+                if id == E_ROUTE_SOURCE
+                    && language == Language::En
+                    && let Some(first) = options.first_mut()
+                {
+                    first["label"] = json!("New source (unbound)");
+                }
                 if id == E_PRESET && language == Language::En {
                     let presets = crate::app::device_setup::catalog();
                     for choice in &mut options {

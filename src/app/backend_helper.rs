@@ -2840,6 +2840,13 @@ mod tests {
     fn proxy_renews_heartbeat_while_one_task_launch_is_blocked() {
         use std::sync::mpsc;
 
+        struct StopProxyOnDrop<'a>(&'a AtomicBool);
+        impl Drop for StopProxyOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
         let (directory, request, _) = sharing_fixture("blocked-task-launch");
         let control = ProxyControl {
             client_lock: Arc::new(client_lock(&directory).unwrap()),
@@ -2849,7 +2856,7 @@ mod tests {
         let snapshot = Mutex::new(Snapshot::default());
         let attempts = Arc::new(AtomicU64::new(0));
         let (launch_started, started) = mpsc::channel();
-        let (release, blocked) = mpsc::channel();
+        let (release, blocked) = mpsc::channel::<()>();
         let blocked = Arc::new(Mutex::new(blocked));
         let poll_until = |predicate: &dyn Fn() -> bool| {
             let until = Instant::now() + Duration::from_secs(3);
@@ -2862,6 +2869,7 @@ mod tests {
             false
         };
         let renewed = thread::scope(|scope| {
+            let _stop_proxy = StopProxyOnDrop(&control.stop);
             scope.spawn(|| {
                 let attempts = attempts.clone();
                 proxy_loop(
@@ -2877,10 +2885,9 @@ mod tests {
                     move |_, _| {
                         attempts.fetch_add(1, Ordering::SeqCst);
                         let _ = launch_started.send(());
-                        let _ = blocked
-                            .lock()
-                            .unwrap()
-                            .recv_timeout(Duration::from_secs(10));
+                        // The observer owns the sender through the lock check.
+                        // Dropping it releases this launcher, including on unwind.
+                        let _ = blocked.lock().unwrap().recv();
                         Ok(())
                     },
                     &start_status_worker(read_status).unwrap(),
@@ -2895,17 +2902,14 @@ mod tests {
             if renewed {
                 // Reach the first retry deadline while the first call is still held.
                 thread::sleep(Duration::from_millis(3_200));
-            } else {
-                let _ = release.send(());
             }
-            control.stop.store(true, Ordering::SeqCst);
             renewed
         });
         drop(control);
         if renewed {
             assert!(client_lock(&directory).is_err());
-            release.send(()).unwrap();
         }
+        drop(release);
         assert!(poll_until(&|| client_lock(&directory).is_ok()));
         fs::remove_file(directory.join("owner-request.json")).unwrap();
         fs::remove_file(directory.join("backend-client.lock")).unwrap();

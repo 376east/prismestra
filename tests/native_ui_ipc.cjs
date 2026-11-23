@@ -1187,6 +1187,28 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
  assert.equal(find('#alice-login').hidden,false);
  assert.equal(find('[data-action="alice-sign-out"]').hidden,true);
  assert.notEqual(open.sequence,signOut.sequence);
+ click('alice-sign-in');
+ const signIn=commands.at(-1);
+ assert.equal(signIn.request.action,'sign_in');
+ assert.equal(signIn.request.language,'ru');
+ const waiting={busy:true,saved:false,needsLogin:true,lamps:[],ticket:null};
+ const stages=['Ждём подтверждения в браузере. Войдите через Яндекс ID и вернитесь в Prismestra.','Ответ получен. Получаем доступ от Яндекса…','Загружаем доступные лампы…'];
+ for(const message of stages){
+  reply(commands.at(-1).sequence,{...waiting,message});
+  assert.equal(find('#alice-status').textContent,message);
+  assert.equal(find('#alice-login').hidden,true);
+  assert.equal(find('#alice-apply').disabled,true);
+  vm.runInContext('aliceRequest("status")',context);
+ }
+ reply(commands.at(-1).sequence,{...waiting,busy:false,message:'Вход отменён или доступ не разрешён. Начните вход заново.'});
+ assert.equal(find('#alice-login').hidden,false);
+ assert.match(find('#alice-status').textContent,/доступ не разрешён/);
+ vm.runInContext('aliceRequest("open")',context);
+ reply(commands.at(-1).sequence,{...waiting,saved:true,busy:false,needsLogin:false,message:'Не удалось загрузить список ламп. Повторите попытку.'});
+ assert.equal(find('[data-action="alice-retry"]').hidden,false);
+ click('alice-retry');
+ assert.equal(commands.at(-1).request.action,'open');
+ assert.equal(find('#alice-status').textContent,'Загружаем доступные лампы…');
  aliceDialog.close();
 }
 console.log('PASS: Alice uses saved access, distinguishes identical lamp names by room, and ignores a late reply after sign-out');
@@ -1735,6 +1757,22 @@ function checkEnglishApplicationLanguage() {
  assert.deepEqual(commands.at(-1),{op:'page',page:'settings'});
  receive('snapshot',{...initial,preferredUiLanguage:'en'});
  assert.match(mainMarkup,/Application language.*value="en" lang="en" selected/s);
+ const englishAliceStages=vm.runInContext(`[
+  aliceStatusText('Ждём подтверждения в браузере. Войдите через Яндекс ID и вернитесь в Prismestra.'),
+  aliceStatusText('Ответ получен. Получаем доступ от Яндекса…'),
+  aliceStatusText('Загружаем доступные лампы…'),
+  aliceStatusText('Не удалось получить доступ от Яндекса. Повторите вход.'),
+  aliceStatusText('Не удалось загрузить список ламп. Повторите попытку.'),
+  aliceStatusText('Вход отменён или доступ не разрешён. Начните вход заново.'),
+ ]`,preview);
+ assert.deepEqual(Array.from(englishAliceStages),[
+  'Waiting for your browser. Sign in with Yandex ID, then return to Prismestra.',
+  'Browser response received. Getting access from Yandex…',
+  'Loading available lights…',
+  'Could not get access from Yandex. Sign in again.',
+  'Could not load available lights. Try again.',
+  'Sign-in was cancelled or access was denied. Start sign-in again.',
+ ]);
  const select=find('#ui-language');
  select.id='ui-language';
  select.value='ru';
@@ -1764,7 +1802,99 @@ function checkEnglishApplicationLanguage() {
  vm.runInContext('window.prismestraReceive(payload)',preview);
  assert.match(find('#scene-activation-'+sample.id).textContent,/applied.*No active RGB outputs/);
  checkSearchRetryRecovery(preview,'Retry search');
+ checkOutputPageLanguage(preview,true);
+ checkOutputPageLanguage(context,false);
+ const installed={...initial,installedProfile:true};
+ vm.runInContext('view="devices"',preview);
+ receive('snapshot',{...installed,editor:{page:'devices',index:0,targets:[],fields:[],dirty:true}});
+ const project=vm.runInContext('projectActions.innerHTML',preview);
+ assert.match(project,/data-action="save"[^>]*>Save active profile/);
+ assert.match(project,/data-action="save-profile-copy"[^>]*>Save a copy…/);
+ assert.match(mainMarkup,/data-action="apply-document"[^>]*>Apply device settings/);
+ const clicked=action=>events.click({target:{closest:()=>({dataset:{action},hasAttribute:()=>true})}});
+ const beforeProfile=commands.length;
+ clicked('save');
+ clicked('save-profile-copy');
+ assert.equal(commands.length,beforeProfile,'unapplied output edits block both profile writes');
+ clicked('apply-document');
+ assert.deepEqual(commands.at(-1),{op:'apply_fields',fields:[]});
+ receive('snapshot',{...installed,editor:{page:'devices',index:0,targets:[],fields:[],dirty:false}});
+ clicked('save');
+ assert.equal(commands.at(-1).op,'save');
+ receive('snapshot',installed);
+ const beforeCopy=commands.length;
+ clicked('save-profile-copy');
+ assert.deepEqual(commands.slice(beforeCopy),[{op:'save_profile_copy'}],'copy must not flush the draft into installed data');
+ receive('snapshot',installed);
+ find('#footer-apply').onclick();
+ assert.equal(commands.at(-1).op,'apply_scene');
+ receive('snapshot',initial);
+ assert.doesNotMatch(vm.runInContext('projectActions.innerHTML',preview),/save-profile-copy/);
+ console.log('PASS: installed profile and copy are separate writes, with section Apply distinct from scene Apply');
  console.log('PASS: English native bootstrap, scenes, device status and application language persistence IPC');
  console.log('PASS: rejected discovery retries only discovery in Russian and English; other errors retain document recovery');
+}
+function checkOutputPageLanguage(target,isEnglish) {
+ const receive=(kind,payload)=>{
+  target.payload=kind==='error'?{kind,message:payload}:{kind,state:payload};
+  vm.runInContext('window.prismestraReceive(payload)',target);
+ };
+ const selectPage=page=>vm.runInContext(`formStages.clear();pendingView=null;search="";libraryEffect="";view="${page}"`,target);
+ const lcd={id:'lcd-lab',label:'Помпа <Lab>',role:'lcd',driver:{type:'tt_lcd'},leds:0,enabled:true};
+ const screen={id:'screen-lab',label:'Лента',role:'ambient',driver:{type:'wled_ddp'},leds:8,enabled:true};
+ const base={...initial,devices:[lcd,screen],library:[]};
+ const sourcesHint='Слева ключ из раздела «Температуры», справа подпись на LCD. Разделяйте показатели точкой с запятой. В этом профиле можно ввести «ram=RAM; gpu=GPU».';
+ const selectedFont={key:'font',label:'Шрифт панели',value:'Выбран · 12345678',hint:'Шрифт по умолчанию',file:true,choices:[]};
+ selectPage('lcd');
+ receive('snapshot',{...base,detail:'Анимация и панель температур. Передача выполняется в памяти, без доступа к помпе.',
+  editor:{page:'lcd',index:0,deviceId:lcd.id,targets:[lcd.label],dirty:false,fields:[
+   selectedFont,{key:'sources',label:'Показатели и подписи',value:'ram=Память <Lab>',hint:sourcesHint,choices:[]},
+   {key:'add_source',label:'Добавить показатель',value:'',hint:'Выбор добавит показатель в черновик.',choices:[
+    {label:'Выберите источник…',value:''},{label:'gpu',value:'gpu'}]},
+  ]}});
+ assert.match(mainMarkup,isEnglish?/Panel font.*Selected · 12345678.*Readings and labels.*ram=RAM; gpu=GPU.*Choose a source…/s:
+  /Шрифт панели.*Выбран · 12345678.*Показатели и подписи.*ram=RAM; gpu=GPU.*Выберите источник…/s);
+ assert.match(mainMarkup,/Помпа &lt;Lab&gt;.*ram=Память &lt;Lab&gt;/s);
+ const field=find('#field-0');
+ events.input({target:field});
+ assert.equal(vm.runInContext('currentGenericStages().length',target),0,'display-only font text is not staged');
+ const source=new Node();
+ source.tagName='SELECT';
+ source.dataset.field='add_source';
+ source.value='gpu';
+ events.change({target:source});
+ assert.deepEqual(commands.at(-1),{op:'set_field',key:'add_source',value:'gpu',fields:[]});
+ receive('error','Выберите хотя бы один показатель для панели температур.');
+ assert.match(find('#native-error').innerHTML,isEnglish?/Select at least one reading/:/Выберите хотя бы один показатель/);
+ const diagnostic='Предпросмотр недоступен: ошибка HID';
+ receive('status',{detail:diagnostic});
+ assert.equal(find('#native-runtime-detail').textContent,isEnglish?'LCD preview unavailable. Check the device connection.':diagnostic);
+ if(isEnglish)assert.equal(find('#native-runtime-detail').title,diagnostic);
+
+ selectPage('ambient');
+ receive('snapshot',{...base,editor:{page:'ambient',index:0,deviceId:screen.id,targets:[screen.label],dirty:false,
+  fields:[{key:'source',label:'Источник',value:'@scene_edges',choices:[
+   {label:'desk-right',value:'desk-right'},{label:'Края общей сцены',value:'@scene_edges'}]}]}});
+ assert.match(mainMarkup,isEnglish?/Source.*value="desk-right"[^>]*>desk-right.*value="@scene_edges" selected>Scene edges/s:
+  /Источник.*value="desk-right"[^>]*>desk-right.*value="@scene_edges" selected>Края общей сцены/s);
+ receive('status',{status:'Захват выбранного экрана запрошен; проверьте статус источника.'});
+ assert.match(find('#player-status').textContent,isEnglish?/Capture requested/:/Захват выбранного экрана/);
+
+ const seeded=[['current','Моя сцена','noise_map'],['noise','Мягкий свет','noise_map'],
+  ['rainbow','Радуга','rainbow_wave'],['breathing','Дыхание','breathing']];
+ const library=seeded.map(([id,name,effect])=>({id,name,scene:{...scene,effect}}));
+ library.push({id:'scene-1',name:'Мягкий свет',scene},{id:'scene-2',name:'Моя сцена',scene});
+ selectPage('library');
+ receive('snapshot',{...base,library});
+ const translate=name=>isEnglish?name[0]:name[1];
+ for(const names of [['Current scene','Моя сцена'],['Soft light','Мягкий свет'],['Rainbow','Радуга'],['Breathing','Дыхание']]){
+  assert.ok(mainMarkup.includes('<h2>'+translate(names)+'</h2>'));
+ }
+ assert.match(mainMarkup,/data-preview="scene-1"[^>]+Мягкий свет/);
+ assert.match(mainMarkup,/data-preview="scene-2"[^>]+Моя сцена/);
+ vm.runInContext('loadEntry(state.library[1]);view="editor";render()',target);
+ assert.ok(mainMarkup.includes('<h1>'+translate(['Soft light','Мягкий свет'])+'</h1>'));
+ assert.equal(vm.runInContext('draftOrigin.name',target),'Мягкий свет');
+ console.log(`PASS: ${isEnglish?'English':'Russian'} LCD and screen lighting presentation, unchanged IPC values and seeded scene labels`);
 }
 checkOutputStatusCopy().then(checkEnglishApplicationLanguage).catch(error=>{console.error(error);process.exitCode=1;});

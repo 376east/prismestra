@@ -341,11 +341,17 @@ impl Player {
             self.source_aligned = false;
             jpeg
         };
-        if let Err(error) = self.sender.send_frame(&jpeg, false, now, transport) {
-            return self.failure(error);
-        }
-        if applied {
-            self.counters.overlay_frames += 1;
+        // Compare the composed bytes with the last acknowledged frame in this
+        // run. Keep polling for readings and expiry; leave animation cadence
+        // and the explicit blank transfer unchanged.
+        let sent = self.media.frames.len() != 1 || jpeg.as_ref() != self.sender.latest_frame();
+        if sent {
+            if let Err(error) = self.sender.send_frame(&jpeg, false, now, transport) {
+                return self.failure(error);
+            }
+            if applied {
+                self.counters.overlay_frames += 1;
+            }
         }
         let finished = transport.now_ms();
         let Some(work_ms) = finished.checked_sub(now) else {
@@ -364,7 +370,7 @@ impl Player {
         }
         self.next_due = Some(due);
         self.process_requests();
-        Ok(Some(Sent {
+        Ok(sent.then_some(Sent {
             frame_index: Some(index),
             overlay_applied: applied,
         }))
@@ -440,6 +446,160 @@ mod tests {
         )
         .unwrap()
     }
+
+    fn static_media(format: image::ImageFormat, color: [u8; 3]) -> Arc<Media> {
+        let image = image::RgbImage::from_pixel(32, 24, image::Rgb(color));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, format).unwrap();
+        let media = media::prepare(bytes.into_inner().into(), 0, || false).unwrap();
+        assert_eq!(media.frames.len(), 1);
+        assert_eq!(media.frames[0].delay_ms, 50);
+        Arc::new(media)
+    }
+
+    #[test]
+    fn static_png_and_jpeg_only_send_one_frame_across_repeated_polls() {
+        for format in [image::ImageFormat::Png, image::ImageFormat::Jpeg] {
+            let media = static_media(format, [32, 128, 200]);
+            let mut player = Player::without_overlay(media.clone()).unwrap();
+            let mut transport = Fake::default();
+            let off = Overlay::default();
+            player.start().unwrap();
+            assert!(player.poll(&off, &mut transport).unwrap().is_some());
+            let writes = transport.writes;
+            assert!(writes > 0);
+            for step in 1..=20 {
+                transport.now = 1000 + step * 50;
+                assert!(player.poll(&off, &mut transport).unwrap().is_none());
+                assert_eq!(player.next_due_ms(), Some(transport.now + 50));
+            }
+            assert_eq!(transport.writes, writes);
+            assert_eq!(transport.acks, 1);
+            assert_eq!(player.frames_sent(), 1);
+            assert_eq!(player.preview(), media.frames[0].jpeg.as_ref());
+        }
+    }
+
+    #[test]
+    fn static_frame_sends_when_temperature_changes_expires_or_returns() {
+        let media = static_media(image::ImageFormat::Png, [32, 128, 200]);
+        let font = include_bytes!("../ui/windows/web/assets/SourceSans3.ttf");
+        let mut player = Player::new(media.clone(), Renderer::new(font.to_vec()).unwrap()).unwrap();
+        let reading = |observed, celsius| {
+            Overlay::new(
+                true,
+                5,
+                Some(observed),
+                vec![OverlayValue {
+                    id: "cpu".into(),
+                    label: "CPU".into(),
+                    celsius,
+                }],
+            )
+            .unwrap()
+        };
+        let mut transport = Fake::default();
+        player.start().unwrap();
+        let first = player
+            .poll(&reading(1000, 42.0), &mut transport)
+            .unwrap()
+            .unwrap();
+        assert!(first.overlay_applied);
+        let first_jpeg = player.preview().to_vec();
+        let first_writes = transport.writes;
+
+        transport.now = 1050;
+        assert!(
+            player
+                .poll(&reading(1050, 42.0), &mut transport)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(transport.writes, first_writes);
+        assert_eq!(transport.acks, 1);
+
+        transport.now = 1100;
+        let changed = reading(1100, 57.0);
+        assert!(
+            player
+                .poll(&changed, &mut transport)
+                .unwrap()
+                .unwrap()
+                .overlay_applied
+        );
+        assert_ne!(player.preview(), first_jpeg.as_slice());
+        assert_eq!(transport.acks, 2);
+
+        transport.now = 6100;
+        assert!(player.poll(&changed, &mut transport).unwrap().is_none());
+        transport.now = 6150;
+        assert!(
+            !player
+                .poll(&changed, &mut transport)
+                .unwrap()
+                .unwrap()
+                .overlay_applied
+        );
+        assert_eq!(player.preview(), media.frames[0].jpeg.as_ref());
+        transport.now = 6200;
+        assert!(player.poll(&changed, &mut transport).unwrap().is_none());
+        assert_eq!(transport.acks, 3);
+
+        transport.now = 6250;
+        assert!(
+            player
+                .poll(&reading(6250, 42.0), &mut transport)
+                .unwrap()
+                .unwrap()
+                .overlay_applied
+        );
+        assert_eq!(player.preview(), first_jpeg.as_slice());
+        assert_eq!(transport.acks, 4);
+        assert_eq!(player.counters().overlay_frames, 3);
+    }
+
+    #[test]
+    fn static_frame_is_sent_again_after_explicit_blank_and_new_transport() {
+        // Even when the last acknowledged image is already black, an explicit
+        // blank must be sent and acknowledged before completing the request.
+        let media = static_media(image::ImageFormat::Png, [0; 3]);
+        let mut player = Player::without_overlay(media.clone()).unwrap();
+        let mut transport = Fake::default();
+        let off = Overlay::default();
+        player.start().unwrap();
+        assert!(player.poll(&off, &mut transport).unwrap().is_some());
+        let initial_jpeg = player.preview().to_vec();
+        player.requests().blank();
+        assert_eq!(
+            player
+                .poll(&off, &mut transport)
+                .unwrap()
+                .unwrap()
+                .frame_index,
+            None
+        );
+        assert_eq!(player.state(), &State::Blanked);
+        assert_eq!(player.preview(), initial_jpeg.as_slice());
+        assert_eq!(transport.acks, 2);
+
+        player.start().unwrap();
+        assert!(player.poll(&off, &mut transport).unwrap().is_some());
+        assert_eq!(transport.acks, 3);
+        player.requests().stop();
+        assert!(player.poll(&off, &mut transport).unwrap().is_none());
+        let mut reconnected = Player::without_overlay(media).unwrap();
+        let mut new_transport = Fake::default();
+        reconnected.start().unwrap();
+        assert!(
+            reconnected
+                .poll(&off, &mut new_transport)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(reconnected.preview(), initial_jpeg.as_slice());
+        assert_eq!(new_transport.acks, 1);
+    }
+
     #[test]
     fn cadence_overrun_no_catchup_and_clean_resume() {
         let mut p = player();

@@ -99,7 +99,7 @@
     <p data-en="Yandex requests access to list and control lights.">Яндекс запросит доступ к списку ламп и управлению светом.</p>
   </div>
   <div class="alice-actions">
-    <button type="button" class="button" data-action="alice-retry" hidden data-en="Retry connection">Повторить подключение</button>
+    <button type="button" class="button" data-action="alice-retry" hidden data-en="Retry loading lights">Повторить загрузку ламп</button>
     <button type="button" class="button" data-action="alice-sign-out" hidden data-en="Sign out of Alice">Выйти из Алисы</button>
   </div>
   <p id="alice-status" role="status" aria-live="polite"></p>
@@ -160,7 +160,7 @@
 <footer class="player" aria-label="Воспроизведение сцены" data-en-aria-label="Scene playback">
   <button class="player-scene" id="open-active" title="Открыть запущенную сцену" data-en-title="Open the active scene"><canvas id="player-art" width="104" height="72"></canvas><span><strong id="player-name"></strong><small id="player-status"></small></span></button>
   <div class="transport"><button class="button" id="play" data-en="Turn lights off">Выключить свет</button></div>
-  <label class="master-brightness"><span id="sun-icon"></span><input id="master-brightness" type="range" min="0" max="100" aria-label="Яркость сцены (черновик)" data-en-aria-label="Scene brightness (draft)"><output id="master-value"></output></label><button class="button primary" id="footer-apply" disabled data-en="Apply">Применить</button>
+  <label class="master-brightness"><span id="sun-icon"></span><input id="master-brightness" type="range" min="0" max="100" aria-label="Яркость сцены (черновик)" data-en-aria-label="Scene brightness (draft)"><output id="master-value"></output></label><button class="button primary" id="footer-apply" disabled title="Обновляет активную сцену. Настройки выходов применяются отдельно." data-en-title="Updates the active scene. Apply output settings on their own page." data-en="Apply scene">Применить сцену</button>
 </footer>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <div id="device-discovery-announcement" class="sr-only" role="status" aria-atomic="true"></div>

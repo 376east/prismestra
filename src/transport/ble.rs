@@ -599,12 +599,14 @@ mod tests {
         assert_eq!(&body[..9], &[0xe1, 4, 1, 0, 1, 80, 83, 0, 153]);
         assert_eq!(body[9..].as_chunks::<5>().0, &[[0, 60, 100, 100, 100]; 153]);
 
-        assert!(
-            write_e1_pixel_frame(&black, 83, 0, 23, &mut clock, &mut |_, _| {
-                panic!("The 21-byte off packet cannot fit this ATT payload");
-            })
-            .is_err()
-        );
+        let mut off_writes = 0;
+        write_e1_pixel_frame(&black, 83, 0, 23, &mut clock, &mut |packet, _| {
+            assert!(door::fits(packet.len(), 23));
+            off_writes += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(off_writes, 2);
         write_e1_pixel_frame(&black, 83, 0, 24, &mut clock, &mut |packet, _| {
             assert_eq!(packet, door::off_packet(0));
             Ok(())

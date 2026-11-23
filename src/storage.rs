@@ -1,6 +1,6 @@
 //! Bounded same-directory replacement for application-owned configuration files.
 use std::{
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -20,35 +20,52 @@ impl Drop for Temporary {
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8], max_bytes: usize) -> io::Result<()> {
-    atomic_write_with(path, bytes, max_bytes, replace)
+    atomic_write_with(path, bytes, max_bytes, Publication::Durable, replace)
 }
 
 /// Publish a live helper record while existing readers permit delete sharing.
-/// Durable configuration and other control writes use the normal replacement.
+/// On Windows these expiring records require atomic visibility, not durability
+/// across power loss. Persistent configuration and control writes use atomic_write.
 pub(crate) fn atomic_write_live_record(
     path: &Path,
     bytes: &[u8],
     max_bytes: usize,
 ) -> io::Result<()> {
-    atomic_write_with(path, bytes, max_bytes, |source, destination| {
-        let result = replace(source, destination);
-        #[cfg(windows)]
-        if result.as_ref().is_err_and(|error| {
-            use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
-            error.raw_os_error().is_some_and(|code| {
-                code == ERROR_ACCESS_DENIED as i32 || code == ERROR_SHARING_VIOLATION as i32
-            })
-        }) {
-            return replace_shared_target(source, destination);
+    #[cfg(windows)]
+    {
+        atomic_write_with(path, bytes, max_bytes, Publication::Live, replace_live)
+    }
+    #[cfg(not(windows))]
+    {
+        atomic_write(path, bytes, max_bytes)
+    }
+}
+
+enum Publication {
+    Durable,
+    #[cfg(windows)]
+    Live,
+}
+
+impl Publication {
+    fn sync_staging(
+        self,
+        file: &File,
+        flush: impl FnOnce(&File) -> io::Result<()>,
+    ) -> io::Result<()> {
+        match self {
+            Self::Durable => flush(file),
+            #[cfg(windows)]
+            Self::Live => Ok(()),
         }
-        result
-    })
+    }
 }
 
 fn atomic_write_with(
     path: &Path,
     bytes: &[u8],
     max_bytes: usize,
+    publication: Publication,
     replace: impl Fn(&Path, &Path) -> io::Result<()>,
 ) -> io::Result<()> {
     if bytes.len() > max_bytes {
@@ -98,7 +115,7 @@ fn atomic_write_with(
         };
         let mut guard = Temporary(Some(temporary.clone()));
         file.write_all(bytes)?;
-        file.sync_all()?;
+        publication.sync_staging(&file, File::sync_all)?;
         drop(file);
         replace(&temporary, path).inspect_err(|_error| {
             #[cfg(all(test, windows))]
@@ -115,6 +132,30 @@ fn atomic_write_with(
 
 #[cfg(windows)]
 fn replace(source: &Path, destination: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH;
+    replace_windows(source, destination, MOVEFILE_WRITE_THROUGH)
+}
+
+#[cfg(windows)]
+fn replace_live(source: &Path, destination: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
+
+    match replace_windows(source, destination, 0) {
+        Err(error)
+            if matches!(
+                error.raw_os_error().map(|code| code as u32),
+                Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION)
+            ) =>
+        {
+            replace_shared_target(source, destination)
+        }
+        result => result,
+    }
+}
+
+#[cfg(windows)]
+fn replace_windows(source: &Path, destination: &Path, flags: u32) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING;
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn MoveFileExW(source: *const u16, destination: *const u16, flags: u32) -> i32;
@@ -123,7 +164,14 @@ fn replace(source: &Path, destination: &Path) -> io::Result<()> {
     let destination = wide(destination)?;
     // Same-directory source. No copy, deferred-at-reboot, registry or power flags.
     // https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-movefileexw
-    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0x1 | 0x8) } == 0 {
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | flags,
+        )
+    } == 0
+    {
         Err(io::Error::last_os_error())
     } else {
         Ok(())
@@ -337,6 +385,64 @@ mod tests {
         assert!(atomic_write(&path, b"replacement", 32).is_err());
         drop(held);
         assert_eq!(fs::read(&path).unwrap(), b"previous");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_durable_staging_requests_a_flush() {
+        let dir = fixture();
+        let path = dir.join("staging");
+        let file = File::create(&path).unwrap();
+        let failure = || io::Error::other("injected flush failure");
+        assert_eq!(
+            Publication::Durable
+                .sync_staging(&file, |_| Err(failure()))
+                .unwrap_err()
+                .to_string(),
+            failure().to_string()
+        );
+        Publication::Live
+            .sync_staging(&file, |_| panic!("live staging must not flush"))
+            .unwrap();
+        drop(file);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_replacement_keeps_old_reader_and_respects_delete_sharing() {
+        use std::{io::Read, os::windows::fs::OpenOptionsExt};
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ};
+        let dir = fixture();
+        let path = dir.join("heartbeat.json");
+        let old = br#"{"tick":100}"#;
+        let new = br#"{"tick":700,"previous":100}"#;
+        atomic_write(&path, old, 64).unwrap();
+
+        let mut reader = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+            .open(&path)
+            .unwrap();
+        atomic_write_live_record(&path, new, 64).unwrap();
+        let mut read = Vec::new();
+        reader.read_to_end(&mut read).unwrap();
+        assert_eq!(read, old);
+        assert_eq!(fs::read(&path).unwrap(), new);
+        drop(reader);
+
+        let reader = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+            .unwrap();
+        assert!(atomic_write_live_record(&path, old, 64).is_err());
+        assert_eq!(fs::read(&path).unwrap(), new);
+        drop(reader);
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
         fs::remove_file(path).unwrap();
         fs::remove_dir(dir).unwrap();

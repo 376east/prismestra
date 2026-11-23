@@ -2480,6 +2480,105 @@ fn pending_save_as_writes_only_candidate_intent_and_can_be_reopened_before_appli
 }
 
 #[test]
+fn installed_profile_save_rejects_an_unavailable_target_journal_before_profile_write() {
+    let stand = Stand::new();
+    let mut runtime = stand.runtime(true);
+    let current = runtime.store.path.clone().unwrap();
+    let profile = stand.root.join("profile.json");
+    runtime.document().save(&profile).unwrap();
+    let mut scene = runtime.document().lighting.scene.clone();
+    scene.brightness = 43;
+    runtime.set_scene(scene).unwrap();
+    runtime.set_group(Target::Pc, false).unwrap();
+    let before = fs::read(&profile).unwrap();
+    let journal_before = fs::read(&current).unwrap();
+    let ledger_before = runtime.schedule.encoded().unwrap();
+    let blocked = stand.root.join("blocked-journal");
+    fs::create_dir(&blocked).unwrap();
+    for target in [stand.root.join("missing/journal.json"), blocked] {
+        assert!(
+            runtime
+                .save_profile_with_journal_at(&profile, target)
+                .is_err()
+        );
+        assert_eq!(fs::read(&profile).unwrap(), before);
+        assert_eq!(fs::read(&current).unwrap(), journal_before);
+        assert_eq!(runtime.store.path.as_ref(), Some(&current));
+        assert_eq!(runtime.schedule.encoded().unwrap(), ledger_before);
+    }
+}
+
+#[test]
+fn installed_profile_save_keeps_live_and_previous_target_journals_after_profile_failure() {
+    let stand = Stand::new();
+    let mut runtime = stand.runtime(true);
+    let current = runtime.store.path.clone().unwrap();
+    let target = stand.root.join("startup-journal.json");
+    let blocked_profile = stand.root.join("blocked-profile");
+    #[cfg(windows)]
+    let (previous_profile, profile_lock) = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        stand.document.save(&blocked_profile).unwrap();
+        let bytes = fs::read(&blocked_profile).unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&blocked_profile)
+            .unwrap();
+        (bytes, lock)
+    };
+    #[cfg(not(windows))]
+    fs::create_dir(&blocked_profile).unwrap();
+    let earlier = fs::read(&current).unwrap();
+    fs::write(&target, &earlier).unwrap();
+    let mut scene = runtime.document().lighting.scene.clone();
+    scene.brightness = 43;
+    runtime.set_scene(scene.clone()).unwrap();
+    runtime.set_group(Target::Pc, false).unwrap();
+    let mut current_bytes = fs::read(&current).unwrap();
+    // Distinguish an untouched journal from a rewrite with equivalent JSON.
+    current_bytes.push(b'\n');
+    fs::write(&current, &current_bytes).unwrap();
+    let ledger = runtime.schedule.encoded().unwrap();
+
+    for journal in [
+        current.clone(),
+        target.clone(),
+        stand.root.join("new-journal.json"),
+    ] {
+        assert!(
+            runtime
+                .save_profile_with_journal_at(&blocked_profile, journal)
+                .is_err()
+        );
+        assert_eq!(fs::read(&current).unwrap(), current_bytes);
+        assert_eq!(fs::read(&target).unwrap(), earlier);
+        assert!(!stand.root.join("new-journal.json").exists());
+        assert_eq!(runtime.store.path.as_ref(), Some(&current));
+        assert_eq!(runtime.schedule.encoded().unwrap(), ledger);
+        #[cfg(windows)]
+        assert_eq!(fs::read(&blocked_profile).unwrap(), previous_profile);
+    }
+
+    #[cfg(windows)]
+    drop(profile_lock);
+    #[cfg(not(windows))]
+    fs::remove_dir(&blocked_profile).unwrap();
+    let profile = blocked_profile;
+    runtime
+        .save_profile_with_journal_at(&profile, target.clone())
+        .unwrap();
+    assert_eq!(runtime.store.path.as_ref(), Some(&target));
+    assert_eq!(fs::read(&current).unwrap(), current_bytes);
+    let restored = Runtime::new(Document::load(&profile).unwrap(), Some(target)).unwrap();
+    assert_eq!(restored.document().lighting.scene, scene);
+    assert!(!restored.group_on(Target::Pc));
+    assert_eq!(restored.schedule.encoded().unwrap(), ledger);
+}
+
+#[test]
 fn normal_save_as_and_failed_pending_relocation_switch_only_after_success() {
     let stand = Stand::new();
     let a = stand.root.join("journal.json");
