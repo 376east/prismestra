@@ -529,6 +529,7 @@ struct App {
     was_pending: bool,
     context_revision: u64,
     profile_revision: u64,
+    scene_lamp_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     lcd_image: Vec<u8>,
     lcd_image_size: (u32, u32),
     lcd_frame: (u64, u64),
@@ -1143,6 +1144,7 @@ impl App {
         self.begin_shutdown();
     }
     fn begin_shutdown(&mut self) {
+        alice::cancel_lamp_on_shutdown(&mut self.scene_lamp_cancel);
         self.first_run.cancel();
         self.sources.release_lighting();
         self.connections.scan.cancel();
@@ -3295,6 +3297,7 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
         was_pending: false,
         context_revision: 1,
         profile_revision: 1,
+        scene_lamp_cancel: None,
         lcd_image: vec![],
         lcd_image_size: (0, 0),
         lcd_frame: (0, 0),

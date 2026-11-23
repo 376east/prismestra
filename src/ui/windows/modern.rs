@@ -1577,7 +1577,8 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                         let lamp = match binding {
                             Ok(Some(binding)) => {
                                 match session.alice.apply_bound(request, binding) {
-                                    Ok(()) => {
+                                    Ok(cancel) => {
+                                        a.scene_lamp_cancel = Some(cancel);
                                         session.scene_lamp_profile = Some(a.profile_revision);
                                         Some("Применяем яркость лампы сцены…".to_owned())
                                     }
@@ -1835,8 +1836,9 @@ pub(super) fn maintain(state: &State) {
         session.context = app.context_revision;
         session.pending = pending;
         session.configuration_error = error;
-        lamp_result = session
-            .take_scene_lamp_result(app.pending_open.is_none().then_some(app.profile_revision));
+        lamp_result = session.take_scene_lamp_result(
+            (app.pending_open.is_none() && !app.shutdown.active()).then_some(app.profile_revision),
+        );
     }
     if snapshot_needed {
         match snapshot(state) {

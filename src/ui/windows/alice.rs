@@ -93,6 +93,12 @@ impl Drop for Job {
     }
 }
 
+pub(super) fn cancel_lamp_on_shutdown(active: &mut Option<Arc<AtomicBool>>) {
+    if let Some(cancel) = active.take() {
+        cancel.store(true, Ordering::Release);
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Session {
     job: Option<Job>,
@@ -231,7 +237,11 @@ impl Session {
         Ok(Binding::new(lamp, brightness, allow_power_on))
     }
 
-    pub(super) fn apply_bound(&mut self, request: u32, binding: Binding) -> Result<(), String> {
+    pub(super) fn apply_bound(
+        &mut self,
+        request: u32,
+        binding: Binding,
+    ) -> Result<Arc<AtomicBool>, String> {
         self.apply_bound_with(
             request,
             binding,
@@ -251,7 +261,7 @@ impl Session {
         mut transport: impl FnMut(&str, &str, Option<&[u8]>, &AtomicBool) -> Result<Value, String>
         + Send
         + 'static,
-    ) -> Result<(), String> {
+    ) -> Result<Arc<AtomicBool>, String> {
         // The editor drains each result before accepting another lamp operation.
         self.poll();
         if self.job.is_some() || self.scene_result.is_some() {
@@ -283,7 +293,9 @@ impl Session {
             },
         )?;
         self.scene_request = Some(request);
-        Ok(())
+        Ok(Arc::clone(
+            &self.job.as_ref().expect("started scene lamp worker").cancel,
+        ))
     }
 
     pub(super) fn take_scene_result(&mut self) -> Option<(u32, String)> {
@@ -460,6 +472,7 @@ impl Session {
             return;
         }
         if cancelled {
+            self.scene_request = None;
             return;
         }
         match result {
@@ -1348,6 +1361,59 @@ mod tests {
         assert_eq!(expired["needsLogin"], true);
         assert_eq!(expired["ticket"], Value::Null);
         assert!(restarted.job.is_none());
+    }
+
+    #[test]
+    fn shutdown_cancels_the_scene_worker_before_a_delayed_catalog_can_start_post() {
+        let mut session = Session::default();
+        session.synthetic_login();
+        let binding = session.binding("fixture-ticket", 1, 40, false).unwrap();
+        let (entered, catalog_pending) = mpsc::channel();
+        let (release, catalog_reply) = mpsc::channel();
+        let (requested, later_requests) = mpsc::channel();
+        let mut active = Some(
+            session
+                .apply_bound_with(
+                    1,
+                    binding,
+                    || unreachable!(),
+                    move |path, _, body, cancel| {
+                        if path == "/v1.0/user/info" {
+                            assert!(body.is_none());
+                            entered.send(false).unwrap();
+                            catalog_reply.recv_timeout(Duration::from_secs(2)).unwrap();
+                            entered.send(cancel.load(Ordering::Acquire)).unwrap();
+                            return Ok(fixture());
+                        }
+                        requested.send(path.to_owned()).unwrap();
+                        Err("fixture received a network request after shutdown".into())
+                    },
+                )
+                .unwrap(),
+        );
+        assert!(
+            !catalog_pending
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+        );
+        cancel_lamp_on_shutdown(&mut active);
+        assert!(active.is_none());
+        release.send(()).unwrap();
+        assert!(
+            catalog_pending
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+        );
+        assert!(matches!(
+            later_requests.recv_timeout(Duration::from_secs(2)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while session.job.is_some() {
+            assert!(session.take_scene_result().is_none());
+            assert!(Instant::now() < deadline, "cancelled worker must finish");
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
