@@ -34,7 +34,8 @@ pub(super) struct Recovery {
     attempts: usize,
     failed_generation: Option<u64>,
     due_us: Option<u64>,
-    bluetooth_retry: bool,
+    // Worker generation and submitted frame count when the radio arrived.
+    bluetooth_retry: Option<(u64, u64)>,
     manual_retry: Option<OpenRgbRetryTicket>,
     manual_attempt: u64,
     manual_started: Option<(OpenRgbRetryTicket, Option<u64>)>,
@@ -248,8 +249,8 @@ impl Runtime {
         })
     }
 
-    /// One extra attempt for a failed saved Surplife route after its normal
-    /// budget. The registered factory still owns endpoint and capacity checks.
+    /// One extra attempt for a saved Surplife route if its final normal
+    /// attempt fails. The factory still owns endpoint and capacity checks.
     #[cfg(any(windows, test))]
     pub(super) fn bluetooth_adapter_arrived(&mut self) {
         use crate::runtime::output::Phase;
@@ -271,11 +272,12 @@ impl Runtime {
             if let Some(recovery) = self.output_recovery.get_mut(&device.id)
                 && recovery.attempts == RETRY_DELAYS_US.len()
                 && recovery.due_us.is_none()
-                && self.host.status(&device.id).is_some_and(|snapshot| {
-                    snapshot.phase == Phase::Failed && !snapshot.requires_action
-                })
+                && let Some(snapshot) = self.host.status(&device.id)
+                && !snapshot.requires_action
+                && (snapshot.phase == Phase::Failed
+                    || (snapshot.phase == Phase::Connecting && snapshot.submitted == 0))
             {
-                recovery.bluetooth_retry = true;
+                recovery.bluetooth_retry = Some((snapshot.generation, snapshot.submitted));
             }
         }
     }
@@ -440,12 +442,14 @@ impl Runtime {
     }
 
     pub(super) fn recover_failed_outputs(&mut self, now: u64) -> Result<(), String> {
+        use crate::runtime::output::Phase;
+
         let automatic_paused = self.automatic_recovery_paused();
         if self.pending.is_some() || automatic_paused {
             for state in self.output_recovery.values_mut() {
                 state.manual_retry = None;
                 if automatic_paused {
-                    state.bluetooth_retry = false;
+                    state.bluetooth_retry = None;
                 }
             }
         }
@@ -471,13 +475,25 @@ impl Runtime {
                     || snapshot.as_ref().is_some_and(|s| s.requires_action)
                 {
                     state.manual_retry = None;
-                    state.bluetooth_retry = false;
+                    state.bluetooth_retry = None;
                     continue;
                 }
+                // Remember an arrival while the last worker is still opening.
+                // A ready worker or any intervening frame consumes that evidence.
+                if state
+                    .bluetooth_retry
+                    .is_some_and(|(generation, submitted)| {
+                        snapshot.as_ref().is_none_or(|snapshot| {
+                            snapshot.generation != generation
+                                || snapshot.submitted != submitted
+                                || !matches!(snapshot.phase, Phase::Connecting | Phase::Failed)
+                        })
+                    })
+                {
+                    state.bluetooth_retry = None;
+                }
                 let failed = state.start_error.is_some()
-                    || snapshot
-                        .as_ref()
-                        .is_some_and(|s| s.phase == crate::runtime::output::Phase::Failed);
+                    || snapshot.as_ref().is_some_and(|s| s.phase == Phase::Failed);
                 scheduled_retry |=
                     state.observe(snapshot.as_ref().map_or(0, |s| s.generation), failed, now);
                 if state.manual_retry.is_some_and(|ticket| {
@@ -491,11 +507,10 @@ impl Runtime {
                     state.manual_retry = None;
                 }
                 if !failed {
-                    state.bluetooth_retry = false;
                     continue;
                 }
                 let reaped = snapshot.is_none() || self.host.output_reaped(id);
-                let bluetooth_retry = reaped && std::mem::take(&mut state.bluetooth_retry);
+                let bluetooth_retry = reaped && state.bluetooth_retry.take().is_some();
                 if bluetooth_retry
                     || (reaped && state.manual_retry.is_some())
                     || state.take_attempt(now, reaped)

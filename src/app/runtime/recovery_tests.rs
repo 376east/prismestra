@@ -403,6 +403,102 @@ fn surplife_adapter_arrival_recovers_after_the_automatic_budget() {
     surplife_first_light_after_adapter_arrival(true);
 }
 
+#[test]
+fn surplife_adapter_arrival_during_the_final_attempt_survives_its_failure() {
+    check_surplife_arrival_during_last_attempt(false);
+}
+
+#[test]
+fn surplife_adapter_arrival_during_the_final_attempt_is_spent_if_it_succeeds() {
+    check_surplife_arrival_during_last_attempt(true);
+}
+
+fn check_surplife_arrival_during_last_attempt(final_attempt_succeeds: bool) {
+    let mut document = runtime().document().clone();
+    document.lighting.setup.devices[0].driver = Driver::SurplifeE1Pixels;
+    let mut runtime = Runtime::new(document, None).unwrap();
+    let ble = Arc::new(Link::default());
+    let adapter = Arc::new(AtomicBool::new(false));
+    let (release, final_attempt) = std::sync::mpsc::channel();
+    let final_attempt = Mutex::new(final_attempt);
+    runtime
+        .attach_rgb(
+            "a",
+            vec!["ble:1".into()],
+            Arc::new({
+                let ble = ble.clone();
+                let adapter = adapter.clone();
+                move |_| {
+                    let present = adapter.load(Ordering::SeqCst);
+                    let final_normal_attempt = ble.calls.fetch_add(1, Ordering::SeqCst) == 3;
+                    if final_normal_attempt {
+                        final_attempt
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(8))
+                            .map_err(|error| error.to_string())?;
+                    }
+                    if !(present || (final_normal_attempt && final_attempt_succeeds)) {
+                        return Err("Stand adapter was absent when the probe started".into());
+                    }
+                    Ok(Box::new(RgbLink(ble.clone(), Driver::SurplifeE1Pixels)))
+                }
+            }),
+        )
+        .unwrap();
+    let wled = Arc::new(Link::default());
+    runtime.attach_rgb("b", vec![], factory(&wled)).unwrap();
+    runtime.enable_registered_output_recovery();
+    let mut now = 0;
+    tick(&mut runtime, &mut now);
+    wait(|| runtime.host.status("b").unwrap().submitted > 0);
+    let neighbor = runtime.host.status("b").unwrap().generation;
+
+    for (calls, delay) in [(1, 1_000_000), (2, 5_000_000), (3, 15_000_000)] {
+        wait(|| {
+            tick(&mut runtime, &mut now);
+            ble.calls.load(Ordering::SeqCst) == calls
+                && runtime.host.status("a").unwrap().phase == Phase::Failed
+                && runtime.host.output_reaped("a")
+        });
+        now += delay;
+        tick(&mut runtime, &mut now);
+    }
+    wait(|| ble.calls.load(Ordering::SeqCst) == 4);
+    let pending = runtime.host.status("a").unwrap();
+    assert_eq!(pending.phase, Phase::Connecting);
+    adapter.store(true, Ordering::SeqCst);
+    runtime.bluetooth_adapter_arrived();
+    tick(&mut runtime, &mut now);
+    assert_eq!(
+        runtime.host.status("a").unwrap().generation,
+        pending.generation
+    );
+    assert_eq!(ble.calls.load(Ordering::SeqCst), 4);
+    release.send(()).unwrap();
+
+    working(&mut runtime, "a", &mut now);
+    if final_attempt_succeeds {
+        assert_eq!(
+            runtime.host.status("a").unwrap().generation,
+            pending.generation
+        );
+        disconnected(&mut runtime, &ble, "a", &mut now);
+        now += 60_000_000;
+        tick(&mut runtime, &mut now);
+        assert_eq!(
+            runtime.host.status("a").unwrap().generation,
+            pending.generation
+        );
+        assert_eq!(ble.calls.load(Ordering::SeqCst), 4);
+    } else {
+        assert_eq!(ble.calls.load(Ordering::SeqCst), 5);
+    }
+    assert_eq!(runtime.host.status("b").unwrap().generation, neighbor);
+    assert_eq!(wled.calls.load(Ordering::SeqCst), 1);
+    drain(&mut runtime);
+}
+
 fn surplife_first_light_after_adapter_arrival(exhaust_budget: bool) {
     const NO_ADAPTER: &str = "Windows не обнаружила Bluetooth-адаптер.";
     let mut runtime =
