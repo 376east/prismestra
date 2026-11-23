@@ -26,6 +26,18 @@ INNO_INPUT = (
 )
 
 
+def install_inno(root, bootstrap):
+    inno = root / "inno"
+    run(POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
+        "$params = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=' + [char]34 + "
+        "$env:PRISMESTRA_INNO_DIRECTORY + [char]34; "
+        "$p = Start-Process -FilePath $env:PRISMESTRA_INNO_BOOTSTRAP "
+        "-Wait -PassThru -WindowStyle Hidden -ArgumentList $params; exit $p.ExitCode",
+        env=dict(os.environ, PRISMESTRA_INNO_BOOTSTRAP=str(bootstrap),
+                 PRISMESTRA_INNO_DIRECTORY=str(inno)))
+    return inno / "ISCC.exe"
+
+
 def load_or_build_component(root, vsdevcmd, cache, key, *, write_cache=False):
     started = time.monotonic()
     existing = cache is not None and (cache.exists() or cache.is_symlink())
@@ -147,18 +159,11 @@ def main():
     for prerequisite, pin in read(INSTALLER / "prerequisites.lock.json")["packages"].items():
         url = os.environ.get("PRISMESTRA_" + prerequisite.upper() + "_URL") or pin["source"]
         fetch(prerequisites, pin["file"], url, pin["sha256"], pin["size"])
-    inno = root / "inno"
-    run(POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
-        "$params = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=' + [char]34 + "
-        "$env:PRISMESTRA_INNO_DIRECTORY + [char]34; "
-        "$p = Start-Process -FilePath $env:PRISMESTRA_INNO_BOOTSTRAP "
-        "-Wait -PassThru -WindowStyle Hidden -ArgumentList $params; exit $p.ExitCode",
-        env=dict(os.environ, PRISMESTRA_INNO_BOOTSTRAP=str(inno_bootstrap),
-                 PRISMESTRA_INNO_DIRECTORY=str(inno)))
+    iscc = install_inno(root, inno_bootstrap)
     component = load_or_build_component(root, vsdevcmd, cache, key, write_cache=args.write_openrgb_cache)
     pawnio = checkout(read(INSTALLER / "pawnio-source.lock.json"), root / "pawnio-source")
     run("git", "-C", pawnio, "submodule", "update", "--init", "--recursive", "--depth=1")
-    package_candidate(root, args.commit, args.version, component, prerequisites, inno / "ISCC.exe", pawnio)
+    package_candidate(root, args.commit, args.version, component, prerequisites, iscc, pawnio)
 
 
 if __name__ == "__main__":
