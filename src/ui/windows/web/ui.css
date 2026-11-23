@@ -33,9 +33,12 @@ nav button.active,#appearance-toggle[aria-expanded=true]{background:var(--ui-sel
 .editor-layout{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:20px}.preview-panel{min-width:0}.stage{position:relative;overflow:hidden;height:clamp(260px,calc(100dvh - 410px),500px);border:1px solid var(--ui-border);border-radius:var(--radius-panel);background:#080d15}.stage canvas{display:block;width:100%;height:100%}.stage-bar{position:absolute;top:16px;left:16px;right:16px;display:flex;justify-content:space-between;pointer-events:none}.stage-chip,.stage-caption{padding:4px 8px;border-radius:12px;background:#080d15b3;color:#edf2f7;font-size:12px;line-height:16px;pointer-events:none}.stage-chip:last-child{display:none}.stage-caption{position:absolute;left:16px;bottom:16px}.preview-description{padding:12px 0;color:var(--ui-muted);font-size:12px;line-height:18px}.preview-description strong{font:inherit}.effect-strip-label{font-size:12px;line-height:18px;font-weight:500;color:var(--ui-muted);margin-bottom:8px}.effect-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}.strip-item{min-width:0;padding:0;overflow:hidden;text-align:left;border:1px solid var(--ui-border);border-radius:20px;background:var(--ui-panel)}.strip-item.active{border-color:var(--ui-accent)}.strip-item canvas{display:block;width:100%;height:48px}.strip-item span{display:block;height:40px;padding:12px 10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:16px}
 .native-palette-order{display:grid;gap:8px;margin-top:12px}
 .placement-object{position:absolute;transform:translate(-50%,-50%);z-index:2;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:5px 9px;border:1px solid #edf2f7;border-radius:8px;background:#080d15e6;color:#edf2f7;cursor:grab;touch-action:none}
-.placement-object:active,.placement-object:focus-visible{z-index:3;cursor:grabbing}
+.placement-object:focus{z-index:3;outline:2px solid #edf2f7;outline-offset:2px}
+.placement-object:active{cursor:grabbing}
 .placement-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px}
 .placement-actions p{width:100%;font-size:13px;color:var(--ui-muted)}
+.placement-picker{flex:1 1 11rem;min-width:0}
+#focus-placement{align-self:end}
 .placement-actions [role=status]:empty{display:none}
 .native-palette-order-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .native-palette-order-actions [data-action=insert-palette-color]{grid-column:1/-1}
