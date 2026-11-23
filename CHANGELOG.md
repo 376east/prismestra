@@ -2,7 +2,7 @@
 
 For downloads, see [GitHub Releases](https://github.com/376east/prismestra/releases). For physical device coverage, see the [compatibility table](docs/compatibility.md).
 
-## Preview 9 (0.1.0.9) · 2026-11-23
+## Preview 10 (0.1.0.10) · 2026-11-23
 
 ### Discovery, scenes and outputs
 
@@ -21,7 +21,7 @@ For downloads, see [GitHub Releases](https://github.com/376east/prismestra/relea
 
 - Apply an ordinary saved scene from the tray after closing the editor without pending changes. [Tray scenes](https://github.com/376east/prismestra/pull/202)
 
-[Download Preview 9](https://github.com/376east/prismestra/releases/tag/v0.1.0-preview.9) · [All changes since Preview 8](https://github.com/376east/prismestra/compare/v0.1.0-preview.8...v0.1.0-preview.9)
+[Download Preview 10](https://github.com/376east/prismestra/releases/tag/v0.1.0-preview.10) · [All changes since Preview 8](https://github.com/376east/prismestra/compare/v0.1.0-preview.8...v0.1.0-preview.10)
 
 ## Preview 8 (0.1.0.8) · 2026-11-22
 

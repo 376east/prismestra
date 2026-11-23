@@ -416,7 +416,7 @@ fn quiet_shore_is_visible_and_loops_smoothly_on_three_geometries() {
             .max(a.g.abs_diff(b.g))
             .max(a.b.abs_diff(b.b))
     };
-    let period = 160 * u32::from(shore.scene.fps) / shore.scene.speed as u32;
+    let period = 160 * shore.scene.fps / shore.scene.speed as u32;
     for (width, height, coordinates) in [
         (8, 1, (0..8).map(|x| (x, 0)).collect::<Vec<_>>()),
         (13, 9, vec![(1, 1), (12, 3), (6, 8), (2, 6)]),
