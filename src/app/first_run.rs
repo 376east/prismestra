@@ -96,7 +96,11 @@ impl Scan {
             }
             self.updated = true;
         }
-        if self.cancel.cancelled() || (!self.progressive && !self.probes.is_empty()) {
+        // Empty intermediate inventories cannot add an output. Accumulate their
+        // issues, but leave the planner free for the first candidate or completion.
+        if self.cancel.cancelled()
+            || (!self.probes.is_empty() && (!self.progressive || !self.inventory.has_candidates()))
+        {
             return None;
         }
         std::mem::take(&mut self.updated).then(|| self.inventory.clone())
@@ -221,6 +225,12 @@ pub(crate) struct Discovery {
     lcd_paths: Vec<String>,
     ble_pixels: Vec<(u64, usize)>,
     issues: Vec<String>,
+}
+
+impl Discovery {
+    fn has_candidates(&self) -> bool {
+        !(self.controllers.is_empty() && self.lcd_paths.is_empty() && self.ble_pixels.is_empty())
+    }
 }
 
 fn discover(
@@ -1334,6 +1344,123 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         inventory.expect("fixture scan produced no inventory")
+    }
+
+    #[test]
+    fn progressive_scan_prepares_only_devices_or_the_final_inventory() {
+        fn run(
+            profile: &Path,
+            state: &Path,
+            with_outputs: bool,
+        ) -> (usize, Vec<Duration>, Duration) {
+            let mut document = Document::load(profile).unwrap();
+            let mut local = Local::read(&state.join(LOCAL_NAME), &document).unwrap();
+            let (send_lcd, wait_lcd) = std::sync::mpsc::channel();
+            let (send_rgb, wait_rgb) = std::sync::mpsc::channel();
+            let mut scan = Scan {
+                cancel: Cancellation::default(),
+                probes: Vec::new(),
+                inventory: Discovery::default(),
+                updated: false,
+                progressive: true,
+            };
+            scan.spawn("Surplife E1", || Err("fixture: radio unavailable".into()));
+            scan.spawn("TT LCD", move || {
+                wait_lcd.recv().map_err(|error| error.to_string())
+            });
+            scan.spawn("OpenRGB", move || {
+                wait_rgb.recv().map_err(|error| error.to_string())
+            });
+            let mut worker = Worker {
+                scan: Some(scan),
+                task: None,
+            };
+            let started = Instant::now();
+            let until = started + Duration::from_secs(8);
+            let mut plans = 0;
+            let mut applied = Vec::new();
+            let mut last_issues = Vec::new();
+            let mut collect = |finished_probe| {
+                while !worker
+                    .scan
+                    .as_ref()
+                    .unwrap()
+                    .probes
+                    .iter()
+                    .any(|(name, probe)| *name == finished_probe && probe.is_finished())
+                {
+                    assert!(Instant::now() < until, "probe did not finish");
+                    thread::sleep(Duration::from_millis(1));
+                }
+                let Some(inventory) = worker.poll_inventory() else {
+                    return;
+                };
+                plans += 1;
+                let baseline = baseline(state, profile, &document, &local).unwrap();
+                worker
+                    .prepare(
+                        document.clone(),
+                        local.clone(),
+                        state.join("assets"),
+                        endpoint(),
+                        inventory,
+                        baseline,
+                    )
+                    .unwrap();
+                let plan = loop {
+                    if let Some(plan) = worker.poll() {
+                        break plan.unwrap();
+                    }
+                    assert!(Instant::now() < until, "map did not finish");
+                    thread::sleep(Duration::from_millis(1));
+                };
+                if plan.changed {
+                    persist(state, profile, &plan).unwrap();
+                    applied.push(started.elapsed());
+                    document = plan.document;
+                    local = plan.local;
+                }
+                last_issues = plan.issues;
+            };
+            collect("Surplife E1");
+            let mut lcd = Discovery::default();
+            if with_outputs {
+                lcd.lcd_paths
+                    .push(r"\\?\hid#vid_264a&pid_233c&mi_01#stand#{synthetic-interface}".into());
+            }
+            send_lcd.send(lcd).unwrap();
+            collect("TT LCD");
+            let mut rgb = Discovery::default();
+            if with_outputs {
+                rgb.controllers.push(controller("Late keyboard"));
+            }
+            send_rgb.send(rgb).unwrap();
+            collect("OpenRGB");
+            assert!(worker.is_idle());
+            assert_eq!(last_issues, ["Surplife E1: fixture: radio unavailable"]);
+            assert_eq!(
+                Document::load(profile)
+                    .unwrap()
+                    .lighting
+                    .setup
+                    .devices
+                    .len(),
+                if with_outputs { 2 } else { 0 }
+            );
+            (plans, applied, started.elapsed())
+        }
+
+        let (_fixture, profile, state, _) = super::super::installed::tests::fresh_profile();
+        let empty: Vec<_> = (0..3).map(|_| run(&profile, &state, false)).collect();
+        let late = run(&profile, &state, true);
+        println!("Three empty scans (plans, applications, elapsed): {empty:?}");
+        println!("First LCD and late OpenRGB (plans, apply times, elapsed): {late:?}");
+        assert!(
+            empty
+                .iter()
+                .all(|(plans, applied, _)| *plans == 1 && applied.is_empty())
+        );
+        assert_eq!((late.0, late.1.len()), (2, 2));
     }
 
     #[test]
