@@ -32,7 +32,7 @@ const PRUNE: i32 = 1814;
 const PATH: i32 = 1815;
 const RESULT_LABEL: i32 = 1816;
 const PATH_LABEL: i32 = 1817;
-const APPLY_OUTPUTS: i32 = 1818;
+pub(super) const APPLY_OUTPUTS: i32 = 1818;
 const REVERT_OUTPUTS: i32 = 1819;
 const ACTIVE_STATUS: i32 = 1820;
 const SAVE_KEY: i32 = 1821;
@@ -63,6 +63,133 @@ struct Pending {
     revision: u64,
     local: Option<crate::app::lighting_outputs::Local>,
     previous: Previous,
+}
+
+#[derive(Debug, PartialEq)]
+struct LayoutChange {
+    id: String,
+    label: String,
+    address: u64,
+    configured: usize,
+    detected: usize,
+}
+
+#[derive(Debug, PartialEq)]
+struct LayoutReview {
+    context: u64,
+    document: Document,
+    changes: Vec<LayoutChange>,
+}
+
+impl LayoutReview {
+    fn message(&self) -> String {
+        let rows = self
+            .changes
+            .iter()
+            .map(|change| {
+                format!(
+                    "{}: {} LEDs in the current layout, {} LEDs reported by the controller",
+                    change.label, change.configured, change.detected
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "{rows}\n\nApplying the reported counts will replace each listed device’s layout with a straight line. Replace the layouts and apply connections?"
+        )
+    }
+}
+
+enum LayoutDecision {
+    Ready(Vec<LayoutChange>),
+    Confirm(LayoutReview),
+}
+
+fn layout_decision(
+    context: u64,
+    document: &Document,
+    bindings: &crate::devices::Bindings,
+    observed: &BTreeMap<String, (u64, usize)>,
+    approved: Option<&LayoutReview>,
+) -> Result<LayoutDecision, String> {
+    let changes: Vec<_> = document
+        .lighting
+        .setup
+        .devices
+        .iter()
+        .filter_map(|device| {
+            let crate::devices::Binding::Ble { address } = bindings.get(&device.id)? else {
+                return None;
+            };
+            let (known, detected) = observed.get(&device.id)?;
+            (device.driver == crate::devices::Driver::SurplifeE1Pixels
+                && known == address
+                && *detected != device.leds)
+                .then(|| LayoutChange {
+                    id: device.id.clone(),
+                    label: device.label.clone(),
+                    address: *address,
+                    configured: device.leds,
+                    detected: *detected,
+                })
+        })
+        .collect();
+    if let Some(approved) = approved {
+        if approved.context != context
+            || &approved.document != document
+            || approved.changes != changes
+        {
+            return Err(
+                "The layout or controller changed. Apply again to review the new LED count.".into(),
+            );
+        }
+    } else if !changes.is_empty() {
+        return Ok(LayoutDecision::Confirm(LayoutReview {
+            context,
+            document: document.clone(),
+            changes,
+        }));
+    }
+    Ok(LayoutDecision::Ready(changes))
+}
+
+pub(super) fn confirm_connection_apply(hwnd: HWND, state: &State) -> Result<(), String> {
+    let review = {
+        let mut slot = state.app.try_borrow_mut().map_err(|_| "Editor is busy")?;
+        let app = slot.as_mut().ok_or("Editor is unavailable")?;
+        if app.shutdown.active() {
+            return Ok(());
+        }
+        if app.connections.pending.is_some() {
+            return app.command(APPLY_OUTPUTS, BN_CLICKED as u16);
+        }
+        let review = app.apply_connections(false, None)?;
+        app.refresh_connections();
+        review
+    };
+    let Some(review) = review else {
+        return Ok(());
+    };
+    // Both UI hosts use this dialog. Release the App borrow before pumping messages.
+    let answer = unsafe {
+        MessageBoxW(
+            hwnd,
+            wide(&review.message()).as_ptr(),
+            wide("Replace Surplife layout?").as_ptr(),
+            MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING,
+        )
+    };
+    if answer == 0 {
+        return Err("Couldn’t open the layout confirmation. Apply again to retry.".into());
+    }
+    if answer != IDYES {
+        return Ok(());
+    }
+    let mut slot = state.app.try_borrow_mut().map_err(|_| "Editor is busy")?;
+    let app = slot.as_mut().ok_or("Editor is unavailable")?;
+    app.apply_connections(false, Some(&review))?;
+    app.refresh_connections();
+    Ok(())
 }
 
 pub(super) fn is_control(id: i32) -> bool {
@@ -737,12 +864,12 @@ impl App {
             APPLY_OUTPUTS if notice == BN_CLICKED as u16 => {
                 if self.connections.pending.is_some() {
                     self.runtime.retry_configuration()?;
-                } else {
-                    self.apply_connections(false)?;
+                } else if self.apply_connections(false, None)?.is_some() {
+                    return Err("Confirm the Surplife layout replacement before applying.".into());
                 }
             }
             REVERT_OUTPUTS if notice == BN_CLICKED as u16 => {
-                self.apply_connections(true)?;
+                self.apply_connections(true, None)?;
             }
             ENDPOINT | IDENTITY | SERIAL if notice == EN_CHANGE as u16 => {
                 if !self.connections.syncing {
@@ -1055,8 +1182,15 @@ impl App {
         self.refresh_connections();
         Ok(true)
     }
-    fn apply_connections(&mut self, revert: bool) -> Result<(), String> {
-        if self.connections.dirty()
+    fn apply_connections(
+        &mut self,
+        revert: bool,
+        approved: Option<&LayoutReview>,
+    ) -> Result<Option<LayoutReview>, String> {
+        if self.page != Page::Connections
+            || self.shutdown.active()
+            || self.connections.pending.is_some()
+            || self.connections.dirty()
             || !self.connections.scan.is_idle()
             || self.runtime.pending_configuration()
             || self.pending_open.is_some()
@@ -1095,6 +1229,16 @@ impl App {
             let mut document = self.runtime.document().clone();
             let local =
                 crate::app::lighting_outputs::Local::read_draft(&self.connections.path, &document)?;
+            let changes = match layout_decision(
+                self.context_revision,
+                &document,
+                &local.devices,
+                &self.connections.surplife_points,
+                approved,
+            )? {
+                LayoutDecision::Confirm(review) => return Ok(Some(review)),
+                LayoutDecision::Ready(changes) => changes,
+            };
             for (id, binding) in &local.devices {
                 if let crate::devices::Binding::OpenRgb {
                     identity, topology, ..
@@ -1114,12 +1258,13 @@ impl App {
                 {
                     document = crate::app::device_setup::adopt_wled(&document, id, info)?;
                 }
-                if let crate::devices::Binding::Ble { address } = binding
-                    && let Some((known, points)) = self.connections.surplife_points.get(id)
-                    && known == address
-                {
-                    document = crate::app::device_setup::adopt_surplife(&document, id, *points)?;
-                }
+            }
+            for change in changes {
+                document = crate::app::device_setup::adopt_surplife(
+                    &document,
+                    &change.id,
+                    change.detected,
+                )?;
             }
             local.validate(&document)?;
             let plan = (activation.factory)(&local, &document, &self.asset_root)?;
@@ -1162,7 +1307,7 @@ impl App {
         });
         self.connections.watch_outputs = false;
         self.status = "Смена подключений: ожидаю завершения прежних потоков подсветки.".into();
-        Ok(())
+        Ok(None)
     }
     pub(super) fn connection_switching(&self) -> bool {
         self.connections.pending.is_some()
@@ -1417,5 +1562,123 @@ mod activation_tests {
         assert!(snapshot.activation.is_none());
         let stand = Editor::new(PathBuf::from("unused.json"), None).activation(true, true);
         assert!(stand.activation.as_ref().is_some_and(|a| !a.native));
+    }
+
+    #[test]
+    fn surplife_layout_confirmation_covers_cancel_retry_and_equal_counts() {
+        use crate::{
+            app::{config::Groups, device_setup},
+            devices::{Binding, Canvas, Point, Setup},
+        };
+        let preset = device_setup::preset("surplife-e1").unwrap();
+        let mut strip = preset.device_with_leds("strip", 120).unwrap();
+        strip.label = "Desk strip".into();
+        let neighbor = preset.device_with_leds("neighbor", 153).unwrap();
+        let points = [&strip, &neighbor]
+            .into_iter()
+            .enumerate()
+            .flat_map(|(row, device)| {
+                (0..device.leds).map(move |led| Point {
+                    device: device.id.clone(),
+                    led,
+                    x: led as u32,
+                    y: 1 + row as u32,
+                })
+            })
+            .collect();
+        let document = Document::from_lighting(crate::app::config::Project {
+            version: 1,
+            setup: Setup {
+                version: 1,
+                devices: vec![strip, neighbor.clone()],
+                canvas: Canvas {
+                    width: 256,
+                    height: 3,
+                    points,
+                },
+            },
+            scene: crate::runtime::scene::example(),
+            schedule: crate::schedule::Config::default(),
+            groups: Groups {
+                pc: vec!["neighbor".into()],
+                door: vec!["strip".into()],
+            },
+        })
+        .unwrap();
+        let bindings = [
+            ("strip".into(), Binding::Ble { address: 1 }),
+            ("neighbor".into(), Binding::Ble { address: 2 }),
+        ]
+        .into();
+        let mut observed = [("strip".into(), (1, 120)), ("neighbor".into(), (2, 153))].into();
+        assert!(matches!(
+            layout_decision(42, &document, &bindings, &observed, None).unwrap(),
+            LayoutDecision::Ready(changes) if changes.is_empty()
+        ));
+
+        observed.insert("strip".into(), (1, 153));
+        let review = || match layout_decision(42, &document, &bindings, &observed, None).unwrap() {
+            LayoutDecision::Confirm(review) => review,
+            _ => panic!("a count change must stop before applying"),
+        };
+        let cancelled = review();
+        assert!(
+            cancelled
+                .message()
+                .contains("120 LEDs in the current layout, 153 LEDs reported")
+        );
+        assert!(cancelled.message().contains("straight line"));
+        assert!(!cancelled.message().contains(&neighbor.label));
+        drop(cancelled);
+        assert_eq!(document.lighting.setup.devices[0].leds, 120);
+        assert_eq!(document.lighting.setup.canvas.points[0].y, 1);
+        let approved = review();
+        assert!(layout_decision(43, &document, &bindings, &observed, Some(&approved)).is_err());
+        let mut changed_probe = observed.clone();
+        changed_probe.insert("strip".into(), (1, 144));
+        assert!(
+            layout_decision(42, &document, &bindings, &changed_probe, Some(&approved)).is_err()
+        );
+        let LayoutDecision::Ready(changes) =
+            layout_decision(42, &document, &bindings, &observed, Some(&approved)).unwrap()
+        else {
+            panic!("a matching approval must allow the change");
+        };
+        assert_eq!(changes.len(), 1);
+        let change = &changes[0];
+        let applied = device_setup::adopt_surplife(&document, &change.id, change.detected).unwrap();
+        assert_eq!(applied.lighting.setup.devices[0].leds, 153);
+        assert_eq!(applied.lighting.setup.devices[1], neighbor);
+        assert!(
+            applied
+                .lighting
+                .setup
+                .canvas
+                .points
+                .iter()
+                .filter(|p| p.device == "strip")
+                .all(|p| p.y == 0)
+        );
+        assert!(
+            applied
+                .lighting
+                .setup
+                .canvas
+                .points
+                .iter()
+                .filter(|p| p.device == "neighbor")
+                .eq(document
+                    .lighting
+                    .setup
+                    .canvas
+                    .points
+                    .iter()
+                    .filter(|p| p.device == "neighbor"))
+        );
+        assert_eq!(applied.lighting.groups, document.lighting.groups);
+        assert!(matches!(
+            layout_decision(42, &applied, &bindings, &observed, None).unwrap(),
+            LayoutDecision::Ready(changes) if changes.is_empty()
+        ));
     }
 }

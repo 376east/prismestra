@@ -235,6 +235,34 @@ assert.deepEqual(commands.at(-1),{op:'native_action',id:1811,fields:[{id:101,val
 assert.equal(bindingSaveDisabled(),true,'the save remains locked until the native acknowledgement');
 console.log('PASS: first click saves staged connection text only when the host can accept it');
 
+// Apply uses the native confirmation route. A cancelled dialog leaves the
+// applied snapshot intact, and Apply can be requested again after the reply.
+{
+ const strip={id:'surplife-strip',label:'Desk strip',driver:{type:'surplife_e1_pixels'},role:'canvas',leds:120,rate_hz:10,enabled:true};
+ const neighbor={id:'neighbor',label:'Neighbor',driver:{type:'open_rgb'},role:'canvas',leds:12,rate_hz:25,enabled:true};
+ const apply={id:1818,label:'Apply',enabled:true};
+ const connections={...structuredClone(initial),devices:[strip,neighbor],nativeForm:{page:'connections',fields:[],actions:[apply],notes:[]}};
+ context.payload={kind:'snapshot',state:connections};
+ vm.runInContext('formStages.clear();view="connections";window.prismestraReceive(payload)',context);
+ const button={dataset:{nativeAction:'1818'},disabled:false,hasAttribute:()=>false};
+ const click=()=>events.click({target:{closest:()=>button}});
+ const before=commands.length;
+ click();
+ click();
+ const command={op:'native_action',id:1818,fields:[],editor_fields:[]};
+ assert.deepEqual(commands.slice(before),[command]);
+ context.payload={kind:'snapshot',state:connections};
+ vm.runInContext('window.prismestraReceive(payload)',context);
+ assert.equal(vm.runInContext('state.devices[0].leds',context),120);
+ click();
+ assert.deepEqual(commands.slice(before),[command,command]);
+ context.payload={kind:'snapshot',state:{...connections,devices:[{...strip,leds:153},neighbor]}};
+ vm.runInContext('window.prismestraReceive(payload)',context);
+ assert.equal(vm.runInContext('state.devices[0].leds',context),153);
+ assert.equal(vm.runInContext('state.devices[1].leds',context),12);
+ console.log('PASS: Connections Apply requests one native action at a time and can retry after a cancelled layout review');
+}
+
 // First-time portable setup uses the existing native action bridge.
 const portableAction={id:1822,label:'Настроить локальный OpenRGB…',enabled:true};
 context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeForm:{page:'connections',fields:[],actions:[portableAction],notes:[]}}};
