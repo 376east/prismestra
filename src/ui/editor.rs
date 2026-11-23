@@ -10,7 +10,7 @@ use crate::{
     capture::ambient::Mode,
     lighting::ambient::Rect,
 };
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::HashMap};
 const SCENE_EDGES: &str = "@scene_edges";
 #[derive(Clone, Debug)]
 pub struct Field {
@@ -159,33 +159,13 @@ impl Editor {
                 .iter()
                 .map(|d| format!("{} ({})", d.label, d.id))
                 .collect(),
-            Page::Ambient => document
-                .ambient
-                .routes
-                .iter()
-                .map(|r| {
-                    document
-                        .lighting
-                        .setup
-                        .devices
-                        .iter()
-                        .find(|d| d.id == r.device)
-                        .map_or(r.device.clone(), |d| d.label.clone())
-                })
-                .collect(),
-            Page::Lcd => document
-                .lcd
-                .iter()
-                .map(|r| {
-                    document
-                        .lighting
-                        .setup
-                        .devices
-                        .iter()
-                        .find(|d| d.id == r.device)
-                        .map_or(r.device.clone(), |d| d.label.clone())
-                })
-                .collect(),
+            Page::Ambient => Self::output_targets(
+                document,
+                document.ambient.routes.iter().map(|r| r.device.as_str()),
+            ),
+            Page::Lcd => {
+                Self::output_targets(document, document.lcd.iter().map(|r| r.device.as_str()))
+            }
             Page::Temperatures => document
                 .temperatures
                 .sources
@@ -195,6 +175,37 @@ impl Editor {
             _ => vec![],
         }
     }
+
+    fn output_targets<'a>(
+        document: &'a Document,
+        ids: impl Iterator<Item = &'a str>,
+    ) -> Vec<String> {
+        let mut counts = HashMap::new();
+        let targets: Vec<_> = ids
+            .map(|id| {
+                let label = document
+                    .lighting
+                    .setup
+                    .devices
+                    .iter()
+                    .find(|device| device.id == id)
+                    .map_or(id, |device| device.label.as_str());
+                *counts.entry(label).or_insert(0) += 1;
+                (id, label)
+            })
+            .collect();
+        targets
+            .into_iter()
+            .map(|(id, label)| {
+                if counts[label] > 1 {
+                    format!("{label} ({id})")
+                } else {
+                    label.to_owned()
+                }
+            })
+            .collect()
+    }
+
     #[cfg(any(windows, test))]
     pub(super) fn selected_connection_device(&self) -> Option<&str> {
         self.selected_device_id()
@@ -1687,6 +1698,59 @@ mod tests {
         assert_eq!(editor.selected_connection_device(), Some("screen"));
         editor.page = Page::Temperatures;
         assert_eq!(editor.selected_connection_device(), None);
+    }
+
+    #[test]
+    fn output_targets_distinguish_same_names_in_route_order() {
+        let mut editor = Editor {
+            document: document(),
+            page: Page::Lcd,
+            index: 1,
+        };
+        let document = &mut editor.document;
+        let devices = &mut document.lighting.setup.devices;
+        for (index, id, label) in [
+            (1, "lcd-second", "Помпа"),
+            (1, "lcd-unique", "Дополнительный дисплей"),
+            (0, "screen-second", "Экранная лента"),
+            (0, "screen-unique", "Стена"),
+        ] {
+            let mut device = devices[index].clone();
+            device.id = id.into();
+            device.label = label.into();
+            devices.push(device);
+        }
+        for id in ["lcd-unique", "lcd-second"] {
+            let mut entry = document.lcd[0].clone();
+            entry.device = id.into();
+            document.lcd.insert(0, entry);
+        }
+        for id in ["screen-unique", "screen-second"] {
+            let mut route = document.ambient.routes[0].clone();
+            route.device = id.into();
+            document.ambient.routes.insert(0, route);
+        }
+
+        assert_eq!(
+            Editor::targets(document, Page::Lcd),
+            [
+                "Помпа (lcd-second)",
+                "Дополнительный дисплей",
+                "Помпа (lcd)"
+            ]
+        );
+        assert_eq!(
+            Editor::targets(document, Page::Ambient),
+            [
+                "Экранная лента (screen-second)",
+                "Стена",
+                "Экранная лента (screen)"
+            ]
+        );
+        editor.index = 0;
+        assert_eq!(editor.selected_connection_device(), Some("lcd-second"));
+        editor.page = Page::Ambient;
+        assert_eq!(editor.selected_connection_device(), Some("screen-second"));
     }
 
     #[test]
