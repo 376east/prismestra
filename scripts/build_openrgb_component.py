@@ -56,20 +56,29 @@ def checkout(lock, path):
     return path
 
 
-def build_component(root, vsdevcmd):
-    from components.verify_openrgb_component import REQUIRED, MSVC_RUNTIME
+def apply_locked_patch(source, patch, expected_sha256):
+    from components.verify_openrgb_component import working_diff
 
-    source_lock = COMPONENT / "source-lock.json"
-    dependency_lock = COMPONENT / "dependency-lock.json"
-    tools = {name: fetch(root, name, *PINNED_INPUTS[name])
-             for name in PINNED_INPUTS}
-    lock = read(source_lock)
-    source = checkout(lock, root / "openrgb-source")
-    patch = COMPONENT / lock["patch"]
-    if sha256(patch) != lock["patch_sha256"]:
+    if sha256(patch) != expected_sha256:
         raise ValueError("OpenRGB patch differs from its source lock")
     run("git", "-C", source, "apply", "--check", patch)
     run("git", "-C", source, "apply", "--intent-to-add", patch)
+    if working_diff(source) != patch.read_bytes():
+        raise ValueError(
+            "OpenRGB patch differs from the applied Git diff; "
+            "regenerate with git diff --binary --full-index HEAD --"
+        )
+
+
+def build_component(root, vsdevcmd):
+    from components.verify_openrgb_component import REQUIRED, MSVC_RUNTIME
+    source_lock = COMPONENT / "source-lock.json"
+    dependency_lock = COMPONENT / "dependency-lock.json"
+    lock = read(source_lock)
+    source = checkout(lock, root / "openrgb-source")
+    apply_locked_patch(source, COMPONENT / lock["patch"], lock["patch_sha256"])
+    tools = {name: fetch(root, name, *PINNED_INPUTS[name])
+             for name in PINNED_INPUTS}
 
     # Reuse the published, pinned user-mode dependency bytes and source archives.
     # The previous OpenRGB.exe is deliberately excluded from the new component.
