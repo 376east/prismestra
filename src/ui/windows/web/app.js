@@ -147,7 +147,8 @@ const changed = () => !!draft && !!state && !same(draft,state.scene);
 const sourceNeedsApply = () => !!state?.native && !!draft
  && ['camera','keys'].includes(reactiveEffects.get(draft.effect))
  && (draft.effect!==state.scene.effect || !state.captureAuthorized);
-const applyNeeded = () => changed() || sourceNeedsApply();
+const savedDraft = () => selectedId && state?.library.find(item=>item.id===selectedId && same(item.scene,draft));
+const applyNeeded = () => changed() || sourceNeedsApply() || Boolean(state?.native && savedDraft()?.aliceLamp);
 let placementOpen=false, placementDrag=null, placementSelection=null;
 let placementLimited=false;
 const placementHelp=()=>placementLimited
@@ -284,6 +285,12 @@ function syncControls(keepRetryFocus) {
  const runtimeDetail=$('#native-runtime-detail');if(runtimeDetail)runtimeDetail.textContent=state?.detail||'';
  const diagnostics=$('#native-runtime-diagnostics');if(diagnostics)diagnostics.hidden=!state?.detail;
  if(sceneActivation?.id)syncSceneActivation(sceneActivation.id,sceneActivation);
+ const editorLamp=$('#editor-lamp-status');
+ if(editorLamp){
+  const message=sceneActivation?.editor && sceneActivation.id===selectedId &&
+   same(sceneActivation.scene,draft) ? sceneActivation.lampMessage||'' : '';
+  if(editorLamp.textContent!==message)editorLamp.textContent=message;
+ }
  const audioSource=$('#scene-audio-source');
  if(audioSource)audioSource.textContent=state?.native
   ? state.audioError&&audioEffects.has(state.scene.effect)?ui('Системный звук недоступен. Повторяю подключение.','System audio is unavailable. Reconnecting.')
@@ -360,6 +367,7 @@ function renderLibrary() {
      <button class="icon-button" data-edit="${esc(item.id)}" aria-label="${ui('Редактировать','Edit')}: ${esc(sceneLabel(item))}" title="${ui('Редактировать','Edit')}" data-mutation ${disabled()}>${icon('edit')}</button>
      ${item.builtIn?'':`<button class="icon-button" data-remove="${esc(item.id)}" aria-label="${ui('Удалить','Delete')}: ${esc(sceneLabel(item))}" data-mutation ${disabled()}>${icon('trash')}</button>`}
     </div>
+    ${item.builtIn||(!state.native&&!item.aliceLampStale)?'':`<button class="button" data-alice-scene="${esc(item.id)}" data-mutation ${disabled()}>${item.aliceLampStale?ui('Привязка лампы устарела','Lamp binding needs review'):item.aliceLamp?ui('Лампа · ','Lamp · ')+esc(item.aliceLamp.label):ui('Добавить лампу','Add a lamp')}</button>`}
     <div id="scene-activation-${esc(item.id)}" class="scene-activation-status" role="status" aria-atomic="true"></div>
     <button id="scene-devices-${esc(item.id)}" class="button scene-devices" data-view="devices" hidden>${ui('Проверить устройства','Check devices')}</button>
    </div>
@@ -450,7 +458,7 @@ function reorderPalette(actionCode) {
 function renderScene() {
  const effectIds=Object.keys(effects);
  if(!Object.hasOwn(effects,draft.effect))effectIds.unshift(draft.effect);
- return heading(draftName,ui('Применение обновляет активную сцену. Сохранение записывает версию в библиотеку.','Apply updates the active scene. Save keeps a version in your library.'),action(ui('Сохранить в библиотеку','Save to library'),'save-scene')+action(ui('Создать копию','Make a copy'),'clone')+(selectedId?action(ui('Переименовать','Rename'),'rename'):'')+action(ui('Применить сцену','Apply scene'),'apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status" role="status" aria-atomic="true"></p><div class="editor-layout"><section class="preview-panel" aria-label="${ui('Предпросмотр','Preview')}"><div class="stage"><canvas id="stage" aria-label="${ui('Предпросмотр сцены из движка Prismestra','Prismestra engine scene preview')}"></canvas><div class="stage-bar"><span class="stage-chip">${ui('Предпросмотр','Preview')}</span></div><div class="stage-caption">${ui('Кадр движка · черновик','Engine frame · draft')}</div>${renderPlacementObjects()}</div>${renderPlacementControls()}<p class="preview-description">${ui('Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.','Preview leaves lighting unchanged. RGB and LCD outputs are enabled separately.')}</p><div class="native-field"><label for="scene-effect">${ui('Эффект','Effect')}</label><select id="scene-effect" data-mutation ${disabled()}>${effectIds.map(id=>effectOption(id,draft.effect)).join('')}</select></div><div class="parameter-panel" style="margin-top:20px"><h2>${ui('Выходы','Outputs')}</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> ${ui('Основной свет · RGB и LCD','Primary lighting · RGB and LCD')}</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> ${ui('Дополнительный свет','Secondary lighting')}</label><button class="button" data-view="devices">${ui('Устройства и свойства','Devices and properties')}</button></div></section><aside class="parameter-panel" id="scene-parameters" aria-label="${ui('Параметры сцены','Scene parameters')}">${sceneParameters()}</aside></div>`;
+ return heading(draftName,ui('Применение обновляет активную сцену. Сохранение записывает версию в библиотеку.','Apply updates the active scene. Save keeps a version in your library.'),action(ui('Сохранить в библиотеку','Save to library'),'save-scene')+action(ui('Создать копию','Make a copy'),'clone')+(selectedId?action(ui('Переименовать','Rename'),'rename'):'')+action(ui('Применить сцену','Apply scene'),'apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status" role="status" aria-atomic="true"></p><p id="editor-lamp-status" class="scene-activation-status" role="status"></p><div class="editor-layout"><section class="preview-panel" aria-label="${ui('Предпросмотр','Preview')}"><div class="stage"><canvas id="stage" aria-label="${ui('Предпросмотр сцены из движка Prismestra','Prismestra engine scene preview')}"></canvas><div class="stage-bar"><span class="stage-chip">${ui('Предпросмотр','Preview')}</span></div><div class="stage-caption">${ui('Кадр движка · черновик','Engine frame · draft')}</div>${renderPlacementObjects()}</div>${renderPlacementControls()}<p class="preview-description">${ui('Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.','Preview leaves lighting unchanged. RGB and LCD outputs are enabled separately.')}</p><div class="native-field"><label for="scene-effect">${ui('Эффект','Effect')}</label><select id="scene-effect" data-mutation ${disabled()}>${effectIds.map(id=>effectOption(id,draft.effect)).join('')}</select></div><div class="parameter-panel" style="margin-top:20px"><h2>${ui('Выходы','Outputs')}</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> ${ui('Основной свет · RGB и LCD','Primary lighting · RGB and LCD')}</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> ${ui('Дополнительный свет','Secondary lighting')}</label><button class="button" data-view="devices">${ui('Устройства и свойства','Devices and properties')}</button></div></section><aside class="parameter-panel" id="scene-parameters" aria-label="${ui('Параметры сцены','Scene parameters')}">${sceneParameters()}</aside></div>`;
 }
 function placementLabel(object,objects) {
  return objects.some(other=>other.id!==object.id&&other.label===object.label)
@@ -901,29 +909,50 @@ function previewLibraryEntry(entry) {
  if(entry.preview)paintPixels($('#library-preview-art canvas'),entry.preview);
  $('#library-preview-dialog').showModal();
 }
-function activateScene(scene,entry=null) {
+function activateScene(scene,entry=null,editor=false) {
  if(busy())return;
  const request=++sceneActivationRequest;
  const submitted=clone(scene);
- if(!send({op:'apply_scene',scene:submitted,request}))return;
+ const command={op:'apply_scene',scene:submitted,request};
+ if(entry&&!entry.builtIn)command.id=entry.id;
+ if(!send(command))return;
  if(sceneActivation?.id)syncSceneActivation(sceneActivation.id,null);
- sceneActivation=entry
-  ?{request,id:entry.id,name:sceneLabel(entry),pending:true,message:ui(`Применяем «${entry.name}»…`,`Applying “${sceneLabel(entry)}”…`)}
-  :{request,scene:submitted,pending:true};
- if(!entry)editorSceneResult=null;
+ sceneActivation={request,scene:submitted,editor,pending:true};
+ if(entry)Object.assign(sceneActivation,{
+  id:entry.id,name:entry.name,displayName:sceneLabel(entry),binding:entry.aliceLamp,
+  profileRevision:state.profileRevision,
+  message:ui(`Применяем «${entry.name}»…`,`Applying “${sceneLabel(entry)}”…`)
+ });
+ if(editor)editorSceneResult=null;
  syncControls();
+}
+function sceneActivationMessage(result) {
+ return result?.lampMessage ? result.message+' '+result.lampMessage : result?.message||'';
+}
+function clearSceneLamp(id) {
+ if(!sceneActivation?.binding || sceneActivation.id!==id)return false;
+ sceneActivation.binding=null;
+ sceneActivation.lampMessage='';
+ return true;
+}
+function reconcileSceneLamp() {
+ if(!sceneActivation?.binding)return;
+ const {id,name,scene,binding,profileRevision,applied}=sceneActivation;
+ const entry=state.library.find(item=>item.id===id);
+ if(profileRevision!==state.profileRevision || !state.native || !entry || entry.name!==name || !same(entry.scene,scene) || !same(entry.aliceLamp,binding) ||
+    (applied && !same(state.scene,scene)))clearSceneLamp(id);
 }
 function syncSceneActivation(id,result) {
  const key=CSS.escape(id);
  const status=$('#scene-activation-'+key);
- const message=result?.message||'';
+ const message=sceneActivationMessage(result);
  if(status&&status.textContent!==message)status.textContent=message;
  const devices=$('#scene-devices-'+key);
  if(devices)devices.hidden=!(result?.applied&&state?.native);
 }
-function receiveSceneActivation({request,status,output,message}) {
+function receiveSceneActivation({request,status,output,message,lamp}) {
  if(!sceneActivation?.pending||request!==sceneActivation.request)return;
- if(!sceneActivation.id){
+ if(sceneActivation.editor){
   let result;
   if(status==='failed')result=ui(`Не удалось применить сцену.${message?' '+message:''}`,'Could not apply the scene.');
   else if(status==='applied'){
@@ -932,22 +961,61 @@ function receiveSceneActivation({request,status,output,message}) {
    else result=ui('Сцена применена.','Scene applied.');
   }else return;
   editorSceneResult={scene:sceneActivation.scene,message:result};
-  sceneActivation=null;
-  syncControls();
-  return;
+  if(!sceneActivation.id){
+   sceneActivation=null;
+   syncControls();
+   return;
+  }
  }
  if(status==='applied'){
   const detail=output==='preview_only'?ui(' Режим предпросмотра.',' Preview mode.'):output==='no_active_rgb'?ui(' Нет активных RGB-выходов для этой сцены.',' No active RGB outputs for this scene.'):'';
-  sceneActivation.message=ui(`Сцена «${sceneActivation.name}» применена.${detail}`,`Scene “${sceneActivation.name}” applied.${detail}`);
+  sceneActivation.message=ui(`Сцена «${sceneActivation.name}» применена.${detail}`,`Scene “${sceneActivation.displayName}” applied.${detail}`);
  }
  else if(status==='failed'){
   sceneActivation.message=ui(`Не удалось применить «${sceneActivation.name}».${message?' '+message:''}`,
-   `Could not apply “${sceneActivation.name}”. Check Devices for output status.`);
+   `Could not apply “${sceneActivation.displayName}”. Check Devices for output status.`);
  }
  else return;
  sceneActivation.pending=false;
  sceneActivation.applied=status==='applied';
+ if(sceneActivation.applied&&sceneActivation.binding)sceneActivation.lampMessage=aliceStatusText(lamp);
  syncControls();
+}
+const englishAliceStatus=new Map([
+ ['Применяем яркость лампы сцены…','Applying the scene lamp brightness…'],
+ ['Яндекс подтвердил команду лампе.','Yandex confirmed the lamp command.'],
+ ['Для лампы сцены войдите через Яндекс ID.','Sign in with Yandex ID to use the scene lamp.'],
+ ['Дождитесь завершения операции Алисы и примените сцену заново.','Wait for the current Alice operation before applying the scene again.'],
+ ['Команда лампе отменена.','The lamp command was cancelled.'],
+ ['Яндекс не подтвердил команду. Автоматического повтора не будет.','Yandex did not confirm the command. No automatic retry.'],
+ ['Проверьте системное время для входа в Алису.','Check the system clock before signing in to Alice.'],
+ ['Доступ к Алисе истёк или отозван. Войдите через Яндекс ID заново.','Alice access expired or was revoked. Sign in with Yandex ID again.'],
+ ['Яндекс отклонил доступ. Войдите заново и проверьте права на лампу.','Yandex denied access. Sign in again and check access to the lamp.'],
+ ['Подтвердите вход в браузере.','Confirm sign-in in your browser.'],
+ ['Загружаем доступные лампы…','Loading available lights…'],
+ ['Выберите лампу.','Choose a light.'],
+ ['Нет доступных ламп с регулировкой яркости.','No dimmable lights are available.'],
+ ['Вы вышли из Алисы в Prismestra.','Signed out of Alice in Prismestra.'],
+ ['Завершаем выход из Алисы…','Signing out of Alice…'],
+ ['Яндекс подтвердил изменение яркости.','Yandex confirmed the brightness change.'],
+ ['Яндекс подтвердил включение лампы.','Yandex confirmed that the light is on.'],
+ ['Яндекс подтвердил выключение лампы.','Yandex confirmed that the light is off.'],
+]);
+function aliceStatusText(message) {
+ if(!english||!message)return message;
+ return englishAliceStatus.get(message)??(message.endsWith('Автоматического повтора не будет.')
+  ?'The lamp command was not confirmed. No automatic retry.'
+  :/[А-Яа-яЁё]/u.test(message)?'Alice could not complete the request.':message);
+}
+function receiveSceneLamp({request,message}) {
+ if(sceneActivation?.request!==request||!sceneActivation.applied||!sceneActivation.binding)return;
+ sceneActivation.lampMessage=aliceStatusText(message);
+ syncControls();
+}
+function applyEditorScene() {
+ if(!draft||placementDirty())return;
+ const entry=savedDraft();
+ activateScene(draft,state?.native&&entry?.aliceLamp?entry:null,true);
 }
 function closeDraftSwitch() {
  const id=draftSwitchId;
@@ -974,7 +1042,15 @@ function nameDialog(mode) {
 window.prismestraReceive = message => {
  try {
   if(typeof message==='string')message=JSON.parse(message);
-  if(message.kind==='alice'){if(message.sequence===aliceSequence)receiveAlice(message);return;}
+  if(message.kind==='alice'){
+   if(alicePickerStarted&&message.sequence===aliceSequence){
+    if(aliceAction==='sign_out'&&!message.error&&clearSceneLamp(sceneActivation?.id))syncControls();
+    receiveAlice(message);
+   }
+   return;
+  }
+  if(message.kind==='alice_binding'){receiveAliceBinding(message);return;}
+  if(message.kind==='scene_lamp'){receiveSceneLamp(message);return;}
   if(message.kind==='output_preview'){window.outputMap?.receive(message);return;}
   if(message.kind==='argb_channels'||message.kind==='argb_channel_saved'){window.argbChannel?.receive(message);return;}
   if(message.kind==='output_retry'){receiveOutputRetry(message);return;}
@@ -1008,6 +1084,8 @@ window.prismestraReceive = message => {
    const acknowledged=awaitingCommandAck;awaitingCommandAck=false;completeStageAck();
    if(retryScope()!==message.state.deviceActivity?.retryScope)outputRetries.clear();
    state=message.state;
+   reconcileSceneLamp();
+   sceneActivationRequest=Math.max(sceneActivationRequest,state.lastSceneApplyRequest??0);
    if(Array.isArray(state.effects)){
     effects=Object.create(null);
     audioEffects=new Set(state.effects.filter(effect=>effect.audio).map(effect=>effect.id));
@@ -1062,6 +1140,7 @@ window.prismestraReceive = message => {
    const nativeFormChanged=(Object.hasOwn(message.state,'nativeForm')&&!same(state.nativeForm,message.state.nativeForm))||(Object.hasOwn(message.state,'nativeAux')&&!same(state.nativeAux,message.state.nativeAux));
    if(message.state.deviceActivity&&retryScope()!==message.state.deviceActivity.retryScope)outputRetries.clear();
    Object.assign(state,message.state);
+   reconcileSceneLamp();
    reconcileRetryActivity(message.state.deviceActivity);
    if(state.pending||Object.hasOwn(message.state,'mapConnection'))window.outputMap?.update(state);
    followActiveScene();
@@ -1075,10 +1154,11 @@ window.prismestraReceive = message => {
   syncControls();
  }
 };
-let aliceTimer, aliceState, aliceSequence=0;
+let aliceTimer, aliceState, aliceSequence=0, aliceAction, aliceScene, aliceBindingPending=false, alicePickerStarted=false;
 let aliceLamps=[];
 function aliceRequest(action, options={}) {
  clearTimeout(aliceTimer);
+ aliceAction=action;
  if(!send({op:'alice',sequence:++aliceSequence,request:{action,...options}}) && action!=='cancel')
   receiveAlice({error:'Не удалось связаться с Prismestra.'});
 }
@@ -1094,6 +1174,49 @@ function aliceSelection() {
  $('#alice-turn-on').disabled=!chosen;
  $('#alice-turn-off').disabled=!chosen;
  $('#alice-apply').disabled=!chosen || !level.value || !level.checkValidity();
+ $('#alice-bind').disabled=aliceBindingPending || $('#alice-apply').disabled;
+ $('#alice-unbind').disabled=aliceBindingPending;
+}
+function openAlice(scene) {
+ aliceScene=scene;
+ aliceBindingPending=false;
+ alicePickerStarted=false;
+ $('#alice-title').textContent=scene ? ui(`Лампа сцены «${scene.name}»`,`Lamp for “${scene.name}”`) : ui('Управление лампами','Lamp controls');
+ const binding=scene?.aliceLamp;
+ const stale=scene?.aliceLampStale;
+ $('#alice-bound-lamp').textContent=stale ? ui('Сцена изменилась. Лампа не будет участвовать, пока вы заново не сохраните привязку.','The scene changed. Save the lamp binding again to use it with this scene.')
+  : binding ? ui(`Выбрана лампа «${binding.label}».`,`Selected lamp: “${binding.label}”.`) : '';
+ $('#alice-bound-lamp').hidden=!binding&&!stale;
+ $('#alice-unbind').hidden=!binding&&!stale;
+ $('#alice-reconfigure').hidden=!stale||!state.native;
+ $('#alice-direct-actions').hidden=Boolean(scene);
+ $('#alice-scene-actions').hidden=!scene;
+ $('#alice-lamp').value='';
+ $('#alice-brightness').value=String(binding?.brightness??40);
+ $('#alice-allow-power').checked=binding?.allowPowerOn??false;
+ $('#alice-dialog').showModal();
+ if(stale)receiveAlice({state:{busy:false,lamps:[],needsLogin:false,message:''}});
+ else startAlicePicker();
+}
+function startAlicePicker() {
+ if(alicePickerStarted)return;
+ alicePickerStarted=true;
+ $('#alice-reconfigure').hidden=true;
+ receiveAlice({state:{busy:true,lamps:[],needsLogin:true,message:ui('Проверяем вход…','Checking sign-in…')}});
+ aliceRequest('open');
+}
+function configureAliceBinding(selection) {
+ if(!aliceScene||aliceBindingPending)return;
+ if(!send({op:'configure_scene_lamp',id:aliceScene.id,selection}))return;
+ aliceBindingPending=true;
+ aliceSelection();
+}
+function receiveAliceBinding({id,error}) {
+ if(!error&&clearSceneLamp(id))syncControls();
+ if(!aliceScene||aliceScene.id!==id)return;
+ aliceBindingPending=false;
+ if(error){$('#alice-status').textContent=aliceStatusText(error);$('#alice-status').title=english?error:'';aliceSelection();return;}
+ $('#alice-dialog').close();
 }
 function receiveAlice(message) {
  const dialog=$('#alice-dialog');
@@ -1105,7 +1228,9 @@ function receiveAlice(message) {
   ? {...(aliceState||{lamps:[],needsLogin:true}),busy:false,message:message.error}
   : message.state;
  aliceState=state;
- $('#alice-status').textContent=state.message;
+ const status=$('#alice-status');
+ status.textContent=aliceStatusText(state.message);
+ status.title=english&&(status.textContent!==state.message)?state.message:'';
  $('#alice-login').hidden=state.busy || !state.needsLogin;
  retry.hidden=state.busy || !state.saved || state.needsLogin || Boolean(state.ticket);
  signOut.hidden=!state.saved && !state.ticket;
@@ -1132,10 +1257,13 @@ function receiveAlice(message) {
 $('#alice-dialog')?.addEventListener('close',()=>{
  clearTimeout(aliceTimer);
  aliceState=undefined;
+ aliceScene=undefined;
+ aliceBindingPending=false;
  $('#alice-lamp').value='';
  $('#alice-choice').hidden=true;
  $('#alice-remember').checked=false;
- aliceRequest('cancel');
+ if(alicePickerStarted)aliceRequest('cancel');
+ alicePickerStarted=false;
 });
 $('#alice-lamp')?.addEventListener('change',aliceSelection);
 $('#alice-brightness')?.addEventListener('input',aliceSelection);
@@ -1162,6 +1290,7 @@ document.addEventListener('click',event=>{
  if(b.dataset.preview!==undefined){const entry=state?.library.find(e=>e.id===b.dataset.preview);if(entry)previewLibraryEntry(entry);return;}
  if(b.dataset.edit){const entry=state.library.find(e=>e.id===b.dataset.edit);if(entry)openEntry(entry);return;}
  if(b.dataset.apply){const entry=state.library.find(e=>e.id===b.dataset.apply);if(entry)activateScene(entry.scene,entry);return;}
+ if(b.dataset.aliceScene){const entry=state.library.find(e=>e.id===b.dataset.aliceScene);if(entry&&!entry.builtIn)openAlice(entry);return;}
  if(b.dataset.remove){const entry=state.library.find(e=>e.id===b.dataset.remove);if(entry&&!entry.builtIn){dialogReturn=focusKey();$('#remove-description').textContent=ui(`Удалить сцену «${entry.name}» из профиля? Запущенный эффект продолжит работать.`,`Delete “${entry.name}” from the profile? The active effect will keep running.`);$('#remove-dialog').dataset.id=entry.id;$('#remove-dialog').showModal();$('#cancel-remove').focus();}return;}
  if(b.dataset.removeColor!==undefined){
   if(draft.colors.length>1){
@@ -1185,12 +1314,9 @@ document.addEventListener('click',event=>{
  }
  switch(b.dataset.action){
  case 'copy-output-status':void copyOutputStatus(b.dataset.copyOutput);break;
- case 'alice-open':
-  $('#alice-dialog').showModal();
-  receiveAlice({state:{busy:true,lamps:[],needsLogin:true,message:ui('Проверяем вход…','Checking sign-in…')}});
-  aliceRequest('open');
-  break;
+ case 'alice-open':openAlice();break;
  case 'alice-close':$('#alice-dialog').close();break;
+ case 'alice-reconfigure':if(aliceScene?.aliceLampStale&&state.native)startAlicePicker();break;
  case 'alice-sign-in':
  case 'alice-retry':
  case 'alice-sign-out':
@@ -1201,15 +1327,21 @@ document.addEventListener('click',event=>{
   break;
  case 'alice-turn-on':
  case 'alice-turn-off':
+ case 'alice-bind':
  case 'alice-apply':{
   const ticket=aliceState?.ticket;
   if(!ticket||aliceState.busy||$('#alice-lamp').value==='')break;
   const lamp=Number($('#alice-lamp').value);
+  if(b.dataset.action==='alice-bind'){
+   configureAliceBinding({ticket,lamp,brightness:Number($('#alice-brightness').value),allow_power_on:$('#alice-allow-power').checked});
+   break;
+  }
   receiveAlice({state:{...aliceState,busy:true}});
   if(b.dataset.action!=='alice-apply')aliceRequest('power',{ticket,lamp,on:b.dataset.action==='alice-turn-on'});
   else aliceRequest('apply',{ticket,lamp,brightness:Number($('#alice-brightness').value)});
   break;
  }
+ case 'alice-unbind':configureAliceBinding(null);break;
  case 'preview-argb': {
   const index=Number(b.dataset.argbIndex);
   const controller=state?.unconfiguredArgb?.[index];
@@ -1229,7 +1361,7 @@ document.addEventListener('click',event=>{
  case 'retry-startup-discovery':if(!controlDisabled(b))send({op:'retry_startup_discovery'},true);break;
  case 'new':case 'clone':case 'rename':return nameDialog(b.dataset.action);
  case 'save-scene':return nameDialog('save');
- case 'apply-scene':activateScene(draft);break;
+ case 'apply-scene':applyEditorScene();break;
  case 'open-placement':openPlacement();break;
  case 'focus-placement':document.getElementById('placement-'+$('#placement-picker')?.value)?.focus();break;
  case 'apply-placement':showPlacementLimit(false);send({op:'apply_document'},true);break;
@@ -1304,7 +1436,7 @@ document.addEventListener('change',event=>{
  if(input.dataset.sceneSelect){draft[input.dataset.sceneSelect]=input.value;if(input.dataset.sceneSelect==='noise_palette')render();editDraft();}
 });
 $('#play').onclick=()=>{if(!state)return;const on=!(state.groups.pc||state.groups.door);send({op:'groups',pc:on,door:on},true);};
-$('#footer-apply').onclick=()=>{if(!draft||placementDirty())return;if(view==='editor')activateScene(draft);else send({op:'apply_scene',scene:clone(draft)},true);};
+$('#footer-apply').onclick=applyEditorScene;
 $('#open-active').onclick=()=>changeView('editor');
 $('.brand').onclick=event=>{event.preventDefault();changeView('library');};
 $('#sun-icon').innerHTML=icon('sun');

@@ -103,18 +103,24 @@
     <button type="button" class="button" data-action="alice-sign-out" hidden data-en="Sign out of Alice">Выйти из Алисы</button>
   </div>
   <p id="alice-status" role="status" aria-live="polite"></p>
+  <p id="alice-bound-lamp" hidden></p>
+  <button type="button" class="button primary" id="alice-reconfigure" data-action="alice-reconfigure" hidden data-en="Choose a lamp again">Выбрать лампу заново</button>
   <div id="alice-choice" hidden>
     <label for="alice-lamp" data-en="Light">Лампа</label>
     <select id="alice-lamp" class="native-target"><option value="" data-en="Choose a light">Выберите лампу</option></select>
     <label for="alice-brightness" data-en="Brightness, %">Яркость, %</label>
     <input id="alice-brightness" type="number" min="1" max="100" step="1" value="40">
-    <div class="alice-actions">
+    <div class="alice-actions" id="alice-direct-actions">
       <button type="button" class="button" id="alice-turn-on" data-action="alice-turn-on" disabled data-en="Turn on">Включить</button>
       <button type="button" class="button" id="alice-turn-off" data-action="alice-turn-off" disabled data-en="Turn off">Выключить</button>
       <button type="button" class="button primary" id="alice-apply" data-action="alice-apply" disabled data-en="Apply brightness">Применить яркость</button>
     </div>
+    <div id="alice-scene-actions" hidden>
+      <label class="alice-remember"><input type="checkbox" id="alice-allow-power"> <span data-en="Turn on the lamp when applying the scene">Включать лампу при применении сцены</span></label>
+      <button type="button" class="button primary" id="alice-bind" data-action="alice-bind" disabled data-en="Save binding">Сохранить привязку</button>
+    </div>
   </div>
-  <div class="dialog-actions"><button type="button" class="button" data-action="alice-close" data-en="Close">Закрыть</button></div>
+  <div class="dialog-actions"><button type="button" class="button" id="alice-unbind" data-action="alice-unbind" hidden data-en="Remove lamp from scene">Убрать лампу из сцены</button><button type="button" class="button" data-action="alice-close" data-en="Close">Закрыть</button></div>
 </dialog>
 <dialog id="argb-dialog" aria-labelledby="argb-title" aria-describedby="argb-label">
   <h2 id="argb-title" data-en="ARGB channels">Каналы ARGB</h2>
