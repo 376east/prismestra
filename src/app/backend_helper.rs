@@ -932,7 +932,7 @@ fn supervise_channels(
     }
     let mut lease_deadline = clock::deadline(request.timestamp_ms, now)?;
     let mut last_valid_poll_ms = now;
-    let mut catch_up_tick = None;
+    let mut catch_up = None;
     let mut status_write_failed = false;
     let mut owner_read_failed = false;
     let mut last_backend_state = None;
@@ -993,18 +993,26 @@ fn supervise_channels(
                 .as_ref()
                 .is_some_and(|cancel| control_clear(cancel, request))
         {
-            // Both the writer and the supervisor can be delayed. Require an authenticated
-            // publication made after the last poll and before its original deadline.
-            if catch_up_tick.is_none()
+            // After a missed lease interval, give the same live owner one fixed
+            // window to confirm it is still publishing. A single record is not
+            // enough to restore readiness when the earlier lease cannot be bridged.
+            if catch_up.is_none()
                 && now.saturating_sub(last_valid_poll_ms) >= clock::LEASE_MS
                 && current.timestamp_ms > last_valid_poll_ms
-                && current.timestamp_ms < lease_deadline
-                && !live_request(current, now)
             {
-                catch_up_tick = Some(current.timestamp_ms);
+                let tick = current.timestamp_ms;
+                let until = if tick < lease_deadline && !live_request(current, now) {
+                    tick.checked_add(DELAYED_HEARTBEAT_MAX_AGE_MS)
+                } else if tick >= lease_deadline
+                    && !covers_lease_deadline(current, lease_deadline, now)
+                {
+                    clock::deadline(tick, now).ok()
+                } else {
+                    None
+                };
+                catch_up = until.map(|until| (tick, until));
             }
-            if let Some(tick) = catch_up_tick
-                && let Some(until) = tick.checked_add(DELAYED_HEARTBEAT_MAX_AGE_MS)
+            if let Some((tick, until)) = catch_up
                 && now < until
             {
                 if !channels
@@ -1023,8 +1031,8 @@ fn supervise_channels(
                 let checked_at = clock.now_ms()?;
                 if checked_at < until {
                     if current.timestamp_ms == tick {
-                        // This is a fixed deadline since publication. Re-reading the
-                        // stale record publishes no readiness and never extends it.
+                        // Re-reading the same record never extends this window or
+                        // publishes readiness.
                         clock.sleep(POLL.min(Duration::from_millis(until - checked_at)));
                         continue;
                     }
@@ -1038,7 +1046,7 @@ fn supervise_channels(
         // The current heartbeat may have already replaced that publication.
         if now >= lease_deadline
             && !renewed_during_catch_up
-            && (catch_up_tick.is_some()
+            && (catch_up.is_some()
                 || !current
                     .as_ref()
                     .is_ok_and(|current| covers_lease_deadline(current, lease_deadline, now))
@@ -1126,7 +1134,7 @@ fn supervise_channels(
                 }
                 lease_deadline = clock::deadline(current.timestamp_ms, now)?;
                 last_valid_poll_ms = now;
-                catch_up_tick = None;
+                catch_up = None;
                 if !current.restarting {
                     stop_restarting();
                 }
@@ -1822,6 +1830,7 @@ mod tests {
             ReplaceNonce,
             NoUnseenTick,
             PublishedAfterDeadline,
+            TooOld,
         }
         use OnLatePoll::*;
         const POLL_MS: u64 = 200;
@@ -1829,6 +1838,15 @@ mod tests {
             (3_623, 7_965, 7_256, Renew),
             (4_733, 9_339, 9_114, Renew),
             (8_641, 10_420, 9_819, Renew),
+            (9_574, 10_992, 497, Renew),
+            (42_488, 46_526, 1_880, Renew),
+            (9_574, 10_992, 497, FrozenWriter),
+            (9_574, 10_992, 497, CancelOwner),
+            (9_574, 10_992, 497, UnreadableCancel),
+            (9_574, 10_992, 497, Pause),
+            (9_574, 10_992, 497, ReplaceIdentity),
+            (9_574, 10_992, 497, ReplaceNonce),
+            (14_396, 15_254, 14_652, TooOld),
             (8_641, 10_420, 9_819, FrozenWriter),
             (8_641, 10_420, 9_819, CancelOwner),
             (8_641, 10_420, 9_819, UnreadableCancel),
@@ -1924,8 +1942,15 @@ mod tests {
             fs::remove_dir_all(&directory).unwrap();
             let (expected_publications, ended) = match action {
                 Renew => (2, late_poll + 2 * POLL_MS),
-                FrozenWriter => (1, unseen_tick + DELAYED_HEARTBEAT_MAX_AGE_MS),
-                NoUnseenTick | PublishedAfterDeadline => (1, late_poll),
+                FrozenWriter => {
+                    let window_ms = if unseen_tick >= old_deadline {
+                        clock::LEASE_MS
+                    } else {
+                        DELAYED_HEARTBEAT_MAX_AGE_MS
+                    };
+                    (1, unseen_tick + window_ms)
+                }
+                NoUnseenTick | PublishedAfterDeadline | TooOld => (1, late_poll),
                 _ => (1, late_poll + POLL_MS),
             };
             assert_eq!(
