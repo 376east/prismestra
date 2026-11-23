@@ -735,7 +735,7 @@ pub(super) fn close_editor(state: &State, interactive: bool) -> Result<(), Strin
         return Ok(());
     }
     if state.tray_enabled.get() && !state.tray_registration.get().registered {
-        return Err("Значок Prismestra пока недоступен. Приложение продолжает работу; редактор останется открытым, пока значок не появится.".into());
+        return Err(ShellText::TrayUnavailable.get(state.language).into());
     }
     {
         let slot = state.app.try_borrow().map_err(|_| "Редактор занят")?;
@@ -744,9 +744,9 @@ pub(super) fn close_editor(state: &State, interactive: bool) -> Result<(), Strin
         a.guard_sources_exit()?;
         super::native_forms::guard_close(a)?;
         if a.editor_dirty {
-            return Err(
-                "Примените или сбросьте правки параметров перед закрытием редактора.".into(),
-            );
+            return Err(ShellText::ResolveEditsBeforeClose
+                .get(state.language)
+                .into());
         }
     }
     if !super::modern::prepare_close(state, false, interactive)? {
@@ -888,7 +888,7 @@ pub(super) fn open_editor(state: &State) -> Result<(), String> {
             return Err(last("Reopen editor"));
         }
         state.editor_window.set(hwnd);
-        let built = app.build(hwnd).and_then(|_| {
+        let built = app.build(hwnd, state.language).and_then(|_| {
             if app.page == Page::Connections {
                 if app.connections.scan.is_idle() {
                     app.open_connections()?;
@@ -925,7 +925,10 @@ pub(super) fn open_editor(state: &State) -> Result<(), String> {
         && let Some(app) = state.app.borrow_mut().as_mut()
     {
         app.web_mode = false;
-        app.status = format!("Новый интерфейс недоступен: {error}");
+        app.status = format!(
+            "{}: {error}",
+            ShellText::ModernEditorUnavailable.get(state.language)
+        );
         app.show_page();
     }
     if state.snapshot {
@@ -968,15 +971,15 @@ pub(super) fn request(state: &State, action: Action, confirm: bool) -> Result<()
                     || super::native_forms::guard_close(app).is_err())
         };
         if unapplied && !confirm {
-            return Err("Примените или сбросьте правки перед выходом.".into());
+            return Err(ShellText::ResolveEditsBeforeExit.get(state.language).into());
         }
         if confirm
             && unapplied
             && unsafe {
                 MessageBoxW(
                     state.editor_window.get(),
-                    wide("Неприменённые правки будут потеряны. Выйти?").as_ptr(),
-                    wide("Выход из Prismestra").as_ptr(),
+                    wide(ShellText::ConfirmExitDiscard.get(state.language)).as_ptr(),
+                    wide(ShellText::ExitTitle.get(state.language)).as_ptr(),
                     MB_OKCANCEL | MB_ICONQUESTION,
                 )
             } != IDOK
@@ -994,7 +997,7 @@ pub(super) fn request(state: &State, action: Action, confirm: bool) -> Result<()
         app.guard_sources_exit()?;
         super::native_forms::guard_close(app)?;
         if app.editor_dirty {
-            return Err("Примените или сбросьте правки перед выходом.".into());
+            return Err(ShellText::ResolveEditsBeforeExit.get(state.language).into());
         }
     }
     app.begin_shutdown();
@@ -1150,19 +1153,17 @@ fn apply_tray_scene(state: &State, scenes: &[Entry], id: u32) -> Result<(), Stri
     let mut slot = state.app.try_borrow_mut().map_err(|_| "Сессия занята")?;
     let app = slot.as_mut().ok_or("Нет сессии")?;
     if !tray_scene_available(state, app) {
-        return Err(
-            "Переключение из трея недоступно. Закройте редактор без несохранённого черновика."
-                .into(),
-        );
+        return Err(ShellText::TraySceneUnavailable.get(state.language).into());
     }
     let entry = saved_tray_scenes(&app.state_dir)?
         .into_iter()
         .find(|entry| entry == chosen)
-        .ok_or("Сцена или черновик изменились. Откройте меню заново.")?;
+        .ok_or(ShellText::TraySceneChanged.get(state.language))?;
     app.update_scene(entry.scene, true)
 }
 
 fn create_tray_menu(
+    language: Language,
     updates: Option<(bool, Option<crate::app::release_check::Version>)>,
     scenes: &[Entry],
 ) -> Option<HMENU> {
@@ -1170,12 +1171,20 @@ fn create_tray_menu(
     if menu.is_null() {
         return None;
     }
-    let update_label = updates
-        .and_then(|(_, version)| version)
-        .map(|version| format!("Доступно обновление {}…", version.tag()));
+    let update_label = updates.and_then(|(_, version)| version).map(|version| {
+        format!(
+            "{} {}…",
+            ShellText::UpdateAvailable.get(language),
+            version.tag()
+        )
+    });
     let mut items = vec![
-        (OPEN, MF_STRING, "Открыть Prismestra"),
-        (CHECK_UPDATES, MF_STRING, "Проверить обновления…"),
+        (OPEN, MF_STRING, ShellText::OpenPrismestra.get(language)),
+        (
+            CHECK_UPDATES,
+            MF_STRING,
+            ShellText::CheckForUpdates.get(language),
+        ),
     ];
     if let Some(label) = &update_label {
         items.push((VIEW_UPDATE, MF_STRING, label));
@@ -1185,12 +1194,12 @@ fn create_tray_menu(
         items.push((
             TOGGLE_UPDATES,
             MF_STRING | flag,
-            "Автоматически проверять обновления",
+            ShellText::CheckForUpdatesAutomatically.get(language),
         ));
     }
     items.extend([
-        (STOP, MF_STRING, "Остановить работу"),
-        (EXIT, MF_STRING, "Выйти"),
+        (STOP, MF_STRING, ShellText::StopOutputs.get(language)),
+        (EXIT, MF_STRING, ShellText::ExitMenu.get(language)),
     ]);
     for (id, flags, text) in items {
         if unsafe { AppendMenuW(menu, flags, id as usize, wide(text).as_ptr()) } == 0 {
@@ -1216,7 +1225,7 @@ fn create_tray_menu(
                         1,
                         MF_BYPOSITION | MF_POPUP | MF_STRING,
                         submenu as usize,
-                        wide("Включить сохранённую сцену").as_ptr(),
+                        wide(ShellText::ApplySavedScene.get(language)).as_ptr(),
                     )
                 } == 0
             {
@@ -1270,7 +1279,7 @@ fn menu(state: &State, hwnd: HWND, anchor_to_icon: bool) {
                 .and_then(|app| saved_tray_scenes(&app.state_dir).ok())
         })
         .unwrap_or_default();
-    let Some(menu) = create_tray_menu(updates, &scenes) else {
+    let Some(menu) = create_tray_menu(state.language, updates, &scenes) else {
         return;
     };
     // In version 4, wParam is undefined for WM_CONTEXTMENU. Query the icon
@@ -1694,7 +1703,7 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
         }
         let slot = state.app.borrow();
         let app = slot.as_ref().unwrap();
-        if !app.status.contains("Значок Prismestra пока недоступен")
+        if app.status != ShellText::TrayUnavailable.get(state.language)
             || app.runtime.output_revision() != revision
             || registry.lock().unwrap().status()[0].worker.generation != sensor_generation
         {
@@ -2241,7 +2250,7 @@ fn exercise_tray_scene_selection(state: &State) -> Result<(), String> {
     let scenes = saved_tray_scenes(&dir)?;
     assert_eq!(scenes.len(), 1);
     assert_eq!(scenes[0].id, id);
-    let menu = create_tray_menu(None, &scenes).unwrap();
+    let menu = create_tray_menu(state.language, None, &scenes).unwrap();
     let command = unsafe {
         let submenu = GetSubMenu(menu, 1);
         assert!(!submenu.is_null());
@@ -2447,28 +2456,38 @@ mod tests {
 
     #[test]
     fn native_tray_menu_marks_open_as_its_first_and_default_command() {
-        let menu = create_tray_menu(None, &[]).expect("native popup menu");
-        let mut label = [0u16; 64];
-        let (first, default, length, updates) = unsafe {
-            let first = GetMenuItemID(menu, 0);
-            let default = GetMenuDefaultItem(menu, 0, 0);
-            let length = GetMenuStringW(
-                menu,
-                OPEN,
-                label.as_mut_ptr(),
-                label.len() as i32,
-                MF_BYCOMMAND,
-            );
-            let updates = GetMenuItemID(menu, 1);
-            DestroyMenu(menu);
-            (first, default, length, updates)
-        };
-        assert_eq!((first, default), (OPEN, OPEN));
-        assert_eq!(updates, CHECK_UPDATES);
-        assert_eq!(
-            String::from_utf16_lossy(&label[..length as usize]),
-            "Открыть Prismestra"
-        );
+        for (language, open, exit) in [
+            (Language::En, "Open Prismestra", "Exit Prismestra"),
+            (Language::Ru, "Открыть Prismestra", "Выйти"),
+        ] {
+            let menu = create_tray_menu(language, None, &[]).expect("native popup menu");
+            let label = |id| {
+                let mut buffer = [0u16; 64];
+                let length = unsafe {
+                    GetMenuStringW(
+                        menu,
+                        id,
+                        buffer.as_mut_ptr(),
+                        buffer.len() as i32,
+                        MF_BYCOMMAND,
+                    )
+                };
+                String::from_utf16_lossy(&buffer[..length as usize])
+            };
+            let labels = (label(OPEN), label(EXIT));
+            let commands = unsafe {
+                let commands = [
+                    GetMenuItemID(menu, 0),
+                    GetMenuDefaultItem(menu, 0, 0),
+                    GetMenuItemID(menu, 1),
+                    GetMenuItemID(menu, 3),
+                ];
+                DestroyMenu(menu);
+                commands
+            };
+            assert_eq!(commands, [OPEN, OPEN, CHECK_UPDATES, EXIT]);
+            assert_eq!(labels, (open.to_owned(), exit.to_owned()));
+        }
     }
 
     #[test]
@@ -2476,7 +2495,12 @@ mod tests {
         use crate::app::release_check::Version;
         let version = Version::from_setup("0.1.0.8").unwrap();
         for enabled in [true, false] {
-            let menu = create_tray_menu(Some((enabled, enabled.then_some(version))), &[]).unwrap();
+            let menu = create_tray_menu(
+                Language::En,
+                Some((enabled, enabled.then_some(version))),
+                &[],
+            )
+            .unwrap();
             unsafe {
                 assert_eq!(GetMenuItemID(menu, 1), CHECK_UPDATES);
                 assert_eq!(

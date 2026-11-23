@@ -1,7 +1,12 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
+#[cfg(windows)]
+use pc_control::ui::windows::installed_startup_failure_summary;
+
 fn main() -> std::process::ExitCode {
     #[cfg(windows)]
     let installed_requested = std::env::args_os().any(|arg| arg == "--installed");
+    #[cfg(windows)]
+    let mut failure_summary = installed_requested.then(|| installed_startup_failure_summary(None));
     #[cfg(windows)]
     let result = {
         let args = std::env::args_os().skip(1).collect::<Vec<_>>();
@@ -32,7 +37,10 @@ fn main() -> std::process::ExitCode {
                 Ok(pc_control::app::installed::Dispatch::Ui(args)) => {
                     pc_control::ui::windows::run(args)
                 }
-                Ok(pc_control::app::installed::Dispatch::InstalledUi(launch)) => launch.run(),
+                Ok(pc_control::app::installed::Dispatch::InstalledUi(launch)) => {
+                    failure_summary = Some(launch.startup_failure_summary());
+                    launch.run()
+                }
                 Ok(pc_control::app::installed::Dispatch::Exit(code)) => {
                     return std::process::ExitCode::from(code as u8);
                 }
@@ -42,7 +50,7 @@ fn main() -> std::process::ExitCode {
     };
     #[cfg(windows)]
     {
-        finish_startup(result, installed_requested, |message| {
+        finish_startup(result, failure_summary, |message| {
             use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
             let message = format!("{message}\0").encode_utf16().collect::<Vec<_>>();
             let title = "Prismestra\0".encode_utf16().collect::<Vec<_>>();
@@ -66,15 +74,15 @@ fn main() -> std::process::ExitCode {
 #[cfg(windows)]
 fn finish_startup(
     result: Result<(), String>,
-    installed_requested: bool,
+    failure_summary: Option<&str>,
     show_error: impl FnOnce(&str),
 ) -> std::process::ExitCode {
     let Err(error) = result else {
         return std::process::ExitCode::SUCCESS;
     };
     eprintln!("{error}");
-    if installed_requested {
-        show_error(&format!("Prismestra couldn’t start.\n\n{error}"));
+    if let Some(summary) = failure_summary {
+        show_error(&format!("{summary}\n\n{error}"));
     }
     std::process::ExitCode::FAILURE
 }
@@ -86,18 +94,40 @@ mod tests {
 
     #[test]
     fn installed_startup_has_one_dialog_with_diagnostic_detail() {
-        let mut displayed = Vec::new();
-        let outcome = finish_startup(Err("Fixture failure".into()), true, |message| {
-            displayed.push(message.to_owned());
-        });
-        assert_eq!(outcome, ExitCode::FAILURE);
-        assert_eq!(displayed, ["Prismestra couldn’t start.\n\nFixture failure"]);
+        let state = std::env::temp_dir().join(format!(
+            "prismestra-localized-launch-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&state).unwrap();
+        let preference = state.join("application-language.json");
+        for (tag, expected) in [
+            ("\"en\"", "Prismestra couldn’t start.\n\nFixture failure"),
+            (
+                "\"ru\"",
+                "Не удалось запустить Prismestra.\n\nFixture failure",
+            ),
+        ] {
+            std::fs::write(&preference, tag).unwrap();
+            let mut displayed = Vec::new();
+            let summary = installed_startup_failure_summary(Some(&state));
+            let outcome = finish_startup(Err("Fixture failure".into()), Some(summary), |message| {
+                displayed.push(message.to_owned());
+            });
+            assert_eq!(outcome, ExitCode::FAILURE);
+            assert_eq!(displayed, [expected]);
+        }
+        std::fs::remove_file(preference).unwrap();
+        std::fs::remove_dir(state).unwrap();
         assert_eq!(
-            finish_startup(Ok(()), true, |_| panic!("Unexpected startup dialog")),
+            finish_startup(
+                Ok(()),
+                Some(installed_startup_failure_summary(None)),
+                |_| panic!("Unexpected startup dialog")
+            ),
             ExitCode::SUCCESS,
         );
         assert_eq!(
-            finish_startup(Err("Standalone fixture".into()), false, |_| {
+            finish_startup(Err("Standalone fixture".into()), None, |_| {
                 panic!("Unexpected second startup dialog")
             }),
             ExitCode::FAILURE,

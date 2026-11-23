@@ -1,4 +1,5 @@
 //! Native editor and persistent session. Installed startup restores saved hardware routes.
+use self::{locale::Language, shell_text::Text as ShellText};
 use super::{CONTENT_LEFT, MIN_HEIGHT, MIN_WIDTH, Page, View, paint::Painter, right_panel};
 use crate::{
     app::{
@@ -49,6 +50,7 @@ mod resident;
 pub(crate) use resident::{Instance, shutdown_installed};
 mod locale;
 mod runtime_client;
+mod shell_text;
 mod update_schedule;
 mod updates;
 mod web_shell;
@@ -658,23 +660,23 @@ impl App {
         self.widgets.insert(id, handle);
         Ok(())
     }
-    fn build(&mut self, parent: HWND) -> Result<(), String> {
+    fn build(&mut self, parent: HWND, language: Language) -> Result<(), String> {
         self.control(
             parent,
             MODERN_RETURN,
             "BUTTON",
-            "Новый интерфейс",
+            ShellText::ModernEditor.get(language),
             BS_PUSHBUTTON as u32,
         )?;
         for (id, text) in [
-            (NAV_SCENE, "Сцена"),
-            (NAV_DEVICES, "Устройства"),
-            (NAV_CONNECTIONS, "Подключения"),
-            (NAV_SCHEDULE, "Расписание"),
-            (NAV_AMBIENT, "Подсветка экрана"),
+            (NAV_SCENE, ShellText::Scene.get(language)),
+            (NAV_DEVICES, ShellText::Devices.get(language)),
+            (NAV_CONNECTIONS, ShellText::Connections.get(language)),
+            (NAV_SCHEDULE, ShellText::Schedule.get(language)),
+            (NAV_AMBIENT, ShellText::ScreenLighting.get(language)),
             (NAV_LCD, "LCD"),
-            (NAV_TEMPS, "Температуры"),
-            (NAV_SOURCES, "Датчики"),
+            (NAV_TEMPS, ShellText::Temperatures.get(language)),
+            (NAV_SOURCES, ShellText::Sensors.get(language)),
         ] {
             self.control(
                 parent,
@@ -686,13 +688,25 @@ impl App {
                     | if id == NAV_SCENE { WS_GROUP } else { 0 },
             )?;
         }
-        self.control(parent, OPEN, "BUTTON", "Открыть…", BS_PUSHBUTTON as u32)?;
-        self.control(parent, SAVE, "BUTTON", "Сохранить…", BS_PUSHBUTTON as u32)?;
+        self.control(
+            parent,
+            OPEN,
+            "BUTTON",
+            ShellText::OpenProfile.get(language),
+            BS_PUSHBUTTON as u32,
+        )?;
+        self.control(
+            parent,
+            SAVE,
+            "BUTTON",
+            ShellText::SaveProfile.get(language),
+            BS_PUSHBUTTON as u32,
+        )?;
         self.control(
             parent,
             EXPORT,
             "BUTTON",
-            "Экспорт ZIP…",
+            ShellText::ExportZip.get(language),
             BS_PUSHBUTTON as u32,
         )?;
         self.control(
@@ -2293,6 +2307,7 @@ impl Default for FinalStopRender {
 }
 struct State {
     icon: brand_icon::Icon,
+    language: Language,
     modern_enabled: bool,
     webview_user_data: web_shell::UserDataFolder,
     webview: RefCell<Option<web_shell::WebShell>>,
@@ -2413,8 +2428,8 @@ fn confirm_discard(hwnd: HWND, state: &State) -> Result<bool, String> {
     let answer = unsafe {
         MessageBoxW(
             hwnd,
-            wide("Сохранить изменённый профиль?").as_ptr(),
-            wide("Есть несохранённые изменения").as_ptr(),
+            wide(ShellText::SaveChangedProfile.get(state.language)).as_ptr(),
+            wide(ShellText::UnsavedChanges.get(state.language)).as_ptr(),
             MB_YESNOCANCEL | MB_ICONQUESTION,
         )
     };
@@ -2971,6 +2986,10 @@ pub(crate) fn run_installed(
     run_with_instance(args, Some((instance, user_root)))
 }
 
+pub fn installed_startup_failure_summary(state_dir: Option<&Path>) -> &'static str {
+    ShellText::InstalledStartupFailed.get(state_dir.map(Language::load).unwrap_or(Language::En))
+}
+
 fn run_with_instance(
     args: Vec<OsString>,
     installed: Option<(Instance, PathBuf)>,
@@ -2981,7 +3000,8 @@ fn run_with_instance(
         .find(|pair| pair[0] == "--state-dir")
         .map(|pair| PathBuf::from(&pair[1]));
     let installed_start = installed.is_some();
-    let result = run_inner(args, installed);
+    let language = Cell::new(error_dir.as_deref().map(Language::load).unwrap_or_default());
+    let result = run_inner_with_language(args, installed, &language);
     finish_ui_startup(
         result,
         diagnostic,
@@ -2993,7 +3013,7 @@ fn run_with_instance(
                 MessageBoxW(
                     null_mut(),
                     wide(&message).as_ptr(),
-                    wide("Не удалось запустить программу").as_ptr(),
+                    wide(ShellText::StandaloneStartupFailed.get(language.get())).as_ptr(),
                     MB_OK | MB_ICONERROR,
                 );
             }
@@ -3053,7 +3073,16 @@ fn output_activity_label(activity: &crate::app::runtime::OutputActivity) -> &'st
 fn native_sources_allowed(snapshot: bool, selftest: bool) -> bool {
     !snapshot && !selftest
 }
+#[cfg(test)]
 fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Result<(), String> {
+    run_inner_with_language(args, installed, &Cell::default())
+}
+
+fn run_inner_with_language(
+    args: Vec<OsString>,
+    installed: Option<(Instance, PathBuf)>,
+    language: &Cell<Language>,
+) -> Result<(), String> {
     if installed.is_none()
         && args
             .first()
@@ -3097,6 +3126,7 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
     } else {
         state_dir
     };
+    language.set(Language::load(&state_dir));
     std::fs::create_dir_all(&state_dir).map_err(|e| e.to_string())?;
     if o.start_connected {
         o.native_lighting = Some(state_dir.join("lighting-local.json"));
@@ -3182,6 +3212,7 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
     let modern_enabled = modern_enabled || webview_recovery_stand::enabled();
     let state = Box::new(State {
         icon: brand_icon::Icon::new()?,
+        language: language.get(),
         modern_enabled,
         webview_user_data: match &installed {
             Some((_, user_root)) => web_shell::UserDataFolder::installed(user_root.clone()),
@@ -3319,7 +3350,7 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
         portable_openrgb_setup,
         groups: [true, true],
     };
-    let built = app.build(raw).and_then(|_| {
+    let built = app.build(raw, state.language).and_then(|_| {
         if app.page == Page::Connections {
             app.open_connections()?;
         }
@@ -3537,7 +3568,10 @@ fn run_inner(args: Vec<OsString>, installed: Option<(Instance, PathBuf)>) -> Res
             && let Some(app) = state.app.borrow_mut().as_mut()
         {
             app.web_mode = false;
-            app.status = format!("Новый интерфейс недоступен: {error}");
+            app.status = format!(
+                "{}: {error}",
+                ShellText::ModernEditorUnavailable.get(state.language)
+            );
             app.show_page();
         }
         if crate::app::installed::session() == Some(crate::app::installed::Session::Interactive) {
