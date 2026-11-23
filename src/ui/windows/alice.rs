@@ -26,6 +26,12 @@ const RANGE: &str = "devices.capabilities.range";
 const ON: &str = "devices.capabilities.on_off";
 const SIGN_IN_AGAIN: &str = "Доступ к Алисе истёк или отозван. Войдите через Яндекс ID заново.";
 const ACCESS_DENIED: &str = "Яндекс отклонил доступ. Войдите заново и проверьте права на лампу.";
+const WAIT_BROWSER: &str =
+    "Ждём подтверждения в браузере. Войдите через Яндекс ID и вернитесь в Prismestra.";
+const EXCHANGE_TOKEN: &str = "Ответ получен. Получаем доступ от Яндекса…";
+const LOAD_CATALOG: &str = "Загружаем доступные лампы…";
+const TOKEN_FAILED: &str = "Не удалось получить доступ от Яндекса. Повторите вход.";
+const CATALOG_FAILED: &str = "Не удалось загрузить список ламп. Повторите попытку.";
 
 mod bindings;
 pub(super) use bindings::{Binding, Bindings, ManualApply};
@@ -37,6 +43,8 @@ pub(super) enum Action {
     Open,
     SignIn {
         remember: bool,
+        #[serde(default)]
+        language: CallbackLanguage,
     },
     SignOut,
     Apply {
@@ -50,6 +58,14 @@ pub(super) enum Action {
         on: bool,
     },
     Cancel,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum CallbackLanguage {
+    #[default]
+    En,
+    Ru,
 }
 
 #[derive(Clone, Copy)]
@@ -85,6 +101,7 @@ struct Job {
     cancel: Arc<AtomicBool>,
     reply: mpsc::Receiver<Result<Option<Grant>, String>>,
     success: &'static str,
+    auth_progress: Option<mpsc::Receiver<&'static str>>,
 }
 
 impl Drop for Job {
@@ -142,7 +159,7 @@ impl Session {
                         .map_err(|_| "Не удалось удалить сохранённый вход Алисы.".into())
                 })?;
             }
-            Action::SignIn { remember } => {
+            Action::SignIn { remember, language } => {
                 if self.job.is_some() {
                     return Err("Дождитесь завершения операции Алисы.".into());
                 }
@@ -154,16 +171,16 @@ impl Session {
                 listener
                     .set_nonblocking(true)
                     .map_err(|_| "Не удалось запустить приём входа.")?;
-                super::updates::open_url(&attempt.url())?;
-                self.start(
-                    "Подтвердите вход в браузере.",
-                    "",
-                    move |cancel| {
-                        let code = attempt.receive(&listener, cancel)?;
-                        drop(listener);
-                        attempt.exchange(&code, cancel).map(Some)
-                    },
-                )?;
+                super::updates::open_url(&attempt.url())
+                    .map_err(|_| "Не удалось открыть вход в браузере. Повторите вход.")?;
+                self.start_sign_in(move |cancel, progress| {
+                    let code = attempt.receive(&listener, cancel, language)?;
+                    drop(listener);
+                    let _ = progress.send(EXCHANGE_TOKEN);
+                    attempt.exchange(&code, cancel, || {
+                        let _ = progress.send(LOAD_CATALOG);
+                    })
+                })?;
                 self.remember_pending = remember;
             }
             Action::Apply {
@@ -345,11 +362,9 @@ impl Session {
         };
         let token = token.to_owned();
         let ticket = nonce()?;
-        self.start(
-            "Загружаем доступные лампы…",
-            "",
-            move |cancel| load(token, ticket, until, cancel).map(Some),
-        )
+        self.start(LOAD_CATALOG, "", move |cancel| {
+            load(token, ticket, until, cancel).map(Some)
+        })
     }
 
     pub(super) fn sign_out_with(
@@ -423,6 +438,24 @@ impl Session {
         Ok(())
     }
 
+    fn start_sign_in(
+        &mut self,
+        work: impl FnOnce(&AtomicBool, mpsc::Sender<&'static str>) -> Result<Grant, String>
+        + Send
+        + 'static,
+    ) -> Result<(), String> {
+        let (progress, reader) = mpsc::channel();
+        self.start(WAIT_BROWSER, "", move |cancel| {
+            work(cancel, progress).map(Some)
+        })?;
+        self.job
+            .as_mut()
+            .expect("started sign-in worker")
+            .auth_progress = Some(reader);
+        self.needs_login = true;
+        Ok(())
+    }
+
     fn start(
         &mut self,
         message: &str,
@@ -442,6 +475,7 @@ impl Session {
             cancel,
             reply,
             success,
+            auth_progress: None,
         });
         self.message = message.into();
         Ok(())
@@ -460,7 +494,17 @@ impl Session {
         let Some(job) = &self.job else { return };
         let result = match job.reply.try_recv() {
             Ok(result) => result,
-            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Empty) => {
+                if !job.cancel.load(Ordering::Acquire)
+                    && let Some(message) = job
+                        .auth_progress
+                        .as_ref()
+                        .and_then(|progress| progress.try_iter().last())
+                {
+                    self.message = message.into();
+                }
+                return;
+            }
             Err(mpsc::TryRecvError::Disconnected) => Err("Операция Алисы прервалась.".into()),
         };
         let success = job.success;
@@ -489,8 +533,9 @@ impl Session {
                     {
                         self.saved = true;
                     } else {
-                        self.message
-                            .push_str(" Не удалось сохранить вход для следующего запуска.");
+                        self.message =
+                            "Доступ получен, но не удалось сохранить вход для следующего запуска."
+                                .into();
                     }
                 }
                 self.grant = Some(grant);
@@ -545,7 +590,7 @@ fn load_grant(
     valid_until: Option<u64>,
     cancel: &AtomicBool,
 ) -> Result<Grant, String> {
-    let lamps = lamps(&catalog(&token, cancel)?)?;
+    let lamps = lamps(&catalog(&token, cancel)?).map_err(|_| CATALOG_FAILED)?;
     let ttl = match valid_until {
         Some(until) => until
             .checked_sub(unix_now()?)
@@ -626,12 +671,17 @@ impl Attempt {
         )
     }
 
-    fn receive(&self, listener: &TcpListener, cancel: &AtomicBool) -> Result<String, String> {
+    fn receive(
+        &self,
+        listener: &TcpListener,
+        cancel: &AtomicBool,
+        language: CallbackLanguage,
+    ) -> Result<String, String> {
         let deadline = Instant::now() + Duration::from_secs(300);
         while !cancel.load(Ordering::Acquire) && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    if let Some(result) = callback(&mut stream, &self.state) {
+                    if let Some(result) = callback(&mut stream, &self.state, language) {
                         return result;
                     }
                 }
@@ -641,10 +691,15 @@ impl Attempt {
                 Err(_) => return Err("Не удалось принять ответ Яндекса.".into()),
             }
         }
-        Err("Вход отменён или срок попытки истёк.".into())
+        Err("Время ожидания входа истекло. Начните вход заново.".into())
     }
 
-    fn exchange(&self, code: &str, cancel: &AtomicBool) -> Result<Grant, String> {
+    fn exchange(
+        &self,
+        code: &str,
+        cancel: &AtomicBool,
+        before_catalog: impl FnOnce(),
+    ) -> Result<Grant, String> {
         let body = format!(
             "grant_type=authorization_code&client_id={}&code={}&code_verifier={}&redirect_uri={}",
             CLIENT_ID,
@@ -658,22 +713,27 @@ impl Attempt {
             "Content-Type: application/x-www-form-urlencoded\r\n",
             Some(body.as_bytes()),
             cancel,
-        )?;
+        )
+        .map_err(|_| TOKEN_FAILED)?;
         let token = value["access_token"]
             .as_str()
             .filter(|token| valid_access_token(token))
-            .ok_or("Яндекс не выдал токен входа.")?;
+            .ok_or(TOKEN_FAILED)?;
         if let Some(scope) = value["scope"].as_str() {
             let mut scopes = scope.split_whitespace().collect::<Vec<_>>();
             scopes.sort_unstable();
             if scopes != ["iot:control", "iot:view"] {
-                return Err("Яндекс выдал права, отличные от запрошенных.".into());
+                return Err(
+                    "Яндекс не предоставил права на список и управление лампами. Повторите вход."
+                        .into(),
+                );
             }
         }
         let now = unix_now()?;
         let valid_until = value["expires_in"]
             .as_u64()
             .and_then(|ttl| now.checked_add(ttl));
+        before_catalog();
         load_grant(token.into(), self.state.clone(), valid_until, cancel)
     }
 }
@@ -690,7 +750,9 @@ fn parse_callback(target: &str, state: &str) -> Option<Result<String, String>> {
         return None;
     }
     if fields.clone().any(|(key, _)| key == "error") {
-        return Some(Err("Вход в Яндекс отменён.".into()));
+        return Some(Err(
+            "Вход отменён или доступ не разрешён. Начните вход заново.".into(),
+        ));
     }
     let codes = fields
         .filter(|(key, _)| *key == "code")
@@ -711,7 +773,11 @@ fn parse_callback(target: &str, state: &str) -> Option<Result<String, String>> {
     Some(code)
 }
 
-fn callback(stream: &mut TcpStream, state: &str) -> Option<Result<String, String>> {
+fn callback(
+    stream: &mut TcpStream,
+    state: &str,
+    language: CallbackLanguage,
+) -> Option<Result<String, String>> {
     let timeout = Some(Duration::from_secs(1));
     stream.set_read_timeout(timeout).ok()?;
     stream.set_write_timeout(timeout).ok()?;
@@ -744,17 +810,62 @@ fn callback(stream: &mut TcpStream, state: &str) -> Option<Result<String, String
     let result = (host == Some(true))
         .then(|| parse_callback(target, state))
         .flatten();
-    let (status, body) = if result.is_some() {
-        ("200 OK", "Ответ получен. Вернитесь в Prismestra.")
-    } else {
-        ("404 Not Found", "Попытка входа не найдена.")
-    };
+    let (status, body) = callback_page(language, &result);
     let _ = write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src 'sha256-L+7Hcw/7WhA8ic/Z8Y3YAPwJYGSM/Wc2DuvQXhkqtGw='; base-uri 'none'; frame-ancestors 'none'\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
     result
+}
+
+fn callback_page(
+    language: CallbackLanguage,
+    result: &Option<Result<String, String>>,
+) -> (&'static str, String) {
+    let (status, text) = match result {
+        Some(Ok(_)) => (
+            "200 OK",
+            match language {
+                CallbackLanguage::En => {
+                    "Return to Prismestra to finish signing in and load your lights. You can close this tab."
+                }
+                CallbackLanguage::Ru => {
+                    "Вернитесь в Prismestra, чтобы завершить вход и загрузить список ламп. Эту вкладку можно закрыть."
+                }
+            },
+        ),
+        Some(Err(_)) => (
+            "200 OK",
+            match language {
+                CallbackLanguage::En => {
+                    "Sign-in did not finish. Return to Prismestra to try again. You can close this tab."
+                }
+                CallbackLanguage::Ru => {
+                    "Вход не завершён. Вернитесь в Prismestra и повторите попытку. Эту вкладку можно закрыть."
+                }
+            },
+        ),
+        None => (
+            "404 Not Found",
+            match language {
+                CallbackLanguage::En => {
+                    "This sign-in attempt is no longer available. Open lamp controls in Prismestra to start again."
+                }
+                CallbackLanguage::Ru => {
+                    "Эта попытка входа больше недоступна. Начните вход заново в разделе управления лампами Prismestra."
+                }
+            },
+        ),
+    };
+    let lang = match language {
+        CallbackLanguage::En => "en",
+        CallbackLanguage::Ru => "ru",
+    };
+    let body = format!(
+        r#"<!doctype html><html lang="{lang}"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Prismestra · Yandex ID</title><script>history.replaceState(null,null,location.pathname);</script><main><h1>Prismestra · Yandex ID</h1><p>{text}</p></main></html>"#
+    );
+    (status, body)
 }
 
 fn request(
@@ -810,9 +921,15 @@ fn api(path: &str, token: &str, body: Option<&[u8]>, cancel: &AtomicBool) -> Res
 }
 
 fn catalog(token: &str, cancel: &AtomicBool) -> Result<Value, String> {
-    let value = api("/v1.0/user/info", token, None, cancel)?;
+    let value = api("/v1.0/user/info", token, None, cancel).map_err(|error| {
+        if error == SIGN_IN_AGAIN || error == ACCESS_DENIED {
+            error
+        } else {
+            CATALOG_FAILED.into()
+        }
+    })?;
     if value["status"] != "ok" {
-        return Err("Не удалось прочитать каталог Яндекса.".into());
+        return Err(CATALOG_FAILED.into());
     }
     Ok(value)
 }
@@ -1085,6 +1202,90 @@ mod tests {
     fn lamp(id: &str, room: &str) -> Value {
         json!({"id":id,"name":"Лампа","household_id":"h","room":room,
             "type":"devices.types.light","capabilities":[{"type":RANGE,"parameters":{"instance":"brightness"}}]})
+    }
+
+    #[test]
+    fn callback_page_uses_selected_language_and_keeps_sign_in_data_out_of_html() {
+        let accepted = parse_callback(
+            "/alice/callback?state=fixture-state&code=fixture-code",
+            "fixture-state",
+        );
+        let refused = parse_callback(
+            "/alice/callback?state=fixture-state&error=fixture-denial",
+            "fixture-state",
+        );
+        for (language, lang, return_text, retry_text) in [
+            (
+                CallbackLanguage::En,
+                "en",
+                "Return to Prismestra",
+                "did not finish",
+            ),
+            (
+                CallbackLanguage::Ru,
+                "ru",
+                "Вернитесь в Prismestra",
+                "Вход не завершён",
+            ),
+        ] {
+            for (result, expected_status) in [
+                (&accepted, "200 OK"),
+                (&refused, "200 OK"),
+                (&None, "404 Not Found"),
+            ] {
+                let (status, page) = callback_page(language, result);
+                assert_eq!(status, expected_status);
+                assert!(page.contains(&format!("lang=\"{lang}\"")));
+                assert!(page.contains("<title>Prismestra · Yandex ID</title>"));
+                assert!(page.contains("history.replaceState(null,null,location.pathname);"));
+                assert!(!page.contains("fixture-"));
+                if matches!(result, Some(Ok(_))) {
+                    assert!(page.contains(return_text));
+                } else if result.is_some() {
+                    assert!(page.contains(retry_text));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sign_in_reports_browser_token_and_catalog_before_exposing_retry() {
+        let mut session = Session::default();
+        let (advance, steps) = mpsc::channel();
+        let (reported, observed) = mpsc::channel();
+        session
+            .start_sign_in(move |_, progress| {
+                for message in [EXCHANGE_TOKEN, LOAD_CATALOG] {
+                    steps.recv_timeout(Duration::from_secs(2)).unwrap();
+                    progress.send(message).unwrap();
+                    reported.send(()).unwrap();
+                }
+                steps.recv_timeout(Duration::from_secs(2)).unwrap();
+                Err(CATALOG_FAILED.into())
+            })
+            .unwrap();
+        for message in [WAIT_BROWSER, EXCHANGE_TOKEN, LOAD_CATALOG] {
+            if message != WAIT_BROWSER {
+                advance.send(()).unwrap();
+                observed.recv_timeout(Duration::from_secs(2)).unwrap();
+            }
+            let view = session.handle(Action::Status).unwrap();
+            assert_eq!(view["message"], message);
+            assert_eq!(view["busy"], true);
+            assert_eq!(view["ticket"], Value::Null);
+        }
+        advance.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let view = session.handle(Action::Status).unwrap();
+            if view["busy"] == false {
+                assert_eq!(view["message"], CATALOG_FAILED);
+                assert_eq!(view["needsLogin"], true);
+                break;
+            }
+            assert!(Instant::now() < deadline, "sign-in failure must settle");
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]

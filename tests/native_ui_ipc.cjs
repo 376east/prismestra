@@ -1187,6 +1187,28 @@ console.log('PASS: scene activation survives an unrelated error, ignores stale r
  assert.equal(find('#alice-login').hidden,false);
  assert.equal(find('[data-action="alice-sign-out"]').hidden,true);
  assert.notEqual(open.sequence,signOut.sequence);
+ click('alice-sign-in');
+ const signIn=commands.at(-1);
+ assert.equal(signIn.request.action,'sign_in');
+ assert.equal(signIn.request.language,'ru');
+ const waiting={busy:true,saved:false,needsLogin:true,lamps:[],ticket:null};
+ const stages=['Ждём подтверждения в браузере. Войдите через Яндекс ID и вернитесь в Prismestra.','Ответ получен. Получаем доступ от Яндекса…','Загружаем доступные лампы…'];
+ for(const message of stages){
+  reply(commands.at(-1).sequence,{...waiting,message});
+  assert.equal(find('#alice-status').textContent,message);
+  assert.equal(find('#alice-login').hidden,true);
+  assert.equal(find('#alice-apply').disabled,true);
+  vm.runInContext('aliceRequest("status")',context);
+ }
+ reply(commands.at(-1).sequence,{...waiting,busy:false,message:'Вход отменён или доступ не разрешён. Начните вход заново.'});
+ assert.equal(find('#alice-login').hidden,false);
+ assert.match(find('#alice-status').textContent,/доступ не разрешён/);
+ vm.runInContext('aliceRequest("open")',context);
+ reply(commands.at(-1).sequence,{...waiting,saved:true,busy:false,needsLogin:false,message:'Не удалось загрузить список ламп. Повторите попытку.'});
+ assert.equal(find('[data-action="alice-retry"]').hidden,false);
+ click('alice-retry');
+ assert.equal(commands.at(-1).request.action,'open');
+ assert.equal(find('#alice-status').textContent,'Загружаем доступные лампы…');
  aliceDialog.close();
 }
 console.log('PASS: Alice uses saved access, distinguishes identical lamp names by room, and ignores a late reply after sign-out');
@@ -1735,6 +1757,22 @@ function checkEnglishApplicationLanguage() {
  assert.deepEqual(commands.at(-1),{op:'page',page:'settings'});
  receive('snapshot',{...initial,preferredUiLanguage:'en'});
  assert.match(mainMarkup,/Application language.*value="en" lang="en" selected/s);
+ const englishAliceStages=vm.runInContext(`[
+  aliceStatusText('Ждём подтверждения в браузере. Войдите через Яндекс ID и вернитесь в Prismestra.'),
+  aliceStatusText('Ответ получен. Получаем доступ от Яндекса…'),
+  aliceStatusText('Загружаем доступные лампы…'),
+  aliceStatusText('Не удалось получить доступ от Яндекса. Повторите вход.'),
+  aliceStatusText('Не удалось загрузить список ламп. Повторите попытку.'),
+  aliceStatusText('Вход отменён или доступ не разрешён. Начните вход заново.'),
+ ]`,preview);
+ assert.deepEqual(Array.from(englishAliceStages),[
+  'Waiting for your browser. Sign in with Yandex ID, then return to Prismestra.',
+  'Browser response received. Getting access from Yandex…',
+  'Loading available lights…',
+  'Could not get access from Yandex. Sign in again.',
+  'Could not load available lights. Try again.',
+  'Sign-in was cancelled or access was denied. Start sign-in again.',
+ ]);
  const select=find('#ui-language');
  select.id='ui-language';
  select.value='ru';
