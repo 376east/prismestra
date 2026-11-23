@@ -41,7 +41,6 @@ const englishStartupStatus = new Map([
 const englishRuntimeStatus=new Map([
  ['Готово','Ready'],['Профиль сохранён.','Profile saved.'],
  ['Сцена сохранена','Scene saved'],['Сцена сохранена.','Scene saved.'],
- ['Сцена изменена и ещё не сохранена.','The scene has unsaved changes.'],
  ['Параметр изменён. Нажмите «Применить».','A setting changed. Select Apply.'],
  ['Проверка и применение параметров…','Checking and applying settings…'],
  ['Изменения параметров отменены.','Changes discarded.'],
@@ -74,7 +73,7 @@ let view = 'library', search = '', previewTimer = null, frame = null, commandPen
 const formStages = new Map();
 const libraryPageSize = 24;
 let libraryLimit = libraryPageSize, libraryEffect = '';
-let sceneActivation = null, sceneActivationRequest = 0;
+let sceneActivation = null, sceneActivationRequest = 0, editorSceneResult = null;
 let deviceInspection = null;
 let visibleCandidateIds = new Set();
 const outputRetries = new Map();
@@ -277,13 +276,14 @@ function syncControls(keepRetryFocus) {
  $('#player-name').textContent=state?effectLabel(state.scene.effect):'Prismestra';
  const startupStatus=english?englishStartupStatus.get(state?.startupStatus):null;
  const playerStatus=$('#player-status');
- playerStatus.textContent=startupStatus||(state?.status&&ui(state.status,
-  englishRuntimeStatus.get(state.status)??(state.pending?'Working…':'See profile status in Devices')))
-  ||ui('Подключение к приложению…','Connecting to the app…');
- playerStatus.title=english||startupStatus?state?.status||'':'';
+ const runtimeStatus=state?.status==='Сцена изменена и ещё не сохранена.'?'':state?.status;
+ playerStatus.textContent=startupStatus||(runtimeStatus&&ui(runtimeStatus,
+  englishRuntimeStatus.get(runtimeStatus)??(state.pending?'Working…':'See profile status in Devices')))
+  ||(state?'':ui('Подключение к приложению…','Connecting to the app…'));
+ playerStatus.title=english||startupStatus?runtimeStatus||'':'';
  const runtimeDetail=$('#native-runtime-detail');if(runtimeDetail)runtimeDetail.textContent=state?.detail||'';
  const diagnostics=$('#native-runtime-diagnostics');if(diagnostics)diagnostics.hidden=!state?.detail;
- if(sceneActivation)syncSceneActivation(sceneActivation.id,sceneActivation);
+ if(sceneActivation?.id)syncSceneActivation(sceneActivation.id,sceneActivation);
  const audioSource=$('#scene-audio-source');
  if(audioSource)audioSource.textContent=state?.native
   ? state.audioError&&audioEffects.has(state.scene.effect)?ui('Системный звук недоступен. Повторяю подключение.','System audio is unavailable. Reconnecting.')
@@ -318,8 +318,12 @@ function syncControls(keepRetryFocus) {
  }
  $('#save-status').textContent=busy()&&state?ui('Выполняется…','Working…'):state?.dirty?ui('Профиль изменён','Profile modified'):ui('Локальный профиль','Local profile');
  if(draft){$('#master-brightness').value=draft.brightness;$('#master-value').textContent=draft.brightness+'%';}
- const status=$('.scene-status');if(status)status.textContent=changed()?ui('Изменения ещё не применены','Changes not yet applied'):sourceNeedsApply()?ui('Для источника нужно применить сцену','Apply the scene to use this source'):ui('Эта версия применена','This version is applied');
- const apply=$('[data-action="apply-scene"]');if(apply)apply.textContent=applyNeeded()?ui('Применить','Apply'):ui('Применено','Applied');
+ if(editorSceneResult&&!same(editorSceneResult.scene,draft))editorSceneResult=null;
+ const status=$('.scene-status');
+ if(status){
+  const message=editorSceneResult?.message??(changed()?ui('Изменения ещё не применены','Changes not yet applied'):sourceNeedsApply()?ui('Для источника нужно применить сцену','Apply the scene to use this source'):'');
+  if(status.textContent!==message)status.textContent=message;
+ }
  if(state){const art=$('#player-art'),ctx=art.getContext('2d');art.setAttribute('aria-label',ui('Палитра применённой сцены','Applied scene palette'));state.scene.colors.forEach((c,i)=>{ctx.fillStyle=hex(c);ctx.fillRect(i*art.width/state.scene.colors.length,0,Math.ceil(art.width/state.scene.colors.length),art.height);});}
  if(state?.error)showRuntimeError(state.error,true);
 }
@@ -446,7 +450,7 @@ function reorderPalette(actionCode) {
 function renderScene() {
  const effectIds=Object.keys(effects);
  if(!Object.hasOwn(effects,draft.effect))effectIds.unshift(draft.effect);
- return heading(draftName,ui('Изменения остаются в черновике до нажатия «Применить».','Changes stay in the draft until you select Apply.'),action(ui('Сохранить сцену','Save scene'),'save-scene')+action(ui('Создать копию','Make a copy'),'clone')+(selectedId?action(ui('Переименовать','Rename'),'rename'):'')+action(ui('Применить','Apply'),'apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status"></p><div class="editor-layout"><section class="preview-panel" aria-label="${ui('Предпросмотр','Preview')}"><div class="stage"><canvas id="stage" aria-label="${ui('Предпросмотр сцены из движка Prismestra','Prismestra engine scene preview')}"></canvas><div class="stage-bar"><span class="stage-chip">${ui('Предпросмотр','Preview')}</span></div><div class="stage-caption">${ui('Кадр движка · черновик','Engine frame · draft')}</div>${renderPlacementObjects()}</div>${renderPlacementControls()}<p class="preview-description">${ui('Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.','Preview leaves lighting unchanged. RGB and LCD outputs are enabled separately.')}</p><div class="native-field"><label for="scene-effect">${ui('Эффект','Effect')}</label><select id="scene-effect" data-mutation ${disabled()}>${effectIds.map(id=>effectOption(id,draft.effect)).join('')}</select></div><div class="parameter-panel" style="margin-top:20px"><h2>${ui('Выходы','Outputs')}</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> ${ui('Основной свет · RGB и LCD','Primary lighting · RGB and LCD')}</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> ${ui('Дополнительный свет','Secondary lighting')}</label><button class="button" data-view="devices">${ui('Устройства и свойства','Devices and properties')}</button></div></section><aside class="parameter-panel" id="scene-parameters" aria-label="${ui('Параметры сцены','Scene parameters')}">${sceneParameters()}</aside></div>`;
+ return heading(draftName,ui('Применение обновляет активную сцену. Сохранение записывает версию в библиотеку.','Apply updates the active scene. Save keeps a version in your library.'),action(ui('Сохранить в библиотеку','Save to library'),'save-scene')+action(ui('Создать копию','Make a copy'),'clone')+(selectedId?action(ui('Переименовать','Rename'),'rename'):'')+action(ui('Применить сцену','Apply scene'),'apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status" role="status" aria-atomic="true"></p><div class="editor-layout"><section class="preview-panel" aria-label="${ui('Предпросмотр','Preview')}"><div class="stage"><canvas id="stage" aria-label="${ui('Предпросмотр сцены из движка Prismestra','Prismestra engine scene preview')}"></canvas><div class="stage-bar"><span class="stage-chip">${ui('Предпросмотр','Preview')}</span></div><div class="stage-caption">${ui('Кадр движка · черновик','Engine frame · draft')}</div>${renderPlacementObjects()}</div>${renderPlacementControls()}<p class="preview-description">${ui('Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.','Preview leaves lighting unchanged. RGB and LCD outputs are enabled separately.')}</p><div class="native-field"><label for="scene-effect">${ui('Эффект','Effect')}</label><select id="scene-effect" data-mutation ${disabled()}>${effectIds.map(id=>effectOption(id,draft.effect)).join('')}</select></div><div class="parameter-panel" style="margin-top:20px"><h2>${ui('Выходы','Outputs')}</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> ${ui('Основной свет · RGB и LCD','Primary lighting · RGB and LCD')}</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> ${ui('Дополнительный свет','Secondary lighting')}</label><button class="button" data-view="devices">${ui('Устройства и свойства','Devices and properties')}</button></div></section><aside class="parameter-panel" id="scene-parameters" aria-label="${ui('Параметры сцены','Scene parameters')}">${sceneParameters()}</aside></div>`;
 }
 function placementLabel(object,objects) {
  return objects.some(other=>other.id!==object.id&&other.label===object.label)
@@ -876,6 +880,7 @@ function checkDraftOrigin() {
  else if(entry?.name!==draftOrigin.name||!same(entry.scene,draftOrigin.scene))setDraftOrigin({...draftOrigin,id:null});
 }
 function loadEntry(entry) {
+ editorSceneResult=null;
  draft=clone(entry.scene);
  setDraftOrigin({id:entry.builtIn?null:entry.id,name:entry.name,scene:entry.scene});
  if(view==='editor')render();else changeView('editor');
@@ -896,12 +901,16 @@ function previewLibraryEntry(entry) {
  if(entry.preview)paintPixels($('#library-preview-art canvas'),entry.preview);
  $('#library-preview-dialog').showModal();
 }
-function activateLibraryEntry(entry) {
+function activateScene(scene,entry=null) {
  if(busy())return;
  const request=++sceneActivationRequest;
- if(!send({op:'apply_scene',scene:clone(entry.scene),request}))return;
- if(sceneActivation)syncSceneActivation(sceneActivation.id,null);
- sceneActivation={request,id:entry.id,name:sceneLabel(entry),pending:true,message:ui(`Применяем «${entry.name}»…`,`Applying “${sceneLabel(entry)}”…`)};
+ const submitted=clone(scene);
+ if(!send({op:'apply_scene',scene:submitted,request}))return;
+ if(sceneActivation?.id)syncSceneActivation(sceneActivation.id,null);
+ sceneActivation=entry
+  ?{request,id:entry.id,name:sceneLabel(entry),pending:true,message:ui(`Применяем «${entry.name}»…`,`Applying “${sceneLabel(entry)}”…`)}
+  :{request,scene:submitted,pending:true};
+ if(!entry)editorSceneResult=null;
  syncControls();
 }
 function syncSceneActivation(id,result) {
@@ -914,6 +923,19 @@ function syncSceneActivation(id,result) {
 }
 function receiveSceneActivation({request,status,output,message}) {
  if(!sceneActivation?.pending||request!==sceneActivation.request)return;
+ if(!sceneActivation.id){
+  let result;
+  if(status==='failed')result=ui(`Не удалось применить сцену.${message?' '+message:''}`,'Could not apply the scene.');
+  else if(status==='applied'){
+   if(output==='preview_only')result=ui('Применено в предпросмотре.','Applied to preview.');
+   else if(output==='no_active_rgb')result=ui('Сцена применена. Нет активных RGB-выходов.','Scene applied. No active RGB outputs.');
+   else result=ui('Сцена применена.','Scene applied.');
+  }else return;
+  editorSceneResult={scene:sceneActivation.scene,message:result};
+  sceneActivation=null;
+  syncControls();
+  return;
+ }
  if(status==='applied'){
   const detail=output==='preview_only'?ui(' Режим предпросмотра.',' Preview mode.'):output==='no_active_rgb'?ui(' Нет активных RGB-выходов для этой сцены.',' No active RGB outputs for this scene.'):'';
   sceneActivation.message=ui(`Сцена «${sceneActivation.name}» применена.${detail}`,`Scene “${sceneActivation.name}” applied.${detail}`);
@@ -940,12 +962,13 @@ function stayInDraft() {
 function saveDraft(name,id=null,nextId=null,editCreatedFrom=null) {
  const scene=clone(draft);
  if(!send({op:'save_scene',id,name,scene},true))return false;
+ editorSceneResult=null;
  savedSceneRequest={id,name,scene,nextId,editCreatedFrom,ids:state.library.map(item=>item.id)};
  return true;
 }
 function nameDialog(mode) {
  if(!draft||busy())return;
- dialogMode=mode;dialogReturn=focusKey();$('#dialog-title').textContent={new:ui('Новая сцена','New scene'),clone:ui('Создать копию','Make a copy'),rename:ui('Переименовать сцену','Rename scene'),save:ui('Сохранить сцену','Save scene'),'save-switch':ui('Сохранить сцену','Save scene')}[mode];
+ dialogMode=mode;dialogReturn=focusKey();$('#dialog-title').textContent={new:ui('Новая сцена','New scene'),clone:ui('Создать копию','Make a copy'),rename:ui('Переименовать сцену','Rename scene'),save:ui('Сохранить в библиотеку','Save to library'),'save-switch':ui('Сохранить в библиотеку','Save to library')}[mode];
  $('#scene-name').value=mode==='new'?'':mode==='clone'?(draftName+ui(' · копия',' · copy')).slice(0,48):draftName;$('#scene-name').setCustomValidity('');$('#name-dialog').showModal();$('#scene-name').focus();$('#scene-name').select();
 }
 window.prismestraReceive = message => {
@@ -1019,6 +1042,7 @@ window.prismestraReceive = message => {
      requestPreview();
      const next=state.library.find(item=>item.id===nextId);
      if(next){loadEntry(next);return;}
+     editorSceneResult={scene:saved.scene,message:ui('Сохранено в библиотеку.','Saved to your library.')};
     }
    }
    checkDraftOrigin();
@@ -1126,7 +1150,7 @@ document.addEventListener('click',event=>{
  if(b.dataset.view)return changeView(b.dataset.view,b);
  if(b.dataset.preview!==undefined){const entry=state?.library.find(e=>e.id===b.dataset.preview);if(entry)previewLibraryEntry(entry);return;}
  if(b.dataset.edit){const entry=state.library.find(e=>e.id===b.dataset.edit);if(entry)openEntry(entry);return;}
- if(b.dataset.apply){const entry=state.library.find(e=>e.id===b.dataset.apply);if(entry)activateLibraryEntry(entry);return;}
+ if(b.dataset.apply){const entry=state.library.find(e=>e.id===b.dataset.apply);if(entry)activateScene(entry.scene,entry);return;}
  if(b.dataset.remove){const entry=state.library.find(e=>e.id===b.dataset.remove);if(entry&&!entry.builtIn){dialogReturn=focusKey();$('#remove-description').textContent=ui(`Удалить сцену «${entry.name}» из профиля? Запущенный эффект продолжит работать.`,`Delete “${entry.name}” from the profile? The active effect will keep running.`);$('#remove-dialog').dataset.id=entry.id;$('#remove-dialog').showModal();$('#cancel-remove').focus();}return;}
  if(b.dataset.removeColor!==undefined){
   if(draft.colors.length>1){
@@ -1185,7 +1209,7 @@ document.addEventListener('click',event=>{
  case 'retry-startup-discovery':if(!controlDisabled(b))send({op:'retry_startup_discovery'},true);break;
  case 'new':case 'clone':case 'rename':return nameDialog(b.dataset.action);
  case 'save-scene':return nameDialog('save');
- case 'apply-scene':send({op:'apply_scene',scene:clone(draft)},true);break;
+ case 'apply-scene':activateScene(draft);break;
  case 'open-placement':openPlacement();break;
  case 'focus-placement':document.getElementById('placement-'+$('#placement-picker')?.value)?.focus();break;
  case 'apply-placement':showPlacementLimit(false);send({op:'apply_document'},true);break;
@@ -1260,7 +1284,7 @@ document.addEventListener('change',event=>{
  if(input.dataset.sceneSelect){draft[input.dataset.sceneSelect]=input.value;if(input.dataset.sceneSelect==='noise_palette')render();editDraft();}
 });
 $('#play').onclick=()=>{if(!state)return;const on=!(state.groups.pc||state.groups.door);send({op:'groups',pc:on,door:on},true);};
-$('#footer-apply').onclick=()=>{if(draft&&!placementDirty())send({op:'apply_scene',scene:clone(draft)},true);};
+$('#footer-apply').onclick=()=>{if(!draft||placementDirty())return;if(view==='editor')activateScene(draft);else send({op:'apply_scene',scene:clone(draft)},true);};
 $('#open-active').onclick=()=>changeView('editor');
 $('.brand').onclick=event=>{event.preventDefault();changeView('library');};
 $('#sun-icon').innerHTML=icon('sun');

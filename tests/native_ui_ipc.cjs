@@ -1064,7 +1064,17 @@ console.log('PASS: 80 effect choices in provider order, shared escaped labels an
  find('#footer-apply').onclick();
  assert.equal(commands.at(-1).op,'apply_scene');
  assert.equal(commands.at(-1).scene.effect,'camera_color');
+ const request=commands.at(-1).request;
+ assert.ok(Number.isInteger(request));
  receiveDeviceState('snapshot',{...initial,scene:camera,draftScene:null,effects,native:true,captureAuthorized:true});
+ const status=find('.scene-status');
+ assert.equal(status.textContent,'','a snapshot alone does not confirm the requested Apply');
+ const reply=request=>vm.runInContext(
+  'window.prismestraReceive('+JSON.stringify({kind:'scene_activation',request,status:'applied',output:'no_active_rgb'})+')',context);
+ reply(request+1);
+ assert.equal(status.textContent,'','stale scene replies do not confirm Apply');
+ reply(request);
+ assert.equal(status.textContent,'Сцена применена. Нет активных RGB-выходов.');
  assert.equal(find('#footer-apply').disabled,true,'an applied unchanged scene needs no second click');
 }
 console.log('PASS: restored capture is inert and can be explicitly applied without editing the effect');
