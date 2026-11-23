@@ -973,7 +973,7 @@ impl Editor {
             )
             .into()
         };
-        vec![
+        let mut fields = vec![
             boolean(
                 "enabled",
                 "Воспроизводить",
@@ -1006,7 +1006,32 @@ impl Editor {
                     .join("; "),
                 source_hint,
             ),
-        ]
+        ];
+        if !sources.is_empty() {
+            let mut add = field(
+                "add_source",
+                "Добавить показатель",
+                "",
+                "Выбор добавит показатель в черновик. Подпись можно изменить в списке выше.",
+            );
+            let available = sources
+                .iter()
+                .filter(|source| !c.sources.iter().any(|entry| entry.key == source.key));
+            let placeholder = if c.sources.len() >= lcd::MAX_SOURCES {
+                "Достигнут предел показателей"
+            } else if available.clone().next().is_none() {
+                "Все источники добавлены"
+            } else {
+                "Выберите источник…"
+            };
+            add.choices.push((placeholder.into(), String::new()));
+            if c.sources.len() < lcd::MAX_SOURCES {
+                add.choices
+                    .extend(available.map(|source| (source.key.clone(), source.key.clone())));
+            }
+            fields.push(add);
+        }
+        fields
     }
     fn temperature_fields(&self) -> Vec<Field> {
         let Some(s) = self.document.temperatures.sources.get(self.index) else {
@@ -1164,6 +1189,29 @@ impl Editor {
                     .0;
             }
             "interval" => c.interval_seconds = parse(value)?,
+            "add_source" => {
+                if value.is_empty() {
+                    return Err("Выберите температурный источник.".into());
+                }
+                if !self
+                    .document
+                    .temperatures
+                    .sources
+                    .iter()
+                    .any(|source| source.key == value)
+                {
+                    return Err("Температурный источник отсутствует в профиле.".into());
+                }
+                if !c.sources.iter().any(|source| source.key == value) {
+                    if c.sources.len() >= lcd::MAX_SOURCES {
+                        return Err("Достигнут предел показателей LCD.".into());
+                    }
+                    c.sources.push(lcd::OverlaySource {
+                        key: value.into(),
+                        label: value.to_ascii_uppercase(),
+                    });
+                }
+            }
             "sources" => {
                 let sources = value
                     .split(';')
@@ -1676,6 +1724,55 @@ mod tests {
         assert_eq!(
             source_hint(&editor),
             "Сначала добавьте источник в разделе «Температуры»."
+        );
+    }
+
+    #[test]
+    fn lcd_source_choice_appends_once_and_preserves_manual_assignments() {
+        let current = document();
+        let mut editor = Editor {
+            document: current.clone(),
+            page: Page::Lcd,
+            index: 0,
+        };
+        let choices = |editor: &Editor| {
+            editor
+                .fields()
+                .into_iter()
+                .find(|field| field.key == "add_source")
+                .unwrap()
+                .choices
+        };
+        assert_eq!(
+            choices(&editor),
+            [
+                ("Выберите источник…".into(), "".into()),
+                ("a".into(), "a".into()),
+                ("b".into(), "b".into()),
+            ]
+        );
+        editor.set("enabled", "true").unwrap();
+        editor.set("overlay", "true").unwrap();
+        editor.set("sources", "ram=Память; a=Процессор").unwrap();
+        editor.set("add_source", "b").unwrap();
+        editor.set("add_source", "b").unwrap();
+        assert!(editor.set("add_source", "missing").is_err());
+        assert!(editor.set("add_source", "").is_err());
+        assert_eq!(
+            choices(&editor),
+            [("Все источники добавлены".into(), "".into())]
+        );
+        let reopened =
+            Document::decode(&editor.merged(&current).unwrap().encode().unwrap()).unwrap();
+        let assignments: Vec<_> = reopened.lcd[0]
+            .config
+            .sources
+            .iter()
+            .map(|source| (source.key.as_str(), source.label.as_str()))
+            .collect();
+        assert_eq!(
+            assignments,
+            [("ram", "Память"), ("a", "Процессор"), ("b", "B")]
         );
     }
 
