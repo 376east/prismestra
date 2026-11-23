@@ -181,6 +181,7 @@ struct Attempt {
 
 struct E1Link {
     attempt: usize,
+    pdu: u32,
     inject_reconnect_faults: bool,
     traces: Arc<Mutex<Vec<Attempt>>>,
     first_frame_release: Option<std::sync::mpsc::Receiver<()>>,
@@ -202,7 +203,7 @@ impl ble::Link for E1Link {
     }
 
     fn max_pdu(&self) -> Result<u32, String> {
-        Ok(200)
+        Ok(self.pdu)
     }
 
     fn connected(&self) -> Result<bool, String> {
@@ -313,6 +314,7 @@ fn surplife_reconnect_sends_all_153_distinct_colors_from_a_fresh_frame() {
                 };
                 let link = E1Link {
                     attempt,
+                    pdu: 200,
                     inject_reconnect_faults: true,
                     traces: factory_traces.clone(),
                     first_frame_release: None,
@@ -539,6 +541,7 @@ fn surplife_first_light_after_adapter_arrival(exhaust_budget: bool) {
                     };
                     let link = E1Link {
                         attempt,
+                        pdu: 200,
                         inject_reconnect_faults: false,
                         traces: traces.clone(),
                         first_frame_release: None,
@@ -651,6 +654,7 @@ fn surplife_backpressure_after_adapter_arrival_keeps_rgb_and_lcd_live() {
                     }
                     let link = E1Link {
                         attempt: 0,
+                        pdu: 200,
                         inject_reconnect_faults: false,
                         traces: traces.clone(),
                         first_frame_release: gate.lock().unwrap().take(),
@@ -754,6 +758,70 @@ fn surplife_backpressure_after_adapter_arrival_keeps_rgb_and_lcd_live() {
         .collect();
     assert_eq!(traces.lock().unwrap()[0].packets, expected_packets);
     remove_lcd_assets(runtime, dir);
+}
+
+#[test]
+fn surplife_default_att_mtu_sends_lights_off_but_exit_only_releases() {
+    let mut runtime =
+        Runtime::new(Document::from_lighting(surplife_project()).unwrap(), None).unwrap();
+    let traces = Arc::new(Mutex::new(vec![Attempt::default()]));
+    runtime
+        .attach_rgb(
+            "a",
+            vec!["ble:1".into()],
+            Arc::new({
+                let traces = traces.clone();
+                move |cancel| {
+                    let link = E1Link {
+                        attempt: 0,
+                        pdu: 23,
+                        inject_reconnect_faults: false,
+                        traces: traces.clone(),
+                        first_frame_release: None,
+                    };
+                    Ok(Box::new(Ble::with_e1(link, 1, 83, PIXEL_LEDS, &cancel)?))
+                }
+            }),
+        )
+        .unwrap();
+    let submit = |runtime: &mut Runtime, now: &mut u64, count| {
+        tick(runtime, now);
+        wait(|| {
+            let status = runtime.host.status("a").unwrap();
+            status.submitted >= count || status.phase == Phase::Failed
+        });
+        let status = runtime.host.status("a").unwrap();
+        assert_eq!(status.submitted, count, "{:?}", status.error);
+    };
+
+    let mut now = 0;
+    submit(&mut runtime, &mut now, 1);
+    let lit_packets = traces.lock().unwrap()[0].packets.len();
+    assert_eq!(lit_packets, 56);
+
+    runtime.set_group(Target::Door, false).unwrap();
+    submit(&mut runtime, &mut now, 2);
+    {
+        let traces = traces.lock().unwrap();
+        let off = &traces[0].packets[lit_packets..];
+        assert_eq!(off.len(), 2);
+        assert_eq!(
+            [&off[0][8..], &off[1][5..]].concat(),
+            crate::lighting::door::off_packet(1)[8..]
+        );
+    }
+
+    runtime.set_group(Target::Door, true).unwrap();
+    submit(&mut runtime, &mut now, 3);
+    let mut shutdown = crate::app::shutdown::Shutdown::default();
+    shutdown.request(&mut runtime);
+    wait(|| {
+        shutdown.poll(&mut runtime);
+        shutdown.phase() == crate::app::shutdown::Phase::Ready
+    });
+    let traces = traces.lock().unwrap();
+    assert!(traces[0].dropped);
+    assert_eq!(traces[0].packets.len(), lit_packets * 2 + 2);
 }
 
 #[cfg(windows)]
