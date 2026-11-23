@@ -1,7 +1,10 @@
+import os
+import subprocess
+import sys
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, call, patch
 
-from capture_console_windows import WindowCapture, window_observation
+from capture_console_windows import WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, WindowCapture, window_observation
 from normalize_process_events import normalize
 from shell_acceptance import check_trace
 
@@ -215,6 +218,122 @@ class ConsoleWindowCaptureTests(unittest.TestCase):
         observer.observe.side_effect = OSError('synthetic window access failure')
         observer.on_show(None, 0, 50, 0, 0, 7, 100)
         self.assertIn('synthetic window access failure', observer.gaps[0])
+
+
+class ProcessExitCaptureTests(unittest.TestCase):
+    image = r'C:\Test\Prismestra.exe'
+
+    def fake_observer(self, creation=108, image=None, wait=(WAIT_TIMEOUT, WAIT_OBJECT_0)):
+        observer = WindowCapture.__new__(WindowCapture)
+        observer.open_process = Mock(return_value=42)
+        observer.close_handle = Mock()
+        observer.handle_pid = Mock(return_value=2)
+        observer.wait_process = Mock(side_effect=wait)
+
+        def copy_image(_handle, _flags, name, _size):
+            name.value = image or self.image
+            return True
+
+        def copy_times(_handle, created, exited, _kernel, _user):
+            created._obj.dwLowDateTime = creation
+            exited._obj.dwLowDateTime = 140
+            return True
+
+        observer.handle_image = Mock(side_effect=copy_image)
+        observer.process_times = Mock(side_effect=copy_times)
+        return observer
+
+    def test_waits_on_the_same_live_handle_and_does_not_fill_a_missing_stop(self):
+        observer = self.fake_observer()
+        armed = Mock()
+        with patch('capture_console_windows.utc_filetime', side_effect=('120', '145')):
+            receipt = observer.watch_process_exit(2, '108', self.image, 3, armed)
+        armed.assert_called_once_with()
+        observer.open_process.assert_called_once()
+        observer.close_handle.assert_called_once_with(42)
+        self.assertEqual(observer.wait_process.call_args_list, [call(42, 0), call(42, 3000)])
+        self.assertEqual([entry.args[0] for entry in observer.process_times.call_args_list], [42, 42])
+        self.assertEqual(receipt['exit_filetime'], '140')
+
+        data = capture()
+        data['events'].remove(event('stop', 2, 190, 'Setup.exe'))
+        data['events'].append(event('start', 2, 150, 'setup2.exe', 1))
+        trace = normalize(data, 'setup', REVISION, ARTIFACT, ['2:110'], process_exit_receipt=receipt)
+        self.assertEqual(trace['identified_process_exit'], receipt)
+        self.assertEqual(trace['process_capture_gaps'], ['PID 2 was reused without a captured stop'])
+        self.assertFalse(trace['controls']['process_start_stop'])
+        self.assertEqual(check_trace(trace, REVISION, ARTIFACT)['status'], 'inconclusive')
+        # A receipt cannot be reassigned to the other lifetime of the same PID.
+        receipt['expected']['created_filetime'] = '150'
+        with self.assertRaisesRegex(ValueError, 'match the expected identity'):
+            normalize(data, 'setup', REVISION, ARTIFACT, ['2:110'], process_exit_receipt=receipt)
+
+    def test_reused_pid_and_unverified_image_never_arm(self):
+        for observer in (self.fake_observer(creation=109),
+                         self.fake_observer(image=r'C:\Other\Prismestra.exe')):
+            armed = Mock()
+            with self.assertRaisesRegex(RuntimeError, 'match the expected identity'):
+                observer.watch_process_exit(2, '108', self.image, 3, armed)
+            armed.assert_not_called()
+            observer.wait_process.assert_not_called()
+            observer.close_handle.assert_called_once_with(42)
+
+    def test_failed_identity_query_cannot_confirm(self):
+        for operation in ('handle_image', 'process_times'):
+            with self.subTest(operation=operation):
+                observer = self.fake_observer()
+                getattr(observer, operation).side_effect = None
+                getattr(observer, operation).return_value = False
+                armed = Mock()
+                with patch('ctypes.get_last_error', return_value=5, create=True), patch(
+                    'ctypes.WinError', side_effect=lambda code: OSError(code), create=True
+                ), self.assertRaises(OSError):
+                    observer.watch_process_exit(2, '108', self.image, 3, armed)
+                armed.assert_not_called()
+                observer.wait_process.assert_not_called()
+                observer.close_handle.assert_called_once_with(42)
+
+    def test_already_dead_wait_failure_timeout_and_open_denial_cannot_confirm(self):
+        for waits, error, armed_count in [
+            ((WAIT_OBJECT_0,), RuntimeError, 0),
+            ((WAIT_TIMEOUT, WAIT_TIMEOUT), RuntimeError, 1),
+            ((WAIT_TIMEOUT, WAIT_FAILED), OSError, 1),
+        ]:
+            with self.subTest(waits=waits):
+                observer = self.fake_observer(wait=waits)
+                armed = Mock()
+                with patch('ctypes.get_last_error', return_value=5, create=True), patch(
+                    'ctypes.WinError', side_effect=lambda code: OSError(code), create=True
+                ), self.assertRaises(error):
+                    observer.watch_process_exit(2, '108', self.image, 3, armed)
+                self.assertEqual(armed.call_count, armed_count)
+                observer.close_handle.assert_called_once_with(42)
+        observer = self.fake_observer()
+        observer.open_process.return_value = None
+        armed = Mock()
+        with patch('ctypes.get_last_error', return_value=5, create=True), patch(
+            'ctypes.WinError', side_effect=lambda code: OSError(code), create=True
+        ), self.assertRaises(OSError):
+            observer.watch_process_exit(2, '108', self.image, 3, armed)
+        armed.assert_not_called()
+        observer.wait_process.assert_not_called()
+        observer.close_handle.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'nt', 'requires Win32 process handles')
+    def test_native_wait_on_own_child(self):
+        observer = WindowCapture()
+        with subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
+                              stdin=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW) as child:
+            try:
+                created = observer.owner_created_filetime(child.pid)
+                self.assertIsNotNone(created)
+                receipt = observer.watch_process_exit(child.pid, created, sys.executable, 5,
+                                                      child.stdin.close)
+                self.assertEqual(receipt['observed']['pid'], child.pid)
+                self.assertEqual(receipt['observed']['created_filetime'], created)
+                self.assertEqual(child.wait(timeout=5), 0)
+            finally:
+                child.stdin.close()
 
 
 if __name__ == '__main__':

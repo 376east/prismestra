@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import ntpath
 from pathlib import Path, PureWindowsPath
 
 from shell_acceptance import PROCESS_ID, SCENARIOS, SHA, SHA256
@@ -22,6 +23,27 @@ def process_id(value, allow_zero=False):
     return value
 
 
+def image_path(value):
+    if not isinstance(value, str) or not PureWindowsPath(value).is_absolute() or '\0' in value:
+        raise ValueError('Expected an absolute Windows executable path')
+    return ntpath.normcase(ntpath.normpath(value))
+
+
+def verify_process_exit(receipt):
+    if (receipt['format'] != 'prismestra-windows-process-exit-v1'
+            or receipt['status'] != 'confirmed'):
+        raise ValueError('Expected a confirmed process handle exit receipt')
+    expected, observed = receipt['expected'], receipt['observed']
+    if (process_id(expected['pid']) != process_id(observed['pid'])
+            or filetime(expected['created_filetime']) != filetime(observed['created_filetime'])
+            or image_path(expected['image']) != image_path(observed['image'])):
+        raise ValueError('Process handle does not match the expected identity')
+    if not (filetime(observed['created_filetime']) <= filetime(receipt['armed_filetime'])
+            <= filetime(receipt['exit_filetime']) <= filetime(receipt['confirmed_filetime'])):
+        raise ValueError('Process exit receipt has inconsistent times')
+    return receipt
+
+
 def verify_control(control, event_index, harness_pid):
     pid = process_id(control['pid'])
     start = filetime(control['start_filetime'])
@@ -35,7 +57,8 @@ def verify_control(control, event_index, harness_pid):
     return start, stop
 
 
-def normalize(capture, scenario, revision, artifact, product_roots, harness_roots=()):
+def normalize(capture, scenario, revision, artifact, product_roots, harness_roots=(),
+              process_exit_receipt=None):
     if capture['format'] != 'prismestra-windows-process-events-v1':
         raise ValueError('Unsupported Windows process event capture')
     if scenario not in SCENARIOS or not SHA.fullmatch(revision) or not SHA256.fullmatch(artifact):
@@ -96,12 +119,19 @@ def normalize(capture, scenario, revision, artifact, product_roots, harness_root
         raise ValueError('Each declared root must identify a process started in the measured interval')
     if set(product_roots) & set(harness_roots):
         raise ValueError('Product and harness root sets overlap')
-    return {
+    result = {
         'scenario': scenario, 'revision': revision, 'artifact_sha256': artifact,
         'product_roots': product_roots, 'harness_roots': harness_roots,
         'controls': {'process_start_stop': not gaps, 'visible_console': False, 'full_scenario': False},
         'processes': list(processes.values()), 'windows': [], 'process_capture_gaps': gaps,
     }
+    if process_exit_receipt is not None:
+        receipt = verify_process_exit(process_exit_receipt)
+        if not started <= filetime(receipt['armed_filetime']) <= filetime(receipt['exit_filetime']) < ended:
+            raise ValueError('Identified process exit is outside the capture interval')
+        # A handle proves only this process exited. It cannot replace a trace event.
+        result['identified_process_exit'] = receipt
+    return result
 
 
 def main():
@@ -112,12 +142,16 @@ def main():
     parser.add_argument('--artifact-sha256', required=True)
     parser.add_argument('--product-root', required=True, action='append')
     parser.add_argument('--harness-root', default=[], action='append')
+    parser.add_argument('--process-exit-receipt', type=Path)
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     try:
         capture = json.loads(args.capture.read_text(encoding='utf-8-sig'))
+        process_exit = (None if args.process_exit_receipt is None else
+                        verify_process_exit(json.loads(
+                            args.process_exit_receipt.read_text(encoding='utf-8-sig'))))
         result = normalize(capture, args.scenario, args.revision, args.artifact_sha256,
-                           args.product_root, args.harness_root)
+                           args.product_root, args.harness_root, process_exit)
         if args.output is not None:
             with args.output.open('x', encoding='utf-8') as output:
                 json.dump(result, output, indent=2)

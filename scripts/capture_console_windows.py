@@ -1,4 +1,4 @@
-"""Observe visible console and Terminal windows on one disposable Windows desktop."""
+"""Observe visible console windows or one identified process exit in a disposable guest."""
 
 import argparse
 import ctypes
@@ -8,6 +8,7 @@ import time
 from ctypes import wintypes as wt
 from pathlib import Path
 
+from normalize_process_events import filetime, image_path, process_id, verify_process_exit
 from shell_acceptance import CONSOLE_CLASSES
 
 
@@ -21,6 +22,9 @@ WM_QUIT = 0x0012
 QS_ALLINPUT = 0x04FF
 MWMO_INPUTAVAILABLE = 0x0004
 WAIT_FAILED = 0xFFFFFFFF
+WAIT_OBJECT_0 = 0
+WAIT_TIMEOUT = 258
+SYNCHRONIZE = 0x00100000
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 FILETIME_EPOCH = 116444736000000000
 MAX_OBSERVATIONS = 50000
@@ -28,6 +32,10 @@ MAX_OBSERVATIONS = 50000
 
 def utc_filetime():
     return str(FILETIME_EPOCH + time.time_ns() // 100)
+
+
+def filetime_text(value):
+    return str((value.dwHighDateTime << 32) | value.dwLowDateTime)
 
 
 def window_observation(window, window_class, owner_pid, reason, event_tick=None, owner_start=None):
@@ -72,6 +80,10 @@ class WindowCapture:
         times = ctypes.POINTER(wt.FILETIME)
         self.process_times = self.bind(self.kernel.GetProcessTimes, wt.BOOL, wt.HANDLE,
                                       times, times, times, times)
+        self.handle_pid = self.bind(self.kernel.GetProcessId, wt.DWORD, wt.HANDLE)
+        self.handle_image = self.bind(self.kernel.QueryFullProcessImageNameW, wt.BOOL,
+                                      wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD))
+        self.wait_process = self.bind(self.kernel.WaitForSingleObject, wt.DWORD, wt.HANDLE, wt.DWORD)
         self.thread_desktop = self.bind(self.user.GetThreadDesktop, wt.HANDLE, wt.DWORD)
         self.object_info = self.bind(self.user.GetUserObjectInformationW, wt.BOOL, wt.HANDLE, ctypes.c_int,
                                      ctypes.c_void_p, wt.DWORD, ctypes.POINTER(wt.DWORD))
@@ -135,7 +147,55 @@ class WindowCapture:
             if not self.process_times(process, ctypes.byref(created), ctypes.byref(exited),
                                       ctypes.byref(kernel), ctypes.byref(user)):
                 return None
-            return str((created.dwHighDateTime << 32) | created.dwLowDateTime)
+            return filetime_text(created)
+        finally:
+            self.close_handle(process)
+
+    def watch_process_exit(self, pid, created, image, duration, armed_notice):
+        process_id(pid)
+        filetime(created)
+        expected_image = image_path(image)
+        process = self.open_process(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
+        if not process:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            name = ctypes.create_unicode_buffer(32768)
+            size = wt.DWORD(len(name))
+            if not self.handle_image(process, 0, name, ctypes.byref(size)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            times = [wt.FILETIME() for _ in range(4)]
+            pointers = [ctypes.byref(value) for value in times]
+            if not self.process_times(process, *pointers):
+                raise ctypes.WinError(ctypes.get_last_error())
+            observed = {
+                'pid': self.handle_pid(process), 'created_filetime': filetime_text(times[0]),
+                'image': name.value,
+            }
+            if (observed['pid'] != pid or observed['created_filetime'] != created
+                    or image_path(observed['image']) != expected_image):
+                raise RuntimeError('Process handle does not match the expected identity')
+            armed = utc_filetime()
+            initial = self.wait_process(process, 0)
+            if initial == WAIT_FAILED:
+                raise ctypes.WinError(ctypes.get_last_error())
+            if initial != WAIT_TIMEOUT:
+                raise RuntimeError('Expected process was not live at arming')
+            armed_notice()
+            result = self.wait_process(process, duration * 1000)
+            if result == WAIT_FAILED:
+                raise ctypes.WinError(ctypes.get_last_error())
+            if result != WAIT_OBJECT_0:
+                raise RuntimeError('Process handle did not signal within the observation interval')
+            if not self.process_times(process, *pointers):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if filetime_text(times[0]) != observed['created_filetime']:
+                raise RuntimeError('Process handle creation time changed')
+            return verify_process_exit({
+                'format': 'prismestra-windows-process-exit-v1', 'status': 'confirmed',
+                'expected': {'pid': pid, 'created_filetime': created, 'image': image},
+                'observed': observed, 'armed_filetime': armed,
+                'exit_filetime': filetime_text(times[1]), 'confirmed_filetime': utc_filetime(),
+            })
         finally:
             self.close_handle(process)
 
@@ -203,18 +263,31 @@ def main():
     parser.add_argument('--disposable-guest', action='store_true', required=True)
     parser.add_argument('--duration-seconds', default=1000, type=int)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--expect-pid', type=int)
+    parser.add_argument('--expect-created-filetime')
+    parser.add_argument('--expect-image')
     args = parser.parse_args()
     if os.name != 'nt' or not 1 <= args.duration_seconds <= 7200:
         parser.error('Use Windows and a capture duration between 1 and 7200 seconds')
     if args.output.exists() or not args.output.parent.is_dir():
         parser.error('Use a new output file in an existing directory')
+    expected = (args.expect_pid, args.expect_created_filetime, args.expect_image)
+    if any(value is not None for value in expected) and not all(value is not None for value in expected):
+        parser.error('Supply all three expected process identity fields')
     try:
-        result = WindowCapture().capture(args.duration_seconds)
+        observer = WindowCapture()
+        if args.expect_pid is None:
+            result = observer.capture(args.duration_seconds)
+        else:
+            result = observer.watch_process_exit(
+                *expected, args.duration_seconds,
+                lambda: print(f'Process exit observer armed for PID {args.expect_pid}.', flush=True),
+            )
         with args.output.open('x', encoding='utf-8') as stream:
             json.dump(result, stream, indent=2)
             stream.write('\n')
-    except (OSError, RuntimeError) as error:
-        parser.exit(2, f'Window capture failed: {error}\n')
+    except (OSError, RuntimeError, ValueError) as error:
+        parser.exit(2, f'Observation failed: {error}\n')
     return 0
 
 

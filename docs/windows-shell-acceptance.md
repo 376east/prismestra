@@ -35,6 +35,14 @@ Start the window observer on each measured desktop before the process interval. 
 python scripts/capture_console_windows.py --disposable-guest --duration-seconds 1000 --output uninstall-windows.json
 ```
 
+For an expected Prismestra exit, keep the regular trace running. Take the resident PID, exact Win32 creation FILETIME and full image path from the verified launch receipt. Start a separate exit observation while the resident is alive and wait for its armed message before choosing **Exit** in the guest. The observer compares the identity on the opened handle and waits on that same handle. An identity mismatch, access failure, already-exited process or wait timeout produces no exit receipt. The WMI start-event timestamp is distinct from the Win32 creation FILETIME. [Windows process handles](https://learn.microsoft.com/en-us/windows/desktop/procthread/process-handles-and-identifiers) · [Win32 process times](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes)
+
+```powershell
+python scripts/capture_console_windows.py --disposable-guest --duration-seconds 30 --output resident-exit.json --expect-pid <pid> --expect-created-filetime <win32-creation-filetime> --expect-image '<full-executable-path>'
+```
+
+Attach the receipt with `--process-exit-receipt resident-exit.json` on the normalizer command. It adds `identified_process_exit` when the armed and exit times fit the measured interval. The observation covers that process instance. Any missing start or stop in the general trace still leaves its control incomplete.
+
 ```powershell
 python scripts/shell_acceptance.py evidence.json --scenario uninstall --revision <commit> --artifact-sha256 <sha256>
 ```
