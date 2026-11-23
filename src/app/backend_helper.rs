@@ -333,8 +333,10 @@ impl Proxy {
             .name("backend-helper-client".into())
             .spawn(move || {
                 proxy_loop(
-                    &directory,
-                    &status_dir,
+                    ProxyPaths {
+                        directory: &directory,
+                        status_dir: &status_dir,
+                    },
                     &task_name,
                     &request,
                     &output,
@@ -391,6 +393,11 @@ struct ProxyControl {
     restarting: Arc<AtomicBool>,
 }
 
+struct ProxyPaths<'a> {
+    directory: &'a Path,
+    status_dir: &'a Path,
+}
+
 struct StatusPoll {
     path: PathBuf,
     installed: bool,
@@ -416,8 +423,10 @@ fn start_status_worker(
 }
 
 fn proxy_loop(
-    directory: &Path,
-    status_dir: &Path,
+    ProxyPaths {
+        directory,
+        status_dir,
+    }: ProxyPaths<'_>,
     task_name: &str,
     request: &Request,
     output: &Mutex<Snapshot>,
@@ -2584,8 +2593,10 @@ mod tests {
         let (renewed, waiting, early_launch, created, resumed) = thread::scope(|scope| {
             scope.spawn(|| {
                 proxy_loop(
-                    &directory,
-                    &outbox,
+                    ProxyPaths {
+                        directory: &directory,
+                        status_dir: &outbox,
+                    },
                     "fixture",
                     &request,
                     &snapshot,
@@ -2664,8 +2675,10 @@ mod tests {
             scope.spawn(|| {
                 let attempts = attempts.clone();
                 proxy_loop(
-                    &directory,
-                    &directory,
+                    ProxyPaths {
+                        directory: &directory,
+                        status_dir: &directory,
+                    },
                     "fixture",
                     &request,
                     &snapshot,
@@ -2750,8 +2763,10 @@ mod tests {
                 })
                 .unwrap();
                 proxy_loop(
-                    directory_ref,
-                    outbox_ref,
+                    ProxyPaths {
+                        directory: directory_ref,
+                        status_dir: outbox_ref,
+                    },
                     "fixture",
                     request_ref,
                     snapshot_ref,
@@ -2855,8 +2870,10 @@ mod tests {
                     })
                     .unwrap();
                     proxy_loop(
-                        directory,
-                        &outbox,
+                        ProxyPaths {
+                            directory,
+                            status_dir: &outbox,
+                        },
                         "fixture",
                         request,
                         &snapshot,
