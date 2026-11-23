@@ -5,6 +5,98 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[test]
+fn canvas_device_translation_preserves_neighbour_and_changes_frame_only_after_apply() {
+    use pc_control::app::{
+        config::{Groups, Project},
+        device_setup::translate_canvas_device,
+        document::Document,
+        runtime::Runtime,
+    };
+    let devices = ["moving", "neighbour"].map(|id| Device {
+        id: id.into(),
+        label: id.into(),
+        role: Role::Canvas,
+        driver: Driver::WledDdp,
+        leds: 3,
+        rate_hz: 25,
+        enabled: false,
+    });
+    let points = devices
+        .iter()
+        .zip([[(2, 2), (3, 2), (3, 4)], [(6, 4), (7, 4), (7, 6)]])
+        .flat_map(|(device, coords)| {
+            coords.into_iter().enumerate().map(|(led, (x, y))| Point {
+                device: device.id.clone(),
+                led,
+                x,
+                y,
+            })
+        })
+        .collect();
+    let mut scene = pc_control::ui::catalog::plum_dawn().scene;
+    scene.noise.motion_speed = 0;
+    let profile = Document::from_lighting(Project {
+        version: 1,
+        setup: Setup {
+            version: 1,
+            devices: devices.into(),
+            canvas: Canvas {
+                width: 13,
+                height: 11,
+                points,
+            },
+        },
+        scene,
+        schedule: Default::default(),
+        groups: Groups {
+            pc: vec!["moving".into(), "neighbour".into()],
+            door: vec![],
+        },
+    })
+    .unwrap();
+    let mut runtime = Runtime::new(profile.clone(), None).unwrap();
+    runtime.tick(0, 1_800_000_000).unwrap();
+    let before = runtime.host().frame("moving").unwrap().to_vec();
+    let neighbour = runtime.host().frame("neighbour").unwrap().to_vec();
+    assert_ne!(before, neighbour);
+    for (device, dx, dy) in [
+        ("missing", 0, 0),
+        ("moving", 10, 0),
+        ("moving", 0, -3),
+        ("moving", i32::MIN, 0),
+    ] {
+        assert!(translate_canvas_device(&profile, device, dx, dy).is_err());
+    }
+    let draft = translate_canvas_device(&profile, "moving", 4, 2).unwrap();
+    let expected = profile
+        .lighting
+        .setup
+        .canvas
+        .points
+        .iter()
+        .cloned()
+        .map(|mut p| {
+            if p.device == "moving" {
+                p.x += 4;
+                p.y += 2;
+            }
+            p
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(draft.lighting.setup.canvas.points, expected);
+    assert_eq!(runtime.host().frame("moving").unwrap(), before);
+    runtime.request_document(draft.clone()).unwrap();
+    for now in [50_000, 100_000, 150_000] {
+        runtime.tick(now, 1_800_000_000).unwrap();
+    }
+    assert_eq!(runtime.document(), &draft);
+    let after = runtime.host().frame("moving").unwrap();
+    assert_ne!(after, before);
+    assert_eq!(after, runtime.host().frame("neighbour").unwrap());
+    assert_eq!(Document::decode(&draft.encode().unwrap()).unwrap(), draft);
+}
+
 fn setup() -> Setup {
     let devices = vec![
         Device {

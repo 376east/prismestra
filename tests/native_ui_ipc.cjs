@@ -1238,5 +1238,24 @@ async function checkOutputStatusCopy() {
   editor:{page:'devices',deviceId:selected.id,index:0,targets:[selected.label],fields:[],dirty:true}});
  assert.doesNotMatch(mainMarkup,/data-copy-output/,'draft-only output has no runtime status to copy');
  console.log('PASS: selected runtime status copies only allowlisted text and its validated counter, with local clipboard feedback');
+
+{
+ const canvasPlacement={width:13,height:11,objects:[{id:'strip',label:'Strip <1>',bounds:[1,1,2,1]}]};
+ restoreDraft({...draftState,canvasPlacement});
+ evaluate('view="editor";pendingView=null;commandPending=false;awaitingCommandAck=false;openPlacement()');
+ assert.deepEqual(commands.at(-1),{op:'page',page:'devices'});
+ context.payload={kind:'snapshot',state:{...draftState,canvasPlacement,draftMapRevision:'7',editor:{page:'devices',dirty:false}}};
+ evaluate('window.prismestraReceive(payload)');
+ assert.match(evaluate('renderPlacementObjects()'),/Strip &lt;1&gt;/);
+ evaluate('movePlacement("strip","7",1,0)');
+ assert.deepEqual(commands.at(-1),{op:'move_canvas_device',device:'strip',revision:'7',dx:1,dy:0});
+ context.payload.state.editor.dirty=true;
+ evaluate('window.prismestraReceive(payload)');
+ assert.equal(evaluate('pageHasEdits()'),true);
+ evaluate('changeView("library")');
+ assert.equal(evaluate('view'),'editor');
+ assert.equal(evaluate('send({op:"save"},true)'),false);
+}
+console.log('PASS: scene placement uses the device draft and guards navigation and profile save until apply or revert');
 }
 checkOutputStatusCopy().catch(error=>{console.error(error);process.exitCode=1;});

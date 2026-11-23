@@ -124,6 +124,12 @@ enum Command {
     SelectDevice {
         id: String,
     },
+    MoveCanvasDevice {
+        device: String,
+        revision: String,
+        dx: i32,
+        dy: i32,
+    },
     RetryOutput {
         id: String,
         request: u32,
@@ -803,6 +809,31 @@ fn selected_map_device(app: &App) -> Option<&str> {
     app.editor.as_ref()?.selected_device_id()
 }
 
+fn canvas_placement(setup: &crate::devices::Setup) -> Value {
+    let mut bounds = std::collections::BTreeMap::new();
+    for p in &setup.canvas.points {
+        let bounds = bounds
+            .entry(p.device.as_str())
+            .or_insert([p.x, p.y, p.x, p.y]);
+        *bounds = [
+            bounds[0].min(p.x),
+            bounds[1].min(p.y),
+            bounds[2].max(p.x),
+            bounds[3].max(p.y),
+        ];
+    }
+    let objects = setup
+        .devices
+        .iter()
+        .filter_map(|device| {
+            let bounds = bounds.get(device.id.as_str())?;
+            (device.role == crate::devices::Role::Canvas)
+                .then(|| json!({"id":device.id,"label":device.label,"bounds":bounds}))
+        })
+        .collect::<Vec<_>>();
+    json!({"width":setup.canvas.width,"height":setup.canvas.height,"objects":objects})
+}
+
 fn map_connection(app: &App) -> Value {
     let Some(device) = selected_map_device(app) else {
         return Value::Null;
@@ -842,6 +873,11 @@ fn snapshot(state: &State) -> Result<Value, String> {
         .collect::<Vec<_>>();
     value["state"]["effects"] = json!(effects);
     value["state"]["draftMapRevision"] = json!(draft_map_revision);
+    let placement_setup = draft_map_input(app).map_or_else(
+        || &app.runtime.document().lighting.setup,
+        |(_, setup, _)| setup,
+    );
+    value["state"]["canvasPlacement"] = canvas_placement(placement_setup);
     value["state"]["captureAuthorized"] = json!(app.runtime.read(Runtime::capture_authorized));
     value["state"]["mapConnection"] = map_connection(app);
     value["state"]["argbDevice"] = json!(argb_channels::available(app));
@@ -1353,6 +1389,35 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                         .select_device(&id)?;
                     a.refresh_editor(true);
                 }
+                Command::MoveCanvasDevice {
+                    device,
+                    revision,
+                    dx,
+                    dy,
+                } => {
+                    if busy(a) {
+                        return Err("Дождитесь завершения операции".into());
+                    }
+                    let mut session = state.modern_session.borrow_mut();
+                    let session = session.as_mut().ok_or("Нет интерфейса")?;
+                    let current = session.draft_map.observe(draft_map_input(a));
+                    if current.as_deref() != Some(&revision) {
+                        return Err("Раскладка изменилась. Повторите перемещение.".into());
+                    }
+                    let editor = a.editor.as_mut().ok_or("Нет черновика устройств")?;
+                    let document = crate::app::device_setup::translate_canvas_device(
+                        &editor.document,
+                        &device,
+                        dx,
+                        dy,
+                    )?;
+                    if dx != 0 || dy != 0 {
+                        editor.document = document;
+                        a.editor_dirty = true;
+                        a.dirty = true;
+                        a.refresh_editor(false);
+                    }
+                }
                 Command::SetField {
                     key,
                     value,
@@ -1594,6 +1659,25 @@ pub(super) fn return_to_editor(state: &State) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn canvas_device_move_requires_explicit_id_revision_and_integer_delta() {
+        use super::Command;
+        let valid = r#"{"op":"move_canvas_device","device":"left","revision":"7","dx":-1,"dy":0}"#;
+        assert!(
+            matches!(serde_json::from_str::<Command>(valid).unwrap(), Command::MoveCanvasDevice {
+            device, revision, dx: -1, dy: 0
+        } if device == "left" && revision == "7")
+        );
+        for invalid in [
+            valid.replace(",\"device\":\"left\"", ""),
+            valid.replace(",\"revision\":\"7\"", ""),
+            valid.replace("-1", "1.5"),
+            valid.replace("-1", "2147483648"),
+        ] {
+            assert!(serde_json::from_str::<Command>(&invalid).is_err());
+        }
+    }
+
     #[test]
     fn audio_cards_show_distinct_demo_posters_and_motion() {
         let canvas = super::preview_canvas(48, 24);
