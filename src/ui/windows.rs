@@ -2478,10 +2478,11 @@ fn save_dialog(hwnd: HWND, state: &State) -> Result<bool, String> {
     let app = slot.as_mut().ok_or("UI не создан")?;
     let path = if let Some(root) = &root {
         app.ready_to_save_installed_profile()?;
-        let document = app.runtime.requested_document();
-        let path = crate::app::installed::save_startup_profile(root, document)?;
-        app.runtime
-            .relocate_journal(journal_path(&app.state_dir, Some(&path), document))?;
+        let path = crate::app::installed::startup_profile_destination(root)?;
+        app.runtime.with(|runtime, _| {
+            let journal = journal_path(&app.state_dir, Some(&path), runtime.document());
+            runtime.save_profile_with_journal_at(&path, journal)
+        })?;
         path
     } else {
         let path = standalone_path.expect("standalone save dialog returned a path");
@@ -2655,9 +2656,8 @@ fn modal_command(hwnd: HWND, state: &State, id: i32) -> Result<(), String> {
         };
         let mut slot = state.app.try_borrow_mut().map_err(|_| "UI занято")?;
         let app = slot.as_mut().ok_or("UI не создан")?;
-        let path = crate::app::installed::profile_copy_destination(&root, &path)?;
         app.ready_to_save_installed_profile()?;
-        app.runtime.save(&path)?;
+        crate::app::installed::save_profile_copy(&root, &path, app.runtime.requested_document())?;
         app.status = app
             .language
             .text("Копия профиля сохранена.", "Profile copy saved.")

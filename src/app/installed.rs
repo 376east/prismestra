@@ -497,18 +497,22 @@ pub(crate) fn startup_profile_path(user_root: &Path) -> PathBuf {
     user_root.join("profile.json")
 }
 
-pub(crate) fn save_startup_profile(
-    user_root: &Path,
-    document: &Document,
-) -> Result<PathBuf, String> {
+pub(crate) fn startup_profile_destination(user_root: &Path) -> Result<PathBuf, String> {
     let root = checked_local_path(user_root).map_err(|error| error.to_string())?;
     let path = startup_profile_path(&root);
     absent(&path)?;
-    document.save(&path)?;
     Ok(path)
 }
 
-pub(crate) fn profile_copy_destination(user_root: &Path, path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn save_profile_copy(
+    user_root: &Path,
+    path: &Path,
+    document: &Document,
+) -> Result<(), String> {
+    document.save(&profile_copy_destination(user_root, path)?)
+}
+
+fn profile_copy_destination(user_root: &Path, path: &Path) -> Result<PathBuf, String> {
     let root = checked_local_path(user_root).map_err(|error| error.to_string())?;
     let parent = path
         .parent()
@@ -1032,13 +1036,18 @@ pub(crate) mod tests {
         let original_bindings = fs::read(&bindings).unwrap();
         let draft = state.join("editor-scene-draft.json");
         fs::write(&draft, b"separate draft fixture").unwrap();
-        let saved = save_startup_profile(&user, &Document::load(&external).unwrap()).unwrap();
+        let saved = startup_profile_destination(&user).unwrap();
+        let mut runtime =
+            crate::app::runtime::Runtime::new(Document::load(&external).unwrap(), None).unwrap();
+        runtime
+            .save_profile_with_journal_at(&saved, state.join("startup-fixture-journal.json"))
+            .unwrap();
         assert_eq!(saved, startup);
         let fresh_args = bootstrap(&manifest, &exe, &user).unwrap();
         assert_eq!(Document::load(Path::new(&fresh_args[3])).unwrap(), edited);
 
-        let copy = profile_copy_destination(&user, &downloads.join("Copy.json")).unwrap();
-        old.save(&copy).unwrap();
+        let copy = downloads.join("Copy.json");
+        save_profile_copy(&user, &copy, &old).unwrap();
         assert_eq!(Document::load(&copy).unwrap(), old);
         assert_eq!(Document::load(&startup).unwrap(), edited);
         assert!(profile_copy_destination(&user, &startup).is_err());
@@ -1047,6 +1056,36 @@ pub(crate) mod tests {
         assert_eq!(fs::read(bindings).unwrap(), original_bindings);
         assert_eq!(fs::read(draft).unwrap(), b"separate draft fixture");
         assert_eq!(Document::load(&external).unwrap(), edited);
+    }
+
+    #[test]
+    fn saving_profile_copy_does_not_change_any_installed_data_file() {
+        fn files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+            let mut observed = std::collections::BTreeMap::new();
+            for entry in fs::read_dir(root).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    observed.extend(files(&path));
+                } else {
+                    observed.insert(path.clone(), fs::read(path).unwrap());
+                }
+            }
+            observed
+        }
+
+        let (fixture, profile, state, _) = fresh_profile();
+        let data = profile.parent().unwrap();
+        fs::write(state.join("editor-scene-draft.json"), b"draft").unwrap();
+        fs::write(state.join("runtime-fixture.json"), b"journal").unwrap();
+        let mut document = Document::load(&profile).unwrap();
+        document.lighting.scene.colors[0] = 0xa2e14b;
+        let before = files(data);
+
+        let copy = fixture.0.join("Copy.json");
+        save_profile_copy(data, &copy, &document).unwrap();
+        assert_eq!(Document::load(&copy).unwrap(), document);
+        assert_eq!(files(data), before);
     }
 
     #[test]

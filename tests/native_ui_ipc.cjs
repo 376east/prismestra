@@ -1822,8 +1822,9 @@ function checkEnglishApplicationLanguage() {
  clicked('save');
  assert.equal(commands.at(-1).op,'save');
  receive('snapshot',installed);
+ const beforeCopy=commands.length;
  clicked('save-profile-copy');
- assert.equal(commands.at(-1).op,'save_profile_copy');
+ assert.deepEqual(commands.slice(beforeCopy),[{op:'save_profile_copy'}],'copy must not flush the draft into installed data');
  receive('snapshot',installed);
  find('#footer-apply').onclick();
  assert.equal(commands.at(-1).op,'apply_scene');
