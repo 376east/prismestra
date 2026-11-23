@@ -1127,3 +1127,27 @@ events.input({target:backgroundInput});
 events.click({target:{closest:()=>({dataset:{action:'apply-document'},disabled:false,hasAttribute:()=>true})}});
 assert.deepEqual(commands.at(-1),{op:'apply_fields',fields:[{key:'media',value:''}]});
 console.log('PASS: clearing the LCD background sends an explicit empty field in Apply');
+
+{
+ const library=Array.from({length:100},(_,i)=>({
+  id:'search-'+i,name:i===99?'Ёлка 099':`Evening ${i}`,
+  scene:{...scene,effect:i===99?'gradient_wave':'breathing'},
+ }));
+ const effects=[{id:'gradient_wave',name:'Градиентная волна'},{id:'breathing',name:'Дыхание'}];
+ vm.runInContext('formStages.clear();view="library";pendingView=null;libraryEffect="";search=""',context);
+ receiveDeviceState('snapshot',{...initial,library,effects});
+ const beforeSearch=commands.length;
+ const query=value=>{const input=find('#search');input.id='search';input.value=value;events.input({target:input});};
+ for(const value of ['ГРАДИЕНТНАЯ волна','gradient_wave','елка gradient wave']){
+  query(value);
+  assert.match(mainMarkup,/data-preview="search-99"/,value);
+  assert.doesNotMatch(mainMarkup,/data-preview="search-98"/,value);
+ }
+ query('evening 98');
+ assert.match(mainMarkup,/data-preview="search-98"/);
+ query('gradient wave');
+ events.change({target:{id:'library-effect',value:'breathing'}});
+ assert.match(mainMarkup,/Сцен не найдено/);
+ assert.equal(commands.length,beforeSearch,'search and filtering stay local');
+}
+console.log('PASS: bilingual effect and scene search across 100 saved scenes without IPC');
