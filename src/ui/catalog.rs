@@ -179,7 +179,7 @@ impl Catalog {
         *self = next;
         Ok(())
     }
-    fn persist(&self, path: &Path) -> Result<(), String> {
+    pub(crate) fn persist(&self, path: &Path) -> Result<(), String> {
         self.validate()?;
         let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
         storage::atomic_write(path, &bytes, MAX_BYTES).map_err(|e| e.to_string())
