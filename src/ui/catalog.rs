@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::{fs::File, io::Read, path::Path};
 
 const MAX_BYTES: usize = 256 * 1024;
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
     pub id: String,
@@ -105,9 +105,13 @@ impl Catalog {
         Ok(())
     }
     pub fn load(path: &Path, current: &Scene) -> Result<Self, String> {
+        Ok(Self::load_saved(path)?.unwrap_or_else(|| Self::seeded(current)))
+    }
+
+    pub(crate) fn load_saved(path: &Path) -> Result<Option<Self>, String> {
         let file = match File::open(path) {
             Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::seeded(current)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.to_string()),
         };
         if file.metadata().map_err(|e| e.to_string())?.len() > MAX_BYTES as u64 {
@@ -120,7 +124,7 @@ impl Catalog {
         let catalog: Self = serde_json::from_slice(&bytes)
             .map_err(|e| format!("Не удалось прочитать библиотеку сцен: {e}"))?;
         catalog.validate()?;
-        Ok(catalog)
+        Ok(Some(catalog))
     }
     pub fn save_entry(
         &mut self,

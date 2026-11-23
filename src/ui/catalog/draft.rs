@@ -21,6 +21,13 @@ pub(crate) struct Draft {
 }
 
 impl Draft {
+    #[cfg(windows)]
+    pub(crate) fn has_unsaved_changes(&self) -> bool {
+        self.origin
+            .as_ref()
+            .is_none_or(|origin| origin.scene != self.scene)
+    }
+
     pub fn new(scene: Scene, origin: Option<Origin>) -> Result<Self, String> {
         let draft = Self {
             version: 1,

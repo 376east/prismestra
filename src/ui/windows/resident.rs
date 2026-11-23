@@ -1,6 +1,7 @@
 //! One native session owns the Runtime; editor HWNDs are disposable.
 use super::*;
 use crate::app::installed;
+use crate::ui::catalog::{Catalog, Entry, draft::Draft};
 use sha2::{Digest, Sha256};
 use std::{
     fs::OpenOptions,
@@ -36,6 +37,7 @@ const EXIT: u32 = 3;
 const CHECK_UPDATES: u32 = 4;
 const TOGGLE_UPDATES: u32 = 5;
 const VIEW_UPDATE: u32 = 6;
+const SCENE_FIRST: u32 = 100;
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 static INSTALLED_EXIT_MSG: AtomicU32 = AtomicU32::new(0);
 
@@ -752,6 +754,8 @@ pub(super) fn close_editor(state: &State, interactive: bool) -> Result<(), Strin
     }
     // Native teardown can reenter the window procedure; do not retain a RefCell borrow.
     let mut app = state.app.borrow_mut().take().ok_or("Нет сессии")?;
+    // Applying a tray scene could overwrite an edited active scene in an unsaved profile.
+    let scene_ready = !app.dirty && super::modern::clean_draft_before_tray_close(state);
     super::modern::close(state);
     let destroyed = unsafe { DestroyWindow(hwnd) };
     if destroyed != 0 {
@@ -766,6 +770,7 @@ pub(super) fn close_editor(state: &State, interactive: bool) -> Result<(), Strin
     if destroyed == 0 {
         Err(last("Close editor"))
     } else {
+        state.tray_scene_ready.set(scene_ready);
         Ok(())
     }
 }
@@ -815,6 +820,7 @@ pub(super) fn open_editor(state: &State) -> Result<(), String> {
     if state.session_action.get() == Action::Exit {
         return Ok(());
     }
+    state.tray_scene_ready.set(false);
     let existing = state.editor_window.get();
     if !existing.is_null() {
         if !state.snapshot {
@@ -993,6 +999,7 @@ pub(super) fn request(state: &State, action: Action, confirm: bool) -> Result<()
     }
     app.begin_shutdown();
     if app.shutdown.active() {
+        state.tray_scene_ready.set(false);
         state.session_action.set(action);
     }
     Ok(())
@@ -1110,8 +1117,54 @@ fn tray_command(w: WPARAM, l: LPARAM) -> Option<TrayCommand> {
     }
 }
 
+fn saved_tray_scenes(state_dir: &Path) -> Result<Vec<Entry>, String> {
+    let draft = Draft::load(&state_dir.join("editor-scene-draft.json"))?;
+    if draft.as_ref().is_none_or(Draft::has_unsaved_changes) {
+        return Ok(Vec::new());
+    }
+    Ok(Catalog::load_saved(&state_dir.join("scene-library.json"))?
+        .into_iter()
+        .flat_map(|catalog| catalog.entries)
+        .filter(|entry| {
+            let effect = entry.scene.effect;
+            !effect.uses_audio() && !effect.uses_context() && !effect.uses_reactive()
+        })
+        .collect())
+}
+
+fn tray_scene_available(state: &State, app: &App) -> bool {
+    state.tray_scene_ready.get()
+        && state.editor_window.get().is_null()
+        && !state.activation_requested.get()
+        && state.session_action.get() == Action::None
+        && !super::modern::busy(app)
+}
+
+fn apply_tray_scene(state: &State, scenes: &[Entry], id: u32) -> Result<(), String> {
+    let Some(chosen) = id
+        .checked_sub(SCENE_FIRST)
+        .and_then(|i| scenes.get(i as usize))
+    else {
+        return Ok(());
+    };
+    let mut slot = state.app.try_borrow_mut().map_err(|_| "Сессия занята")?;
+    let app = slot.as_mut().ok_or("Нет сессии")?;
+    if !tray_scene_available(state, app) {
+        return Err(
+            "Переключение из трея недоступно. Закройте редактор без несохранённого черновика."
+                .into(),
+        );
+    }
+    let entry = saved_tray_scenes(&app.state_dir)?
+        .into_iter()
+        .find(|entry| entry == chosen)
+        .ok_or("Сцена или черновик изменились. Откройте меню заново.")?;
+    app.update_scene(entry.scene, true)
+}
+
 fn create_tray_menu(
     updates: Option<(bool, Option<crate::app::release_check::Version>)>,
+    scenes: &[Entry],
 ) -> Option<HMENU> {
     let menu = unsafe { CreatePopupMenu() };
     if menu.is_null() {
@@ -1143,6 +1196,32 @@ fn create_tray_menu(
         if unsafe { AppendMenuW(menu, flags, id as usize, wide(text).as_ptr()) } == 0 {
             unsafe { DestroyMenu(menu) };
             return None;
+        }
+    }
+    if !scenes.is_empty() {
+        let submenu = unsafe { CreatePopupMenu() };
+        if !submenu.is_null() {
+            let complete = scenes.iter().enumerate().all(|(index, entry)| unsafe {
+                AppendMenuW(
+                    submenu,
+                    MF_STRING,
+                    SCENE_FIRST as usize + index,
+                    wide(&entry.name.replace('&', "&&")).as_ptr(),
+                ) != 0
+            });
+            if !complete
+                || unsafe {
+                    InsertMenuW(
+                        menu,
+                        1,
+                        MF_BYPOSITION | MF_POPUP | MF_STRING,
+                        submenu as usize,
+                        wide("Включить сохранённую сцену").as_ptr(),
+                    )
+                } == 0
+            {
+                unsafe { DestroyMenu(submenu) };
+            }
         }
     }
     unsafe { SetMenuDefaultItem(menu, OPEN, 0) };
@@ -1181,7 +1260,17 @@ fn menu(state: &State, hwnd: HWND, anchor_to_icon: bool) {
         .borrow()
         .as_ref()
         .map(|schedule| (schedule.enabled(), schedule.available()));
-    let Some(menu) = create_tray_menu(updates) else {
+    let scenes = state
+        .app
+        .try_borrow()
+        .ok()
+        .and_then(|slot| {
+            slot.as_ref()
+                .filter(|app| tray_scene_available(state, app))
+                .and_then(|app| saved_tray_scenes(&app.state_dir).ok())
+        })
+        .unwrap_or_default();
+    let Some(menu) = create_tray_menu(updates, &scenes) else {
         return;
     };
     // In version 4, wParam is undefined for WM_CONTEXTMENU. Query the icon
@@ -1236,6 +1325,7 @@ fn menu(state: &State, hwnd: HWND, anchor_to_icon: bool) {
             .map_or(Ok(()), super::update_schedule::Schedule::toggle),
         STOP => request(state, Action::Stop, false),
         EXIT => request(state, Action::Exit, true),
+        id if id >= SCENE_FIRST => apply_tray_scene(state, &scenes, id),
         _ => Ok(()),
     };
     if let Err(error) = result {
@@ -2083,8 +2173,156 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
 }
 
 #[cfg(test)]
+thread_local! {
+    static TRAY_SCENE_FIXTURE: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn tray_scene_fixture(state: &State) -> Option<Result<(), String>> {
+    TRAY_SCENE_FIXTURE
+        .get()
+        .then(|| exercise_tray_scene_selection(state))
+}
+
+#[cfg(test)]
+fn exercise_tray_scene_selection(state: &State) -> Result<(), String> {
+    let (dir, original, pc, door) = {
+        let slot = state.app.borrow();
+        let app = slot.as_ref().unwrap();
+        assert!(state.snapshot && !state.resident.get() && app.native_lighting.is_none());
+        (
+            app.state_dir.clone(),
+            app.runtime.project().scene.clone(),
+            app.runtime.group_on(Target::Pc),
+            app.runtime.group_on(Target::Door),
+        )
+    };
+    let library_path = dir.join("scene-library.json");
+    let draft_path = dir.join("editor-scene-draft.json");
+    assert!(saved_tray_scenes(&dir)?.is_empty());
+    let target = crate::ui::catalog::plum_dawn().scene;
+    let mut library = Catalog::seeded(&original);
+    for entry in library.entries.clone() {
+        library.remove(&library_path, &entry.id)?;
+    }
+    let id = library.save_entry(&library_path, None, "A & B".into(), target.clone())?;
+    for effect in [
+        Effect::AudioLevel,
+        Effect::KeyRipple,
+        Effect::CameraColor,
+        Effect::GameEvents,
+        Effect::DayNight,
+    ] {
+        let mut scene = target.clone();
+        scene.effect = effect;
+        let (min, max) = effect.limits();
+        scene.speed = scene.speed.clamp(min, max);
+        library.save_entry(&library_path, None, "Requires input".into(), scene)?;
+    }
+    assert!(
+        saved_tray_scenes(&dir)?.is_empty(),
+        "a close receipt must have a draft"
+    );
+    super::modern::fixture_flush_tray_draft(state, Draft::new(original.clone(), None)?)?;
+    assert!(!super::modern::clean_draft_before_tray_close(state));
+    let clean = || {
+        let origin =
+            serde_json::from_value(serde_json::json!({"id":null,"name":null,"scene":original}))
+                .unwrap();
+        Draft::new(original.clone(), Some(origin))
+    };
+    super::modern::fixture_flush_tray_draft(state, clean()?)?;
+    state.app.borrow_mut().as_mut().unwrap().dirty = true;
+    close_editor(state, false)?;
+    assert!(!state.tray_scene_ready.get());
+    open_editor(state)?;
+    state.app.borrow_mut().as_mut().unwrap().dirty = false;
+    super::modern::fixture_flush_tray_draft(state, clean()?)?;
+    let scenes = saved_tray_scenes(&dir)?;
+    assert_eq!(scenes.len(), 1);
+    assert_eq!(scenes[0].id, id);
+    let menu = create_tray_menu(None, &scenes).unwrap();
+    let command = unsafe {
+        let submenu = GetSubMenu(menu, 1);
+        assert!(!submenu.is_null());
+        assert_eq!(GetMenuItemCount(submenu), 1);
+        let command = GetMenuItemID(submenu, 0);
+        DestroyMenu(menu);
+        command
+    };
+    state.tray_scene_ready.set(true);
+    assert!(apply_tray_scene(state, &scenes, command).is_err());
+    state.tray_scene_ready.set(false);
+    close_editor(state, false)?;
+    assert!(state.editor_window.get().is_null() && state.tray_scene_ready.get());
+    let clean_bytes = std::fs::read(&draft_path).unwrap();
+    Draft::new(original.clone(), None)?.save(&draft_path)?;
+    assert!(apply_tray_scene(state, &scenes, command).is_err());
+    std::fs::write(&draft_path, &clean_bytes).unwrap();
+    library.save_entry(
+        &library_path,
+        Some(&id),
+        "Renamed scene".into(),
+        target.clone(),
+    )?;
+    assert!(apply_tray_scene(state, &scenes, command).is_err());
+    let scenes = saved_tray_scenes(&dir)?;
+    let library_bytes = std::fs::read(&library_path).unwrap();
+    state.session_action.set(Action::Stop);
+    assert!(apply_tray_scene(state, &scenes, command).is_err());
+    state.session_action.set(Action::None);
+    {
+        let mut slot = state.app.borrow_mut();
+        let app = slot.as_mut().unwrap();
+        assert_eq!(app.runtime.project().scene, original);
+        // Exercise connected Apply without attaching device factories.
+        app.native_lighting = Some(crate::app::lighting_outputs::Local {
+            version: 1,
+            devices: Default::default(),
+            monitors: Default::default(),
+            door_brightness: 100,
+        });
+    }
+    apply_tray_scene(state, &scenes, command)?;
+    {
+        let slot = state.app.borrow();
+        let app = slot.as_ref().unwrap();
+        assert_eq!(app.runtime.project().scene, target);
+        assert_eq!(app.runtime.group_on(Target::Pc), pc);
+        assert_eq!(app.runtime.group_on(Target::Door), door);
+        assert!(!app.runtime.read(Runtime::capture_authorized));
+    }
+    assert_eq!(std::fs::read(&draft_path).unwrap(), clean_bytes);
+    assert_eq!(std::fs::read(&library_path).unwrap(), library_bytes);
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires an isolated native Windows editor window"]
+    fn isolated_tray_scene_menu_applies_only_clean_saved_scenes() {
+        let root = std::env::temp_dir().join(format!(
+            "prismestra-tray-scene-{}-{}",
+            std::process::id(),
+            crate::clock::monotonic_us()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        TRAY_SCENE_FIXTURE.set(true);
+        let result = super::super::run_inner(
+            vec![
+                "--selftest".into(),
+                "--state-dir".into(),
+                root.clone().into_os_string(),
+            ],
+            None,
+        );
+        TRAY_SCENE_FIXTURE.set(false);
+        std::fs::remove_dir_all(&root).unwrap();
+        result.unwrap();
+    }
     #[test]
     fn legacy_handover_refuses_self_before_enumerating_windows() {
         assert!(
@@ -2209,7 +2447,7 @@ mod tests {
 
     #[test]
     fn native_tray_menu_marks_open_as_its_first_and_default_command() {
-        let menu = create_tray_menu(None).expect("native popup menu");
+        let menu = create_tray_menu(None, &[]).expect("native popup menu");
         let mut label = [0u16; 64];
         let (first, default, length, updates) = unsafe {
             let first = GetMenuItemID(menu, 0);
@@ -2238,7 +2476,7 @@ mod tests {
         use crate::app::release_check::Version;
         let version = Version::from_setup("0.1.0.8").unwrap();
         for enabled in [true, false] {
-            let menu = create_tray_menu(Some((enabled, enabled.then_some(version)))).unwrap();
+            let menu = create_tray_menu(Some((enabled, enabled.then_some(version))), &[]).unwrap();
             unsafe {
                 assert_eq!(GetMenuItemID(menu, 1), CHECK_UPDATES);
                 assert_eq!(

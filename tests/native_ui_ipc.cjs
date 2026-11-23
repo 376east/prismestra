@@ -1247,6 +1247,15 @@ async function checkOutputStatusCopy() {
  context.payload={kind:'snapshot',state:{...draftState,canvasPlacement,draftMapRevision:'7',editor:{page:'devices',dirty:false}}};
  evaluate('window.prismestraReceive(payload)');
  assert.match(evaluate('renderPlacementObjects()'),/Strip &lt;1&gt;/);
+ assert.doesNotMatch(evaluate('renderPlacementControls()'),/id="placement-picker"/);
+ canvasPlacement.objects.push({id:'overlap',label:'Strip <1>',bounds:[1,1,2,1]});
+ events.change({target:{id:'placement-picker',value:'overlap'}});
+ assert.match(evaluate('renderPlacementControls()'),/value="overlap" selected>Strip &lt;1&gt; · overlap/);
+ assert.match(evaluate('renderPlacementObjects()'),/aria-label="Strip &lt;1&gt; · strip"/);
+ const delta=(x,y)=>JSON.parse(evaluate(`JSON.stringify(placementDelta({x:100,y:100,cellX:10,cellY:20,minX:-1,maxX:3,minY:-2,maxY:1},${x},${y}))`));
+ assert.deepEqual(delta(148,185),{dx:3,dy:1,limited:true});
+ assert.deepEqual(delta(78,55),{dx:-1,dy:-2,limited:true});
+ assert.deepEqual(delta(119,82),{dx:2,dy:-1,limited:false});
  evaluate('movePlacement("strip","7",1,0)');
  assert.deepEqual(commands.at(-1),{op:'move_canvas_device',device:'strip',revision:'7',dx:1,dy:0});
  context.payload.state.editor.dirty=true;

@@ -174,11 +174,18 @@ struct CardMotion {
     frame: u64,
 }
 
+#[derive(Clone, Copy)]
+struct CloseReady {
+    exit: bool,
+    confirm: bool,
+    clean_draft: bool,
+}
+
 pub(super) struct Session {
     alice: super::alice::Session,
     close_request: Option<CloseRequest>,
     close_id: u32,
-    close_ready: Option<(bool, bool)>,
+    close_ready: Option<CloseReady>,
     close_deciding: bool,
     catalog: Catalog,
     catalog_view: BTreeMap<String, Value>,
@@ -513,7 +520,7 @@ pub(super) fn prepare_close(state: &State, exit: bool, confirm: bool) -> Result<
             return Ok(false);
         }
         if let Some(intent) = session.close_ready {
-            return Ok(intent == (exit, confirm));
+            return Ok(intent.exit == exit && intent.confirm == confirm);
         }
         if let Some(request) = session.close_request.as_mut() {
             if exit && request.confirm == confirm {
@@ -543,6 +550,44 @@ pub(super) fn prepare_close(state: &State, exit: bool, confirm: bool) -> Result<
     }
     Ok(false)
 }
+pub(super) fn clean_draft_before_tray_close(state: &State) -> bool {
+    state
+        .modern_session
+        .borrow()
+        .as_ref()
+        .is_some_and(|session| {
+            session
+                .close_ready
+                .is_some_and(|receipt| !receipt.exit && receipt.clean_draft)
+        })
+}
+
+#[cfg(test)]
+pub(super) fn fixture_flush_tray_draft(state: &State, draft: Draft) -> Result<(), String> {
+    let mut session = {
+        let slot = state.app.borrow();
+        Session::new(slot.as_ref().unwrap())?
+    };
+    session.close_request = Some(CloseRequest {
+        id: 1,
+        exit: false,
+        confirm: false,
+        started: Instant::now(),
+    });
+    state.modern_session.replace(Some(session));
+    execute(
+        state,
+        Command::CloseReady {
+            id: 1,
+            scene: Some(draft.scene),
+            origin: draft.origin,
+            form_dirty: false,
+            blocked: false,
+        },
+    )?;
+    Ok(())
+}
+
 pub(super) fn close_failed(state: &State, message: &str) {
     if let Some(session) = state.modern_session.borrow_mut().as_mut() {
         session.close_ready = None;
@@ -719,7 +764,7 @@ fn page_name(page: Page) -> &'static str {
         Page::Scene => "scene",
     }
 }
-fn busy(app: &App) -> bool {
+pub(super) fn busy(app: &App) -> bool {
     app.runtime.pending_configuration()
         || app.pending_open.is_some()
         || app.connection_switching()
@@ -1013,7 +1058,7 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
             form_dirty,
             blocked,
         } => {
-            let (request, ask) = {
+            let (request, ask, clean_draft) = {
                 let mut slot = state.modern_session.borrow_mut();
                 let session = slot.as_mut().ok_or("Нет интерфейса")?;
                 if session
@@ -1024,12 +1069,19 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                     return Err("Устаревшее подтверждение закрытия".into());
                 }
                 let request = session.close_request.take().ok_or("Закрытие отменено")?;
+                let draft_flushed = scene.is_some();
                 if let Some(scene) = scene {
                     session.persist_draft(scene, origin)?;
                 }
                 let ask = needs_discard_confirmation(blocked, form_dirty, request.confirm)?;
                 session.close_deciding = ask;
-                (request, ask)
+                let clean_draft = draft_flushed
+                    && !form_dirty
+                    && session
+                        .draft
+                        .as_ref()
+                        .is_some_and(|draft| !draft.has_unsaved_changes());
+                (request, ask, clean_draft)
             };
             if ask {
                 let discard = confirm_unapplied_close(hwnd, request.exit);
@@ -1048,7 +1100,11 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                 }
             }
             if let Some(session) = state.modern_session.borrow_mut().as_mut() {
-                session.close_ready = Some((request.exit, request.confirm));
+                session.close_ready = Some(CloseReady {
+                    exit: request.exit,
+                    confirm: request.confirm,
+                    clean_draft,
+                });
             }
             if request.exit {
                 let result = resident::request(state, resident::Action::Exit, request.confirm);

@@ -2,6 +2,27 @@
 
 For downloads, see [GitHub Releases](https://github.com/376east/prismestra/releases). For physical device coverage, see the [compatibility table](docs/compatibility.md).
 
+## Preview 10 (0.1.0.10) · 2026-11-23
+
+### Discovery, scenes and outputs
+
+- Run another device search after the first scan finds nothing. If automatic setup cannot identify an OpenRGB controller, choose and configure it manually. [Empty scan](https://github.com/376east/prismestra/pull/191) · [Controller identification](https://github.com/376east/prismestra/pull/193)
+- See when Bluetooth is unavailable, retry the selected LCD connection, and get guidance when a saved LCD connection is missing. [Bluetooth](https://github.com/376east/prismestra/pull/187) · [LCD retry](https://github.com/376east/prismestra/pull/166) · [Missing LCD](https://github.com/376east/prismestra/pull/185)
+- Search the scene library by title or effect. Creating a scene or copying a preset opens the editor with the effect picker focused. Preview audio-reactive scenes with a test signal. [Search](https://github.com/376east/prismestra/pull/192) · [Scene editor](https://github.com/376east/prismestra/pull/181) · [Audio preview](https://github.com/376east/prismestra/pull/174)
+- Use the active scene's edge colors for monitor lighting. Set up an LCD with a temperature panel alone and pick a configured temperature source from a list. [Monitor lighting](https://github.com/376east/prismestra/pull/164) · [Temperature panel](https://github.com/376east/prismestra/pull/179) · [Source picker](https://github.com/376east/prismestra/pull/194)
+- Launch the portable app and configure its managed OpenRGB connection from Prismestra. The binary portable ZIP drops its legacy CMD and PowerShell scripts. [Direct launch](https://github.com/376east/prismestra/pull/165) · [Connections](https://github.com/376east/prismestra/pull/175) · [ZIP packaging](https://github.com/376east/prismestra/pull/189)
+- Keep network lighting failures visible in device status when switching an output off. The status shows the output as off after the new muted frame is sent successfully. [Network output status](https://github.com/376east/prismestra/pull/186)
+
+### Scene control and troubleshooting
+
+- Copy a summary of the selected output's status for troubleshooting. A device-search click just before the automatic pass starts now starts a manual search. [Status summary](https://github.com/376east/prismestra/pull/195) · [Early search](https://github.com/376east/prismestra/pull/196)
+- Place and move RGB devices on the scene canvas with the mouse or keyboard. Select overlapping devices individually and keep drag previews within the canvas. [Placement](https://github.com/376east/prismestra/pull/197) · [Overlap](https://github.com/376east/prismestra/pull/198) · [Canvas bounds](https://github.com/376east/prismestra/pull/199)
+- Try Quiet Shore (Тихий берег), a built-in gradient-wave scene. [Quiet Shore](https://github.com/376east/prismestra/pull/200)
+
+- Apply an ordinary saved scene from the tray after closing the editor without pending changes. [Tray scenes](https://github.com/376east/prismestra/pull/202)
+
+[Download Preview 10](https://github.com/376east/prismestra/releases/tag/v0.1.0-preview.10) · [All changes since Preview 8](https://github.com/376east/prismestra/compare/v0.1.0-preview.8...v0.1.0-preview.10)
+
 ## Preview 8 (0.1.0.8) · 2026-11-22
 
 - Start a lighting scene from the library. Preview and edit remain separate actions. Failed activation links to device status.
