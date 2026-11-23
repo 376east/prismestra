@@ -163,12 +163,20 @@ pub fn pixel_fragments_for_points(
     let payload = pixel_payload_for_points(colors, brightness, points)?;
     if colors.iter().all(|color| *color == Rgb::default()) {
         let off = off_packet(sequence);
-        return if fits(off.len(), pdu) {
-            Ok(vec![off])
-        } else {
-            Err("off packet exceeds negotiated ATT payload")
-        };
+        if fits(off.len(), pdu) {
+            return Ok(vec![off]);
+        }
+        // The default ATT MTU cannot carry the 21-byte off packet in one write.
+        // Keep the command body and encode it with the same V0 fragmentation.
+        if pdu == 23 {
+            return fragment_v0_body(&off[8..], sequence, pdu);
+        }
+        return Err("off packet exceeds negotiated ATT payload");
     }
+    fragment_v0_body(&payload, sequence, pdu)
+}
+
+fn fragment_v0_body(payload: &[u8], sequence: u8, pdu: u32) -> Result<Vec<Vec<u8>>, &'static str> {
     let maximum = pdu.saturating_sub(4).min(255) as usize;
     if maximum < 9 {
         return Err("ATT payload too small for pixel fragments");
@@ -365,12 +373,21 @@ fn pixel_fragments_reassemble_in_order_with_one_sequence() {
 }
 
 #[test]
-fn black_pixel_frame_preserves_existing_off_packet() {
+fn black_pixel_frame_preserves_the_off_command_at_default_att_mtu() {
     assert_eq!(
         pixel_fragments(&[Rgb::default(); PIXEL_LEDS], 15, 9, 24).unwrap(),
         [off_packet(9)]
     );
-    assert!(pixel_fragments(&[Rgb::default(); PIXEL_LEDS], 15, 9, 23).is_err());
+    let packets = pixel_fragments(&[Rgb::default(); PIXEL_LEDS], 15, 9, 23).unwrap();
+    assert_eq!(packets.len(), 2);
+    assert_eq!(&packets[0][..8], &[0x40, 9, 0, 0, 0, 13, 12, 0x0b]);
+    assert_eq!(&packets[1][..5], &[0x40, 9, 0x80, 1, 2]);
+    assert_eq!(
+        [&packets[0][8..], &packets[1][5..]].concat(),
+        off_packet(9)[8..]
+    );
+    assert!(packets.iter().all(|packet| fits(packet.len(), 23)));
+    assert!(pixel_fragments(&[Rgb::default(); PIXEL_LEDS], 15, 9, 22).is_err());
 }
 
 #[test]
