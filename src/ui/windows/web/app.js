@@ -587,7 +587,7 @@ function renderSettings() {
  return heading('Настройки','Настройки локального профиля.')
   + `<div class="settings-sections">
     <section class="parameter-panel"><h2>Диагностика</h2><div class="settings-links">${pageButton('temperatures')}${pageButton('connections')}${pageButton('sources','Источники температур')}</div></section>
-    <section class="parameter-panel"><h2>Алиса</h2><button class="button" data-action="alice-open">Подключить лампу кабинета</button></section>
+    <section class="parameter-panel"><h2>Алиса</h2><div class="settings-links"><button class="button" data-action="alice-open">Лампа кабинета</button></div></section>
     <section class="parameter-panel"><h2>Расписание</h2><p class="parameter-note">${schedule}</p><div class="settings-links">${pageButton('schedule','Управлять расписанием')}</div></section>
   </div>`;
 }
@@ -819,7 +819,7 @@ function nameDialog(mode) {
 window.prismestraReceive = message => {
  try {
   if(typeof message==='string')message=JSON.parse(message);
-  if(message.kind==='alice'){receiveAlice(message);return;}
+  if(message.kind==='alice'){if(message.sequence===aliceSequence)receiveAlice(message);return;}
   if(message.kind==='output_preview'){window.outputMap?.receive(message);return;}
   if(message.kind==='argb_channels'||message.kind==='argb_channel_saved'){window.argbChannel?.receive(message);return;}
   if(message.kind==='output_retry'){receiveOutputRetry(message);return;}
@@ -905,9 +905,12 @@ window.prismestraReceive = message => {
   syncControls();
  }
 };
-let aliceTimer, aliceTicket;
+let aliceTimer, aliceState, aliceSequence=0;
+let aliceLamps=[];
 function aliceRequest(action, options={}) {
- send({op:'alice',request:{action,...options}});
+ clearTimeout(aliceTimer);
+ if(!send({op:'alice',sequence:++aliceSequence,request:{action,...options}}) && action!=='cancel')
+  receiveAlice({error:'Не удалось связаться с Prismestra.'});
 }
 function aliceWait() {
  clearTimeout(aliceTimer);
@@ -915,25 +918,30 @@ function aliceWait() {
 }
 function aliceSelection() {
  const level=$('#alice-brightness');
- $('#alice-apply').disabled=!aliceTicket || $('#alice-lamp').value==='' || !level.value || !level.checkValidity();
+ const picker=$('#alice-lamp');
+ picker.disabled=level.disabled=Boolean(aliceState?.busy);
+ const chosen=Boolean(aliceState?.ticket) && !aliceState.busy && picker.value!=='';
+ $('#alice-turn-on').disabled=!chosen;
+ $('#alice-turn-off').disabled=!chosen;
+ $('#alice-apply').disabled=!chosen || !level.value || !level.checkValidity();
 }
 function receiveAlice(message) {
  const dialog=$('#alice-dialog');
  if(!dialog?.open)return;
  clearTimeout(aliceTimer);
- const signIn=dialog.querySelector('[data-action="alice-sign-in"]');
- const status=$('#alice-status');
- if(message.error){
-  status.textContent=message.error;
-  signIn.disabled=false;
-  aliceSelection();
-  return;
- }
- const state=message.state;
- status.textContent=state.message;
- signIn.disabled=state.busy;
- if(aliceTicket!==state.ticket){
-  aliceTicket=state.ticket;
+ const retry=dialog.querySelector('[data-action="alice-retry"]');
+ const signOut=dialog.querySelector('[data-action="alice-sign-out"]');
+ const state=message.error
+  ? {...(aliceState||{lamps:[],needsLogin:true}),busy:false,message:message.error}
+  : message.state;
+ aliceState=state;
+ $('#alice-status').textContent=state.message;
+ $('#alice-login').hidden=state.busy || !state.needsLogin;
+ retry.hidden=state.busy || !state.saved || state.needsLogin || Boolean(state.ticket);
+ signOut.hidden=!state.saved && !state.ticket;
+ signOut.disabled=state.busy;
+ if(aliceLamps.length!==state.lamps.length || aliceLamps.some((label,index)=>label!==state.lamps[index])){
+  aliceLamps=state.lamps;
   const picker=$('#alice-lamp');
   picker.replaceChildren();
   const placeholder=document.createElement('option');
@@ -946,15 +954,17 @@ function receiveAlice(message) {
    option.textContent=label;
    picker.append(option);
   });
-  $('#alice-choice').hidden=!state.lamps.length;
  }
+ $('#alice-choice').hidden=!state.lamps.length;
  aliceSelection();
- if(state.busy)aliceWait();
+ if(state.busy&&message.sequence!==undefined)aliceWait();
 }
 $('#alice-dialog')?.addEventListener('close',()=>{
  clearTimeout(aliceTimer);
- aliceTicket=undefined;
+ aliceState=undefined;
+ $('#alice-lamp').value='';
  $('#alice-choice').hidden=true;
+ $('#alice-remember').checked=false;
  aliceRequest('cancel');
 });
 $('#alice-lamp')?.addEventListener('change',aliceSelection);
@@ -1005,20 +1015,29 @@ document.addEventListener('click',event=>{
  }
  switch(b.dataset.action){
  case 'copy-output-status':void copyOutputStatus(b.dataset.copyOutput);break;
- case 'alice-open':$('#alice-dialog').showModal();aliceRequest('status');break;
+ case 'alice-open':
+  $('#alice-dialog').showModal();
+  receiveAlice({state:{busy:true,lamps:[],needsLogin:true,message:'Проверяем вход…'}});
+  aliceRequest('open');
+  break;
  case 'alice-close':$('#alice-dialog').close();break;
  case 'alice-sign-in':
-  b.disabled=true;
-  $('#alice-choice').hidden=true;
-  aliceTicket=undefined;
-  aliceRequest('sign_in');
+ case 'alice-retry':
+ case 'alice-sign-out':
+  if(aliceState?.busy)break;
+  receiveAlice({state:{...aliceState,busy:true,lamps:[]}});
+  if(b.dataset.action==='alice-sign-in')aliceRequest('sign_in',{remember:$('#alice-remember').checked});
+  else aliceRequest(b.dataset.action==='alice-retry'?'open':'sign_out');
   break;
+ case 'alice-turn-on':
+ case 'alice-turn-off':
  case 'alice-apply':{
-  const ticket=aliceTicket;
-  if(!ticket||$('#alice-lamp').value==='')break;
-  aliceTicket=undefined;
-  aliceSelection();
-  aliceRequest('apply',{ticket,lamp:Number($('#alice-lamp').value),brightness:Number($('#alice-brightness').value)});
+  const ticket=aliceState?.ticket;
+  if(!ticket||aliceState.busy||$('#alice-lamp').value==='')break;
+  const lamp=Number($('#alice-lamp').value);
+  receiveAlice({state:{...aliceState,busy:true}});
+  if(b.dataset.action!=='alice-apply')aliceRequest('power',{ticket,lamp,on:b.dataset.action==='alice-turn-on'});
+  else aliceRequest('apply',{ticket,lamp,brightness:Number($('#alice-brightness').value)});
   break;
  }
  case 'open-argb': {
