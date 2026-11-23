@@ -96,7 +96,7 @@
       ${[['#d4d9e0',appearanceText('Серебристый', 'Silver')],['#b8a4ed',appearanceText('Лиловый', 'Lilac')],['#a4ceb7',appearanceText('Шалфей', 'Sage')],['#edaa94',appearanceText('Коралловый', 'Coral')]].map(([color,name]) => `<button type="button" data-prism-accent="${color}" style="--prism-swatch:${color}" aria-label="${name}" title="${name}"></button>`).join('')}
     </div>
     <div class="prism-appearance-footer"><button type="button" id="prism-appearance-reset">${appearanceText('Сбросить', 'Reset')}</button><span id="prism-appearance-status" role="status" aria-live="polite"></span></div>`;
-  document.body.append(panel);
+  trigger.after(panel);
   trigger.setAttribute('aria-controls', panel.id);
   trigger.setAttribute('aria-haspopup', 'dialog');
   trigger.setAttribute('aria-expanded', 'false');
@@ -123,7 +123,7 @@
   function close(restoreFocus = true) {
     panel.hidden = true;
     trigger.setAttribute('aria-expanded', 'false');
-    if (restoreFocus) trigger.focus();
+    if (restoreFocus) trigger.focus({preventScroll: true});
   }
   trigger.addEventListener('click', () => {
     if (!panel.hidden) { close(); return; }
@@ -134,8 +134,11 @@
     panel.querySelector('[data-prism-preset]').focus();
   });
   panel.querySelector('.prism-appearance-close').addEventListener('click', () => close());
-  document.addEventListener('keydown', event => {
-    if (!panel.hidden && event.key === 'Escape') { event.preventDefault(); close(); }
+  trigger.parentElement.addEventListener('keydown', event => {
+    if (!panel.hidden && event.key === 'Escape' && !event.defaultPrevented && !event.isComposing) {
+      event.preventDefault();
+      close();
+    }
   });
   document.addEventListener('click', event => {
     if (!panel.hidden && !panel.contains(event.target) && !trigger.contains(event.target)) close(false);
