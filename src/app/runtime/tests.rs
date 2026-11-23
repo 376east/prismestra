@@ -642,6 +642,164 @@ impl ReportTransport for Reports {
         Ok(ACK_BYTES)
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn local_rgb_off_waits_for_a_black_submission() {
+    let stand = Stand::new();
+    let mut runtime = stand.runtime(false);
+    let record = Arc::new(Record::default());
+    runtime
+        .attach_rgb(
+            "body",
+            vec![],
+            rgb_factory(
+                &stand.document,
+                "body",
+                record.clone(),
+                Arc::new(AtomicUsize::new(0)),
+            ),
+        )
+        .unwrap();
+    let device = &stand.document.lighting.setup.devices[0];
+    runtime.set_group(Target::Pc, true).unwrap();
+    let start = now();
+    runtime.tick(start, wall()).unwrap();
+    wait(|| matches!(runtime.output_activity(device), OutputActivity::Sent(_)));
+    assert!(
+        record.0.lock().unwrap()[0]
+            .iter()
+            .any(|pixel| *pixel != Rgb::default())
+    );
+
+    runtime.set_group(Target::Pc, false).unwrap();
+    assert!(matches!(
+        runtime.output_activity(device),
+        OutputActivity::TurningOff
+    ));
+    runtime.tick(start + 50_000, wall()).unwrap();
+    wait(|| {
+        matches!(
+            runtime.output_activity(device),
+            OutputActivity::OffSubmitted
+        )
+    });
+    assert_eq!(
+        record.0.lock().unwrap().last().unwrap(),
+        &vec![Rgb::default(); device.leds]
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn lcd_off_waits_for_its_blank_ack_and_exposes_a_failure() {
+    use std::sync::mpsc::{Receiver, Sender, channel};
+
+    struct HeldAck {
+        entered: Sender<()>,
+        release: Receiver<bool>,
+        next_ack: u8,
+    }
+
+    impl ReportTransport for HeldAck {
+        fn now_ms(&self) -> u64 {
+            Reports.now_ms()
+        }
+
+        fn write_report(
+            &mut self,
+            report: &[u8; REPORT_BYTES],
+            timeout: u64,
+        ) -> Result<usize, String> {
+            Reports.write_report(report, timeout)
+        }
+
+        fn read_ack(
+            &mut self,
+            response: &mut [u8; ACK_BYTES],
+            timeout: u64,
+        ) -> Result<usize, String> {
+            if self.next_ack == 1 {
+                self.entered.send(()).map_err(|error| error.to_string())?;
+                if !self
+                    .release
+                    .recv_timeout(Duration::from_secs(2))
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err("Injected blank ACK failure".into());
+                }
+            }
+            self.next_ack = self.next_ack.saturating_add(1);
+            Reports.read_ack(response, timeout)
+        }
+    }
+
+    for ack_ok in [true, false] {
+        let mut stand = Stand::new();
+        let assets = stand.root.join("assets");
+        let store = Assets::new(assets.clone()).unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1, 1, image::Rgb([120, 0, 0])))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        stand.document.lcd[0].config.media =
+            Some(store.put(png.get_ref(), 32 * 1024 * 1024).unwrap());
+        let mut runtime = stand.runtime(false);
+        let (entered, waiting) = channel();
+        let (release, released) = channel();
+        let released = Mutex::new(Some(released));
+        runtime
+            .attach_lcd(
+                "lcd",
+                vec![],
+                Arc::new(move |config, _| {
+                    let store = Assets::new(assets.clone())?;
+                    let transport = HeldAck {
+                        entered: entered.clone(),
+                        release: released.lock().unwrap().take().unwrap(),
+                        next_ack: 0,
+                    };
+                    Ok((lcd::Controller::new(config, &store)?, Box::new(transport)))
+                }),
+            )
+            .unwrap();
+        let device = stand
+            .document
+            .lighting
+            .setup
+            .devices
+            .iter()
+            .find(|d| d.id == "lcd")
+            .unwrap();
+        runtime.set_group(Target::Pc, true).unwrap();
+        let start = now();
+        runtime.tick(start, wall()).unwrap();
+        wait(|| matches!(runtime.output_activity(device), OutputActivity::Sent(1)));
+
+        runtime.set_group(Target::Pc, false).unwrap();
+        runtime.tick(start + 1_000, wall()).unwrap();
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(
+            runtime.output_activity(device),
+            OutputActivity::TurningOff
+        ));
+        release.send(ack_ok).unwrap();
+        if ack_ok {
+            wait(|| runtime.lcd_status("lcd").unwrap().lcd_state == Some(lcd::State::Blanked));
+            assert!(matches!(
+                runtime.output_activity(device),
+                OutputActivity::OffSubmitted
+            ));
+        } else {
+            wait(|| runtime.lcd_status("lcd").unwrap().phase == lcd_worker::Phase::Failed);
+            assert!(matches!(
+                runtime.output_activity(device),
+                OutputActivity::Unavailable(Some(_))
+            ));
+        }
+    }
+}
+
 struct Pixels;
 impl ambient::Provider for Pixels {
     fn poll(

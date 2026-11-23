@@ -719,6 +719,7 @@ const transportLabels = new Map([
 ]);
 const outputStatuses=new Map([
  ['Выключено','Off'],['Выключается','Turning off'],['Подключается','Connecting'],
+ ['Команда выключения отправлена','Off command sent'],
  ['Ожидает повтора','Waiting to retry'],['Кадры отправлены','Frames sent'],['Недоступно','Unavailable'],
  ['Предпросмотр','Preview'],['Подключение занято другим выходом Prismestra','Connection in use by another Prismestra output'],
  ['Проверьте доступ Home Assistant','Check Home Assistant access'],

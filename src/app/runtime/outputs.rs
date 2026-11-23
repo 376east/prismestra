@@ -5,6 +5,7 @@ use super::*;
 pub(crate) enum OutputActivity {
     Off,
     TurningOff,
+    OffSubmitted,
     Connecting,
     Retrying(String),
     Sent(u64),
@@ -87,19 +88,21 @@ impl Runtime {
 
     #[cfg(windows)]
     pub(crate) fn output_activity(&self, device: &crate::devices::Device) -> OutputActivity {
-        use crate::{devices::Driver, runtime::output::Phase};
+        use crate::runtime::output::Phase;
 
         let id = &device.id;
         let is_lcd = device.role == Role::Lcd;
         let group_off = !self.desired.on(self.target(id));
-        // A registered network output still has to deliver Off. Keep its failure visible.
-        let show_network_status_while_off = group_off
-            && matches!(device.driver, Driver::HomeAssistant | Driver::WledDdp)
-            && self.rgb_specs.contains_key(id)
-            && !self.rgb_requires_action(id);
+        // A registered output still has to submit Off. Keep its failure visible.
+        let no_off_status = group_off
+            && if is_lcd {
+                !self.lcd_specs.contains_key(id)
+            } else {
+                !self.rgb_specs.contains_key(id) || self.rgb_requires_action(id)
+            };
         if !device.enabled
             || self.stopped
-            || (group_off && !show_network_status_while_off)
+            || no_off_status
             || (is_lcd
                 && self
                     .document
@@ -140,6 +143,17 @@ impl Runtime {
             let Some(status) = self.lcd_status(id) else {
                 return OutputActivity::Unavailable(None);
             };
+            if group_off && status.phase == lcd_worker::Phase::Ready {
+                return match status.lcd_state {
+                    Some(lcd::State::Failed(error)) => failed_activity(Some(error)),
+                    Some(lcd::State::Blanked)
+                        if status.processed_revision == status.last_accepted_revision =>
+                    {
+                        OutputActivity::OffSubmitted
+                    }
+                    _ => OutputActivity::TurningOff,
+                };
+            }
             let phase = match status.phase {
                 lcd_worker::Phase::Connecting => Phase::Connecting,
                 lcd_worker::Phase::Ready => Phase::Ready,
@@ -157,7 +171,7 @@ impl Runtime {
             }
             if group_off && status.phase == Phase::Ready {
                 return if self.host.mute_submitted(id, &status) {
-                    OutputActivity::Off
+                    OutputActivity::OffSubmitted
                 } else {
                     OutputActivity::TurningOff
                 };

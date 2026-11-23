@@ -1804,6 +1804,8 @@ function checkEnglishApplicationLanguage() {
  checkSearchRetryRecovery(preview,'Retry search');
  checkOutputPageLanguage(preview,true);
  checkOutputPageLanguage(context,false);
+ assert.equal(vm.runInContext("outputStatusLabel('Команда выключения отправлена')",preview),'Off command sent');
+ assert.equal(vm.runInContext("outputStatusLabel('Команда выключения отправлена')",context),'Команда выключения отправлена');
  const installed={...initial,installedProfile:true};
  vm.runInContext('view="devices"',preview);
  receive('snapshot',{...installed,editor:{page:'devices',index:0,targets:[],fields:[],dirty:true}});
