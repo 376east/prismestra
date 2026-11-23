@@ -1000,6 +1000,74 @@ index e7e6d616da0cb4f0b28cd04f37ccee11f7b38a63..bdcab12bc97c2d7b6047a7c01ccf3c8d
          else if(option == "--server")
          {
              server_start            = true;
+diff --git a/i2c_smbus/Windows/i2c_smbus_amdadl.cpp b/i2c_smbus/Windows/i2c_smbus_amdadl.cpp
+index 8f38ed48704d459b207e16d273f222b17352471f..aeeecf648d879617f200acff942b642b6de862d1 100644
+--- a/i2c_smbus/Windows/i2c_smbus_amdadl.cpp
++++ b/i2c_smbus/Windows/i2c_smbus_amdadl.cpp
+@@ -9,6 +9,7 @@
+ |   SPDX-License-Identifier: GPL-2.0-or-later               |
+ \*---------------------------------------------------------*/
+ 
++#include <chrono>
+ #include <string>
+ #include "DetectionManager.h"
+ #include "i2c_smbus_amdadl.h"
+@@ -29,6 +30,25 @@ ADL2_ADAPTER_ADAPTERINFOX2_GET    ADL2_Adapter_AdapterInfoX2_Get;
+ ADL2_ADAPTER_ADAPTERINFOX4_GET    ADL2_Adapter_AdapterInfoX4_Get;
+ ADL2_DISPLAY_WRITEANDREADI2C      ADL2_Display_WriteAndReadI2C;
+ 
++template<typename Call>
++static int TimedAdlDiscoveryCall(const char* stage, Call call)
++{
++#ifdef PRISMESTRA_PC_BACKEND
++    const auto began = std::chrono::steady_clock::now();
++    const int status = call();
++    const auto elapsed = std::chrono::steady_clock::now() - began;
++    if(elapsed >= std::chrono::milliseconds(250))
++    {
++        LOG_WARNING("[AMD ADL] Slow discovery stage: %s elapsed_ms=%llu status=%d", stage,
++                    static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()), status);
++    }
++    return status;
++#else
++    (void)stage;
++    return call();
++#endif
++}
++
+ int LoadLibraries()
+ {
+     HINSTANCE hDLL;
+@@ -96,7 +116,7 @@ i2c_smbus_amdadl::i2c_smbus_amdadl(ADL_CONTEXT_HANDLE context, int adapter_index
+ 
+     this->context = context;
+ 
+-    if (ADL_OK != ADL2_Adapter_AdapterInfoX4_Get(context, adapter_index, &num_of_devices, &info))
++    if (ADL_OK != TimedAdlDiscoveryCall("adapter_details", [&] { return ADL2_Adapter_AdapterInfoX4_Get(context, adapter_index, &num_of_devices, &info); }))
+     {
+         printf("Cannot get Adapter Info!\n");
+     }
+@@ -249,9 +269,9 @@ bool i2c_smbus_amdadl_detect()
+ {
+     ADL_CONTEXT_HANDLE context;
+ 
+-    if(ADL_OK == LoadLibraries())
++    if(ADL_OK == TimedAdlDiscoveryCall("load_library", LoadLibraries))
+     {
+-        if (ADL_OK != ADL2_Main_Control_Create(::ADL_Main_Memory_Alloc, 1, &context))
++        if (ADL_OK != TimedAdlDiscoveryCall("create_context", [&] { return ADL2_Main_Control_Create(::ADL_Main_Memory_Alloc, 1, &context); }))
+         {
+             printf("Cannot get handle!\n");
+             return(false);
+@@ -260,7 +280,7 @@ bool i2c_smbus_amdadl_detect()
+         {
+             int num_of_devices;
+             AdapterInfoX2* info;
+-            if (ADL_OK == ADL2_Adapter_AdapterInfoX4_Get(context, -1, &num_of_devices, &info))
++            if (ADL_OK == TimedAdlDiscoveryCall("enumerate_adapters", [&] { return ADL2_Adapter_AdapterInfoX4_Get(context, -1, &num_of_devices, &info); }))
+             {
+                 int last_bus_number = -1;
+                 for(int i = 0; i < num_of_devices; i++)
 diff --git a/i2c_smbus/Windows/i2c_smbus_pawnio.cpp b/i2c_smbus/Windows/i2c_smbus_pawnio.cpp
 index 35cd3fda18f704ee4d4f67483325ce83d1d09371..fd9ce9c7517b35ce254c5cac7bf1fb6ce3caf7f9 100644
 --- a/i2c_smbus/Windows/i2c_smbus_pawnio.cpp
@@ -1750,71 +1818,3 @@ index 0000000000000000000000000000000000000000..670553a52ca329d631607e938b1c954b
 +    CloseHandle(mutex);
 +    std::cout << "PASS: private mutex busy/released/abandoned; bounded admission, HID progress, no duplicate scan, partial terminal, probe circuit, independent output, cancellation, no IO on failed acquisition\n";
 +}
-diff --git a/i2c_smbus/Windows/i2c_smbus_amdadl.cpp b/i2c_smbus/Windows/i2c_smbus_amdadl.cpp
-index 8f38ed48704d459b207e16d273f222b17352471f..aeeecf648d879617f200acff942b642b6de862d1 100644
---- a/i2c_smbus/Windows/i2c_smbus_amdadl.cpp
-+++ b/i2c_smbus/Windows/i2c_smbus_amdadl.cpp
-@@ -9,6 +9,7 @@
- |   SPDX-License-Identifier: GPL-2.0-or-later               |
- \*---------------------------------------------------------*/
- 
-+#include <chrono>
- #include <string>
- #include "DetectionManager.h"
- #include "i2c_smbus_amdadl.h"
-@@ -29,6 +30,25 @@ ADL2_ADAPTER_ADAPTERINFOX2_GET    ADL2_Adapter_AdapterInfoX2_Get;
- ADL2_ADAPTER_ADAPTERINFOX4_GET    ADL2_Adapter_AdapterInfoX4_Get;
- ADL2_DISPLAY_WRITEANDREADI2C      ADL2_Display_WriteAndReadI2C;
- 
-+template<typename Call>
-+static int TimedAdlDiscoveryCall(const char* stage, Call call)
-+{
-+#ifdef PRISMESTRA_PC_BACKEND
-+    const auto began = std::chrono::steady_clock::now();
-+    const int status = call();
-+    const auto elapsed = std::chrono::steady_clock::now() - began;
-+    if(elapsed >= std::chrono::milliseconds(250))
-+    {
-+        LOG_WARNING("[AMD ADL] Slow discovery stage: %s elapsed_ms=%llu status=%d", stage,
-+                    static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()), status);
-+    }
-+    return status;
-+#else
-+    (void)stage;
-+    return call();
-+#endif
-+}
-+
- int LoadLibraries()
- {
-     HINSTANCE hDLL;
-@@ -96,7 +116,7 @@ i2c_smbus_amdadl::i2c_smbus_amdadl(ADL_CONTEXT_HANDLE context, int adapter_index
- 
-     this->context = context;
- 
--    if (ADL_OK != ADL2_Adapter_AdapterInfoX4_Get(context, adapter_index, &num_of_devices, &info))
-+    if (ADL_OK != TimedAdlDiscoveryCall("adapter_details", [&] { return ADL2_Adapter_AdapterInfoX4_Get(context, adapter_index, &num_of_devices, &info); }))
-     {
-         printf("Cannot get Adapter Info!\n");
-     }
-@@ -249,9 +269,9 @@ bool i2c_smbus_amdadl_detect()
- {
-     ADL_CONTEXT_HANDLE context;
- 
--    if(ADL_OK == LoadLibraries())
-+    if(ADL_OK == TimedAdlDiscoveryCall("load_library", LoadLibraries))
-     {
--        if (ADL_OK != ADL2_Main_Control_Create(::ADL_Main_Memory_Alloc, 1, &context))
-+        if (ADL_OK != TimedAdlDiscoveryCall("create_context", [&] { return ADL2_Main_Control_Create(::ADL_Main_Memory_Alloc, 1, &context); }))
-         {
-             printf("Cannot get handle!\n");
-             return(false);
-@@ -260,7 +280,7 @@ bool i2c_smbus_amdadl_detect()
-         {
-             int num_of_devices;
-             AdapterInfoX2* info;
--            if (ADL_OK == ADL2_Adapter_AdapterInfoX4_Get(context, -1, &num_of_devices, &info))
-+            if (ADL_OK == TimedAdlDiscoveryCall("enumerate_adapters", [&] { return ADL2_Adapter_AdapterInfoX4_Get(context, -1, &num_of_devices, &info); }))
-             {
-                 int last_bus_number = -1;
-                 for(int i = 0; i < num_of_devices; i++)
