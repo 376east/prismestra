@@ -54,7 +54,7 @@ pub(super) struct Startup {
     discovery_issues: Vec<String>,
     unconfigured_argb: Vec<crate::transport::openrgb::UnconfiguredArgb>,
     unknown_openrgb_controller: bool,
-    completed_empty_pass: bool,
+    observed_empty_search: bool,
     enabled: bool,
     initialized: bool,
     handover: Option<JoinHandle<Result<(), String>>>,
@@ -83,7 +83,7 @@ impl Startup {
             discovery_issues: Vec::new(),
             unconfigured_argb: Vec::new(),
             unknown_openrgb_controller: false,
-            completed_empty_pass: false,
+            observed_empty_search: false,
             enabled,
             initialized: false,
             handover: None,
@@ -145,7 +145,7 @@ impl Startup {
             self.attempts = 0;
             self.search_limit = 1;
             self.next = now;
-            self.completed_empty_pass = false;
+            self.observed_empty_search = false;
         }
         self.enabled = true;
         self.phase = "discovering";
@@ -169,9 +169,17 @@ impl Startup {
         self.phase = "discovering";
     }
 
+    fn record_empty_sdk_inventory(&mut self) -> bool {
+        if self.observed_empty_search || self.attempts >= self.search_limit {
+            return false;
+        }
+        self.observed_empty_search = true;
+        true
+    }
+
     fn record_search_result(&mut self, empty: bool, now: Instant) {
         self.phase = "discovered";
-        self.completed_empty_pass = empty;
+        self.observed_empty_search = empty;
         self.schedule_next_search(now);
     }
 
@@ -179,7 +187,7 @@ impl Startup {
         match self.phase {
             "complete" => Some("complete"),
             "discovered" if self.attempts >= self.search_limit => Some("complete"),
-            _ if self.enabled && self.completed_empty_pass => Some("continuing"),
+            _ if self.enabled && self.observed_empty_search => Some("continuing"),
             _ => None,
         }
     }
@@ -627,7 +635,9 @@ impl App {
             return Ok(false);
         }
         if !self.first_run.worker.is_idle() {
-            return Ok(false);
+            return Ok(self.first_run.worker.take_empty_sdk_observation()
+                && self.runtime.document().lighting.setup.devices.is_empty()
+                && self.first_run.record_empty_sdk_inventory());
         }
         if self.first_run.complete_search() {
             self.set_first_run_status(
@@ -670,6 +680,23 @@ impl App {
 mod tests {
     use super::*;
     use crate::devices::Driver;
+
+    #[test]
+    fn sdk_empty_observation_surfaces_while_first_pass_is_still_discovering() {
+        let mut startup = Startup::new(true);
+        startup.initialized = true;
+        let due = startup.next;
+        startup.record_search_started();
+
+        assert_eq!(startup.empty_search_result(), None);
+        assert!(startup.record_empty_sdk_inventory());
+        assert_eq!(startup.empty_search_result(), Some("continuing"));
+        assert!(!startup.record_empty_sdk_inventory());
+        assert_eq!(startup.phase, "discovering");
+        assert_eq!((startup.attempts, startup.next), (1, due));
+        assert!(!startup.can_retry_search(due));
+        assert!(!startup.complete_search());
+    }
 
     #[test]
     fn empty_result_is_visible_before_the_automatic_search_finishes() {

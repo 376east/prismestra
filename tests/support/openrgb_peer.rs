@@ -18,6 +18,7 @@ pub struct Peer {
     socket: Arc<Mutex<Option<TcpStream>>>,
     paused: Arc<AtomicBool>,
     changed_identity: Arc<AtomicBool>,
+    inventory_hidden: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
 fn word(out: &mut Vec<u8>, n: u16) {
@@ -96,6 +97,11 @@ impl Peer {
         self.changed_identity.store(changed, Ordering::Release);
     }
 
+    #[allow(dead_code)]
+    pub fn hide_inventory(&self, hidden: bool) {
+        self.inventory_hidden.store(hidden, Ordering::Release);
+    }
+
     pub fn new(duplicate: bool) -> Self {
         Self::start(duplicate, Some(14), false, None, 0)
     }
@@ -130,6 +136,8 @@ impl Peer {
         let socket = Arc::new(Mutex::new(None));
         let paused = Arc::new(AtomicBool::new(false));
         let changed_identity = Arc::new(AtomicBool::new(false));
+        let inventory_hidden = Arc::new(AtomicBool::new(false));
+        let hidden = inventory_hidden.clone();
         let calls: Calls = Arc::new(Mutex::new(vec![]));
         let (done, current, saved) = (stop.clone(), socket.clone(), calls.clone());
         let (reject, changed) = (paused.clone(), changed_identity.clone());
@@ -175,7 +183,7 @@ impl Peer {
                     let result = match kind {
                         40 => packet(&mut stream, device, kind, &6u32.to_le_bytes()),
                         52 => packet(&mut stream, device, 53, &(1u32 | 1 << 30).to_le_bytes()),
-                        0 if controller_kind.is_none() => {
+                        0 if controller_kind.is_none() || hidden.load(Ordering::Acquire) => {
                             packet(&mut stream, device, kind, &0u32.to_le_bytes())
                         }
                         0 => {
@@ -243,6 +251,7 @@ impl Peer {
             socket,
             paused,
             changed_identity,
+            inventory_hidden,
             thread: Some(thread),
         }
     }
