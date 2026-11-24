@@ -328,8 +328,22 @@ fn lost_capture_uses_base_scene_until_fresh_pixels_return_with_current_geometry(
     let mut changed = runtime.document().clone();
     changed.lighting.setup.canvas.width = 37;
     changed.lighting.setup.canvas.height = 9;
-    changed.ambient.routes[0].zone.reverse = true;
+    let new_leds = 96;
+    let mut zone = Zone::linear(new_leds, true, Mode::ScreenCopy).unwrap();
+    zone.width = 48;
+    zone.height = 2;
+    changed.ambient.routes[0].zone = zone;
+    changed
+        .lighting
+        .setup
+        .devices
+        .iter_mut()
+        .find(|device| device.id == "ambient")
+        .unwrap()
+        .leds = new_leds;
     let reversed = scene_edges(&changed, context);
+    assert_eq!(original.len(), 150);
+    assert_eq!(reversed.len(), new_leds);
     let mut forward_document = changed.clone();
     forward_document.ambient.routes[0].zone.reverse = false;
     let forward = scene_edges(&forward_document, context);
@@ -337,20 +351,42 @@ fn lost_capture_uses_base_scene_until_fresh_pixels_return_with_current_geometry(
     assert_eq!(reversed, forward.into_iter().rev().collect::<Vec<_>>());
 
     let capture_generation = runtime.capture_status().unwrap().generation;
-    let outputs = runtime.output_plan();
+    let mut outputs = runtime.output_plan();
+    outputs.rgb[0].2 = rgb_factory(
+        &changed,
+        "ambient",
+        record.clone(),
+        Arc::new(AtomicUsize::new(0)),
+    );
     runtime.request_outputs_for(changed, outputs).unwrap();
+    // Clear observations only after the old owner can no longer write.
+    wait(|| runtime.drained());
+    record.0.lock().unwrap().clear();
+    let received = || {
+        let frames = record.0.lock().unwrap();
+        assert!(
+            frames.iter().all(|frame| frame.len() == new_leds),
+            "old route length reached the receiver after the replacement"
+        );
+        frames.last().cloned()
+    };
     wait(|| {
         runtime.tick(now(), wall()).unwrap();
         !runtime.pending_configuration()
             && runtime
                 .capture_status()
                 .is_some_and(|s| s.generation != capture_generation)
-            && record.last().is_some_and(|frame| {
+            && received().is_some_and(|frame| {
                 frame.first().is_some_and(green) && frame.last().is_some_and(blue)
             })
     });
     mode.store(0, Ordering::SeqCst);
-    wait(|| record.last().as_ref() == Some(&reversed));
+    wait(|| received().as_ref() == Some(&reversed));
+    #[cfg(windows)]
+    assert_eq!(
+        runtime.ambient_source_detail("ambient"),
+        Some("Базовая сцена · кадр монитора устарел")
+    );
     mode.store(1, Ordering::SeqCst);
-    wait(|| record.last().is_some_and(|frame| frame.iter().all(green)));
+    wait(|| received().is_some_and(|frame| frame.iter().all(green)));
 }
