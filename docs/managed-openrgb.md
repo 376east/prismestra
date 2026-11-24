@@ -2,7 +2,7 @@
 
 Prismestra can own a local OpenRGB SDK server without its window or tray icon. Executable, configuration directory and numeric loopback endpoint are machine settings; device models/counts and personal paths are not compiled in. Remote or manually managed servers remain external.
 
-The Windows installer bundles and configures a private backend automatically, including its protected authorization policy. Its first-run coordinator can discover devices before saved bindings exist. See [the installed startup path](windows-installer.md).
+The Windows installer includes a pinned OpenRGB build and configures it automatically with a protected authorization policy. You can install Prismestra on a PC that has never had OpenRGB installed. The first-run coordinator can discover devices before saved bindings exist. The installer guide describes where the files go. The component guide records the upstream source, local patch and licenses. [Installer guide](windows-installer.md) · [Component verification](openrgb-component-verification.md)
 
 ## Configure a portable backend
 
@@ -34,7 +34,7 @@ To change the authorized OpenRGB path or SHA-256, have the administrator who pro
 
 The matching source ZIP retains `prismestra-source/scripts/portable/Configure OpenRGB.ps1` for development and administrator compatibility. For initial association with a task the administrator has independently verified, the utility accepts `-AuthorizedTaskName` and an explicit `-StateDirectory` pointing to the portable folder's `data/state`. The utility checks that the task exists. Verification of its action, principal and protected files remains the administrator's responsibility. The utility cannot reauthorize an existing task or validate a changed pin against its action.
 
-The helper verifies the parent's PID, creation time and executable path. Nonce-bound heartbeat, status and cancel files reject stale sessions. The private controls use protocol2 and a boot-relative active-time clock, excluding sleep/hibernation and UTC corrections; deploy the helper launcher and application together. Parent death, cancellation or active heartbeat loss releases only its owned child. A bounded diagnostic history survives helper restarts. [Helper](../src/app/backend_helper.rs), [clock contract, diagnostics and actual boot gates](startup-recovery.md).
+The installed helper verifies process identities during bootstrap and uses an authenticated local pipe to exchange heartbeats, readiness and shutdown commands. The private portable task uses nonce-bound control files. Both use a Windows active-time clock that excludes sleep, hibernation and UTC corrections. Loss of the parent or its lease releases only the owned child. [Helper](../src/app/backend_helper.rs) · [Recovery and diagnostics](startup-recovery.md)
 
 ## Coexistence with other software
 
@@ -48,4 +48,4 @@ An existing OpenRGB device can report a different zone layout after a configurat
 
 ## Verification limits
 
-Software fixtures cover multiple endpoints, IPv4/IPv6 ownership, foreign ports, wrong hashes, stale identities/status, backoff, cancellation, owner crash/port release, candidate transactions and targeted recovery. Setup tests never run their fake backend. These do not certify physical controllers, clean Windows or suspend/resume. Persistent errors remain visible in Connections/output status; recovery is not an unlimited hot loop. OpenRGB remains a separate internal process and external dependency, not bundled here. Management does not create support for unknown protocols.
+Software fixtures cover endpoint ownership, binary pins, stale identities, backoff, cancellation, child exit and targeted recovery. Clean Windows installation, physical output and suspend/resume have separate verification records. Persistent errors remain visible in Connections and output status. [Verified status](status.md)
