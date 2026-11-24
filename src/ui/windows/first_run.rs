@@ -129,11 +129,13 @@ impl Startup {
         }
     }
     pub(super) fn cancel(&mut self, reason: CancellationReason) {
+        if self.enabled {
+            self.cancellation_reason.get_or_insert(reason);
+        }
         self.enabled = false;
         self.unconfigured_argb.clear();
         self.unknown_openrgb_controller = false;
         self.phase = "cancelled";
-        self.cancellation_reason.get_or_insert(reason);
         self.worker.cancel();
     }
     pub(super) fn cancel_for_import(&mut self) {
@@ -931,6 +933,17 @@ mod tests {
         assert!(startup.needs_report(runtime.intent_receipt()));
 
         startup.retry_search(runtime.document(), &profile, 1, Instant::now());
+        assert_eq!(startup.cancellation_reason, None);
+    }
+
+    #[test]
+    fn shutdown_after_completed_discovery_does_not_claim_to_have_interrupted_it() {
+        let mut startup = Startup::new(true);
+        startup.initialized = true;
+        startup.attempts = STARTUP_SEARCHES;
+        assert!(startup.complete_search());
+        startup.cancel(CancellationReason::Shutdown);
+        assert_eq!(startup.phase, "cancelled");
         assert_eq!(startup.cancellation_reason, None);
     }
 
