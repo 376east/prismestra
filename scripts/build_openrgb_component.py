@@ -70,6 +70,19 @@ def apply_locked_patch(source, patch, expected_sha256):
         )
 
 
+def stage_pinned_hidapi(runtime, archives, dependency_lock, dependencies, root, vsdevcmd):
+    from components.build_hidapi import build
+    from components.package_openrgb_component import hidapi_patch
+
+    patch = hidapi_patch(dependency_lock, dependencies)
+    if patch is None:
+        return
+    pins = dependencies["files"]["hidapi-hotplug.dll"]
+    archive = archives / f"hidapi-hotplug-{pins['source_revision']}-source.zip"
+    rebuilt = build(archive, patch, pins, root / "hidapi-build", vsdevcmd)
+    shutil.copy2(rebuilt, runtime / "hidapi-hotplug.dll")
+
+
 def build_component(root, vsdevcmd):
     from components.verify_openrgb_component import REQUIRED, MSVC_RUNTIME
     source_lock = COMPONENT / "source-lock.json"
@@ -81,7 +94,7 @@ def build_component(root, vsdevcmd):
     tools = {name: fetch(root, name, *PINNED_INPUTS[name])
              for name in PINNED_INPUTS}
 
-    # Reuse the published, pinned user-mode dependency bytes and source archives.
+    # Reuse the pinned source archives and unchanged user-mode dependencies.
     # The previous OpenRGB.exe is deliberately excluded from the new component.
     with ZipFile(tools["Prismestra-Sources-0.1.0.5.zip"]) as previous:
         base = root / "previous-component.zip"
@@ -102,6 +115,7 @@ def build_component(root, vsdevcmd):
             role, name = entry["path"].split("/")
             if role == "source":
                 (archives / name).write_bytes(previous.read(entry["path"]))
+    stage_pinned_hidapi(runtime, archives, dependency_lock, read(dependency_lock), root, vsdevcmd)
 
     jom = root / "jom"
     with ZipFile(tools["jom.zip"]) as archive:

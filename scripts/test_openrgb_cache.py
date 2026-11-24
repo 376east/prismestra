@@ -14,6 +14,7 @@ import build_openrgb_component as builder
 import build_windows_candidate as candidate
 import openrgb_cache as cache
 from components import verify_openrgb_component as verifier
+from components import build_hidapi
 from test_package_installer import amd64_fixture
 
 
@@ -34,6 +35,55 @@ class OpenRGBCacheTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         return data
+
+    def test_patched_hidapi_staging_requires_exact_build_tools_and_dll(self):
+        runtime = self.root / "runtime"
+        runtime.mkdir()
+        dll = runtime / "hidapi-hotplug.dll"
+        dll.write_bytes(b"old baseline DLL")
+        archive = self.root / "archives" / f"hidapi-hotplug-{'a' * 40}-source.zip"
+        archive.parent.mkdir()
+        with ZipFile(archive, "w") as source:
+            source.writestr(f"hidapi-hotplug-{'a' * 40}/windows/hid.c", b"pinned fixture source")
+        self.component.mkdir(parents=True)
+        overlay = self.component / "hidapi-teardown.patch"
+        overlay.write_bytes(b"pinned fixture patch")
+        lock = self.component / "dependency-lock.json"
+        candidate = b"expected rebuilt DLL"
+        pins = {
+            "source_revision": "a" * 40, "source_archive_sha256": build_hidapi.sha256(archive),
+            "patch": overlay.name, "patch_sha256": build_hidapi.sha256(overlay),
+            "msvc_toolset": "14.44.35207", "windows_sdk": "10.0.26100.0",
+            "sha256": hashlib.sha256(candidate).hexdigest(),
+        }
+        dependencies = {"files": {dll.name: pins}}
+        devcmd = self.root / "VS/Common7/Tools/VsDevCmd.bat"
+        env = {"VCTOOLSVERSION": pins["msvc_toolset"], "WINDOWSSDKVERSION": pins["windows_sdk"] + "\\"}
+
+        def fake_build(args, **kwargs):
+            if args[1] == "--build":
+                result = args[2] / "src/windows/hidapi-hotplug.dll"
+                result.parent.mkdir(parents=True)
+                result.write_bytes(output_bytes)
+
+        def stage(work):
+            builder.stage_pinned_hidapi(runtime, archive.parent, lock, dependencies, work, devcmd)
+
+        with patch.object(build_hidapi, "msvc_environment", return_value={**env, "VCTOOLSVERSION": "15"}):
+            with self.assertRaisesRegex(ValueError, "toolchain differs"):
+                stage(self.root / "drifted-toolset")
+        self.assertEqual(dll.read_bytes(), b"old baseline DLL")
+        with patch.object(build_hidapi, "msvc_environment", return_value=env), \
+             patch.object(build_hidapi.subprocess, "run", side_effect=fake_build) as run:
+            output_bytes = b"old baseline DLL"
+            with self.assertRaisesRegex(ValueError, "DLL differs"):
+                stage(self.root / "drifted-dll")
+            self.assertEqual(dll.read_bytes(), b"old baseline DLL")
+            output_bytes = candidate
+            stage(self.root / "rebuilt-dll")
+            self.assertTrue(any("-DCMAKE_SHARED_LINKER_FLAGS=/Brepro" in invocation.args[0]
+                                for invocation in run.call_args_list))
+        self.assertEqual(dll.read_bytes(), candidate)
 
     def make_bundle(self, remove=None, change=None, linker=(14, 51), patched_hidapi=False):
         def lock(name, value):

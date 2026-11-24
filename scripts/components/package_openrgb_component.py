@@ -17,7 +17,7 @@ else:
     import verify_openrgb_component as verifier
 
 
-RECIPES = ("build_openrgb.ps1", "build_openrgb_dependencies.ps1",
+RECIPES = ("build_openrgb.ps1", "build_openrgb_dependencies.ps1", "build_hidapi.py",
            "verify_openrgb_component.py", "test_verify_openrgb_component.py",
            "test_actual_openrgb.py", "test_parent_pipe.py", "pawniolib/CMakeLists.txt")
 LICENSES = {"OpenRGB-GPL-2.0.txt", "LICENSE-bsd.txt", "LICENSE-orig.txt", "LICENSE.txt",
