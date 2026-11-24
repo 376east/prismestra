@@ -10,7 +10,7 @@ import tempfile
 
 from build_openrgb_component import BUNDLE, REPO
 from component_archive import extract_component
-from components.package_openrgb_component import LICENSES, RECIPES, checked, read_json, safe_name
+from components.package_openrgb_component import LICENSES, RECIPES, checked, hidapi_patch, read_json, safe_name
 from components.verify_openrgb_component import MSVC_RUNTIME, REQUIRED, fingerprint
 from package_installer import read_prerequisite_lock
 
@@ -26,6 +26,9 @@ def build_input_pins(repo):
     component = "components/openrgb/"
     lock, _ = read_json(repo / component / "source-lock.json")
     assets, _ = read_json(repo / component / "distribution-assets.json")
+    dependency_lock = repo / component / "dependency-lock.json"
+    dependencies, _ = read_json(dependency_lock)
+    overlay = hidapi_patch(dependency_lock, dependencies)
     # Include the recipes and notices shipped in the ZIP even if the build does not execute them.
     paths = [
         "scripts/build_openrgb_component.py",
@@ -40,6 +43,8 @@ def build_input_pins(repo):
         component + str(safe_name(lock["patch"])),
         *(component + str(safe_name(row["path"])) for row in assets["files"] if row["path"].startswith("licenses/")),
     ]
+    if overlay is not None:
+        paths.append(component + overlay.name)
     return {path: fingerprint(repo / path) for path in paths}
 
 
@@ -68,6 +73,12 @@ def verify_members(manifest, repo):
         **{entry["path"]: {field: entry[field] for field in ("sha256", "size")}
            for entry in assets["files"] if entry["path"].partition("/")[0] in ("source", "licenses")},
     }
+    overlay = hidapi_patch(component / "dependency-lock.json", dependencies)
+    if overlay is not None:
+        member = "build/" + overlay.name
+        if member.casefold() in {path.casefold() for path in expected}:
+            raise ValueError("HIDAPI patch collides with an existing build member")
+        expected[member] = fingerprint(overlay)
     if not {f"licenses/{name}" for name in LICENSES} <= expected.keys():
         raise ValueError("Missing OpenRGB notices in the checked distribution pins")
     required = {f"runtime/{name}" for name in REQUIRED} | expected.keys()

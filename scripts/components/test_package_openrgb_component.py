@@ -108,6 +108,36 @@ class PackagingChecks(unittest.TestCase):
             self.assertFalse(self.args.output.exists())
             path.write_bytes(original)
 
+    def test_patched_hidapi_requires_overlay_and_rebuilt_dll(self):
+        overlay = self.root / "hidapi-teardown.patch"
+        overlay.write_bytes(b"fixture HIDAPI patch")
+        dll = self.args.runtime_dir / "hidapi-hotplug.dll"
+        old_dll = dll.read_bytes()
+        dll.write_bytes(b"fixture rebuilt DLL")
+        self.mutate(self.args.dependency_lock, lambda data: data["files"][dll.name].update(
+            patch=overlay.name, patch_sha256=self.info(overlay)["sha256"], sha256=self.info(dll)["sha256"]))
+        original_overlay = overlay.read_bytes()
+        overlay.unlink()
+        with self.assertRaises(FileNotFoundError):
+            packager.package(self.args)
+        overlay.write_bytes(b"altered patch")
+        with self.assertRaisesRegex(ValueError, "HIDAPI patch SHA256 mismatch"):
+            packager.package(self.args)
+        overlay.write_bytes(original_overlay)
+
+        # A self-consistent prior inventory still cannot authorize Preview DLL bytes.
+        dll.write_bytes(old_dll)
+        with self.assertRaisesRegex(ValueError, "rebuilt dependency binary/source pins mismatch"):
+            packager.package(self.args)
+        self.assertFalse(self.args.output.exists())
+
+        dll.write_bytes(b"fixture rebuilt DLL")
+        self.mutate(self.args.inventory, lambda data: next(
+            entry for entry in data["files"] if entry["name"] == dll.name).update(self.info(dll)))
+        packager.package(self.args)
+        with zipfile.ZipFile(self.args.output) as archive:
+            self.assertEqual(archive.read("build/" + overlay.name), original_overlay)
+
     def test_missing_required_sources_notices_and_recipes_is_rejected(self):
         for path in (next(self.args.source_archives_dir.iterdir()), self.args.licenses_dir / "PawnIO-COPYING",
                      self.args.recipes_dir / "pawniolib/CMakeLists.txt"):
