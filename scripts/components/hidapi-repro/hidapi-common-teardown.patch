@@ -1,0 +1,399 @@
+diff --git a/hidapi-hotplug/hidapi.h b/hidapi-hotplug/hidapi.h
+index 5a634cd..d77686b 100644
+--- a/hidapi-hotplug/hidapi.h
++++ b/hidapi-hotplug/hidapi.h
+@@ -565,6 +565,13 @@ extern "C" {
+ 			a hotplug callback, the deregistered callback will not be
+ 			invoked once the currently executing invocation returns.
+ 
++			On Windows, closing the last callback from inside a callback
++			defers draining the subscription and returns -1. An external
++			control caller must retry the same handle. Failed drains retain
++			the subscription and its context. Retry before releasing callback
++			resources or registering again. If hid_exit() reports a pending
++			or failed drain, retry hid_exit() before unloading the library.
++
+ 			See "Thread safety" on #hid_hotplug_register_callback for the
+ 			full thread-safety contract of the hotplug API.
+ 
+diff --git a/windows/hid.c b/windows/hid.c
+index bd74767..5357ab5 100644
+--- a/windows/hid.c
++++ b/windows/hid.c
+@@ -207,6 +207,9 @@ struct hid_device_ {
+ 		DWORD write_timeout_ms;
+ };
+ 
++enum hotplug_close_state { HOTPLUG_OPEN, HOTPLUG_CLOSE_PENDING, HOTPLUG_DRAINING };
++
++static INIT_ONCE hotplug_lock_once = INIT_ONCE_STATIC_INIT;
+ static struct hid_hotplug_context {
+ 	/* Win32 notification handle */
+ 	HCMNOTIFICATION notify_handle;
+@@ -215,9 +218,10 @@ static struct hid_hotplug_context {
+ 	CRITICAL_SECTION critical_section;
+ 
+ 	/* Boolean flags */
+-	unsigned char mutex_ready;
+ 	unsigned char mutex_in_use;
+ 	unsigned char cb_list_dirty;
++	unsigned char exit_requested;
++	enum hotplug_close_state close_state;
+ 
+ 	/* HIDAPI unique callback handle counter */
+ 	hid_hotplug_callback_handle next_handle;
+@@ -402,34 +406,47 @@ HID_API_EXPORT const char* HID_API_CALL hid_version_str(void)
+ 	return HID_API_VERSION_STR;
+ }
+ 
+-static void hid_internal_hotplug_init()
++static BOOL CALLBACK hid_internal_hotplug_init(PINIT_ONCE once, PVOID parameter, PVOID *context)
+ {
+-	if (!hid_hotplug_context.mutex_ready) {
+-		InitializeCriticalSection(&hid_hotplug_context.critical_section);
++	(void)once;
++	(void)parameter;
++	(void)context;
++	/* Keep this lock valid for racing public callers after hid_exit. */
++	InitializeCriticalSection(&hid_hotplug_context.critical_section);
++	hid_hotplug_context.next_handle = FIRST_HOTPLUG_CALLBACK_HANDLE;
++	return TRUE;
++}
+ 
+-		/* Set state to Ready */
+-		hid_hotplug_context.mutex_ready = 1;
+-		hid_hotplug_context.mutex_in_use = 0;
+-		hid_hotplug_context.cb_list_dirty = 0;
+-		if (hid_hotplug_context.next_handle < FIRST_HOTPLUG_CALLBACK_HANDLE)
+-			hid_hotplug_context.next_handle = FIRST_HOTPLUG_CALLBACK_HANDLE;
+-	}
++static BOOL hid_internal_hotplug_lock(void)
++{
++	if (!InitOnceExecuteOnce(&hotplug_lock_once, hid_internal_hotplug_init, NULL, NULL))
++		return FALSE;
++	EnterCriticalSection(&hid_hotplug_context.critical_section);
++	return TRUE;
+ }
+ 
+ int HID_API_EXPORT hid_init(void)
+ {
++	if (!hid_internal_hotplug_lock())
++		return -1;
++	if (hid_hotplug_context.exit_requested) {
++		register_global_error(L"HID exit pending");
++		LeaveCriticalSection(&hid_hotplug_context.critical_section);
++		return -1;
++	}
+ 	register_global_error(NULL);
+ 
+ #ifndef HIDAPI_USE_DDK
+ 	if (!hidapi_initialized) {
+ 		if (lookup_functions() < 0) {
+ 			register_global_winapi_error(L"resolve DLL functions");
++			LeaveCriticalSection(&hid_hotplug_context.critical_section);
+ 			return -1;
+ 		}
+ 		hidapi_initialized = TRUE;
+ 	}
+ #endif
+-
++	LeaveCriticalSection(&hid_hotplug_context.critical_section);
+ 	return 0;
+ }
+ 
+@@ -450,7 +467,7 @@ static void hid_internal_hotplug_remove_postponed()
+ 	/* Unregister the callbacks whose removal was postponed */
+ 	/* This function is always called inside a locked mutex */
+ 	/* However, any actions are only allowed if the mutex is NOT in use and if the DIRTY flag is set */
+-	if (!hid_hotplug_context.mutex_ready || hid_hotplug_context.mutex_in_use || !hid_hotplug_context.cb_list_dirty) {
++	if (hid_hotplug_context.mutex_in_use || !hid_hotplug_context.cb_list_dirty) {
+ 		return;
+ 	}
+ 	
+@@ -472,65 +489,82 @@ static void hid_internal_hotplug_remove_postponed()
+ 
+ static void hid_internal_hotplug_cleanup()
+ {
+-	if (!hid_hotplug_context.mutex_ready || hid_hotplug_context.mutex_in_use) {
+-		return;
+-	}
+-
+-	/* Before checking if the list is empty, clear any entries whose removal was postponed first */
+-	hid_internal_hotplug_remove_postponed();
+-
+-	/* Unregister the HID device connection notification when removing the last callback */
+-	/* This function is always called inside a locked mutex */
+-	if (hid_hotplug_context.hotplug_cbs != NULL) {
++	struct hid_hotplug_callback *callback;
++	if (hid_hotplug_context.close_state != HOTPLUG_OPEN)
+ 		return;
+-	}
+-
+-	if (hid_hotplug_context.devs) {
+-		/* Cleanup connected device list */
+-		hid_free_enumeration(hid_hotplug_context.devs);
+-		hid_hotplug_context.devs = NULL;
+-	}
+-
+-	if (hid_hotplug_context.notify_handle) {
+-		if (CM_Unregister_Notification(hid_hotplug_context.notify_handle) != CR_SUCCESS) {
+-			/* We mark an error, but we proceed with the cleanup */
+-			register_global_error(L"CM_Unregister_Notification failed for Hotplug notification");
++	for (callback = hid_hotplug_context.hotplug_cbs; callback; callback = callback->next) {
++		if (callback->events) {
++			hid_internal_hotplug_remove_postponed();
++			return;
+ 		}
+ 	}
+-
+-	hid_hotplug_context.notify_handle = NULL;
++	/* Keep disabled entries and their user_data until ConfigMgr drains. */
++	if (hid_hotplug_context.notify_handle)
++		hid_hotplug_context.close_state = HOTPLUG_CLOSE_PENDING;
++	else
++		hid_internal_hotplug_remove_postponed();
+ }
+ 
+-static void hid_internal_hotplug_exit()
++/* Called by an external control entry with the lock held. Returns with the same lock held. */
++static int hid_internal_hotplug_drain(void)
+ {
+-	if (!hid_hotplug_context.mutex_ready) {
+-		/* If the critical section is not initialized, we are safe to assume nothing else is */
+-		return;
++	HCMNOTIFICATION notification;
++	CONFIGRET result;
++	if (hid_hotplug_context.mutex_in_use || hid_hotplug_context.close_state == HOTPLUG_DRAINING) {
++		register_global_error(L"HID hotplug drain deferred");
++		return -1;
+ 	}
++	if (hid_hotplug_context.close_state != HOTPLUG_CLOSE_PENDING)
++		return 0;
++	hid_hotplug_context.close_state = HOTPLUG_DRAINING;
++	notification = hid_hotplug_context.notify_handle;
++	LeaveCriticalSection(&hid_hotplug_context.critical_section);
++	result = CM_Unregister_Notification(notification);
+ 	EnterCriticalSection(&hid_hotplug_context.critical_section);
+-	struct hid_hotplug_callback **current = &hid_hotplug_context.hotplug_cbs;
+-	/* Remove all callbacks from the list */
+-	while (*current) {
+-		struct hid_hotplug_callback *next = (*current)->next;
+-		free(*current);
+-		*current = next;
++	if (result != CR_SUCCESS) {
++		wchar_t message[96];
++		hid_hotplug_context.close_state = HOTPLUG_CLOSE_PENDING;
++		swprintf(message, sizeof(message) / sizeof(message[0]),
++			L"CM_Unregister_Notification failed (CONFIGRET %lu)", (unsigned long)result);
++		register_global_error(message);
++		return -1;
+ 	}
+-	hid_internal_hotplug_cleanup();
+-	LeaveCriticalSection(&hid_hotplug_context.critical_section);
+-	hid_hotplug_context.mutex_ready = 0;
+-	DeleteCriticalSection(&hid_hotplug_context.critical_section);
++	hid_hotplug_context.notify_handle = NULL;
++	hid_free_enumeration(hid_hotplug_context.devs);
++	hid_hotplug_context.devs = NULL;
++	hid_hotplug_context.close_state = HOTPLUG_OPEN;
++	hid_internal_hotplug_remove_postponed();
++	return 0;
+ }
+ 
+ int HID_API_EXPORT hid_exit(void)
+ {
+-    hid_internal_hotplug_exit();
++	struct hid_hotplug_callback *callback;
++	if (!hid_internal_hotplug_lock())
++		return -1;
++	if (hid_hotplug_context.close_state == HOTPLUG_DRAINING) {
++		register_global_error(L"HID hotplug drain in progress");
++		LeaveCriticalSection(&hid_hotplug_context.critical_section);
++		return -1;
++	}
++	hid_hotplug_context.exit_requested = 1;
++	for (callback = hid_hotplug_context.hotplug_cbs; callback; callback = callback->next) {
++		callback->events = 0;
++		hid_hotplug_context.cb_list_dirty = 1;
++	}
++	hid_internal_hotplug_cleanup();
++	if (hid_internal_hotplug_drain() < 0) {
++		LeaveCriticalSection(&hid_hotplug_context.critical_section);
++		return -1;
++	}
+ 
+ #ifndef HIDAPI_USE_DDK
+ 	free_library_handles();
+ 	hidapi_initialized = FALSE;
+ #endif
++	hid_hotplug_context.exit_requested = 0;
+ 	register_global_error(NULL);
+-
++	LeaveCriticalSection(&hid_hotplug_context.critical_section);
+ 	return 0;
+ }
+ 
+@@ -1089,6 +1123,11 @@ DWORD WINAPI hid_internal_notify_callback(HCMNOTIFICATION notify, PVOID context,
+ 
+ 	/* Lock the mutex to avoid race conditions */
+ 	EnterCriticalSection(&hid_hotplug_context.critical_section);
++	if (hid_hotplug_context.close_state != HOTPLUG_OPEN ||
++	    notify != hid_hotplug_context.notify_handle) {
++		LeaveCriticalSection(&hid_hotplug_context.critical_section);
++		return ERROR_SUCCESS;
++	}
+ 
+ 	if (action == CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL) {
+ 		HANDLE read_handle;
+@@ -1202,11 +1241,16 @@ int HID_API_EXPORT HID_API_CALL hid_hotplug_register_callback(unsigned short ven
+ 	hotplug_cb->user_data = user_data;
+ 	hotplug_cb->callback = callback;
+ 
+-	/* Ensure we are ready to actually use the mutex */
+-	hid_internal_hotplug_init();
+-
+-	/* Lock the mutex to avoid race conditions */
+-	EnterCriticalSection(&hid_hotplug_context.critical_section);
++	if (!hid_internal_hotplug_lock()) {
++		free(hotplug_cb);
++		return -1;
++	}
++	if (hid_hotplug_context.close_state != HOTPLUG_OPEN || hid_hotplug_context.exit_requested) {
++		register_global_error(L"Previous HID hotplug subscription has not drained");
++		LeaveCriticalSection(&hid_hotplug_context.critical_section);
++		free(hotplug_cb);
++		return -1;
++	}
+ 
+ 	hotplug_cb->handle = hid_hotplug_context.next_handle++;
+ 
+@@ -1216,11 +1260,6 @@ int HID_API_EXPORT HID_API_CALL hid_hotplug_register_callback(unsigned short ven
+ 		hid_hotplug_context.next_handle = 1;
+ 	}
+ 
+-	/* Return allocated handle */
+-	if (callback_handle != NULL) {
+-		*callback_handle = hotplug_cb->handle;
+-	}
+-
+ 	/* Append a new callback to the end */
+ 	if (hid_hotplug_context.hotplug_cbs != NULL) {
+ 		struct hid_hotplug_callback *last = hid_hotplug_context.hotplug_cbs;
+@@ -1232,17 +1271,15 @@ int HID_API_EXPORT HID_API_CALL hid_hotplug_register_callback(unsigned short ven
+ 	else {
+         GUID interface_class_guid;
+         CM_NOTIFY_FILTER notify_filter = { 0 };
++		HCMNOTIFICATION notification = NULL;
+ 
+-		/* Fill already connected devices so we can use this info in disconnection notification */
+-		hid_hotplug_context.devs = hid_enumerate(0, 0);
+-
+-		hid_hotplug_context.hotplug_cbs = hotplug_cb;
+-
+-		if (hid_hotplug_context.notify_handle != NULL) {
+-			register_global_error(L"Device notification have already been registered");
++		if (hid_init() < 0) {
+ 			LeaveCriticalSection(&hid_hotplug_context.critical_section);
++			free(hotplug_cb);
+ 			return -1;
+ 		}
++		/* Fill already connected devices so we can use this info in disconnection notification */
++		hid_hotplug_context.devs = hid_enumerate(0, 0);
+ 
+ 		/* Retrieve HID Interface Class GUID
+ 			https://docs.microsoft.com/windows-hardware/drivers/install/guid-devinterface-hid */
+@@ -1253,11 +1290,20 @@ int HID_API_EXPORT HID_API_CALL hid_hotplug_register_callback(unsigned short ven
+ 		notify_filter.u.DeviceInterface.ClassGuid = interface_class_guid;
+ 
+ 		/* Register for a HID device notification when adding the first callback */
+-		if (CM_Register_Notification(&notify_filter, NULL, hid_internal_notify_callback, &hid_hotplug_context.notify_handle) != CR_SUCCESS) {
++		if (!CM_Register_Notification ||
++		    CM_Register_Notification(&notify_filter, NULL, hid_internal_notify_callback, &notification) != CR_SUCCESS) {
++			hid_free_enumeration(hid_hotplug_context.devs);
++			hid_hotplug_context.devs = NULL;
+ 			register_global_error(L"hid_hotplug_register_callback/CM_Register_Notification");
+ 			LeaveCriticalSection(&hid_hotplug_context.critical_section);
++			free(hotplug_cb);
+ 			return -1;
+ 		}
++		hid_hotplug_context.notify_handle = notification;
++		hid_hotplug_context.hotplug_cbs = hotplug_cb;
++	}
++	if (callback_handle != NULL) {
++		*callback_handle = hotplug_cb->handle;
+ 	}
+ 
+ 	/* Mark the critical section as IN USE, to prevent callback removal from inside a callback */
+@@ -1267,9 +1313,13 @@ int HID_API_EXPORT HID_API_CALL hid_hotplug_register_callback(unsigned short ven
+ 	if ((flags & HID_API_HOTPLUG_ENUMERATE) && (events & HID_API_HOTPLUG_EVENT_DEVICE_ARRIVED)) {
+ 		struct hid_device_info* device = hid_hotplug_context.devs;
+ 		/* Notify about already connected devices, if asked so */
+-		while (device != NULL) {
++		while (device != NULL && hotplug_cb->events &&
++		       hid_hotplug_context.close_state == HOTPLUG_OPEN) {
+ 			if (hid_internal_match_device_id(device->vendor_id, device->product_id, hotplug_cb->vendor_id, hotplug_cb->product_id)) {
+-				(*hotplug_cb->callback)(hotplug_cb->handle, device, HID_API_HOTPLUG_EVENT_DEVICE_ARRIVED, hotplug_cb->user_data);
++				if ((*hotplug_cb->callback)(hotplug_cb->handle, device, HID_API_HOTPLUG_EVENT_DEVICE_ARRIVED, hotplug_cb->user_data)) {
++					hotplug_cb->events = 0;
++					hid_hotplug_context.cb_list_dirty = 1;
++				}
+ 			}
+ 
+ 			device = device->next;
+@@ -1288,40 +1338,29 @@ int HID_API_EXPORT HID_API_CALL hid_hotplug_register_callback(unsigned short ven
+ 
+ int HID_API_EXPORT HID_API_CALL hid_hotplug_deregister_callback(hid_hotplug_callback_handle callback_handle)
+ {
+-	if (callback_handle <= 0 || !hid_hotplug_context.mutex_ready) {
++	struct hid_hotplug_callback *callback;
++	if (callback_handle <= 0 || !hid_internal_hotplug_lock())
+ 		return -1;
+-	}
+-
+-	/* Lock the mutex to avoid race conditions */
+-	EnterCriticalSection(&hid_hotplug_context.critical_section);
+-
+-	if (!hid_hotplug_context.hotplug_cbs) {
++	if (hid_hotplug_context.exit_requested || hid_hotplug_context.close_state == HOTPLUG_DRAINING) {
++		register_global_error(L"HID exit or hotplug drain in progress");
+ 		LeaveCriticalSection(&hid_hotplug_context.critical_section);
+ 		return -1;
+ 	}
+-
+-	/* Remove this notification */
+-	for (struct hid_hotplug_callback **current = &hid_hotplug_context.hotplug_cbs; *current != NULL; current = &(*current)->next) {
+-		if ((*current)->handle == callback_handle) {
+-			/* Check if we were already in the critical section, as we are NOT allowed to remove any callbacks if we are */
+-			if (hid_hotplug_context.mutex_in_use) {
+-				/* If we are not allowed to remove the callback, we mark it as pending removal */
+-				(*current)->events = 0;
+-				hid_hotplug_context.cb_list_dirty = 1;
+-			} else {
+-				struct hid_hotplug_callback *next = (*current)->next;
+-				free(*current);
+-				*current = next;
+-			}
+-			break;
++	for (callback = hid_hotplug_context.hotplug_cbs; callback; callback = callback->next) {
++		if (callback->handle == callback_handle) {
++			int result = 0;
++			callback->events = 0;
++			hid_hotplug_context.cb_list_dirty = 1;
++			hid_internal_hotplug_cleanup();
++			if (hid_hotplug_context.close_state == HOTPLUG_CLOSE_PENDING)
++				result = hid_internal_hotplug_drain();
++			LeaveCriticalSection(&hid_hotplug_context.critical_section);
++			return result;
+ 		}
+ 	}
+-
+-	hid_internal_hotplug_cleanup();
+-
++	register_global_error(L"Unknown HID hotplug callback handle");
+ 	LeaveCriticalSection(&hid_hotplug_context.critical_section);
+-
+-	return 0;
++	return -1;
+ }
+ 
+ HID_API_EXPORT hid_device * HID_API_CALL hid_open(unsigned short vendor_id, unsigned short product_id, const wchar_t *serial_number)
