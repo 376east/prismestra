@@ -235,6 +235,53 @@ assert.deepEqual(commands.at(-1),{op:'native_action',id:1811,fields:[{id:101,val
 assert.equal(bindingSaveDisabled(),true,'the save remains locked until the native acknowledgement');
 console.log('PASS: first click saves staged connection text only when the host can accept it');
 
+{
+ const actions=[
+  {id:1811,label:'Сохранить',enabled:false,accepts_staged_text:true},
+  {id:1812,label:'Отменить правки',enabled:true},
+  {id:1818,label:'Применить',enabled:true},
+ ];
+ const wledForm={page:'connections',fields:[
+  {id:1806,label:'WLED DDP',kind:'text',enabled:true,value:'',choices:[]},
+  {id:1808,label:'WLED identity',kind:'text',enabled:true,value:'',choices:[]},
+  {id:1810,label:'WLED HTTP',kind:'text',enabled:true,value:'',choices:[]},
+ ],actions,notes:[]};
+ const snapshot = (nativeForm=wledForm) => {
+  context.payload={kind:'snapshot',state:{...structuredClone(initial),nativeForm}};
+  vm.runInContext('window.prismestraReceive(payload)',context);
+ };
+ const click = dataset => events.click({target:{closest:()=>({dataset,hasAttribute:()=>false})}});
+ const type = value => {
+  const field=find('#native-field-0');
+  field.value=value;
+  events.input({target:field});
+ };
+ vm.runInContext('formStages.clear();view="connections";pendingView=null',context);
+ snapshot();
+ const before=commands.length;
+ type('127.0.0.1:4048');
+ click({nativeAction:'1818'});
+ assert.equal(commands.length,before,'Apply must not stage unsaved DDP text in the native draft');
+ click({action:'discard-page-fields'});
+ assert.equal(find('#native-field-0').value,'');
+ assert.equal(commands.length,before,'discarding WebView-only input stays local');
+ type('127.0.0.1:4048');
+ click({nativeAction:'1811'});
+ assert.deepEqual(commands.at(-1),{op:'native_action',id:1811,fields:[{id:1806,value:'127.0.0.1:4048'}],editor_fields:[]});
+ click({nativeAction:'1818'});
+ assert.equal(commands.length,before+1,'Apply waits for the Save acknowledgement');
+ snapshot({...wledForm,fields:[{...wledForm.fields[0],value:'127.0.0.1:4048'},...wledForm.fields.slice(1)]});
+ click({nativeAction:'1818'});
+ assert.deepEqual(commands.at(-1),{op:'native_action',id:1818,fields:[],editor_fields:[]});
+ snapshot({...wledForm,actions:actions.map(action=>({...action,enabled:action.id!==1818}))});
+ type('127.0.0.1:4049');
+ click({nativeAction:'1812'});
+ assert.deepEqual(commands.at(-1),{op:'native_action',id:1812});
+ snapshot();
+ assert.equal(find('#native-field-0').value,'');
+ console.log('PASS: manual WLED saves before Apply, never stages on Apply, and can discard local or native edits');
+}
+
 // Apply uses the native confirmation route. A cancelled dialog leaves the
 // applied snapshot intact, and Apply can be requested again after the reply.
 {

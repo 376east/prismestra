@@ -110,6 +110,7 @@ function outputDetail(text) {
 }
 const settingsPages = ['temperatures','connections','sources','schedule'];
 const devicePresetField = 714;
+const saveConnectionBinding = 1811, applySavedConnections = 1818;
 const glyphs = {
  library:'<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>',
  editor:'<path d="M7 3v6m0 4v8M17 3v11m0 4v3M4 9h6v4H4zm10 5h6v4h-6z"/>',
@@ -289,6 +290,7 @@ function nativeControlDisabled(node) {
  const form=nativeFormForView();
  const items=node.dataset.nativeAction!==undefined?form?.actions:form?.fields;
  const id=node.dataset.nativeAction??node.dataset.nativeField;
+ if(view==='connections'&&node.dataset.nativeAction===String(applySavedConnections)&&currentPageStaged())return true;
  const item=items?.find(item=>String(item.id)===id);
  const staged=item?.accepts_staged_text && form.page===view && form.fields.some(field=>
   field.enabled && field.kind==='text' && formStages.has(stageKey('native',field.id)));
@@ -867,12 +869,19 @@ function renderDevices(candidates) {
 function renderNativeForm(form=nativeFormForView()) {
  if(!form||form.page!==view)return `<div class="native-wait" role="status">${ui('Загрузка настроек…','Loading settings…')}</div>`;
  const notice=form.notice?`<p class="parameter-note" role="status">${esc(form.notice)}</p>`:'';
+ const bindingHelp=form.page==='connections'&&form.actions.some(item=>item.id===saveConnectionBinding&&item.accepts_staged_text)
+  ? `<p class="parameter-note" id="connection-save-help">${ui('Сначала сохраните привязку, затем нажмите «Применить», чтобы переключить подключения.','Save the binding first, then select Apply to switch connections.')}</p>`
+  : '';
  return `<section class="native-properties"><div class="parameter-panel">${notice}<div class="native-form">${form.fields.map((field,index)=>{
   const id='native-field-'+index,common=`id="${id}" data-native-field="${esc(field.id)}" data-native-kind="${esc(field.kind)}" data-native-control ${nativeControlDisabled({dataset:{nativeField:String(field.id)}})?'disabled':''}`;
   if(field.kind==='checkbox')return `<label class="native-group" for="${id}"><input type="checkbox" ${common} ${field.value==='true'?'checked':''}>${esc(field.label)}</label>`;
   const control=field.kind==='select'?`<select ${common}>${!field.choices.some(choice=>String(choice.value)===String(field.value))?`<option value="" disabled selected>${ui('Выберите…','Choose…')}</option>`:''}${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===field.value?'selected':''}>${esc(choice.label)}</option>`).join('')}</select>`:`<input ${common} type="${field.kind==='secret'?'password':'text'}" autocomplete="off" value="${field.kind==='secret'?'':esc(nativeValue(field))}">`;
   return `<div class="native-field"><label for="${id}">${esc(field.label)}</label>${control}</div>`;
- }).join('')}</div><div class="native-property-actions">${form.actions.map(item=>`<button class="button" data-native-action="${esc(item.id)}" data-native-control ${nativeControlDisabled({dataset:{nativeAction:String(item.id)}})?'disabled':''}>${esc(item.label)}</button>`).join('')}<button class="button" data-action="discard-page-fields" data-local-discard ${currentPageStaged()?'':'hidden'}>${ui('Отменить незавершённый ввод','Discard unfinished input')}</button></div>${form.notes.map(note=>`<p class="parameter-note">${esc(note)}</p>`).join('')}</div></section>`;
+ }).join('')}</div>${bindingHelp}<div class="native-property-actions">${form.actions.map(item=>{
+  const label=form.page==='connections'&&item.id===saveConnectionBinding?ui('Сохранить привязку','Save binding'):item.label;
+  const help=bindingHelp&&[saveConnectionBinding,applySavedConnections].includes(item.id)?' aria-describedby="connection-save-help"':'';
+  return `<button class="button" data-native-action="${esc(item.id)}" data-native-control${help} ${nativeControlDisabled({dataset:{nativeAction:String(item.id)}})?'disabled':''}>${esc(label)}</button>`;
+ }).join('')}<button class="button" data-action="discard-page-fields" data-local-discard ${currentPageStaged()?'':'hidden'}>${ui('Отменить незавершённый ввод','Discard unfinished input')}</button></div>${form.notes.map(note=>`<p class="parameter-note">${esc(note)}</p>`).join('')}</div></section>`;
 }
 function renderSettings() {
  const preference=state.preferredUiLanguage;
