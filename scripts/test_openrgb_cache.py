@@ -36,6 +36,14 @@ class OpenRGBCacheTests(unittest.TestCase):
         path.write_bytes(data)
         return data
 
+    @unittest.skipUnless(sys.platform == "win32", "requires Windows cmd.exe")
+    def test_hidapi_dev_command_path_can_contain_spaces(self):
+        script = self.root / "Visual Studio Tools" / "VsDevCmd.bat"
+        script.parent.mkdir()
+        script.write_bytes(b'@set "PrismestraDevCmdFixture=loaded"\r\n')
+        env = build_hidapi.msvc_environment(script)
+        self.assertEqual(env["PRISMESTRADEVCMDFIXTURE"], "loaded")
+
     def test_patched_hidapi_staging_requires_exact_build_tools_and_dll(self):
         runtime = self.root / "runtime"
         runtime.mkdir()

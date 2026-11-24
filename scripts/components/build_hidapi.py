@@ -16,8 +16,11 @@ def sha256(path):
 
 
 def msvc_environment(vsdevcmd):
-    setup = f'call "{vsdevcmd}" -no_logo -arch=x64 -host_arch=x64 >NUL && set'
-    lines = subprocess.check_output([os.environ["ComSpec"], "/d", "/c", setup], text=True)
+    cmd = os.environ["ComSpec"]
+    # cmd.exe parses the /c command itself. CRT argument quoting would escape
+    # the quotes around the Visual Studio path as literal backslashes.
+    setup = f'"{cmd}" /d /s /u /c "call "{vsdevcmd}" -no_logo -arch=x64 -host_arch=x64 >NUL && set"'
+    lines = subprocess.check_output(setup, executable=cmd, encoding="utf-16-le")
     env = {key.upper(): value for key, value in os.environ.items()}
     for line in lines.splitlines():
         key, separator, value = line.partition("=")
