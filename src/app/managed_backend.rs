@@ -108,6 +108,14 @@ impl Config {
 
     fn validate(&self) -> Result<(), String> {
         self.validate_fields()?;
+        #[cfg(windows)]
+        if !self
+            .executable
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+        {
+            return Err("Managed OpenRGB executable must have an .exe extension".into());
+        }
         local_path(&self.executable)?;
         local_path(&self.config_dir)?;
         if !self.config_dir.is_dir() {
@@ -1947,6 +1955,45 @@ mod tests {
         assert!(Config::read_optional(&path).unwrap_err().contains("16 KiB"));
         fs::remove_file(config).unwrap();
         fs::remove_dir(path).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn saved_windows_config_requires_an_exe_extension() {
+        let directory = std::env::temp_dir().join(format!(
+            "prismestra-managed-extension-{}-{}",
+            std::process::id(),
+            crate::clock::monotonic_us()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let saved = directory.join("managed-openrgb.json");
+        let bytes = b"inert validation fixture";
+        let mut config = fixture();
+        config.config_dir = directory.clone();
+        config.expected_executable_sha256 = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        for (name, accepted) in [
+            ("Open RGB.ExE", true),
+            ("OpenRGB.cmd", false),
+            ("OpenRGB.bat", false),
+            ("OpenRGB.ps1", false),
+            ("OpenRGB", false),
+        ] {
+            config.executable = directory.join(name);
+            fs::write(&config.executable, bytes).unwrap();
+            fs::write(&saved, serde_json::to_vec(&config).unwrap()).unwrap();
+            let result = Config::read_optional(&directory);
+            if accepted {
+                assert_eq!(result.unwrap().as_ref(), Some(&config));
+            } else {
+                assert!(result.unwrap_err().contains(".exe extension"), "{name}");
+            }
+            fs::remove_file(&config.executable).unwrap();
+        }
+        fs::remove_file(saved).unwrap();
+        fs::remove_dir(directory).unwrap();
     }
 
     #[test]
