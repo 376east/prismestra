@@ -20,7 +20,10 @@ use std::{
     net::SocketAddr,
     os::windows::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -53,6 +56,7 @@ struct Scan {
     inventory: Discovery,
     updated: bool,
     progressive: bool,
+    empty_sdk: Arc<AtomicBool>,
 }
 
 impl Scan {
@@ -143,6 +147,14 @@ impl Worker {
             self.scan = None;
         }
         result
+    }
+
+    pub(crate) fn take_empty_sdk_observation(&self) -> bool {
+        self.scan.as_ref().is_some_and(|scan| {
+            scan.progressive
+                && !scan.cancel.cancelled()
+                && scan.empty_sdk.swap(false, Ordering::AcqRel)
+        })
     }
 
     pub(crate) fn prepare(
@@ -266,6 +278,7 @@ fn discover(
         inventory: Discovery::default(),
         updated: false,
         progressive,
+        empty_sdk: Arc::default(),
     };
     let ble_cancel = deadline.clone();
     scan.spawn("Surplife E1", move || {
@@ -300,8 +313,11 @@ fn discover(
             ..Default::default()
         })
     });
+    let empty_sdk = scan.empty_sdk.clone();
     scan.spawn("OpenRGB", move || {
-        discover_rgb(endpoint, guard, deadline, started)
+        discover_rgb(endpoint, guard, deadline, started, || {
+            empty_sdk.store(true, Ordering::Release);
+        })
     });
     scan
 }
@@ -311,6 +327,7 @@ fn discover_rgb(
     guard: Result<Option<Guard>, String>,
     deadline: Cancellation,
     started: Instant,
+    observe_empty: impl FnOnce(),
 ) -> Result<Discovery, String> {
     let guard = guard?.ok_or("Управляемый backend недоступен для первичного поиска.")?;
     if !endpoint.ip().is_loopback() || endpoint.port() == 0 {
@@ -327,7 +344,7 @@ fn discover_rgb(
         }
     }
     let until = (Instant::now() + INVENTORY_WAIT).min(started + DISCOVERY_LIMIT);
-    let inventory = discover_openrgb_inventory(endpoint, guard, deadline, until)?;
+    let inventory = discover_openrgb_inventory(endpoint, guard, deadline, until, observe_empty)?;
     Ok(Discovery {
         controllers: inventory
             .candidates
@@ -345,12 +362,14 @@ fn discover_openrgb_inventory(
     guard: Guard,
     deadline: Cancellation,
     until: Instant,
+    observe_empty: impl FnOnce(),
 ) -> Result<Inventory, String> {
     let target = Target::Device(device_setup::preset("openrgb-controller")?.device("rgb-search")?);
     let factory = openrgb_factory(endpoint);
     let scan_cancel = deadline.with_guard(guard.clone());
     let poll_delay = Duration::from_millis(250);
     let mut retried = false;
+    let mut observe_empty = Some(observe_empty);
     loop {
         let inventory = match factory(target.clone(), scan_cancel.clone()) {
             Err(first)
@@ -377,6 +396,14 @@ fn discover_openrgb_inventory(
         }
         if scan_cancel.cancelled() {
             return Err("Поиск OpenRGB прерван.".into());
+        }
+        // Rejected or unconfigured controllers also leave candidates empty.
+        // Only a successful SDK inventory with no controllers emits this signal.
+        if inventory.issues.is_empty()
+            && inventory.unconfigured_argb.is_empty()
+            && let Some(observe_empty) = observe_empty.take()
+        {
+            observe_empty();
         }
         thread::sleep(poll_delay);
     }
@@ -1195,6 +1222,55 @@ mod tests {
     };
 
     #[test]
+    fn sdk_signals_empty_while_scan_can_still_find_a_late_controller() {
+        let peer = openrgb_peer::Peer::new(false);
+        peer.hide_inventory(true);
+        let mut scan = Scan {
+            cancel: Cancellation::default(),
+            probes: Vec::new(),
+            inventory: Discovery::default(),
+            updated: false,
+            progressive: true,
+            empty_sdk: Arc::default(),
+        };
+        let empty_sdk = scan.empty_sdk.clone();
+        let endpoint = peer.endpoint;
+        let cancel = scan.cancel.clone();
+        scan.spawn("OpenRGB", move || {
+            discover_rgb(
+                endpoint,
+                Ok(Some(Arc::new(|| Ok(())))),
+                cancel,
+                Instant::now(),
+                || {
+                    empty_sdk.store(true, Ordering::Release);
+                },
+            )
+        });
+        let mut worker = Worker {
+            scan: Some(scan),
+            task: None,
+        };
+        let until = Instant::now() + Duration::from_secs(5);
+        while !worker.take_empty_sdk_observation() {
+            assert!(worker.poll_inventory().is_none());
+            assert!(Instant::now() < until, "no early empty SDK observation");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!worker.is_idle(), "the probe is still running");
+        assert!(
+            !worker.take_empty_sdk_observation(),
+            "the signal is one-shot"
+        );
+        assert!(worker.poll_inventory().is_none(), "no empty map is built");
+
+        peer.hide_inventory(false);
+        let inventory = finish_scan(&mut worker);
+        assert_eq!(inventory.controllers.len(), 1);
+        assert!(worker.is_idle());
+    }
+
+    #[test]
     fn sdk_inventory_retries_one_interrupted_read() {
         let peer = openrgb_peer::Peer::disconnect_inventory(1);
         let inventory = discover_openrgb_inventory(
@@ -1202,6 +1278,7 @@ mod tests {
             Arc::new(|| Ok(())),
             Cancellation::default(),
             Instant::now() + INVENTORY_WAIT,
+            || panic!("a failed read or a nonempty inventory is not an empty observation"),
         )
         .unwrap();
         assert_eq!(inventory.candidates.len(), 1);
@@ -1218,6 +1295,7 @@ mod tests {
             Arc::new(|| Ok(())),
             Cancellation::default(),
             Instant::now() + INVENTORY_WAIT,
+            || panic!("a failed read or a nonempty inventory is not an empty observation"),
         ) else {
             panic!("the SDK receiver breaks every read");
         };
@@ -1243,6 +1321,7 @@ mod tests {
             guard,
             Cancellation::default(),
             Instant::now() + INVENTORY_WAIT,
+            || panic!("a failed read or a nonempty inventory is not an empty observation"),
         ) else {
             panic!("the ownership guard closes the route");
         };
@@ -1332,6 +1411,7 @@ mod tests {
             inventory: Discovery::default(),
             updated: false,
             progressive,
+            empty_sdk: Arc::default(),
         };
         scan.spawn("OpenRGB", move || openrgb);
         scan.spawn("TT LCD", move || lcd);
@@ -1340,6 +1420,10 @@ mod tests {
             scan: Some(scan),
             task: None,
         };
+        finish_scan(&mut worker)
+    }
+
+    fn finish_scan(worker: &mut Worker) -> Discovery {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut inventory = None;
         while !worker.is_idle() {
@@ -1369,6 +1453,7 @@ mod tests {
                 inventory: Discovery::default(),
                 updated: false,
                 progressive: true,
+                empty_sdk: Arc::default(),
             };
             scan.spawn("Surplife E1", || Err("fixture: radio unavailable".into()));
             scan.spawn("TT LCD", move || {
@@ -1495,6 +1580,7 @@ mod tests {
             inventory: initial,
             updated: false,
             progressive: true,
+            empty_sdk: Arc::default(),
         };
         scan.spawn("OpenRGB", || {
             Ok(Discovery {
@@ -1738,6 +1824,7 @@ mod tests {
             inventory: Discovery::default(),
             updated: false,
             progressive: true,
+            empty_sdk: Arc::default(),
         };
         scan.spawn("OpenRGB", move || {
             waiting.recv().map_err(|error| error.to_string())?;
