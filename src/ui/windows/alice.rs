@@ -1159,7 +1159,21 @@ fn apply_payload_with(
     .ok_or("Некорректная команда Алисы.")?;
     let body = serde_json::to_vec(&payload).map_err(|_| "Некорректная команда Алисы.")?;
     let result = request("/v1.0/devices/actions", Some(&body)).map_err(|error| {
-        format!("{error} Результат команды не подтверждён. Автоматического повтора не будет.")
+        if error == SIGN_IN_AGAIN || error == ACCESS_DENIED {
+            return error;
+        }
+        let observed = data["capabilities"]
+            .as_array()
+            .and_then(|caps| caps.iter().find(|cap| cap["type"] == ON))
+            .and_then(|cap| cap["state"]["value"].as_bool());
+        let observation = match observed {
+            Some(true) => " Последнее наблюдение перед командой: лампа была включена.",
+            Some(false) => " Последнее наблюдение перед командой: лампа была выключена.",
+            None => "",
+        };
+        format!(
+            "Результат команды не подтверждён. Автоматического повтора не будет.{observation} Текущая доступность неизвестна."
+        )
     })?;
     if confirms(&result, &selected.id, actions) {
         Ok(())
@@ -1431,6 +1445,108 @@ mod tests {
             assert_eq!(result.is_ok(), confirmed);
             assert_eq!(posts, writes);
         }
+    }
+
+    #[test]
+    fn accepted_post_with_truncated_reply_preserves_only_the_preflight_observation() {
+        let catalog = fixture();
+        let lamp = &lamps(&catalog).unwrap()[1];
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "no POST reached the fixture");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(&mut stream);
+            use std::io::BufRead;
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("POST /v1.0/devices/actions "));
+            let mut length = 0;
+            loop {
+                line.clear();
+                assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            assert!((1..1024).contains(&length));
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                payload["devices"],
+                json!([{"id":"b","actions":[{"type":ON,
+                "state":{"instance":"on","value":false}}]}])
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{")
+                .unwrap();
+            drop(stream);
+            listener
+        });
+
+        let mut posts = 0;
+        let error = apply_with(lamp, Change::Power(false), |path, body| match path {
+            "/v1.0/user/info" => Ok(catalog.clone()),
+            "/v1.0/devices/b" => Ok(json!({"status":"ok","id":"b","room":"r","state":"online",
+                "capabilities":[{"type":ON,"state":{"value":true}}]})),
+            "/v1.0/devices/actions" => {
+                posts += 1;
+                let spec = Request {
+                    agent: "Prismestra fixture",
+                    host: "127.0.0.1",
+                    port,
+                    path,
+                    secure: false,
+                    proxy: Proxy::Direct,
+                    headers: "Content-Type: application/json\r\n",
+                    max_body: 1024,
+                    io_timeout_ms: 500,
+                };
+                let response = winhttp_get::post(
+                    &spec,
+                    body.unwrap(),
+                    Instant::now() + Duration::from_secs(2),
+                    &mut || false,
+                );
+                assert!(
+                    !response
+                        .as_ref()
+                        .is_ok_and(|bytes| serde_json::from_slice::<Value>(bytes).is_ok())
+                );
+                Err("Ответ оборвался.".into())
+            }
+            _ => panic!("a different lamp was accessed"),
+        })
+        .unwrap_err();
+        let listener = peer.join().unwrap();
+        assert_eq!(posts, 1);
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        assert_eq!(
+            error,
+            "Результат команды не подтверждён. Автоматического повтора не будет. Последнее наблюдение перед командой: лампа была включена. Текущая доступность неизвестна."
+        );
     }
 
     #[test]
