@@ -1797,6 +1797,8 @@ function checkEnglishApplicationLanguage() {
   aliceStatusText('Не удалось получить доступ от Яндекса. Повторите вход.'),
   aliceStatusText('Не удалось загрузить список ламп. Повторите попытку.'),
   aliceStatusText('Вход отменён или доступ не разрешён. Начните вход заново.'),
+  aliceStatusText('Результат команды не подтверждён. Автоматического повтора не будет. Последнее наблюдение перед командой: лампа была включена. Текущая доступность неизвестна.'),
+  aliceStatusText('Результат команды не подтверждён. Автоматического повтора не будет. Последнее наблюдение перед командой: лампа была выключена. Текущая доступность неизвестна.'),
  ]`,preview);
  assert.deepEqual(Array.from(englishAliceStages),[
   'Waiting for your browser. Sign in with Yandex ID, then return to Prismestra.',
@@ -1805,6 +1807,8 @@ function checkEnglishApplicationLanguage() {
   'Could not get access from Yandex. Sign in again.',
   'Could not load available lights. Try again.',
   'Sign-in was cancelled or access was denied. Start sign-in again.',
+  'The lamp command was not confirmed. No automatic retry. Last observed before the command: the light was on. Current availability is unknown.',
+  'The lamp command was not confirmed. No automatic retry. Last observed before the command: the light was off. Current availability is unknown.',
  ]);
  const select=find('#ui-language');
  select.id='ui-language';
