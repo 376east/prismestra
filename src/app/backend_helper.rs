@@ -6,6 +6,8 @@ use super::managed_backend::{Config, Manager};
 mod clock;
 mod control_tick;
 #[cfg(test)]
+mod ipc_cutover;
+#[cfg(test)]
 mod ipc_ready;
 mod retry;
 use clock::{ActiveClock, Clock};
