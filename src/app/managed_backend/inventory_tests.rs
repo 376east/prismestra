@@ -131,6 +131,7 @@ fn installed_stop_keeps_admission_locked_while_direct_releases_it_with_worker() 
                 system: directory.0.clone(),
                 outbox: directory.0.clone(),
             }),
+            || Ok(()),
         )
     };
     let installed = start_installed().unwrap();

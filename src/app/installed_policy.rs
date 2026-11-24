@@ -21,12 +21,12 @@ use windows_sys::Win32::{
     Security::{
         CheckTokenMembership, CreateWellKnownSid, DuplicateTokenEx, GetTokenInformation,
         RevertToSelf, SECURITY_MAX_SID_SIZE, SecurityImpersonation, SetTokenInformation,
-        TOKEN_ADJUST_DEFAULT, TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_IMPERSONATE,
+        TOKEN_ADJUST_DEFAULT, TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_IMPERSONATE,
         TOKEN_INFORMATION_CLASS, TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_OWNER,
         TOKEN_QUERY, TOKEN_STATISTICS, TOKEN_USER, TokenElevation, TokenElevationType,
         TokenElevationTypeFull, TokenElevationTypeLimited, TokenImpersonation, TokenIntegrityLevel,
-        TokenLinkedToken, TokenOwner, TokenPrimary, TokenSessionId, TokenStatistics, TokenUser,
-        WinBuiltinAdministratorsSid, WinInteractiveSid,
+        TokenLinkedToken, TokenLogonSid, TokenOwner, TokenPrimary, TokenSessionId, TokenStatistics,
+        TokenUser, WinBuiltinAdministratorsSid, WinInteractiveSid,
     },
     Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT,
     System::{
@@ -392,6 +392,11 @@ pub(super) struct HelperAuthority {
 }
 
 impl HelperAuthority {
+    pub(super) fn ipc_logon_sid(&self) -> Result<String, String> {
+        self.parent_identity(self.parent.pid)?;
+        logon_sid(&self.limited)
+    }
+
     pub(super) fn verified_parent(&self) -> &Identity {
         &self.parent
     }
@@ -507,6 +512,19 @@ pub(super) fn verify_status(path: &Path) -> Result<(), String> {
         return Err(error("expected an installed helper status file"));
     }
     Ok(())
+}
+
+pub(super) fn open_ipc_offer(path: &Path) -> Result<Option<File>, String> {
+    let parent = path.parent().ok_or("Missing protected IPC outbox")?;
+    let root = known_folder(&FOLDERID_ProgramData)?;
+    if !protected_chain(parent, &root, false)? {
+        return Err(error("missing protected IPC outbox"));
+    }
+    match fs::symlink_metadata(path) {
+        Ok(_) => windows_protected_path::open_protected_file(path).map(Some),
+        Err(failure) if failure.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(failure) => Err(error(failure)),
+    }
 }
 
 fn visit_tree(
@@ -818,6 +836,23 @@ fn token_value<T: Copy>(token: &Handle, class: TOKEN_INFORMATION_CLASS) -> Resul
 fn token_sid(token: &Handle) -> Result<String, String> {
     let data = token_data(token, TokenUser)?;
     sid_string(unsafe { (*data.as_ptr().cast::<TOKEN_USER>()).User.Sid })
+}
+
+fn logon_sid(token: &Handle) -> Result<String, String> {
+    let data = token_data(token, TokenLogonSid)?;
+    if data.len() * size_of::<usize>() < size_of::<TOKEN_GROUPS>() {
+        return Err(error("missing token logon SID"));
+    }
+    let groups = unsafe { &*data.as_ptr().cast::<TOKEN_GROUPS>() };
+    if groups.GroupCount != 1 {
+        return Err(error("unexpected token logon SID count"));
+    }
+    sid_string(groups.Groups[0].Sid)
+}
+
+#[cfg(test)]
+pub(super) fn fixture_logon_sid() -> Result<String, String> {
+    logon_sid(&process_token(unsafe { GetCurrentProcess() }, TOKEN_QUERY)?)
 }
 
 fn session(token: &Handle) -> Result<u32, String> {

@@ -118,7 +118,7 @@ impl Generation {
 // required. A reused PID still blocks the extra attempt. Only a complete
 // enumeration can prove absence; an API error never does.
 #[cfg(windows)]
-fn old_processes_absent(pids: [u32; 2]) -> bool {
+pub(super) fn old_processes_absent(pids: [u32; 2]) -> bool {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE},
         System::Diagnostics::ToolHelp::{
@@ -152,7 +152,7 @@ fn old_processes_absent(pids: [u32; 2]) -> bool {
 }
 
 #[cfg(not(windows))]
-fn old_processes_absent(_: [u32; 2]) -> bool {
+pub(super) fn old_processes_absent(_: [u32; 2]) -> bool {
     false
 }
 
