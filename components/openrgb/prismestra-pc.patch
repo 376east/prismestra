@@ -136,7 +136,7 @@ index 0000000000000000000000000000000000000000..0929a5f3d515e040dfe87051c856f1b7
 +}
 +}
 diff --git a/DetectionManager.cpp b/DetectionManager.cpp
-index 4a5290a8ef3bd45b701d52e6436c854b6c308552..858036dc93a4c6081354a3dfcc991fdc940762d4 100644
+index 4a5290a8ef3bd45b701d52e6436c854b6c308552..4643da074291c22650c21d5a43226513d266962f 100644
 --- a/DetectionManager.cpp
 +++ b/DetectionManager.cpp
 @@ -14,10 +14,14 @@
@@ -403,7 +403,20 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..858036dc93a4c6081354a3dfcc991fdc
  
      /*-----------------------------------------------------*\
      | Detect HID devices                                    |
-@@ -920,7 +945,7 @@ void DetectionManager::BackgroundDetectDevices()
+@@ -864,8 +889,10 @@ void DetectionManager::BackgroundDetectDevices()
+     else
+     {
+ #if(HID_HOTPLUG_ENABLED)
+-        StopHIDHotplug();
+-        StartHIDHotplug();
++        if(StopHIDHotplug())
++        {
++            StartHIDHotplug();
++        }
+ #else
+         BackgroundDetectHIDDevices(hid_devices, detector_settings);
+ #endif
+@@ -920,7 +947,7 @@ void DetectionManager::BackgroundDetectDevices()
      /*-----------------------------------------------------*\
      | Unlock detection mutex                                |
      \*-----------------------------------------------------*/
@@ -412,7 +425,7 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..858036dc93a4c6081354a3dfcc991fdc
  
  #ifdef __linux__
      /*-----------------------------------------------------*\
-@@ -995,6 +1020,76 @@ void DetectionManager::BackgroundDetectDevices()
+@@ -995,6 +1022,76 @@ void DetectionManager::BackgroundDetectDevices()
      }
  }
  
@@ -489,7 +502,7 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..858036dc93a4c6081354a3dfcc991fdc
  void DetectionManager::BackgroundDetectI2CBuses()
  {
      LOG_INFO("------------------------------------------------------");
-@@ -1010,6 +1105,7 @@ void DetectionManager::BackgroundDetectI2CBuses()
+@@ -1010,6 +1107,7 @@ void DetectionManager::BackgroundDetectI2CBuses()
  
      for(std::size_t i2c_bus_detector_idx = 0; i2c_bus_detector_idx < i2c_bus_detectors.size(); i2c_bus_detector_idx++)
      {
@@ -497,7 +510,7 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..858036dc93a4c6081354a3dfcc991fdc
          if(i2c_bus_detectors[i2c_bus_detector_idx]() == false)
          {
              i2c_interface_fail = true;
-@@ -1040,6 +1136,7 @@ void DetectionManager::BackgroundDetectI2CDevices(json& detector_settings)
+@@ -1040,6 +1138,7 @@ void DetectionManager::BackgroundDetectI2CDevices(json& detector_settings)
  
      for(std::size_t i2c_detector_idx = 0; i2c_detector_idx < i2c_device_detectors.size(); i2c_detector_idx++)
      {
@@ -505,7 +518,7 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..858036dc93a4c6081354a3dfcc991fdc
          /*-------------------------------------------------*\
          | Update detection string                           |
          \*-------------------------------------------------*/
-@@ -1096,6 +1193,7 @@ void DetectionManager::BackgroundDetectI2CDRAMDevices(json& detector_settings)
+@@ -1096,6 +1195,7 @@ void DetectionManager::BackgroundDetectI2CDRAMDevices(json& detector_settings)
  
      for(std::size_t bus = 0; bus < i2c_buses.size() && IsAnyDimmDetectorEnabled(detector_settings); bus++)
      {
@@ -513,7 +526,7 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..858036dc93a4c6081354a3dfcc991fdc
          IF_DRAM_SMBUS(i2c_buses[bus]->info.pci_vendor, i2c_buses[bus]->info.pci_device)
          {
              std::vector<SPDWrapper> slots;
-@@ -1865,15 +1963,8 @@ void DetectionManager::ProcessDynamicDetectors()
+@@ -1865,15 +1965,8 @@ void DetectionManager::ProcessDynamicDetectors()
  
  bool DetectionManager::ProcessPreDetection()
  {
@@ -531,8 +544,42 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..858036dc93a4c6081354a3dfcc991fdc
      /*-----------------------------------------------------*\
      | Process pre-detection hooks                           |
      \*-----------------------------------------------------*/
+@@ -2178,8 +2271,23 @@ void DetectionManager::StartHIDHotplug()
+ #endif
+ }
+ 
+-void DetectionManager::StopHIDHotplug()
++bool DetectionManager::StopHIDHotplug()
+ {
++#ifdef _WIN32
++    const auto stop = [](hid_hotplug_callback_handle& handle) {
++        if(handle == 0) return true;
++        if(hid_hotplug_deregister_callback(handle) != 0)
++        {
++            LOG_WARNING("[%s] HID hotplug stop deferred or failed", DETECTIONMANAGER);
++            return false;
++        }
++        handle = 0;
++        return true;
++    };
++    const bool arrival_stopped = stop(hotplug_callback_handle);
++    const bool removal_stopped = stop(unplug_callback_handle);
++    return arrival_stopped && removal_stopped;
++#else
+     hid_hotplug_deregister_callback(hotplug_callback_handle);
+     hid_hotplug_deregister_callback(unplug_callback_handle);
+ 
+@@ -2191,6 +2299,8 @@ void DetectionManager::StopHIDHotplug()
+         hidapi_libusb_wrapper.hid_hotplug_deregister_callback(libusb_unplug_callback_handle);
+     }
+ #endif
++#endif
++    return true;
+ #endif
+ }
+ 
 diff --git a/DetectionManager.h b/DetectionManager.h
-index 3e334463b96a3eca23501c848f18c2a242d00180..0d3e5b83fc4d9f1979959b078eef524f93bd238d 100644
+index 3e334463b96a3eca23501c848f18c2a242d00180..df71275633ca2e5995c7983475a2c4c0567c490e 100644
 --- a/DetectionManager.h
 +++ b/DetectionManager.h
 @@ -17,6 +17,7 @@
@@ -577,6 +624,15 @@ index 3e334463b96a3eca23501c848f18c2a242d00180..0d3e5b83fc4d9f1979959b078eef524f
      void BackgroundDetectI2CDevices(json& detector_settings);
      void BackgroundDetectI2CDRAMDevices(json& detector_settings);
      void BackgroundDetectI2CPCIDevices(json& detector_settings);
+@@ -394,7 +401,7 @@ private:
+     | HID hotplug management functions                      |
+     \*-----------------------------------------------------*/
+     void StartHIDHotplug();
+-    void StopHIDHotplug();
++    bool StopHIDHotplug();
+ 
+     /*-----------------------------------------------------*\
+     | HID hotplug callback functions                        |
 diff --git a/NetworkServer.cpp b/NetworkServer.cpp
 index 967a6e74026a19dcf2d165e7ddb1c4ce9ff322a4..4c548e95335e2fa674c12a29eacedd8f1d9b445e 100644
 --- a/NetworkServer.cpp

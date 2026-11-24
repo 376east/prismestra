@@ -34,6 +34,8 @@ The selected HIDAPI and PawnIOLib DLLs are our source builds, pinned separately 
 
 When the HIDAPI entry pins a local patch, check the unchanged upstream archive and patch SHA-256 separately. Extract into a fresh directory, then run `git apply --check` and `git apply` with that patch before building. The component archive carries the upstream archive under `source/`, the overlay under `build/`, and the matching BSD notice under `licenses/`. The dependency lock pins the resulting DLL separately. An OpenRGB source revision alone cannot authorize an older HIDAPI build.
 
+The Windows 2022 cold build uses the pinned [HIDAPI recipe](../scripts/components/build_hidapi.py) with the Visual Studio x64 tools and SDK recorded in the dependency lock. The recipe applies the patch to the pinned source archive, builds with `/Brepro`, and accepts only the recorded DLL hash. Two independent Windows 2022 jobs produced this hash and confirmed matching export names and ordinals. The build reuses the other locked dependencies. [CI evidence](https://github.com/376east/prismestra/actions/runs/45373290694)
+
 ```text
 python scripts/components/verify_openrgb_component.py --source-root SOURCE --release-dir RELEASE --source-lock components/openrgb/source-lock.json --dependency-lock components/openrgb/dependency-lock.json --output audit.json
 python scripts/components/test_verify_openrgb_component.py

@@ -2,12 +2,16 @@
   "version": 1,
   "files": {
     "hidapi-hotplug.dll": {
-      "sha256": "eb2f1d2bbbea2457356b79fd3077f07bead2e77adc5079de0adb795d64ed1d83",
+      "sha256": "a9ca6352a1fd30637b99f9ceac9712520bf2eb85198cc4c3841fe83ca911b0a7",
       "source_archive_sha256": "d4197d1756dbb0f6d7ff167d1e92ec5b44d9d9ce6b87cb8ff3603272edcb1817",
       "source_revision": "238df449ecc0a56a70a3c8f4ebf46bb46857af27",
       "repository": "https://github.com/OpenRGBDevelopers/hidapi-hotplug",
       "source_url": "https://codeload.github.com/OpenRGBDevelopers/hidapi-hotplug/zip/238df449ecc0a56a70a3c8f4ebf46bb46857af27",
-      "license": "BSD-3-Clause (upstream BSD-style option; preserve LICENSE-bsd.txt and notices)"
+      "license": "BSD-3-Clause (upstream BSD-style option; preserve LICENSE-bsd.txt and notices)",
+      "patch": "hidapi-common-teardown.patch",
+      "patch_sha256": "a5f9b93d20d1cfd4e37dd544deebc9bdd31f41b162ded3bd63c1dbfcd32765c2",
+      "msvc_toolset": "14.44.35207",
+      "windows_sdk": "10.0.26100.0"
     },
     "PawnIOLib.dll": {
       "sha256": "93ac1915dabba7b2eb8f796d714f15d83a4fde21f68b7e11646f93aa38de897b",
