@@ -3,11 +3,7 @@ use std::{
     ffi::{OsString, c_void},
     fs, io,
     mem::{size_of, zeroed},
-    os::windows::{
-        ffi::{OsStrExt, OsStringExt},
-        fs::OpenOptionsExt,
-        io::AsRawHandle,
-    },
+    os::windows::ffi::{OsStrExt, OsStringExt},
     path::{Component, Path, PathBuf, Prefix},
     ptr::{addr_of, null, null_mut},
 };
@@ -182,20 +178,7 @@ pub(super) fn inspect_protected_entry(
     inspect_protected_handle(file.0, path, system_path, exception, single_link)
 }
 
-pub(super) fn open_protected_file(path: &Path) -> Result<fs::File, String> {
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .map_err(error)?;
-    if inspect_protected_handle(file.as_raw_handle(), path, false, 0, true)? {
-        return Err(error("expected a protected file"));
-    }
-    Ok(file)
-}
-
-fn inspect_protected_handle(
+pub(super) fn inspect_protected_handle(
     file: HANDLE,
     path: &Path,
     system_path: bool,

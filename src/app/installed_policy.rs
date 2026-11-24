@@ -9,7 +9,7 @@ use std::{
     io::{self, Read},
     mem::size_of,
     net::{Ipv4Addr, SocketAddr},
-    os::windows::ffi::OsStringExt,
+    os::windows::{ffi::OsStringExt, fs::OpenOptionsExt, io::AsRawHandle},
     path::{Path, PathBuf},
     ptr::{addr_of, null, null_mut},
 };
@@ -28,7 +28,10 @@ use windows_sys::Win32::{
         TokenLinkedToken, TokenLogonSid, TokenOwner, TokenPrimary, TokenSessionId, TokenStatistics,
         TokenUser, WinBuiltinAdministratorsSid, WinInteractiveSid,
     },
-    Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT,
+    Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    },
     System::{
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -54,8 +57,8 @@ mod windows_protected_path;
 #[cfg(test)]
 use windows_protected_path::{ADMINISTRATORS, SYSTEM, TRUSTED_INSTALLER, privileged_sid};
 use windows_protected_path::{
-    Handle, checked_disk_path, error, known_folder, known_folder_for, protected_chain,
-    protected_entry, sid_string,
+    Handle, checked_disk_path, error, inspect_protected_handle, known_folder, known_folder_for,
+    protected_chain, protected_entry, sid_string,
 };
 
 const POLICY_LIMIT: usize = 128 * 1024;
@@ -521,10 +524,20 @@ pub(super) fn open_ipc_offer(path: &Path) -> Result<Option<File>, String> {
         return Err(error("missing protected IPC outbox"));
     }
     match fs::symlink_metadata(path) {
-        Ok(_) => windows_protected_path::open_protected_file(path).map(Some),
-        Err(failure) if failure.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(failure) => Err(error(failure)),
+        Ok(_) => {}
+        Err(failure) if failure.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(failure) => return Err(error(failure)),
     }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(error)?;
+    if inspect_protected_handle(file.as_raw_handle(), path, false, 0, true)? {
+        return Err(error("expected a protected file"));
+    }
+    Ok(Some(file))
 }
 
 fn visit_tree(
