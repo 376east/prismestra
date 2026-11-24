@@ -784,6 +784,11 @@ fn run(config: Config, installed: Option<&InstalledLaunch>, state: &Shared) {
             &mut retry,
             MonitorTiming::default(),
             |endpoint, pid| probe_owned_sdk(endpoint, pid, &|| state.cancel.load(Ordering::SeqCst)),
+            |cause, pid, generation| {
+                if installed.is_some() {
+                    report_ready_change(cause, pid, generation);
+                }
+            },
         );
         let exited = owned.shutdown();
         {
@@ -850,6 +855,31 @@ impl MonitorTiming {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadyCause {
+    SdkProbeRecovered,
+    InventoryFingerprintChanged,
+}
+
+fn report_ready_change(cause: ReadyCause, backend_pid: u32, generation: u64) {
+    #[cfg(windows)]
+    {
+        let cause = match cause {
+            ReadyCause::SdkProbeRecovered => "sdk_probe_recovered",
+            ReadyCause::InventoryFingerprintChanged => "inventory_fingerprint_changed",
+        };
+        super::backend_diagnostics::queue_windows_event(
+            3,
+            format!(
+                "event=backend_ready_generation cause={cause} helper_pid={} backend_pid={backend_pid} manager_generation={generation}",
+                std::process::id()
+            ),
+        );
+    }
+    #[cfg(not(windows))]
+    let _ = (cause, backend_pid, generation);
+}
+
 fn monitor_owned(
     config: &Config,
     state: &Shared,
@@ -857,6 +887,7 @@ fn monitor_owned(
     retry: &mut Retry,
     timing: MonitorTiming,
     mut probe: impl FnMut(SocketAddr, u32) -> Result<(), ProbeFailure>,
+    mut ready_changed: impl FnMut(ReadyCause, u32, u64),
 ) {
     let began = Instant::now();
     let mut ready = false;
@@ -915,11 +946,18 @@ fn monitor_owned(
             unhealthy = 0;
             if !ready {
                 ready = true;
+                let recovered = ever_ready;
                 ever_ready = true;
-                let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
-                snapshot.ready = true;
-                snapshot.ready_generation = snapshot.ready_generation.saturating_add(1);
-                snapshot.detail = "Managed OpenRGB SDK ready".into();
+                let generation = {
+                    let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
+                    snapshot.ready = true;
+                    snapshot.ready_generation = snapshot.ready_generation.saturating_add(1);
+                    snapshot.detail = "Managed OpenRGB SDK ready".into();
+                    snapshot.ready_generation
+                };
+                if recovered {
+                    ready_changed(ReadyCause::SdkProbeRecovered, owned.child.id(), generation);
+                }
             }
             if Instant::now() >= inventory_at {
                 inventory_at = Instant::now() + timing.inventory_interval;
@@ -928,7 +966,13 @@ fn monitor_owned(
                         if !state.cancel.load(Ordering::SeqCst)
                             && listener_owned(config.endpoint, owned.child.id()) =>
                     {
-                        inventory.observe(count, fingerprint, state)
+                        if let Some(generation) = inventory.observe(count, fingerprint, state) {
+                            ready_changed(
+                                ReadyCause::InventoryFingerprintChanged,
+                                owned.child.id(),
+                                generation,
+                            );
+                        }
                     }
                     result => {
                         let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
@@ -1016,11 +1060,12 @@ impl Default for InventoryWatch {
     }
 }
 impl InventoryWatch {
-    fn observe(&mut self, count: usize, fingerprint: [u8; 32], state: &Shared) {
+    fn observe(&mut self, count: usize, fingerprint: [u8; 32], state: &Shared) -> Option<u64> {
         self.ever_populated |= count > 0;
         let mut snapshot = state.snapshot.lock().unwrap_or_else(|p| p.into_inner());
         snapshot.populated_inventory_at = (count > 0).then(Instant::now);
-        if self.last != fingerprint {
+        let changed = self.last != fingerprint;
+        if changed {
             self.last = fingerprint;
             snapshot.ready_generation = snapshot.ready_generation.saturating_add(1);
         }
@@ -1029,6 +1074,7 @@ impl InventoryWatch {
         } else {
             format!("Managed OpenRGB SDK ready; inventory {count} controllers")
         };
+        changed.then_some(snapshot.ready_generation)
     }
 }
 
@@ -1611,6 +1657,7 @@ mod tests {
                 }
                 probe_owned_sdk(endpoint, std::process::id(), &|| false)
             },
+            |_, _, _| panic!("the initial Ready and an unrecovered failure are not changes"),
         );
         server.join().unwrap();
         assert_eq!(probes, 7);
@@ -1799,6 +1846,8 @@ mod tests {
             gate: Mutex::new(()),
         };
         let mut probes = 0;
+        let mut changes = Vec::new();
+        let pid = owned.child.id();
         monitor_owned(
             &config,
             &state,
@@ -1813,7 +1862,7 @@ mod tests {
                 probes += 1;
                 let snapshot = state.snapshot.lock().unwrap();
                 match probes {
-                    1..=3 | 7 => Err(ProbeFailure::Unknown("ownership table unreadable".into())),
+                    1..=3 | 10 => Err(ProbeFailure::Unknown("ownership table unreadable".into())),
                     4 => {
                         assert!(!snapshot.ready);
                         assert!(snapshot.detail.contains("ownership table unreadable"));
@@ -1823,18 +1872,31 @@ mod tests {
                         assert!(snapshot.ready);
                         Err(ProbeFailure::Confirmed("listener missing".into()))
                     }
-                    6 | 8..=10 => {
+                    7 => {
                         assert!(!snapshot.ready);
+                        Ok(())
+                    }
+                    6 | 9 | 11..=13 => {
+                        assert!(!snapshot.ready);
+                        Err(ProbeFailure::Confirmed("listener missing".into()))
+                    }
+                    8 => {
+                        assert!(snapshot.ready);
                         Err(ProbeFailure::Confirmed("listener missing".into()))
                     }
                     _ => panic!("confirmed listener loss did not trigger a restart"),
                 }
             },
+            |cause, pid, generation| {
+                assert!(state.snapshot.try_lock().is_ok());
+                changes.push((cause, pid, generation));
+            },
         );
-        assert_eq!(probes, 10);
+        assert_eq!(probes, 13);
+        assert_eq!(changes, [(ReadyCause::SdkProbeRecovered, pid, 2)]);
         let snapshot = state.snapshot.lock().unwrap();
         assert!(!snapshot.ready);
-        assert_eq!(snapshot.ready_generation, 1);
+        assert_eq!(snapshot.ready_generation, 2);
         assert!(snapshot.detail.contains("restarting owned child"));
         assert!(snapshot.detail.contains("stage=listener missing"));
     }
