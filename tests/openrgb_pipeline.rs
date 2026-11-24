@@ -599,6 +599,19 @@ fn invalid_geometry_only_excludes_the_affected_physical_identity() {
 }
 
 #[test]
+fn empty_inventory_has_no_controller_diagnostics() {
+    let peer = Peer::empty_inventory();
+    let inventory = discovery::openrgb_factory(peer.endpoint)(
+        discovery::Target::Device(document().lighting.setup.devices[0].clone()),
+        Cancellation::default(),
+    )
+    .unwrap();
+
+    assert!(inventory.candidates.is_empty());
+    assert!(inventory.issues.is_empty(), "{:?}", inventory.issues);
+}
+
+#[test]
 fn virtual_controllers_are_excluded_even_if_a_private_binding_is_forged() {
     let peer = Peer::virtual_controller();
     let mut document = document();
@@ -608,6 +621,7 @@ fn virtual_controllers_are_excluded_even_if_a_private_binding_is_forged() {
     )
     .unwrap();
     assert!(inventory.candidates.is_empty());
+    assert_eq!(inventory.issues.len(), 1, "{:?}", inventory.issues);
     assert!(
         inventory
             .issues
