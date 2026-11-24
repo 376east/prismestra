@@ -5,7 +5,7 @@ Extract the complete Windows ZIP into a folder you can write to. Prismestra loca
 ## First setup
 
 1. Open `Prismestra.exe` from the extracted folder. With the adjacent release manifest, this opens a software preview without activating saved hardware outputs.
-2. Create your device layout or open an exported profile using the editor. Inspect the Connections page and configure the supported devices on this PC. Saving connection settings and applying them are separate actions. See [connection behavior](https://github.com/malyarq/prismestra/blob/codex/native-design/docs/universal-connections.md).
+2. Create your device layout or open an exported profile using the editor. Inspect the Connections page and configure the supported devices on this PC. Saving connection settings and applying them are separate actions. See [connection behavior](universal-connections.md).
 3. Save your profile as `data/profile.json` inside the extracted folder. The launcher does not guess which of your scenes to use and does not automatically save unsaved profile edits. Use **Export Profile** to move a profile with its LCD media to another PC. Opening the ZIP imports those files into the local asset store. Save the imported profile at `data/profile.json` afterward.
 4. To activate the saved connections, create a Windows shortcut. Set its target to `"C:\path\to\Prismestra.exe" --portable --start-connected`. Exit the existing session from the tray before switching modes. Start the new shortcut to restore the saved scene and its local connections, including configured temperature routes.
 
