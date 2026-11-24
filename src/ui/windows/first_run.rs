@@ -3,6 +3,7 @@ use super::*;
 use crate::app::{
     first_run::{self, Plan, Worker},
     lighting_outputs::Local,
+    runtime::IntentReceipt,
 };
 use crate::devices::{Device, Role};
 use std::{thread::JoinHandle, time::Duration};
@@ -45,11 +46,31 @@ struct Applying {
     context: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum CancellationReason {
+    ProfileDirty,
+    EditorDirty,
+    ProfileOpenPending,
+    ProfilePathChanged,
+    ContextChanged,
+    DocumentChanged,
+    ConnectionSwitching,
+    ConnectionEdits,
+    ConnectionScan,
+    ProfileImport,
+    Shutdown,
+    Error,
+}
+
 pub(super) struct Startup {
     installed: bool,
     phase: &'static str,
     report: Vec<u8>,
     reported_phase: &'static str,
+    reported_intent: Option<IntentReceipt>,
+    process_creation_filetime: Option<String>,
+    cancellation_reason: Option<CancellationReason>,
     status_label: Option<(&'static str, String)>,
     discovery_issues: Vec<String>,
     unconfigured_argb: Vec<crate::transport::openrgb::UnconfiguredArgb>,
@@ -79,6 +100,12 @@ impl Startup {
             phase: if enabled { "starting" } else { "disabled" },
             report: Vec::new(),
             reported_phase: "",
+            reported_intent: None,
+            process_creation_filetime: enabled
+                .then(resident::current_creation_filetime)
+                .flatten()
+                .map(|time| time.to_string()),
+            cancellation_reason: None,
             status_label: None,
             discovery_issues: Vec::new(),
             unconfigured_argb: Vec::new(),
@@ -101,16 +128,17 @@ impl Startup {
             next: Instant::now(),
         }
     }
-    pub(super) fn cancel(&mut self) {
+    pub(super) fn cancel(&mut self, reason: CancellationReason) {
         self.enabled = false;
         self.unconfigured_argb.clear();
         self.unknown_openrgb_controller = false;
         self.phase = "cancelled";
+        self.cancellation_reason.get_or_insert(reason);
         self.worker.cancel();
     }
     pub(super) fn cancel_for_import(&mut self) {
         if self.enabled {
-            self.cancel();
+            self.cancel(CancellationReason::ProfileImport);
         }
     }
     pub(super) fn drained(&self) -> bool {
@@ -118,6 +146,13 @@ impl Startup {
     }
     pub(super) fn configuring(&self) -> bool {
         self.applying.is_some() || self.restoring.is_some()
+    }
+
+    fn needs_report(&self, intent: IntentReceipt) -> bool {
+        self.installed
+            && (self.enabled
+                || self.reported_phase != self.phase
+                || self.reported_intent != Some(intent))
     }
 
     fn can_retry_search(&self, now: Instant) -> bool {
@@ -149,6 +184,7 @@ impl Startup {
         }
         self.enabled = true;
         self.phase = "discovering";
+        self.cancellation_reason = None;
         self.discovery_issues.clear();
         self.unknown_openrgb_controller = false;
     }
@@ -284,22 +320,52 @@ impl App {
         Ok(())
     }
 
-    fn pending_plan_matches(&self, pending: &Applying) -> bool {
-        self.path.as_ref() == Some(&pending.path)
-            && self.context_revision == pending.context
-            && !self.dirty
-            && !self.editor_dirty
-            && self.pending_open.is_none()
-            && !self.connection_switching()
-            && self.guard_connections_close().is_ok()
-            && self.connections.scan.is_idle()
-            && (self.runtime.document() == &pending.previous_document
-                || self.runtime.document() == &pending.plan.document)
+    fn startup_cancel_reason(
+        &self,
+        path_changed: bool,
+        context: u64,
+        document_changed: impl FnOnce() -> bool,
+    ) -> Option<CancellationReason> {
+        use CancellationReason::*;
+        if self.dirty {
+            Some(ProfileDirty)
+        } else if self.editor_dirty {
+            Some(EditorDirty)
+        } else if self.pending_open.is_some() {
+            Some(ProfileOpenPending)
+        } else if path_changed {
+            Some(ProfilePathChanged)
+        } else if self.context_revision != context {
+            Some(ContextChanged)
+        } else if document_changed() {
+            Some(DocumentChanged)
+        } else if self.connection_switching() {
+            Some(ConnectionSwitching)
+        } else if self.guard_connections_close().is_err() {
+            Some(ConnectionEdits)
+        } else if !self.connections.scan.is_idle() {
+            Some(ConnectionScan)
+        } else {
+            None
+        }
+    }
+
+    fn pending_plan_cancel_reason(&self, pending: &Applying) -> Option<CancellationReason> {
+        self.startup_cancel_reason(
+            self.path.as_ref() != Some(&pending.path),
+            pending.context,
+            || {
+                self.runtime.document() != &pending.previous_document
+                    && self.runtime.document() != &pending.plan.document
+            },
+        )
     }
 
     pub(super) fn newly_found_devices(&self) -> impl Iterator<Item = &Device> {
         let proposal = self.first_run.applying.as_ref().filter(|pending| {
-            self.first_run.enabled && !self.shutdown.active() && self.pending_plan_matches(pending)
+            self.first_run.enabled
+                && !self.shutdown.active()
+                && self.pending_plan_cancel_reason(pending).is_none()
         });
         new_devices(
             &self.runtime.project().setup.devices,
@@ -317,17 +383,20 @@ impl App {
         let changed = match self.advance_first_run() {
             Ok(changed) => changed,
             Err(error) => {
-                self.first_run.cancel();
+                self.first_run.cancel(CancellationReason::Error);
                 self.first_run.phase = "error";
                 self.set_first_run_status("failed", format!("Автонастройка: {error}"));
                 true
             }
         };
-        if self.first_run.installed
-            && (self.first_run.enabled || self.first_run.reported_phase != self.first_run.phase)
-        {
+        let intent = self.runtime.intent_receipt();
+        if self.first_run.needs_report(intent) {
             let report = serde_json::to_vec_pretty(&serde_json::json!({
                 "version": 1, "phase": self.first_run.phase,
+                "process_id": std::process::id(),
+                "process_creation_filetime": self.first_run.process_creation_filetime,
+                "cancellation_reason": self.first_run.cancellation_reason,
+                "intent": intent,
                 "attempt": self.first_run.attempts,
                 "early_manual_starts": self.first_run.early_manual_starts,
                 "native_outputs": self.native_lighting.is_some(),
@@ -347,6 +416,7 @@ impl App {
             {
                 self.first_run.report = bytes;
                 self.first_run.reported_phase = self.first_run.phase;
+                self.first_run.reported_intent = Some(intent);
             }
         }
         changed
@@ -404,17 +474,12 @@ impl App {
                 .unwrap()
                 .join()
                 .map_err(|_| "Не удалось завершить перенос сессии")??;
-            if self.dirty
-                || self.editor_dirty
-                || self.pending_open.is_some()
-                || self.path != self.first_run.path
-                || self.context_revision != self.first_run.context
-                || self.first_run.expected.as_ref() != Some(self.runtime.document())
-                || self.connection_switching()
-                || self.guard_connections_close().is_err()
-                || !self.connections.scan.is_idle()
-            {
-                self.first_run.cancel();
+            if let Some(reason) = self.startup_cancel_reason(
+                self.path != self.first_run.path,
+                self.first_run.context,
+                || self.first_run.expected.as_ref() != Some(self.runtime.document()),
+            ) {
+                self.first_run.cancel(reason);
                 self.set_first_run_status(
                     "cancelled",
                     "Автовключение отменено: вы изменили профиль. Правки остаются в редакторе.",
@@ -465,16 +530,11 @@ impl App {
             return Ok(true);
         }
         if self.first_run.applying.is_none()
-            && (self.dirty
-                || self.editor_dirty
-                || self.connection_switching()
-                || self.pending_open.is_some()
-                || self.context_revision != self.first_run.context
-                || self.first_run.expected.as_ref() != Some(self.runtime.document())
-                || self.guard_connections_close().is_err()
-                || !self.connections.scan.is_idle())
+            && let Some(reason) = self.startup_cancel_reason(false, self.first_run.context, || {
+                self.first_run.expected.as_ref() != Some(self.runtime.document())
+            })
         {
-            self.first_run.cancel();
+            self.first_run.cancel(reason);
             self.set_first_run_status(
                 "cancelled",
                 "Автонастройка остановлена: сохраняю ваши текущие правки.",
@@ -482,7 +542,7 @@ impl App {
             return Ok(true);
         }
         if let Some(pending) = &self.first_run.applying {
-            if !self.pending_plan_matches(pending) {
+            if let Some(reason) = self.pending_plan_cancel_reason(pending) {
                 let pending = self.first_run.applying.take().unwrap();
                 if self.path.as_ref() == Some(&pending.path)
                     && self.runtime.output_revision() == pending.revision
@@ -490,7 +550,7 @@ impl App {
                     self.native_lighting = Some(pending.plan.local);
                     self.dirty = true;
                 }
-                self.first_run.cancel();
+                self.first_run.cancel(reason);
                 self.set_first_run_status("cancelled", "Автонастройка остановлена. Ваши правки остаются в редакторе; профиль не перезаписан.");
                 return Ok(true);
             }
@@ -839,8 +899,39 @@ mod tests {
         assert!(startup.complete_search());
         assert!(startup.can_retry_search(now));
 
-        startup.cancel();
+        startup.cancel(CancellationReason::Shutdown);
         assert!(!startup.can_retry_search(now));
+    }
+
+    #[test]
+    fn cancelled_startup_reports_new_intent_without_losing_the_first_reason() {
+        let (_fixture, profile, _, _) = crate::app::installed::tests::fresh_profile();
+        let mut runtime = Runtime::new(Document::load(&profile).unwrap(), None).unwrap();
+        let mut startup = Startup::new(true);
+        assert_eq!(
+            startup
+                .process_creation_filetime
+                .as_deref()
+                .and_then(|time| time.parse().ok()),
+            resident::current_creation_filetime()
+        );
+        assert!(startup.process_creation_filetime.is_some());
+        startup.cancel(CancellationReason::ConnectionScan);
+        startup.cancel(CancellationReason::Shutdown);
+        assert_eq!(
+            serde_json::to_value(startup.cancellation_reason).unwrap(),
+            "connection_scan"
+        );
+        assert!(startup.needs_report(runtime.intent_receipt()));
+
+        startup.reported_phase = "cancelled";
+        startup.reported_intent = Some(runtime.intent_receipt());
+        assert!(!startup.needs_report(runtime.intent_receipt()));
+        runtime.set_group(Target::Door, false).unwrap();
+        assert!(startup.needs_report(runtime.intent_receipt()));
+
+        startup.retry_search(runtime.document(), &profile, 1, Instant::now());
+        assert_eq!(startup.cancellation_reason, None);
     }
 
     #[test]

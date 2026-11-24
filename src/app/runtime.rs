@@ -64,6 +64,37 @@ impl Desired {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum IntentOrigin {
+    Default,
+    Journal,
+    Manual,
+    TrayStop,
+    Schedule,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+struct IntentOrigins {
+    pc: IntentOrigin,
+    door: IntentOrigin,
+}
+
+impl IntentOrigins {
+    fn set(&mut self, target: Target, origin: IntentOrigin) {
+        match target {
+            Target::Pc => self.pc = origin,
+            Target::Door => self.door = origin,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct IntentReceipt {
+    desired: Desired,
+    origins: IntentOrigins,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Journal {
@@ -249,6 +280,7 @@ pub struct Runtime {
     store: Store,
     schedule: Schedule,
     desired: Desired,
+    intent_origins: IntentOrigins,
     lcd: BTreeMap<String, lcd_worker::Worker>,
     capture: Option<capture_worker::Worker>,
     #[cfg(windows)]
@@ -314,7 +346,13 @@ impl Runtime {
     pub fn new(document: Document, journal: Option<PathBuf>) -> Result<Self, String> {
         document.validate()?;
         let store = Store::new(journal, &document)?;
-        let (mut schedule, desired) = store.load()?.unwrap_or((
+        let loaded = store.load()?;
+        let origin = if loaded.is_some() {
+            IntentOrigin::Journal
+        } else {
+            IntentOrigin::Default
+        };
+        let (mut schedule, desired) = loaded.unwrap_or((
             Schedule::new(document.lighting.schedule.clone())?,
             Desired {
                 pc: true,
@@ -341,6 +379,10 @@ impl Runtime {
             store,
             schedule,
             desired,
+            intent_origins: IntentOrigins {
+                pc: origin,
+                door: origin,
+            },
             lcd: BTreeMap::new(),
             capture: None,
             #[cfg(windows)]
@@ -450,6 +492,12 @@ impl Runtime {
     }
     pub fn desired(&self) -> Desired {
         self.desired
+    }
+    pub(crate) fn intent_receipt(&self) -> IntentReceipt {
+        IntentReceipt {
+            desired: self.desired,
+            origins: self.intent_origins,
+        }
     }
     pub fn error(&self) -> Option<&str> {
         self.configuration_error()
@@ -1266,6 +1314,19 @@ impl Runtime {
         Ok(())
     }
     pub fn set_group(&mut self, target: Target, on: bool) -> Result<(), String> {
+        self.set_group_from(target, on, IntentOrigin::Manual)
+    }
+    pub(crate) fn mute_for_tray_stop(&mut self) -> Result<(), String> {
+        self.set_group_from(Target::Pc, false, IntentOrigin::TrayStop)?;
+        self.set_group_from(Target::Door, false, IntentOrigin::TrayStop)
+    }
+
+    fn set_group_from(
+        &mut self,
+        target: Target,
+        on: bool,
+        origin: IntentOrigin,
+    ) -> Result<(), String> {
         if self.stopped {
             return Err("Runtime has stopped".into());
         }
@@ -1276,6 +1337,7 @@ impl Runtime {
         desired.set(target, on);
         self.store.persist(desired, &self.schedule.encoded()?)?;
         self.desired = desired;
+        self.intent_origins.set(target, origin);
         self.apply_mutes()?;
         self.mask_view();
         self.bump_view();
@@ -2020,6 +2082,9 @@ impl Runtime {
                 ACCEPTED,
                 &mut |ledger| self.store.persist(desired, ledger),
             )?;
+            if self.desired != desired {
+                self.intent_origins.set(d.target, IntentOrigin::Schedule);
+            }
             self.desired = desired;
             self.apply_mutes()?;
             self.mask_view();

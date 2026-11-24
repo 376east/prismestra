@@ -1193,7 +1193,8 @@ impl App {
     }
     fn begin_shutdown(&mut self) {
         alice::cancel_lamp_on_shutdown(&mut self.scene_lamp_cancel);
-        self.first_run.cancel();
+        self.first_run
+            .cancel(first_run::CancellationReason::Shutdown);
         self.sources.release_lighting();
         self.connections.scan.cancel();
         self.sources.scan.cancel();
