@@ -1918,6 +1918,10 @@ function checkOutputPageLanguage(target,isEnglish) {
   /Источник.*value="desk-right"[^>]*>desk-right.*value="@scene_edges" selected>Края общей сцены/s);
  receive('status',{status:'Захват выбранного экрана запрошен; проверьте статус источника.'});
  assert.match(find('#player-status').textContent,isEnglish?/Capture requested/:/Захват выбранного экрана/);
+ receive('status',{detail:'Базовая сцена · кадр монитора устарел'});
+ assert.equal(find('#native-runtime-detail').textContent,isEnglish?'Base scene · Monitor frame expired':'Базовая сцена · кадр монитора устарел');
+ receive('status',{detail:'Источник кадров — монитор'});
+ assert.equal(find('#native-runtime-detail').textContent,isEnglish?'Frame source: Monitor':'Источник кадров — монитор');
 
  const seeded=[['current','Моя сцена','noise_map'],['noise','Мягкий свет','noise_map'],
   ['rainbow','Радуга','rainbow_wave'],['breathing','Дыхание','breathing']];

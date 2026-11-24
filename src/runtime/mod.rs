@@ -48,10 +48,14 @@ impl Cadence {
 struct FrameView {
     preview: Vec<Rgb>,
     frames: BTreeMap<String, Vec<Rgb>>,
+    perimeter: Vec<Rgb>,
 }
 struct Core {
     setup: std::sync::Arc<Setup>,
     scene_canvas: Option<crate::devices::Canvas>,
+    fallback_routes: BTreeMap<String, (bool, crate::capture::ambient::OutputSettings)>,
+    perimeter_slots: Vec<usize>,
+    perimeter_start: Option<usize>,
     renderer: Renderer,
     #[cfg(windows)]
     audio: Option<(u64, crate::capture::audio_features::AudioFeatures)>,
@@ -75,6 +79,9 @@ impl Core {
         Ok(Self {
             setup: std::sync::Arc::new(setup),
             scene_canvas: None,
+            fallback_routes: BTreeMap::new(),
+            perimeter_slots: Vec::new(),
+            perimeter_start: None,
             renderer,
             #[cfg(windows)]
             audio: None,
@@ -112,6 +119,9 @@ impl Core {
         }
         self.setup = std::sync::Arc::new(setup);
         self.scene_canvas = None;
+        self.fallback_routes.clear();
+        self.perimeter_slots.clear();
+        self.perimeter_start = None;
         self.outputs.clear();
         self.endpoint_leases.clear();
         self.cadences.clear();
@@ -237,8 +247,12 @@ impl Core {
     fn clear_feed(&mut self) {
         if let Some(feed) = self.feed.take() {
             for (id, r) in feed.routes() {
-                self.external
-                    .insert(id.clone(), vec![Rgb::default(); r.leds].into());
+                if self.fallback_routes.contains_key(id) {
+                    self.external.remove(id);
+                } else {
+                    self.external
+                        .insert(id.clone(), vec![Rgb::default(); r.leds].into());
+                }
                 self.cadences.remove(id);
             }
         }
@@ -250,15 +264,18 @@ impl Core {
         let batch = feed.snapshot();
         let now = now_us / 1000;
         for (id, route) in feed.routes() {
-            let frame = batch.frames.get(id).filter(|f| {
-                !batch.closed
-                    && f.observed_ms.is_some_and(|at| {
-                        now.checked_sub(at)
-                            .is_some_and(|age| age <= route.stale_after_ms)
-                    })
-            });
-            if let Some(frame) = frame {
-                self.external.insert(id.clone(), frame.colors.clone());
+            if let Ok(frame) = batch.fresh_frame(id, route, now) {
+                if self
+                    .external
+                    .insert(id.clone(), frame.colors.clone())
+                    .is_none()
+                {
+                    self.cadences.remove(id);
+                }
+            } else if self.fallback_routes.contains_key(id) {
+                if self.external.remove(id).is_some() {
+                    self.cadences.remove(id);
+                }
             } else if self
                 .external
                 .get(id)
@@ -309,11 +326,13 @@ impl Core {
                 .set_audio(crate::capture::recent_audio(self.audio, now_us));
             let canvas = self.scene_canvas.as_ref().unwrap_or(&self.setup.canvas);
             let mut preview = self.renderer.step_after_skips(canvas, skipped)?;
+            let mapped = self.perimeter_start.unwrap_or(canvas.points.len());
+            let perimeter = preview.split_off(mapped);
             let mut frames = BTreeMap::new();
             for device in self.setup.devices.iter().filter(|d| d.role == Role::Canvas) {
                 frames.insert(device.id.clone(), vec![Rgb::default(); device.leds]);
             }
-            for point in canvas.points[self.setup.canvas.points.len()..]
+            for point in canvas.points[self.setup.canvas.points.len()..mapped]
                 .iter()
                 .filter(|p| p.led == 0)
             {
@@ -332,7 +351,11 @@ impl Core {
                     .ok_or("Canvas device disappeared")?[point.led] = *color;
             }
             preview.truncate(self.setup.canvas.points.len());
-            self.frame = std::sync::Arc::new(FrameView { preview, frames });
+            self.frame = std::sync::Arc::new(FrameView {
+                preview,
+                frames,
+                perimeter,
+            });
         }
         let mut accepted = 0;
         for device in self
@@ -380,11 +403,27 @@ impl Core {
                 continue;
             }
             let black;
+            let fallback;
             let colors = if off {
                 black = vec![Rgb::default(); device.leds];
                 &black
             } else if let Some(source) = source {
                 source
+            } else if let Some((reverse, settings)) = self.fallback_routes.get(&device.id)
+                && !self.frame.perimeter.is_empty()
+            {
+                fallback = crate::devices::perimeter_indices(
+                    self.perimeter_slots.len(),
+                    device.leds,
+                    *reverse,
+                )
+                .map(|index| {
+                    self.frame.perimeter[self.perimeter_slots[index]]
+                        .adjusted(settings.brightness, settings.temperature, settings.tint)
+                        .map_err(str::to_owned)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+                &fallback
             } else {
                 continue;
             };

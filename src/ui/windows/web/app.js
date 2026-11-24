@@ -67,6 +67,12 @@ const englishRuntimeStatus=new Map([
  ['Параметры обновлены на программном стенде.','Settings updated in the software test environment.'],
 ]);
 const outputDetails=new Map([
+ ['Экранная подсветка выключена','Screen lighting is off'],
+ ['Источник кадров — края общей сцены','Frame source: Scene edges'],
+ ['Источник кадров — монитор','Frame source: Monitor'],
+ ['Базовая сцена · кадр монитора устарел','Base scene · Monitor frame expired'],
+ ['Базовая сцена · нет свежего кадра монитора','Base scene · Waiting for a fresh monitor frame'],
+ ['Базовая сцена · источник экрана недоступен','Base scene · Screen source unavailable'],
  ['Добавьте ленту в «Устройствах» и выберите назначение «От экрана».','Add a lighting device in Devices and select Screen lighting as its output mode.'],
  ['Источник здесь логический. Предпросмотр получает только явно включённый тестовый кадр.','This source is a profile reference. The preview shows a test frame when you explicitly request it.'],
  ['Сохранён старый маршрут Home Assistant. Чтобы вернуть свет в сцены, откройте «Устройства», выберите «Общий холст» и снова включите свет.','This Home Assistant light uses an older screen-lighting route. To use it in scenes, open Devices, select Shared canvas, then turn the light back on.'],
@@ -658,7 +664,7 @@ const outputFieldText = {
   stable:['Frames to confirm bars','1–200 frames.'],
   unknown:['Frames to reset bars','1–2000 frames when the image is entirely black.'],
   crop:['Crop','Enter x, y, width and height. Leave blank for the full screen. Shared by outputs using this source.'],
-  stale:['Turn off after signal loss, ms','100–60000 ms. Clears the previous frame when the signal is lost.'],
+  stale:['Return to the base scene after signal loss, ms','100–60000 ms. The base scene plays until a fresh frame arrives.'],
  },
 };
 const outputChoiceText=new Map([

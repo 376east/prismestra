@@ -18,6 +18,33 @@ pub struct Snapshot {
     pub closed: bool,
     pub frames: BTreeMap<String, Frame>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unavailable {
+    Disconnected,
+    NoFrame,
+    Expired,
+}
+impl Snapshot {
+    pub(crate) fn fresh_frame(
+        &self,
+        id: &str,
+        route: &Route,
+        now: u64,
+    ) -> Result<&Frame, Unavailable> {
+        if self.closed {
+            return Err(Unavailable::Disconnected);
+        }
+        let frame = self.frames.get(id).ok_or(Unavailable::NoFrame)?;
+        let age = frame
+            .observed_ms
+            .and_then(|at| now.checked_sub(at))
+            .ok_or(Unavailable::NoFrame)?;
+        if age > route.stale_after_ms {
+            return Err(Unavailable::Expired);
+        }
+        Ok(frame)
+    }
+}
 struct State {
     latest: Arc<Snapshot>,
     high_water: BTreeMap<String, u64>,

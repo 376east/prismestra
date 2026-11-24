@@ -1889,7 +1889,7 @@ fn scene_edges_source_roundtrips_and_renders_without_monitor_capture() {
 }
 
 #[test]
-fn terminal_capture_invalidation_removes_old_host_color() {
+fn terminal_capture_invalidation_returns_to_scene() {
     use std::sync::atomic::AtomicBool;
     struct FailingPixels(Arc<AtomicBool>);
     impl ambient::Provider for FailingPixels {
@@ -1906,7 +1906,8 @@ fn terminal_capture_invalidation_removes_old_host_color() {
             Pixels.poll(source, crop, requested_ms)
         }
     }
-    let stand = Stand::new();
+    let mut stand = Stand::new();
+    stand.document.lighting.scene.colors = vec![0x0000ff; 5];
     let mut runtime = stand.runtime(false);
     let record = Arc::new(Record::default());
     runtime
@@ -1928,9 +1929,7 @@ fn terminal_capture_invalidation_removes_old_host_color() {
         .unwrap();
     wait(|| {
         runtime.tick(now(), wall()).unwrap();
-        record
-            .last()
-            .is_some_and(|v| v.iter().any(|c| *c != Rgb::default()))
+        record.last().is_some_and(|v| v.iter().any(|c| c.r > 0))
     });
     failed.store(true, Ordering::SeqCst);
     wait(|| runtime.capture_status().unwrap().phase == capture_worker::Phase::Failed);
@@ -1938,7 +1937,7 @@ fn terminal_capture_invalidation_removes_old_host_color() {
         runtime.tick(now(), wall()).unwrap();
         record
             .last()
-            .is_some_and(|v| v.iter().all(|c| *c == Rgb::default()))
+            .is_some_and(|v| v.iter().all(|c| c.r == 0 && c.g == 0 && c.b > 0))
     });
     let snapshot = runtime.capture_status().unwrap();
     assert!(snapshot.frames.is_empty());

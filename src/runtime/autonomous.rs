@@ -138,11 +138,61 @@ impl Host {
             autonomous: false,
         })
     }
-    pub(crate) fn set_scene_canvas(&mut self, canvas: Option<crate::devices::Canvas>) {
-        self.core
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .scene_canvas = canvas;
+    pub(crate) fn set_scene_canvas(
+        &mut self,
+        canvas: Option<crate::devices::Canvas>,
+        fallback_routes: BTreeMap<String, (bool, crate::capture::ambient::OutputSettings)>,
+    ) {
+        let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.perimeter_start = None;
+        core.perimeter_slots.clear();
+        core.scene_canvas = if fallback_routes.is_empty() {
+            canvas
+        } else {
+            let mut canvas = canvas.unwrap_or_else(|| core.setup.canvas.clone());
+            let span = canvas.perimeter_len();
+            let mut needed = vec![false; span];
+            for device in &core.setup.devices {
+                if let Some((reverse, _)) = fallback_routes.get(&device.id) {
+                    for index in crate::devices::perimeter_indices(span, device.leds, *reverse) {
+                        needed[index] = true;
+                    }
+                }
+            }
+            core.perimeter_start = Some(canvas.points.len());
+            core.perimeter_slots = vec![0; span];
+            for (slot, (index, _)) in needed
+                .into_iter()
+                .enumerate()
+                .filter(|(_, needed)| *needed)
+                .enumerate()
+            {
+                let (x, y) = canvas.perimeter_point(index);
+                canvas.points.push(crate::devices::Point {
+                    device: String::new(),
+                    led: 0,
+                    x,
+                    y,
+                });
+                core.perimeter_slots[index] = slot;
+            }
+            Some(canvas)
+        };
+        core.fallback_routes = fallback_routes;
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn monitor_frame(&self, id: &str, now: u64) -> Result<(), frame_feed::Unavailable> {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        let feed = core
+            .feed
+            .as_ref()
+            .ok_or(frame_feed::Unavailable::Disconnected)?;
+        let route = feed
+            .routes()
+            .get(id)
+            .ok_or(frame_feed::Unavailable::Disconnected)?;
+        feed.snapshot().fresh_frame(id, route, now).map(|_| ())
     }
     /// Explicit real-clock mode. Deterministic/manual callers remain thread-free by default.
     pub fn enable_autonomous(&mut self) -> Result<(), String> {
@@ -342,7 +392,11 @@ impl Host {
             })
             .collect();
         core.setup = Arc::new(setup);
-        core.frame = Arc::new(FrameView { preview, frames });
+        core.frame = Arc::new(FrameView {
+            preview,
+            frames,
+            perimeter: Vec::new(),
+        });
         self.setup = core.setup.clone();
         self.frame = core.frame.clone();
         drop(core);

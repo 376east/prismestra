@@ -2248,6 +2248,19 @@ impl App {
             }
         }
         if self.page == Page::Ambient
+            && let Some(route) = self
+                .editor
+                .as_ref()
+                .and_then(|e| e.document.ambient.routes.get(e.index))
+            && let Some(detail) = self
+                .runtime
+                .read(|r| r.ambient_source_detail(&route.device))
+            && self.detail != detail
+        {
+            detail.clone_into(&mut self.detail);
+            changed = true;
+        }
+        if self.page == Page::Ambient
             && let Some(snapshot) = self.runtime.capture_status()
         {
             let frame = (snapshot.generation, snapshot.frame_revision);

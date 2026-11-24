@@ -285,6 +285,9 @@ impl Renderer {
         Ok(())
     }
     pub fn step(&mut self, canvas: &Canvas) -> Result<Vec<Rgb>, String> {
+        if canvas.points.len() > crate::devices::MAX_POINTS {
+            return Err("Invalid render canvas".into());
+        }
         self.step_after_skips(canvas, 0)
     }
 
@@ -295,7 +298,8 @@ impl Renderer {
     ) -> Result<Vec<Rgb>, String> {
         if canvas.width == 0
             || canvas.height == 0
-            || canvas.points.len() > 65536
+            // The host can append one shared perimeter to a validated canvas.
+            || canvas.points.len() > crate::devices::MAX_POINTS + 4 * (crate::devices::MAX_AXIS as usize - 1)
             || canvas
                 .points
                 .iter()

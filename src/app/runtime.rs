@@ -368,7 +368,12 @@ impl Runtime {
             document.lighting.setup.clone(),
             document.lighting.scene.clone(),
         )?;
-        host.set_scene_canvas(document.ambient.render_canvas(&document.lighting.setup));
+        host.set_scene_canvas(
+            document.ambient.render_canvas(&document.lighting.setup),
+            document
+                .ambient
+                .monitor_fallback_routes(&document.lighting.setup),
+        );
         let point_targets = Self::point_targets(&document);
         let colors = vec![Rgb::default(); document.lighting.setup.canvas.points.len()];
         let mut value = Self {
@@ -509,6 +514,40 @@ impl Runtime {
     }
     pub fn lcd_status(&self, id: &str) -> Option<lcd_worker::Snapshot> {
         self.lcd.get(id).map(lcd_worker::Worker::snapshot)
+    }
+    #[cfg(windows)]
+    pub(crate) fn ambient_source_detail(&self, id: &str) -> Option<&'static str> {
+        use crate::runtime::frame_feed::Unavailable;
+        let route = self
+            .document
+            .ambient
+            .routes
+            .iter()
+            .find(|r| r.device == id)?;
+        let device = self
+            .document
+            .lighting
+            .setup
+            .devices
+            .iter()
+            .find(|d| d.id == id)?;
+        if device.driver == crate::devices::Driver::HomeAssistant {
+            return None;
+        }
+        Some(
+            if !device.enabled || !route.enabled || !self.desired.on(self.target(id)) {
+                "Экранная подсветка выключена"
+            } else if route.scene_edges {
+                "Источник кадров — края общей сцены"
+            } else {
+                match self.host.monitor_frame(id, crate::clock::monotonic_ms()) {
+                    Ok(()) => "Источник кадров — монитор",
+                    Err(Unavailable::Expired) => "Базовая сцена · кадр монитора устарел",
+                    Err(Unavailable::NoFrame) => "Базовая сцена · нет свежего кадра монитора",
+                    Err(Unavailable::Disconnected) => "Базовая сцена · источник экрана недоступен",
+                }
+            },
+        )
     }
     pub fn capture_status(&self) -> Option<capture_worker::Snapshot> {
         self.capture.as_ref().map(capture_worker::Worker::snapshot)
@@ -1055,7 +1094,7 @@ impl Runtime {
             self.sensors.clear();
 
             self.capture_active = None;
-            self.clear_capture_intent()?;
+            self.host.clear_external_feed();
             self.bump()?;
             self.bump_view();
         } else {
@@ -1068,7 +1107,12 @@ impl Runtime {
                         document.lighting.setup.clone(),
                         document.lighting.scene.clone(),
                     )?;
-                    host.set_scene_canvas(document.ambient.render_canvas(&document.lighting.setup));
+                    host.set_scene_canvas(
+                        document.ambient.render_canvas(&document.lighting.setup),
+                        document
+                            .ambient
+                            .monitor_fallback_routes(&document.lighting.setup),
+                    );
                     for d in &document.lighting.setup.devices {
                         if d.role != Role::Lcd {
                             let target = if document.lighting.groups.door.contains(&d.id) {
@@ -1661,27 +1705,11 @@ impl Runtime {
         )?);
         self.capture_factory = Some(factory);
         self.capture_active = None;
-        self.clear_capture_intent()?;
+        self.host.clear_external_feed();
         self.host
             .bind_external_feed(self.capture.as_ref().unwrap().frame_reader())?;
         self.bump_view();
         self.bump()
-    }
-    fn clear_capture_intent(&mut self) -> Result<(), String> {
-        self.host.clear_external_feed();
-        for route in self
-            .document
-            .ambient
-            .routes
-            .iter()
-            .filter(|route| !route.scene_edges)
-        {
-            self.host.set_external(
-                &route.device,
-                vec![crate::lighting::color::Rgb::default(); route.zone.leds],
-            )?;
-        }
-        Ok(())
     }
     fn stop_channels(&mut self) {
         #[cfg(windows)]
@@ -1884,7 +1912,7 @@ impl Runtime {
                 move |c| f(c),
             )?);
             self.capture_active = None;
-            self.clear_capture_intent()?;
+            self.host.clear_external_feed();
             self.host
                 .bind_external_feed(self.capture.as_ref().unwrap().frame_reader())?;
         }
