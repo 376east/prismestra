@@ -323,8 +323,7 @@ pub fn openrgb_factory(endpoint: std::net::SocketAddr) -> Factory {
                 },
             });
         }
-        inventory.issues.truncate(127);
-        inventory.issues.push("Выбирайте физический контроллер; общий виртуальный холст вместе с его физическими выходами создаёт конфликт владения.".into());
+        inventory.issues.truncate(128);
         inventory.validate(&target)?;
         Ok(inventory)
     })
