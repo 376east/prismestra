@@ -1013,6 +1013,54 @@ fn installed_startup_restores_a_saved_lcd_without_rgb_outputs() {
 }
 
 #[test]
+fn intent_receipt_distinguishes_manual_schedule_tray_stop_and_journal() {
+    let mut stand = Stand::new();
+    stand.document.lighting.schedule.enabled = true;
+    let before_pc_on = at("2026-11-07T00:00:00Z");
+    {
+        let mut runtime = stand.runtime(true);
+        let defaults = runtime.intent_receipt();
+        assert_eq!(defaults.origins.pc, IntentOrigin::Default);
+        assert_eq!(defaults.origins.door, IntentOrigin::Default);
+
+        runtime.set_group(Target::Pc, false).unwrap();
+        runtime.schedule_tick(before_pc_on).unwrap();
+        let off = runtime.intent_receipt();
+        assert_eq!(
+            off.desired,
+            Desired {
+                pc: false,
+                door: false
+            }
+        );
+        assert_eq!(off.origins.pc, IntentOrigin::Manual);
+        assert_eq!(off.origins.door, IntentOrigin::Schedule);
+
+        runtime.set_group(Target::Door, false).unwrap();
+        assert_eq!(
+            runtime.intent_receipt(),
+            off,
+            "no-op does not erase the origin"
+        );
+
+        runtime.set_group(Target::Pc, true).unwrap();
+        runtime.mute_for_tray_stop().unwrap();
+        let captured = coordinator::View::capture(&runtime, None);
+        assert_eq!(captured.intent_receipt.origins.pc, IntentOrigin::TrayStop);
+        assert_eq!(captured.intent_receipt.origins.door, IntentOrigin::Schedule);
+    }
+
+    let runtime = stand.runtime(true);
+    assert_eq!(
+        serde_json::to_value(runtime.intent_receipt()).unwrap(),
+        serde_json::json!({
+            "desired": {"pc": false, "door": false},
+            "origins": {"pc": "journal", "door": "journal"}
+        })
+    );
+}
+
+#[test]
 fn journal_commits_intent_before_effect_and_restore_does_not_replay_old_event() {
     let mut stand = Stand::new();
     stand.document.lighting.schedule.enabled = true;
@@ -1039,6 +1087,7 @@ fn journal_commits_intent_before_effect_and_restore_does_not_replay_old_event() 
     .unwrap();
     fs::create_dir(stand.root.join("journal.json")).unwrap();
     let desired = runtime.desired();
+    let receipt = runtime.intent_receipt();
     assert!(
         runtime
             .set_group(Target::Pc, false)
@@ -1046,6 +1095,7 @@ fn journal_commits_intent_before_effect_and_restore_does_not_replay_old_event() 
             .contains("Runtime journal atomic replace")
     );
     assert_eq!(runtime.desired(), desired);
+    assert_eq!(runtime.intent_receipt(), receipt);
 }
 #[test]
 fn synthetic_power_refresh_reopens_owners_only_after_drain_and_keeps_current_manual_intent() {

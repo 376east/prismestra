@@ -183,6 +183,9 @@ impl Client {
             crate::schedule::Target::Door => self.view.desired.door,
         }
     }
+    pub(super) fn intent_receipt(&self) -> crate::app::runtime::IntentReceipt {
+        self.view.intent_receipt
+    }
     pub(super) fn view_revision(&self) -> u64 {
         self.view.revision
     }

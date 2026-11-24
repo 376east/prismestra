@@ -88,13 +88,21 @@ impl Process {
     }
 
     fn creation_filetime(&self) -> Result<u64, String> {
-        let mut times = [FILETIME::default(); 4];
-        let [created, exited, kernel, user] = &mut times;
-        if unsafe { GetProcessTimes(self.0, created, exited, kernel, user) } == 0 {
-            return Err(last("Read resident process creation time"));
-        }
-        Ok(u64::from(created.dwHighDateTime) << 32 | u64::from(created.dwLowDateTime))
+        process_creation_filetime(self.0)
     }
+}
+
+fn process_creation_filetime(handle: HANDLE) -> Result<u64, String> {
+    let mut times = [FILETIME::default(); 4];
+    let [created, exited, kernel, user] = &mut times;
+    if unsafe { GetProcessTimes(handle, created, exited, kernel, user) } == 0 {
+        return Err(last("Read resident process creation time"));
+    }
+    Ok(u64::from(created.dwHighDateTime) << 32 | u64::from(created.dwLowDateTime))
+}
+
+pub(super) fn current_creation_filetime() -> Option<u64> {
+    process_creation_filetime(unsafe { GetCurrentProcess() }).ok()
 }
 
 fn shell_pid(hwnd: HWND) -> Option<u32> {
@@ -1012,8 +1020,7 @@ fn finish_stop(app: &mut App) -> Result<(), String> {
     let journal = journal_path(&app.state_dir, app.path.as_deref(), &document);
     let mut runtime = Runtime::new(document, Some(journal))?;
     runtime.enable_autonomous_rgb()?;
-    runtime.set_group(Target::Pc, false)?;
-    runtime.set_group(Target::Door, false)?;
+    runtime.mute_for_tray_stop()?;
     app.runtime = Client::new(runtime, true)?;
     app.pending_open = None;
     app.was_pending = false;

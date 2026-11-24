@@ -1,5 +1,5 @@
 //! Single off-window Runtime owner. Hardware capabilities still require explicit factories.
-use super::{Desired, Document, Runtime, lcd};
+use super::{Desired, Document, IntentReceipt, Runtime, lcd};
 use crate::lighting::color::Rgb;
 use std::{
     sync::{Arc, Condvar, Mutex},
@@ -23,6 +23,7 @@ pub struct View {
     pub colors: Arc<[Rgb]>,
     pub samples: Arc<[lcd::Sample]>,
     pub desired: Desired,
+    pub(crate) intent_receipt: IntentReceipt,
     pub revision: u64,
     pub pending: bool,
     pub configuration_error: Option<String>,
@@ -58,6 +59,7 @@ impl View {
             colors,
             samples: runtime.samples.clone(),
             desired: runtime.desired(),
+            intent_receipt: runtime.intent_receipt(),
             revision: runtime.view_revision(),
             pending,
             configuration_error: runtime.configuration_error().map(str::to_owned),
