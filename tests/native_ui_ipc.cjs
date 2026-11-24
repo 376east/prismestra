@@ -474,7 +474,7 @@ console.log('PASS: device cards select by logical identity and the draft dropdow
  assert.equal(commands.length,start+1,'a failure alone does not re-enable the last ticket');
  receive({kind:'status',state:{deviceActivity:{retryScope:'before',retryTickets:{},reasons:{}}}});
  assert(help.hidden);
- assert.equal(vm.runInContext('deviceStatus(state.devices[0])',context),'Недоступно');
+ assert.equal(vm.runInContext('deviceStatus(state.devices[0])',context),'Нет данных о состоянии');
  receive({kind:'status',state:{deviceActivity:{retryScope:'before',retryTickets:{wled:'first'}}}});
  click();
  assert.equal(commands.length,start+1,'a ticket for another output cannot re-enable the selected one');
@@ -629,6 +629,8 @@ console.log('PASS: candidate identity, applied precedence, metadata replacement,
  receiveDeviceState('status',{startupDiscoveryRetry:false});
  assert.equal(summary.hidden,false,'a later scan keeps the first result visible');
  vm.runInContext('view="devices";pendingView=null',context);
+ receiveDeviceState('snapshot',{...empty,startupStatus:'searching',startupEmptySearchResult:null});
+ assert.equal(summary.textContent,'Ищем поддерживаемые устройства…');
  receiveDeviceState('snapshot',{...empty,startupEmptySearchResult:'continuing'});
  assert.equal(summary.hidden,false);
  receiveDeviceState('status',{deviceCandidates:[foundLcd],pending:true});
@@ -1642,10 +1644,33 @@ async function checkOutputStatusCopy() {
  receiveDeviceState('status',{deviceActivity:{labels:{[selected.id]:privateError}}});
  await click(selected.id);
  assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Нет данных о состоянии');
+ assert.equal(commands.length,beforeCopy,'copy issues no host commands');
+ const connecting={deviceActivity:{labels:{[selected.id]:'Подключается',[neighbor.id]:'Кадры отправлены'}}};
+ receiveDeviceState('status',{profileRevision:'profile-A',...connecting});
+ vm.runInContext('activateScene({...state.scene,brightness:37},null,true)',context);
+ const {request,scene:submittedScene}=commands.at(-1);
+ assert.equal(commands.at(-1).op,'apply_scene');
+ const afterApply=commands.length;
+ const applied=request=>vm.runInContext(
+  'window.prismestraReceive('+JSON.stringify({kind:'scene_activation',request,status:'applied',output:'active_rgb'})+')',context);
+ applied(request+1);
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Подключается');
+ applied(request);
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Подключается','the receipt does not describe the previous scene');
+ receiveDeviceState('status',{scene:submittedScene,...connecting});
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Подключается\nСцена принята приложением');
+ assert.equal(vm.runInContext('deviceStatus(state.devices[0])',context),'Подключается · Сцена принята приложением');
+ receiveDeviceState('status',{profileRevision:'profile-B',...connecting});
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Подключается');
+ assert.equal(commands.length,afterApply,'copy and status updates issue no host commands');
  denied=true;
  await click(selected.id);
  assert.equal(feedback.textContent,'Не удалось скопировать статус');
- assert.equal(commands.length,beforeCopy,'copy issues no host commands');
+ assert.equal(commands.length,afterApply,'clipboard denial issues no host commands');
  receiveDeviceState('snapshot',{...initial,draftDevices:[selected],
   editor:{page:'devices',deviceId:selected.id,index:0,targets:[selected.label],fields:[],dirty:true}});
  assert.doesNotMatch(mainMarkup,/data-copy-output/,'draft-only output has no runtime status to copy');
