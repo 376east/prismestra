@@ -118,6 +118,35 @@ struct Fixtures {
     directory: PathBuf,
 }
 
+impl Fixtures {
+    fn new() -> Self {
+        let directory = std::env::temp_dir().join(format!(
+            "prismestra-installed-ipc-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&directory).unwrap();
+        fs::create_dir(directory.join("outbox")).unwrap();
+        Self {
+            directory,
+            children: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn spawn_helper(&self, endpoint: SocketAddr) -> io::Result<Child> {
+        Program::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "app::backend_helper::ipc::tests::inert_helper_child",
+                "--ignored",
+            ])
+            .env(CHILD_DIRECTORY, &self.directory)
+            .env(CHILD_ENDPOINT, endpoint.to_string())
+            .creation_flags(0x0800_0000)
+            .spawn()
+    }
+}
+
 impl Drop for Fixtures {
     fn drop(&mut self) {
         for child in self.children.get_mut().unwrap() {
@@ -148,19 +177,93 @@ fn until(mut ready: impl FnMut() -> bool) {
 }
 
 #[test]
-fn installed_proxy_recovers_live_pipe_and_pauses_exits_without_files() {
-    let directory = std::env::temp_dir().join(format!(
-        "prismestra-installed-ipc-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&directory).unwrap();
-    let fixture = Arc::new(Fixtures {
-        directory: directory.clone(),
-        children: Mutex::new(Vec::new()),
+fn pause_waits_behind_a_staged_heartbeat_and_preserves_owned_listener_until_exit() {
+    let fixture = Fixtures::new();
+    let endpoint = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let request = Request {
+        version: clock::PROTOCOL,
+        clock_domain: clock::DOMAIN.into(),
+        nonce: "pause-write-slot-fixture".into(),
+        parent: identity(std::process::id()).unwrap(),
+        timestamp_ms: active_ms().unwrap(),
+        previous_timestamp_ms: None,
+        restarting: true,
+    };
+    write_live_record(&fixture.directory.join("owner-request.json"), &request).unwrap();
+    let helper = fixture.spawn_helper(endpoint).unwrap();
+    let pid = helper.id();
+    fixture.children.lock().unwrap().push(helper);
+    let path = fixture.directory.join("outbox").join(OFFER_FILE);
+    let mut offer = None;
+    until(|| {
+        offer = read_json_typed::<Offer>(&path).ok();
+        offer.is_some()
     });
+    let output = Mutex::new(Snapshot::default());
+    let mut resident = Resident::new();
+    resident.open(offer.unwrap(), &request, &output).unwrap();
+    until(|| {
+        resident
+            .tick(&request, true)
+            .unwrap()
+            .is_some_and(|status| status.ready)
+    });
+
+    // Pipe::offer has accepted Heartbeat into its single command slot.
+    // Leave it staged and request Pause before the overlapped poll can write it.
+    let session = resident.session.as_mut().unwrap();
+    let now = active_ms().unwrap();
+    session.send(Command::Heartbeat, now).unwrap();
+    let sequence = session.sequence;
+    let expected = session.expected;
+    assert!(matches!(
+        session.send(Command::Pause, now),
+        Err(PipeError::Busy)
+    ));
+    assert_eq!(session.sequence, sequence);
+    assert_eq!(session.expected, expected);
+    assert!(!session.paused);
+    session.tick(&request, false).unwrap();
+    assert_eq!(session.sequence, sequence); // Busy did not consume a sequence.
+    until(|| {
+        resident.tick(&request, false).unwrap();
+        resident.session.as_ref().unwrap().paused
+    });
+    assert_eq!(resident.session.as_ref().unwrap().sequence, sequence + 1);
+    assert!(fixture.directory.join("fixture-paused").is_file());
+    assert_eq!(
+        crate::app::managed_backend::listener_owner(endpoint).unwrap(),
+        Some(pid)
+    );
+    assert!(
+        fixture.children.lock().unwrap()[0]
+            .try_wait()
+            .unwrap()
+            .is_none()
+    );
+    resident.exit();
+    until(|| {
+        fixture.children.lock().unwrap()[0]
+            .try_wait()
+            .unwrap()
+            .is_some_and(|status| status.success())
+    });
+    assert_eq!(
+        crate::app::managed_backend::listener_owner(endpoint).unwrap(),
+        None
+    );
+    assert!(!fixture.directory.join("owner-pause.json").exists());
+    assert!(!fixture.directory.join("owner-cancel.json").exists());
+}
+
+#[test]
+fn installed_proxy_recovers_live_pipe_and_pauses_exits_without_files() {
+    let fixture = Arc::new(Fixtures::new());
+    let directory = fixture.directory.clone();
     let outbox = directory.join("outbox");
-    fs::create_dir(&outbox).unwrap();
     let (polls, receive) = mpsc::sync_channel::<StatusPoll>(0);
     let reader = thread::spawn(move || {
         while let Ok(poll) = receive.recv() {
@@ -187,18 +290,7 @@ fn installed_proxy_recovers_live_pipe_and_pauses_exits_without_files() {
             let mut children = fixture.children.lock().unwrap();
             assert!(children.len() < 2, "duplicate helper launch");
             let child = permission
-                .submit(|| {
-                    Program::new(std::env::current_exe().unwrap())
-                        .args([
-                            "--exact",
-                            "app::backend_helper::ipc::tests::inert_helper_child",
-                            "--ignored",
-                        ])
-                        .env(CHILD_DIRECTORY, &fixture.directory)
-                        .env(CHILD_ENDPOINT, endpoint.to_string())
-                        .creation_flags(0x0800_0000)
-                        .spawn()
-                })
+                .submit(|| fixture.spawn_helper(endpoint))
                 .ok_or_else(|| "fixture launch cancelled".to_string())?
                 .map_err(|error| error.to_string())?;
             permission.mark_submitted();

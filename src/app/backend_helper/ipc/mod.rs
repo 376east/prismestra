@@ -585,19 +585,17 @@ fn invalidate(output: &Mutex<Snapshot>) {
 }
 
 impl Session<'_> {
-    fn send(&mut self, command: Command, now: u64) -> io::Result<()> {
+    fn send(&mut self, command: Command, now: u64) -> Result<(), PipeError> {
         let sequence = self
             .sequence
             .checked_add(1)
             .ok_or_else(|| io::Error::other("Installed IPC sequence overflow"))?;
-        self.pipe
-            .offer(Frame::Command {
-                epoch: self.epoch,
-                seq: sequence,
-                tick: now,
-                command,
-            })
-            .map_err(pipe_error)?;
+        self.pipe.offer(Frame::Command {
+            epoch: self.epoch,
+            seq: sequence,
+            tick: now,
+            command,
+        })?;
         self.sequence = sequence;
         self.expected = Some((now, command));
         Ok(())
@@ -615,8 +613,13 @@ impl Session<'_> {
             restarting,
             self.paused,
         ) {
-            self.send(command, now)?;
-            self.next_heartbeat = now.saturating_add(EXCHANGE_MS);
+            match self.send(command, now) {
+                Ok(()) => self.next_heartbeat = now.saturating_add(EXCHANGE_MS),
+                // Pause remains requested until acknowledged. Let the
+                // overlapped poll finish the prior write before retrying it.
+                Err(PipeError::Busy) => {}
+                Err(error) => return Err(pipe_error(error)),
+            }
         }
         let Some(frame) = self
             .pipe
