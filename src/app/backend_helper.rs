@@ -1066,7 +1066,7 @@ fn run_installed_helper_observed(
             input: &state,
             output: &policy.outbox,
             authority: Some(&authority),
-            state_diagnostics: super::backend_diagnostics::diagnostic_queue(),
+            state_diagnostics: super::backend_diagnostics::state_diagnostic_queue(),
         };
         match helper_owner_at(&channels, stage) {
             Ok(None) => return Ok(()),
@@ -1097,7 +1097,7 @@ struct HelperChannels<'a> {
     #[cfg(windows)]
     authority: Option<&'a HelperAuthority>,
     #[cfg(windows)]
-    state_diagnostics: Option<&'a super::backend_diagnostics::DiagnosticQueue>,
+    state_diagnostics: Option<&'a super::backend_diagnostics::StateDiagnosticQueue>,
 }
 
 impl<'a> HelperChannels<'a> {
@@ -2469,7 +2469,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn installed_control_ticks_and_lifecycle_continue_while_state_writer_is_blocked() {
-        use super::super::backend_diagnostics::{DiagnosticQueue, QUEUE_CAPACITY};
+        use super::super::backend_diagnostics::{
+            EventLogQueue, QUEUE_CAPACITY, StateDiagnosticQueue,
+        };
 
         let (input, mut request, helper) = sharing_fixture("blocked-state-writer");
         let outbox = input.join("outbox");
@@ -2479,7 +2481,7 @@ mod tests {
         let (entered, blocked) = mpsc::channel();
         let (release, released) = mpsc::channel();
         let mut writes_to_block = 2;
-        let queue = DiagnosticQueue::with_state_gate(move || {
+        let queue = StateDiagnosticQueue::with_state_gate(move || {
             if writes_to_block > 0 {
                 writes_to_block -= 1;
                 entered.send(()).unwrap();
@@ -2491,6 +2493,16 @@ mod tests {
         for _ in 0..QUEUE_CAPACITY {
             queue.backend_state(&outbox, 0, None, "pending");
         }
+        let (delivered, event_log) = mpsc::channel();
+        let events = EventLogQueue::start(move |id, _, detail| {
+            delivered.send((id, detail.to_owned())).unwrap();
+        })
+        .unwrap();
+        events.information(3, "event=helper_action_started".into());
+        assert_eq!(
+            event_log.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (3, "event=helper_action_started".into())
+        );
         let channels = HelperChannels {
             input: &input,
             output: &outbox,
@@ -2559,6 +2571,13 @@ mod tests {
             ["helper_started", "helper_stop", "helper_draining"]
         );
         let state_file = outbox.join("backend-state-events.json");
+        let history: serde_json::Value = read_json(&state_file).unwrap();
+        assert_eq!(history["events"].as_array().unwrap().len(), 1);
+        events.information(4, "event=slow_control_tick role=helper".into());
+        assert_eq!(
+            event_log.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (4, "event=slow_control_tick role=helper".into())
+        );
         let history: serde_json::Value = read_json(&state_file).unwrap();
         assert_eq!(history["events"].as_array().unwrap().len(), 1);
 
