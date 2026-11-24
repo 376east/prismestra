@@ -246,12 +246,13 @@ struct InstalledLaunch {
 
 impl Manager {
     pub fn start(config: Config) -> Result<Self, String> {
-        Self::start_inner(config, None)
+        Self::start_inner(config, None, || Ok(()))
     }
 
     #[cfg(windows)]
     pub(super) fn start_installed(
         policy: &super::installed_policy::InstalledPolicy,
+        before_launch: impl FnOnce() -> Result<(), String>,
     ) -> Result<Self, String> {
         let (windows, system) = super::installed_policy::windows_dirs()?;
         let config = Config {
@@ -270,10 +271,15 @@ impl Manager {
                 system,
                 outbox: policy.outbox.clone(),
             }),
+            before_launch,
         )
     }
 
-    fn start_inner(config: Config, installed: Option<InstalledLaunch>) -> Result<Self, String> {
+    fn start_inner(
+        config: Config,
+        installed: Option<InstalledLaunch>,
+        before_launch: impl FnOnce() -> Result<(), String>,
+    ) -> Result<Self, String> {
         config.validate()?;
         if !config.enabled {
             return Err("Managed OpenRGB is disabled".into());
@@ -323,6 +329,7 @@ impl Manager {
             } else {
                 (Some(lock), None)
             };
+            before_launch()?;
             let worker = thread::Builder::new()
                 .name("managed-openrgb".into())
                 .spawn(move || {

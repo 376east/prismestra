@@ -3,7 +3,11 @@ use std::{
     ffi::{OsString, c_void},
     fs, io,
     mem::{size_of, zeroed},
-    os::windows::ffi::{OsStrExt, OsStringExt},
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        fs::OpenOptionsExt,
+        io::AsRawHandle,
+    },
     path::{Component, Path, PathBuf, Prefix},
     ptr::{addr_of, null, null_mut},
 };
@@ -175,8 +179,31 @@ pub(super) fn inspect_protected_entry(
         )));
     }
     let file = Handle(file);
+    inspect_protected_handle(file.0, path, system_path, exception, single_link)
+}
+
+pub(super) fn open_protected_file(path: &Path) -> Result<fs::File, String> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(error)?;
+    if inspect_protected_handle(file.as_raw_handle(), path, false, 0, true)? {
+        return Err(error("expected a protected file"));
+    }
+    Ok(file)
+}
+
+fn inspect_protected_handle(
+    file: HANDLE,
+    path: &Path,
+    system_path: bool,
+    exception: u32,
+    single_link: bool,
+) -> Result<bool, String> {
     let mut attributes: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
-    if unsafe { GetFileInformationByHandle(file.0, &mut attributes) } == 0
+    if unsafe { GetFileInformationByHandle(file, &mut attributes) } == 0
         || attributes.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
     {
         return Err(error(format!("invalid protected path: {}", path.display())));
@@ -193,7 +220,7 @@ pub(super) fn inspect_protected_entry(
     let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
     let result = unsafe {
         GetSecurityInfo(
-            file.0,
+            file,
             SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             &mut owner,

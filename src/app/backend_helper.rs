@@ -5,8 +5,12 @@ use super::installed_policy::{HelperAuthority, InstalledPolicy};
 use super::managed_backend::{Config, Manager};
 mod clock;
 mod control_tick;
+#[cfg(windows)]
+mod ipc;
 #[cfg(test)]
 mod ipc_cutover;
+#[cfg(any(test, windows))]
+mod ipc_offer;
 #[cfg(test)]
 mod ipc_ready;
 mod retry;
@@ -157,6 +161,7 @@ struct Proxy {
     snapshot: Arc<Mutex<Snapshot>>,
     stop: Arc<AtomicBool>,
     restarting: Arc<AtomicBool>,
+    live_ipc: bool,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -197,6 +202,7 @@ impl Backend {
             None,
             polls,
             |_, _| panic!("the fixture must never launch a task"),
+            false,
         )
         .unwrap();
         Self {
@@ -301,14 +307,16 @@ impl Backend {
             Inner::Direct(manager) => manager.stop_restarting(),
             Inner::Task(proxy) => {
                 proxy.restarting.store(false, Ordering::SeqCst);
-                let _ = write_json(
-                    &proxy.state_dir.join("owner-pause.json"),
-                    &Cancel {
-                        version: clock::PROTOCOL,
-                        clock_domain: clock::DOMAIN.into(),
-                        nonce: proxy.nonce.clone(),
-                    },
-                );
+                if !proxy.live_ipc {
+                    let _ = write_json(
+                        &proxy.state_dir.join("owner-pause.json"),
+                        &Cancel {
+                            version: clock::PROTOCOL,
+                            clock_domain: clock::DOMAIN.into(),
+                            nonce: proxy.nonce.clone(),
+                        },
+                    );
+                }
             }
             #[cfg(test)]
             Inner::Software(_) => {}
@@ -336,6 +344,7 @@ impl Proxy {
             recovery_endpoint,
             polls.clone(),
             move |name, permission| launch_task(name, permission, installed),
+            installed,
         )
     }
 
@@ -346,6 +355,7 @@ impl Proxy {
         recovery_endpoint: Option<SocketAddr>,
         polls: SyncSender<StatusPoll>,
         launcher: impl Fn(&str, LaunchPermission<'_>) -> Result<(), String> + Clone + Send + 'static,
+        live_ipc: bool,
     ) -> Result<Self, String> {
         let client_lock = client_lock(state_dir)?;
         let parent = identity(std::process::id())?;
@@ -386,6 +396,7 @@ impl Proxy {
                         directory: &directory,
                         status_dir: &status_dir,
                         recovery_endpoint,
+                        live_ipc,
                     },
                     &task_name,
                     &request,
@@ -406,6 +417,7 @@ impl Proxy {
             snapshot,
             stop,
             restarting,
+            live_ipc,
             worker: Some(worker),
         })
     }
@@ -417,14 +429,16 @@ impl Drop for Proxy {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .ready = false;
-        let _ = write_json(
-            &self.state_dir.join("owner-cancel.json"),
-            &Cancel {
-                version: clock::PROTOCOL,
-                clock_domain: clock::DOMAIN.into(),
-                nonce: self.nonce.clone(),
-            },
-        );
+        if !self.live_ipc {
+            let _ = write_json(
+                &self.state_dir.join("owner-cancel.json"),
+                &Cancel {
+                    version: clock::PROTOCOL,
+                    clock_domain: clock::DOMAIN.into(),
+                    nonce: self.nonce.clone(),
+                },
+            );
+        }
         let until = Instant::now() + Duration::from_millis(1_800);
         if let Some(worker) = self.worker.take() {
             while !worker.is_finished() && Instant::now() < until {
@@ -447,22 +461,38 @@ struct ProxyPaths<'a> {
     directory: &'a Path,
     status_dir: &'a Path,
     recovery_endpoint: Option<SocketAddr>,
+    live_ipc: bool,
+}
+
+enum Polled {
+    File(Option<Status>),
+    #[cfg(windows)]
+    Offer(Option<ipc_offer::Offer>),
 }
 
 struct StatusPoll {
     path: PathBuf,
     installed: bool,
-    reply: SyncSender<Result<Option<Status>, String>>,
+    reply: SyncSender<Result<Polled, String>>,
 }
 
-type LaunchWorker = JoinHandle<Option<Result<(), String>>>;
+type LaunchResult = (Result<(), String>, Option<Instant>);
+type LaunchWorker = JoinHandle<Option<LaunchResult>>;
 
 struct LaunchPermission<'a> {
     stop: &'a AtomicBool,
     restarting: &'a AtomicBool,
+    submitted_at: Option<&'a std::cell::Cell<Option<Instant>>>,
 }
 
 impl LaunchPermission<'_> {
+    #[cfg(windows)]
+    fn mark_submitted(&self) {
+        if let Some(submitted) = self.submitted_at {
+            submitted.set(Some(Instant::now()));
+        }
+    }
+
     fn allowed(&self) -> bool {
         self.restarting.load(Ordering::SeqCst) && !self.stop.load(Ordering::SeqCst)
     }
@@ -488,7 +518,17 @@ fn start_status_worker(
         .name("backend-helper-status".into())
         .spawn(move || {
             while let Ok(poll) = requests.recv() {
-                let _ = poll.reply.send(read(&poll.path, poll.installed));
+                #[cfg(windows)]
+                let result = if poll.path.file_name().and_then(|name| name.to_str())
+                    == Some(ipc::OFFER_FILE)
+                {
+                    ipc::read_offer(&poll.path).map(Polled::Offer)
+                } else {
+                    read(&poll.path, poll.installed).map(Polled::File)
+                };
+                #[cfg(not(windows))]
+                let result = read(&poll.path, poll.installed).map(Polled::File);
+                let _ = poll.reply.send(result);
             }
         })
         .map_err(|error| format!("Could not start backend status reader: {error}"))?;
@@ -500,6 +540,7 @@ fn proxy_loop(
         directory,
         status_dir,
         recovery_endpoint,
+        live_ipc,
     }: ProxyPaths<'_>,
     task_name: &str,
     request: &Request,
@@ -511,6 +552,16 @@ fn proxy_loop(
     let stop = &control.stop;
     let restarting = &control.restarting;
     let status_path = status_dir.join("helper-status.json");
+    #[cfg(windows)]
+    let status_path = if live_ipc {
+        status_dir.join(ipc::OFFER_FILE)
+    } else {
+        status_path
+    };
+    #[cfg(windows)]
+    let mut ipc_state = live_ipc.then(ipc::Resident::new);
+    #[cfg(not(windows))]
+    let _ = live_ipc;
     let installed = status_dir != directory;
     let (status_result, status_results) = mpsc::sync_channel(1);
     let mut pending = false;
@@ -528,6 +579,70 @@ fn proxy_loop(
     let mut trace = Trace::new(&trace_clock, &report);
     while !stop.load(Ordering::SeqCst) {
         let mut tick = trace.begin(installed && !cfg!(test));
+        #[cfg(windows)]
+        if let Some(ipc) = &mut ipc_state
+            && ipc.session.is_some()
+        {
+            match ipc.tick(request, restarting.load(Ordering::SeqCst)) {
+                Ok(Some(mut status)) => {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let mut published = output.lock().unwrap_or_else(|p| p.into_inner());
+                    let Ok(now) = now_ms() else {
+                        break;
+                    };
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    status.ready &= clock::fresh(status.timestamp_ms, now, FRESH_MS);
+                    if status.ready {
+                        generation.observe(
+                            (
+                                status.helper.created,
+                                status.helper.pid,
+                                status.ready_generation,
+                                status.backend_pid,
+                            ),
+                            status.timestamp_ms,
+                            now,
+                        );
+                    } else {
+                        generation.previous = None;
+                    }
+                    *published = Snapshot {
+                        ready_generation: generation.current,
+                        ready: status.ready,
+                        backend_pid: status.backend_pid,
+                        timestamp_ms: status.timestamp_ms,
+                        detail: status.detail.clone(),
+                    };
+                    drop(published);
+                    if recovery_endpoint.is_some() {
+                        recovery.observe(&status);
+                    }
+                    ipc.record_published(&status, now);
+                    continue;
+                }
+                Ok(None) => {
+                    let Ok(now) = now_ms() else {
+                        break;
+                    };
+                    let mut snapshot = output.lock().unwrap_or_else(|p| p.into_inner());
+                    if snapshot.ready && !clock::fresh(snapshot.timestamp_ms, now, FRESH_MS) {
+                        snapshot.ready = false;
+                        snapshot.backend_pid = None;
+                        generation.previous = None;
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    ipc.lost();
+                    generation.previous = None;
+                    failure_detail = error.to_string();
+                }
+            }
+        }
         if heartbeat.elapsed() >= Duration::from_millis(600) {
             match refresh_heartbeat_observed(
                 directory,
@@ -552,18 +667,25 @@ fn proxy_loop(
             heartbeat = Instant::now();
         }
         if launch.as_ref().is_some_and(|worker| worker.is_finished()) {
-            let result = launch
-                .take()
-                .unwrap()
-                .join()
-                .unwrap_or_else(|_| Some(Err("Backend helper launch worker panicked".into())));
+            let result = launch.take().unwrap().join().unwrap_or_else(|_| {
+                Some((Err("Backend helper launch worker panicked".into()), None))
+            });
             let reserve = reserved_launch.take();
-            if let Some(result) = result {
-                if let Some(reserve) = reserve {
+            if let Some((result, submitted)) = result {
+                if live_ipc {
+                    if let Some(at) = submitted {
+                        *attempts.back_mut().expect("pending scheduler launch") = at;
+                    } else {
+                        attempts.pop_back();
+                    }
+                }
+                if let Some(reserve) = reserve
+                    && (!live_ipc || submitted.is_some())
+                {
                     recovery.spend(reserve);
                     // A slow drain check must not age the scheduler request
                     // out of the window before it has actually been sent.
-                    if let Some(at) = attempts.back_mut() {
+                    if !live_ipc && let Some(at) = attempts.back_mut() {
                         *at = Instant::now();
                     }
                 }
@@ -617,7 +739,26 @@ fn proxy_loop(
             read_json_typed::<Request>(&directory.join("owner-request.json"))
         }) {
             Ok(current) if same_owner_request(&current, request) => match status {
-                Ok(status) => (status, None),
+                Ok(Polled::File(status)) if !live_ipc => (status, None),
+                Ok(Polled::File(_)) => {
+                    (None, Some("File status cannot admit installed IPC".into()))
+                }
+                #[cfg(windows)]
+                Ok(Polled::Offer(offer)) => {
+                    if restarting.load(Ordering::SeqCst)
+                        && let Some(ipc) = &mut ipc_state
+                        && let Some(offer) = offer
+                        && offer.epoch > ipc.highest_epoch
+                        && ipc.retired.is_none_or(|drain| {
+                            recovery_endpoint.is_some_and(|endpoint| drain.complete(endpoint))
+                        })
+                        && ipc.open(offer, &current, output).is_ok()
+                    {
+                        failure_detail.clear();
+                        continue;
+                    }
+                    (None, None)
+                }
                 Err(error) => (None, Some(error)),
             },
             Ok(_) | Err(ControlRead::Invalid(_)) => break,
@@ -652,6 +793,7 @@ fn proxy_loop(
                     status.helper.created,
                     status.helper.pid,
                     status.ready_generation,
+                    None,
                 );
                 generation.observe(key, status.timestamp_ms, now);
             }
@@ -685,8 +827,13 @@ fn proxy_loop(
                     None
                 };
                 let reserve_lock = Arc::downgrade(&control.client_lock);
-                let reserve_owner =
-                    reserve.map(|_| (directory.join("owner-request.json"), request.clone()));
+                let bootstrap_owner = (reserve.is_some() || live_ipc)
+                    .then(|| (directory.join("owner-request.json"), request.clone()));
+                #[cfg(windows)]
+                let ipc_drain = ipc_state
+                    .as_ref()
+                    .and_then(|ipc| ipc.retired)
+                    .zip(recovery_endpoint);
                 let cancelled = stop.clone();
                 let may_restart = restarting.clone();
                 let launcher = launcher.clone();
@@ -694,12 +841,18 @@ fn proxy_loop(
                 match thread::Builder::new()
                     .name("backend-helper-launch".into())
                     .spawn(move || {
+                        #[cfg(windows)]
+                        if let Some((drain, endpoint)) = ipc_drain
+                            && !drain.complete(endpoint)
+                        {
+                            return None;
+                        }
                         if let Some((endpoint, generation)) = reserve
                             && !generation.has_drained(endpoint)
                         {
                             return None;
                         }
-                        if let Some((path, expected)) = reserve_owner
+                        if let Some((path, expected)) = bootstrap_owner
                             && !read_json_typed::<Request>(&path).is_ok_and(|current| {
                                 current.restarting
                                     && same_owner_request(&current, &expected)
@@ -711,14 +864,17 @@ fn proxy_loop(
                         // The drain probe does not retain the client lock. An
                         // actual scheduler call retains it through completion.
                         let _lock = lock.or_else(|| reserve_lock.upgrade())?;
+                        let submitted = std::cell::Cell::new(None);
                         let permission = LaunchPermission {
                             stop: &cancelled,
                             restarting: &may_restart,
+                            submitted_at: live_ipc.then_some(&submitted),
                         };
                         if !permission.allowed() {
-                            return reserve.is_none().then_some(Ok(()));
+                            return (reserve.is_none() && !live_ipc).then_some((Ok(()), None));
                         }
-                        Some(launcher(&task_name, permission))
+                        let result = launcher(&task_name, permission);
+                        Some((result, submitted.get()))
                     }) {
                     Ok(worker) => {
                         launch = Some(worker);
@@ -726,7 +882,9 @@ fn proxy_loop(
                         report_launch_result = true;
                     }
                     Err(error) => {
-                        if let Some((_, generation)) = reserve {
+                        if live_ipc {
+                            attempts.pop_back();
+                        } else if let Some((_, generation)) = reserve {
                             recovery.spend(generation);
                         }
                         failure_detail = error.to_string();
@@ -746,6 +904,10 @@ fn proxy_loop(
         tick.sleep(POLL, thread::sleep);
     }
     stop.store(true, Ordering::SeqCst);
+    #[cfg(windows)]
+    if let Some(ipc) = &mut ipc_state {
+        ipc.exit();
+    }
     let mut snapshot = output.lock().unwrap_or_else(|p| p.into_inner());
     snapshot.ready = false;
     snapshot.detail = "Backend helper client ownership ended".into();
@@ -1022,7 +1184,7 @@ fn run_helper_inner(state_dir: &Path, pin: Option<(&Path, &str)>) -> Result<(), 
     if let Some((executable, sha)) = pin {
         config.require_identity(executable, sha)?;
     }
-    own_backend(&channels, &request, &helper, Manager::start(config)?)
+    own_backend(&channels, &request, &helper, |_| Manager::start(config))
 }
 
 /// Task Scheduler action. All paths and the endpoint are resolved by trusted policy.
@@ -1099,10 +1261,13 @@ fn run_installed_helper_observed(
                 if current.parent != request.parent || current.nonce != request.nonce {
                     return Err("Backend helper owner identity changed before launch".into());
                 }
-                *stage = "manager_start";
-                let manager = Manager::start_installed(&policy)?;
-                *stage = "accepted";
-                return own_backend(&channels, &current, &helper, manager);
+                *stage = "ipc_bootstrap";
+                return own_backend(&channels, &current, &helper, |before_launch| {
+                    *stage = "manager_start";
+                    let manager = Manager::start_installed(&policy, before_launch)?;
+                    *stage = "accepted";
+                    Ok(manager)
+                });
             }
             Err(error) => rejected = Some(error),
         }
@@ -1226,32 +1391,81 @@ fn own_backend(
     channels: &HelperChannels<'_>,
     request: &Request,
     helper: &Identity,
-    manager: Manager,
+    start: impl FnOnce(&dyn Fn() -> Result<(), String>) -> Result<Manager, String>,
 ) -> Result<(), String> {
+    let manager = std::cell::RefCell::new(None::<Manager>);
     #[cfg(windows)]
-    let allow_heartbeat_catch_up = channels.authority.is_some();
+    let installed = channels.authority.is_some();
     #[cfg(not(windows))]
-    let allow_heartbeat_catch_up = false;
-    let mut started = "Validated owner; managed backend worker started".to_owned();
-    if allow_heartbeat_catch_up {
-        started.push_str(&format!(
-            "; helper_created={} parent_created={}",
-            helper.created, request.parent.created
-        ));
-    }
-    helper_note(channels.output, request, "helper_started", None, &started);
-    let result = supervise_channels(
-        channels,
-        request,
-        helper,
-        || manager.snapshot(),
-        |control| match control {
-            BackendControl::Pause => manager.stop_restarting(),
-            BackendControl::Stop => manager.request_stop(),
-        },
-        &ActiveClock,
-        allow_heartbeat_catch_up,
-    );
+    let installed = false;
+    let start = |before_launch: &dyn Fn() -> Result<(), String>| {
+        *manager.borrow_mut() = Some(start(before_launch)?);
+        if !installed {
+            helper_note(
+                channels.output,
+                request,
+                "helper_started",
+                None,
+                "Validated owner; managed backend worker started",
+            );
+        } else {
+            #[cfg(windows)]
+            super::backend_diagnostics::queue_windows_event(
+                3,
+                format!(
+                    "event=helper_ipc_started parent_pid={} parent_created={} helper_pid={} helper_created={}",
+                    request.parent.pid, request.parent.created, helper.pid, helper.created
+                ),
+            );
+        }
+        Ok(())
+    };
+    let snapshot = || {
+        manager
+            .borrow()
+            .as_ref()
+            .map(Manager::snapshot)
+            .unwrap_or_default()
+    };
+    let backend_control = |control| {
+        if let Some(manager) = manager.borrow().as_ref() {
+            match control {
+                BackendControl::Pause => manager.stop_restarting(),
+                BackendControl::Stop => manager.request_stop(),
+            }
+        }
+    };
+    #[cfg(windows)]
+    let result = if installed {
+        ipc::supervise(channels, request, helper, start, snapshot, backend_control)
+    } else {
+        start(&|| Ok(()))?;
+        supervise_channels(
+            channels,
+            request,
+            helper,
+            snapshot,
+            backend_control,
+            &ActiveClock,
+            false,
+        )
+    };
+    #[cfg(not(windows))]
+    let result = {
+        start(&|| Ok(()))?;
+        supervise_channels(
+            channels,
+            request,
+            helper,
+            snapshot,
+            backend_control,
+            &ActiveClock,
+            false,
+        )
+    };
+    let Some(manager) = manager.into_inner() else {
+        return result;
+    };
     // Also cover errors that have no explicit terminal journal event.
     manager.request_stop();
     helper_note(
@@ -1315,6 +1529,43 @@ enum BackendControl {
     Stop,
 }
 
+#[cfg(windows)]
+type BackendState = (Option<u32>, bool, u64, String);
+
+#[cfg(windows)]
+#[derive(Default)]
+struct InstalledStateHistory {
+    last: Option<BackendState>,
+    first_pending: Option<(BackendState, u64)>,
+}
+
+#[cfg(windows)]
+impl InstalledStateHistory {
+    fn observe(&mut self, channels: &HelperChannels<'_>, parent: u32, state: BackendState) {
+        let Some(queue) = channels.state_diagnostics else {
+            return;
+        };
+        if self.last.is_none() {
+            let (first, observed_utc_ms) = self
+                .first_pending
+                .get_or_insert_with(|| (state.clone(), super::backend_diagnostics::utc_ms()));
+            if queue.initial_backend_state(
+                channels.output,
+                parent,
+                first.0,
+                &first.3,
+                *observed_utc_ms,
+            ) {
+                self.last = self.first_pending.take().map(|(first, _)| first);
+            }
+        }
+        if self.last.as_ref().is_some_and(|last| last != &state) {
+            queue.backend_state(channels.output, parent, state.0, &state.3);
+            self.last = Some(state);
+        }
+    }
+}
+
 fn supervise_channels(
     channels: &HelperChannels<'_>,
     request: &Request,
@@ -1338,7 +1589,7 @@ fn supervise_channels(
     let mut owner_read_failed = false;
     let mut last_backend_state = None;
     #[cfg(windows)]
-    let mut initial_backend_state = None;
+    let mut installed_state_history = InstalledStateHistory::default();
     let trace_clock = || now_ms().ok();
     let report = |sample| report_control_tick("helper", request.parent.pid, sample);
     let mut trace = Trace::new(&trace_clock, &report);
@@ -1566,36 +1817,7 @@ fn supervise_channels(
                     }
                 } else {
                     #[cfg(windows)]
-                    if let Some(queue) = channels.state_diagnostics {
-                        if last_backend_state.is_none() {
-                            let (first, observed_utc_ms) = initial_backend_state
-                                .get_or_insert_with(|| {
-                                    (backend_state.clone(), super::backend_diagnostics::utc_ms())
-                                });
-                            if queue.initial_backend_state(
-                                output,
-                                request.parent.pid,
-                                first.0,
-                                &first.3,
-                                *observed_utc_ms,
-                            ) {
-                                last_backend_state =
-                                    initial_backend_state.take().map(|(first, _)| first);
-                            }
-                        }
-                        if last_backend_state
-                            .as_ref()
-                            .is_some_and(|last| last != &backend_state)
-                        {
-                            queue.backend_state(
-                                output,
-                                request.parent.pid,
-                                snapshot.backend_pid,
-                                &snapshot.detail,
-                            );
-                            last_backend_state = Some(backend_state);
-                        }
-                    }
+                    installed_state_history.observe(channels, request.parent.pid, backend_state);
                 }
                 let status = Status {
                     version: clock::PROTOCOL,
@@ -1722,6 +1944,10 @@ fn read_json_typed<T: DeserializeOwned>(path: &Path) -> Result<T, ControlRead> {
             "Backend control path is not a file".into(),
         ));
     }
+    parse_control_record(file)
+}
+
+fn parse_control_record<T: DeserializeOwned>(file: File) -> Result<T, ControlRead> {
     let mut bytes = Vec::new();
     file.take(LIMIT as u64 + 1)
         .read_to_end(&mut bytes)
@@ -1878,6 +2104,7 @@ fn launch_task(
         report("launch_result", "spawn_failed", e.raw_os_error());
         e.to_string()
     })?;
+    permission.mark_submitted();
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         match child.try_wait() {
@@ -3164,6 +3391,7 @@ mod tests {
             let permission = LaunchPermission {
                 stop: &stop,
                 restarting: &restarting,
+                submitted_at: None,
             };
             assert!(permission.allowed());
             // The worker had passed its first check. Pause or Exit now
@@ -3183,6 +3411,7 @@ mod tests {
         let permission = LaunchPermission {
             stop: &stop,
             restarting: &restarting,
+            submitted_at: None,
         };
         assert_eq!(permission.submit(|| 1), Some(1));
     }
@@ -3206,6 +3435,7 @@ mod tests {
                         directory: &directory,
                         status_dir: &outbox,
                         recovery_endpoint: None,
+                        live_ipc: false,
                     },
                     "fixture",
                     &request,
@@ -3297,6 +3527,7 @@ mod tests {
                         directory: &directory,
                         status_dir: &directory,
                         recovery_endpoint: None,
+                        live_ipc: false,
                     },
                     "fixture",
                     &request,
@@ -3382,6 +3613,7 @@ mod tests {
                         directory: directory_ref,
                         status_dir: outbox_ref,
                         recovery_endpoint: None,
+                        live_ipc: false,
                     },
                     "fixture",
                     request_ref,
@@ -3503,6 +3735,7 @@ mod tests {
                             directory,
                             status_dir: &outbox,
                             recovery_endpoint: None,
+                            live_ipc: false,
                         },
                         "fixture",
                         request,
@@ -3642,6 +3875,7 @@ mod tests {
                 None,
                 polls.clone(),
                 launch.clone(),
+                false,
             )
             .unwrap()
         };
@@ -3778,6 +4012,7 @@ mod tests {
             snapshot: snapshot.clone(),
             stop,
             restarting: Arc::new(AtomicBool::new(true)),
+            live_ipc: false,
             worker: None,
         };
         drop(proxy);

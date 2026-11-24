@@ -18,7 +18,7 @@ After validating the owner and acquiring the managed backend, the helper records
 
 Only state changes and stop/drain reasons are recorded, not every render tick. Record failures cannot stop lighting or weaken ownership checks. Malformed/oversized history is preserved rather than overwritten. The size is bounded; filesystem latency is not guaranteed bounded. A draining event means the helper is about to release its owned manager, not proof of successful cleanup or child exit. Those require actual child-exit/log receipts.
 
-The installed helper queues `backend_state` transitions to `backend-state-events.json` in the same protected outbox. Its worker keeps up to 16 pending entries. The separate Windows Event Log worker can deliver ID 4 while a state write is pending. When the state queue is full, the supervisor retains one initial observation and retries it on later control ticks. Later transitions are best effort. State events carry their observation timestamps and may reach disk after a later lifecycle receipt. Join the histories by helper/parent PID and UTC. The synchronous `backend-events.json` still holds the start, stop and drain receipts in order. Heartbeat and status file I/O also remain synchronous.
+The installed helper uses the protected outbox for its bootstrap offer, then carries heartbeat, readiness, Pause and Exit over the authenticated local pipe. Its bounded state writer still queues `backend_state` transitions in the outbox. The separate Windows Application queue reports IPC admission, commands, loss and one continuous readiness window per session. The private and portable helper still uses synchronous heartbeat and status files and retains its file-based lifecycle history.
 
 ## Acceptance gates
 
