@@ -1066,6 +1066,7 @@ fn run_installed_helper_observed(
             input: &state,
             output: &policy.outbox,
             authority: Some(&authority),
+            state_diagnostics: super::backend_diagnostics::state_diagnostic_queue(),
         };
         match helper_owner_at(&channels, stage) {
             Ok(None) => return Ok(()),
@@ -1095,6 +1096,8 @@ struct HelperChannels<'a> {
     output: &'a Path,
     #[cfg(windows)]
     authority: Option<&'a HelperAuthority>,
+    #[cfg(windows)]
+    state_diagnostics: Option<&'a super::backend_diagnostics::StateDiagnosticQueue>,
 }
 
 impl<'a> HelperChannels<'a> {
@@ -1104,6 +1107,8 @@ impl<'a> HelperChannels<'a> {
             output: state,
             #[cfg(windows)]
             authority: None,
+            #[cfg(windows)]
+            state_diagnostics: None,
         }
     }
 
@@ -1300,6 +1305,8 @@ fn supervise_channels(
     let mut status_write_failed = false;
     let mut owner_read_failed = false;
     let mut last_backend_state = None;
+    #[cfg(windows)]
+    let mut initial_backend_state = None;
     let trace_clock = || now_ms().ok();
     let report = |sample| report_control_tick("helper", request.parent.pid, sample);
     let mut trace = Trace::new(&trace_clock, &report);
@@ -1519,17 +1526,51 @@ fn supervise_channels(
                     snapshot.ready_generation,
                     snapshot.detail.clone(),
                 );
-                if last_backend_state.as_ref() != Some(&backend_state) {
-                    tick.measure(Stage::Journal, || {
-                        super::backend_diagnostics::record(
-                            output,
-                            "backend_state",
-                            Some(request.parent.pid),
-                            snapshot.backend_pid,
-                            &snapshot.detail,
-                        );
-                    });
-                    last_backend_state = Some(backend_state);
+                if output == channels.input {
+                    if last_backend_state.as_ref() != Some(&backend_state) {
+                        tick.measure(Stage::Journal, || {
+                            super::backend_diagnostics::record(
+                                output,
+                                "backend_state",
+                                Some(request.parent.pid),
+                                snapshot.backend_pid,
+                                &snapshot.detail,
+                            );
+                        });
+                        last_backend_state = Some(backend_state);
+                    }
+                } else {
+                    #[cfg(windows)]
+                    if let Some(queue) = channels.state_diagnostics {
+                        if last_backend_state.is_none() {
+                            let (first, observed_utc_ms) = initial_backend_state
+                                .get_or_insert_with(|| {
+                                    (backend_state.clone(), super::backend_diagnostics::utc_ms())
+                                });
+                            if queue.initial_backend_state(
+                                output,
+                                request.parent.pid,
+                                first.0,
+                                &first.3,
+                                *observed_utc_ms,
+                            ) {
+                                last_backend_state =
+                                    initial_backend_state.take().map(|(first, _)| first);
+                            }
+                        }
+                        if last_backend_state
+                            .as_ref()
+                            .is_some_and(|last| last != &backend_state)
+                        {
+                            queue.backend_state(
+                                output,
+                                request.parent.pid,
+                                snapshot.backend_pid,
+                                &snapshot.detail,
+                            );
+                            last_backend_state = Some(backend_state);
+                        }
+                    }
                 }
                 let status = Status {
                     version: clock::PROTOCOL,
@@ -2427,6 +2468,142 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn installed_control_ticks_and_lifecycle_continue_while_state_writer_is_blocked() {
+        use super::super::backend_diagnostics::{
+            EventLogQueue, QUEUE_CAPACITY, StateDiagnosticQueue,
+        };
+
+        let (input, mut request, helper) = sharing_fixture("blocked-state-writer");
+        let outbox = input.join("outbox");
+        fs::create_dir(&outbox).unwrap();
+        request.timestamp_ms = 10_000;
+        write_json(&input.join("owner-request.json"), &request).unwrap();
+        let (entered, blocked) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let mut writes_to_block = 2;
+        let queue = StateDiagnosticQueue::with_state_gate(move || {
+            if writes_to_block > 0 {
+                writes_to_block -= 1;
+                entered.send(()).unwrap();
+                let _ = released.recv_timeout(Duration::from_secs(15));
+            }
+        });
+        queue.backend_state(&outbox, 0, None, "in flight");
+        blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+        for _ in 0..QUEUE_CAPACITY {
+            queue.backend_state(&outbox, 0, None, "pending");
+        }
+        let (delivered, event_log) = mpsc::channel();
+        let events = EventLogQueue::start(move |id, _, detail| {
+            delivered.send((id, detail.to_owned())).unwrap();
+        })
+        .unwrap();
+        events.information(3, "event=helper_action_started".into());
+        assert_eq!(
+            event_log.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (3, "event=helper_action_started".into())
+        );
+        let channels = HelperChannels {
+            input: &input,
+            output: &outbox,
+            authority: None,
+            state_diagnostics: Some(&queue),
+        };
+        let ticks = Cell::new(0);
+        let before_release = Cell::new(0);
+        let total = QUEUE_CAPACITY + 3;
+        let mut clock = FakeClock::new(request.timestamp_ms);
+        clock.fail_at_ms = Some(request.timestamp_ms + (total as u64 + 1) * 200);
+        helper_note(&outbox, &request, "helper_started", None, "fixture");
+        supervise_channels(
+            &channels,
+            &request,
+            &helper,
+            || {
+                let tick = ticks.get() + 1;
+                ticks.set(tick);
+                if tick == 2 {
+                    // Free exactly one slot after the helper observes its
+                    // first state against an already-full queue.
+                    before_release.set(super::super::backend_diagnostics::utc_ms());
+                    release.send(()).unwrap();
+                    blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                if tick == total {
+                    write_json(
+                        &input.join("owner-cancel.json"),
+                        &Cancel {
+                            version: clock::PROTOCOL,
+                            clock_domain: clock::DOMAIN.into(),
+                            nonce: request.nonce.clone(),
+                        },
+                    )
+                    .unwrap();
+                }
+                super::super::managed_backend::Snapshot {
+                    ready: true,
+                    ready_generation: tick as u64,
+                    backend_pid: Some(tick as u32),
+                    ..Default::default()
+                }
+            },
+            || {},
+            &clock,
+            false,
+        )
+        .unwrap();
+        helper_note(&outbox, &request, "helper_draining", None, "fixture");
+
+        let status: Status = read_json(&outbox.join("helper-status.json")).unwrap();
+        assert_eq!(ticks.get(), total);
+        assert_eq!(status.ready_generation, total as u64);
+        assert!(status.timestamp_ms > request.timestamp_ms);
+        assert_eq!(queue.dropped(), (total - 1) as u64);
+        let lifecycle: serde_json::Value = read_json(&outbox.join("backend-events.json")).unwrap();
+        let receipts: Vec<_> = lifecycle["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["event"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            receipts,
+            ["helper_started", "helper_stop", "helper_draining"]
+        );
+        let state_file = outbox.join("backend-state-events.json");
+        let history: serde_json::Value = read_json(&state_file).unwrap();
+        assert_eq!(history["events"].as_array().unwrap().len(), 1);
+        events.information(4, "event=slow_control_tick role=helper".into());
+        assert_eq!(
+            event_log.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (4, "event=slow_control_tick role=helper".into())
+        );
+        let history: serde_json::Value = read_json(&state_file).unwrap();
+        assert_eq!(history["events"].as_array().unwrap().len(), 1);
+
+        release.send(()).unwrap();
+        drop(queue);
+        assert_eq!(
+            blocked.recv_timeout(Duration::from_secs(10)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+        let history: serde_json::Value = read_json(&state_file).unwrap();
+        let events = history["events"].as_array().unwrap();
+        assert_eq!(events.len(), QUEUE_CAPACITY + 2);
+        let initial = events.last().unwrap();
+        assert_eq!(initial["event"], "backend_state");
+        assert_eq!(initial["backend_pid"].as_u64(), Some(1));
+        assert_eq!(
+            initial["parent_pid"].as_u64(),
+            Some(u64::from(request.parent.pid))
+        );
+        assert_eq!(initial["helper_pid"].as_u64(), Some(u64::from(helper.pid)));
+        assert!(initial["utc_ms"].as_u64().unwrap() <= before_release.get());
+        fs::remove_dir_all(&input).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn split_channels_only_consume_owner_in_input_and_publish_in_outbox() {
         let (input, mut request, helper) = sharing_fixture("split-control");
         let outbox = input.join("outbox");
@@ -2443,6 +2620,7 @@ mod tests {
             input: &input,
             output: &outbox,
             authority: None,
+            state_diagnostics: None,
         };
         let mut clock = FakeClock::new(request.timestamp_ms);
         clock.fail_at_ms = Some(request.timestamp_ms + 200);
@@ -2468,7 +2646,7 @@ mod tests {
         drop(reader);
         assert_eq!(previous, b"{}");
         fs::remove_file(&status_path).unwrap();
-        fs::remove_file(outbox.join("backend-events.json")).unwrap();
+        assert!(!outbox.join("backend-events.json").exists());
         fs::remove_file(owner_path).unwrap();
         fs::remove_dir(outbox).unwrap();
         fs::remove_dir(input).unwrap();
