@@ -11,6 +11,8 @@ use std::{
 };
 
 const FILE: &str = "backend-events.json";
+#[cfg(windows)]
+const STATE_FILE: &str = "backend-state-events.json";
 const MAX_BYTES: usize = 16_384;
 const MAX_EVENTS: usize = 32;
 static WRITER: Mutex<()> = Mutex::new(());
@@ -61,7 +63,19 @@ struct WindowsEvent {
 }
 
 #[cfg(windows)]
-static WINDOWS_QUEUE_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+enum Diagnostic {
+    Windows(WindowsEvent),
+    BackendState(std::path::PathBuf, Event),
+}
+
+#[cfg(windows)]
+pub(super) struct DiagnosticQueue {
+    sender: std::sync::mpsc::SyncSender<Diagnostic>,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[cfg(windows)]
+pub(super) const QUEUE_CAPACITY: usize = 16;
 
 #[cfg(windows)]
 fn try_enqueue<T>(
@@ -96,29 +110,96 @@ fn detail_with_queue_loss(detail: String, dropped: &std::sync::atomic::AtomicU64
 }
 
 #[cfg(windows)]
-fn enqueue_windows_event(event: WindowsEvent) -> bool {
-    use std::sync::{OnceLock, mpsc};
+impl DiagnosticQueue {
+    fn start(mut before_state_write: impl FnMut() + Send + 'static) -> Option<Self> {
+        use std::sync::{Arc, atomic::AtomicU64, mpsc};
 
-    static EVENTS: OnceLock<Option<mpsc::SyncSender<WindowsEvent>>> = OnceLock::new();
-    let events = EVENTS.get_or_init(|| {
-        let (send, receive) = mpsc::sync_channel::<WindowsEvent>(16);
+        let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let worker_dropped = dropped.clone();
         std::thread::Builder::new()
             .name("backend-launch-events".into())
             .spawn(move || {
-                while let Ok(event) = receive.recv() {
-                    let detail = detail_with_queue_loss(event.detail, &WINDOWS_QUEUE_DROPPED);
-                    windows_event(event.id, event.kind, &detail);
-                    if let Some(written) = event.written {
-                        let _ = written.send(());
+                while let Ok(diagnostic) = receiver.recv() {
+                    match diagnostic {
+                        Diagnostic::Windows(event) => {
+                            let detail = detail_with_queue_loss(event.detail, &worker_dropped);
+                            windows_event(event.id, event.kind, &detail);
+                            if let Some(written) = event.written {
+                                let _ = written.send(());
+                            }
+                        }
+                        Diagnostic::BackendState(directory, event) => {
+                            before_state_write();
+                            // This file has one writer. Never take the
+                            // synchronous lifecycle journal's lock here.
+                            let _ = append_history(&directory, STATE_FILE, event);
+                        }
                     }
                 }
             })
             .ok()?;
-        Some(send)
-    });
-    events
+        Some(Self { sender, dropped })
+    }
+
+    fn enqueue(&self, event: Diagnostic) -> bool {
+        try_enqueue(&self.sender, event, &self.dropped)
+    }
+
+    pub(super) fn backend_state(
+        &self,
+        protected_outbox: &Path,
+        parent_pid: u32,
+        backend_pid: Option<u32>,
+        detail: &str,
+    ) {
+        self.enqueue(Diagnostic::BackendState(
+            protected_outbox.to_owned(),
+            Event::new("backend_state", Some(parent_pid), backend_pid, detail),
+        ));
+    }
+
+    pub(super) fn initial_backend_state(
+        &self,
+        protected_outbox: &Path,
+        parent_pid: u32,
+        backend_pid: Option<u32>,
+        detail: &str,
+        observed_utc_ms: u64,
+    ) -> bool {
+        let mut event = Event::new("backend_state", Some(parent_pid), backend_pid, detail);
+        event.utc_ms = observed_utc_ms;
+        // The supervisor retains this same observation when the queue is full,
+        // so an unsuccessful attempt is not a dropped diagnostic.
+        self.sender
+            .try_send(Diagnostic::BackendState(protected_outbox.to_owned(), event))
+            .is_ok()
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_state_gate(gate: impl FnMut() + Send + 'static) -> Self {
+        Self::start(gate).unwrap()
+    }
+
+    #[cfg(test)]
+    pub(super) fn dropped(&self) -> u64 {
+        self.dropped.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(windows)]
+pub(super) fn diagnostic_queue() -> Option<&'static DiagnosticQueue> {
+    use std::sync::OnceLock;
+
+    static EVENTS: OnceLock<Option<DiagnosticQueue>> = OnceLock::new();
+    EVENTS
+        .get_or_init(|| DiagnosticQueue::start(|| {}))
         .as_ref()
-        .is_some_and(|events| try_enqueue(events, event, &WINDOWS_QUEUE_DROPPED))
+}
+
+#[cfg(windows)]
+fn enqueue_windows_event(event: WindowsEvent) -> bool {
+    diagnostic_queue().is_some_and(|queue| queue.enqueue(Diagnostic::Windows(event)))
 }
 
 #[cfg(windows)]
@@ -167,6 +248,19 @@ struct Event {
     detail: String,
 }
 
+impl Event {
+    fn new(event: &str, parent_pid: Option<u32>, backend_pid: Option<u32>, detail: &str) -> Self {
+        Self {
+            utc_ms: utc_ms(),
+            helper_pid: std::process::id(),
+            parent_pid,
+            backend_pid,
+            event: bounded(event, 48),
+            detail: bounded(detail, 160),
+        }
+    }
+}
+
 /// Diagnostic failures must not stop output or weaken ownership checks.
 /// Callers pass lifecycle summaries, never profiles, credentials, nonces or device frames.
 pub(crate) fn record(
@@ -203,7 +297,15 @@ fn try_record(
     detail: &str,
 ) -> io::Result<()> {
     let _writer = WRITER.lock().unwrap_or_else(|p| p.into_inner());
-    let path = state_dir.join(FILE);
+    append_history(
+        state_dir,
+        FILE,
+        Event::new(event, parent_pid, backend_pid, detail),
+    )
+}
+
+fn append_history(state_dir: &Path, file: &str, event: Event) -> io::Result<()> {
+    let path = state_dir.join(file);
     let mut history = match fs::symlink_metadata(&path) {
         Ok(metadata) => {
             if !metadata.is_file()
@@ -240,14 +342,7 @@ fn try_record(
         },
         Err(error) => return Err(error),
     };
-    history.events.push_back(Event {
-        utc_ms: utc_ms(),
-        helper_pid: std::process::id(),
-        parent_pid,
-        backend_pid,
-        event: bounded(event, 48),
-        detail: bounded(detail, 160),
-    });
+    history.events.push_back(event);
     while history.events.len() > MAX_EVENTS {
         history.events.pop_front();
     }
