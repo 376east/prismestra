@@ -35,7 +35,7 @@ class OpenRGBCacheTests(unittest.TestCase):
         path.write_bytes(data)
         return data
 
-    def make_bundle(self, remove=None, change=None, linker=(14, 51)):
+    def make_bundle(self, remove=None, change=None, linker=(14, 51), patched_hidapi=False):
         def lock(name, value):
             return self.write("components/openrgb/" + name, json.dumps(value).encode())
 
@@ -49,9 +49,16 @@ class OpenRGBCacheTests(unittest.TestCase):
             "repository": self.source, "revision": self.revision, "patch": "test.patch",
             "patch_sha256": pin(patch_bytes)["sha256"],
         })
-        files["build/dependency-lock.json"] = lock("dependency-lock.json", {
-            "files": {"PawnIOLib.dll": pin(files["runtime/PawnIOLib.dll"])},
-        })
+        dependencies = {"PawnIOLib.dll": pin(files["runtime/PawnIOLib.dll"])}
+        if patched_hidapi:
+            overlay = self.write("components/openrgb/hidapi-teardown.patch", b"fixture HIDAPI patch")
+            files["build/hidapi-teardown.patch"] = overlay
+            files["runtime/hidapi-hotplug.dll"] = b"fixture rebuilt DLL"
+            dependencies["hidapi-hotplug.dll"] = {
+                **pin(files["runtime/hidapi-hotplug.dll"]),
+                "patch": "hidapi-teardown.patch", "patch_sha256": pin(overlay)["sha256"],
+            }
+        files["build/dependency-lock.json"] = lock("dependency-lock.json", {"files": dependencies})
         files["build/test.patch"] = patch_bytes
         for recipe in cache.RECIPES:
             files["build/" + recipe] = self.write("scripts/components/" + recipe, recipe.encode())
@@ -152,6 +159,38 @@ class OpenRGBCacheTests(unittest.TestCase):
         cache.save(self.cache, self.key, self.make_bundle(change="runtime/PawnIOLib.dll"))
         with self.assertRaisesRegex(ValueError, "dependency differs"):
             cache.restore(self.cache, self.key, self.root, self.repo)
+
+    def test_old_cache_with_same_engine_revision_cannot_supply_new_dependency(self):
+        cache.save(self.cache, self.key, self.make_bundle())
+        self.make_bundle(patched_hidapi=True)
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            cache.restore(self.cache, self.key, self.root, self.repo)
+
+    def test_cache_requires_exact_hidapi_overlay_and_rebuilt_dll(self):
+        for change, remove, error in (
+            (None, "build/hidapi-teardown.patch", "incomplete"),
+            ("build/hidapi-teardown.patch", None, "member differs"),
+            ("runtime/hidapi-hotplug.dll", None, "dependency differs"),
+        ):
+            with self.subTest(change=change, remove=remove):
+                bundle = self.make_bundle(change=change, remove=remove, patched_hidapi=True)
+                location = self.root / ("cache-" + error.replace(" ", "-"))
+                cache.save(location, self.key, bundle)
+                with self.assertRaisesRegex(ValueError, error):
+                    cache.restore(location, self.key, self.root, self.repo)
+
+    def test_hidapi_overlay_cannot_shadow_the_openrgb_patch(self):
+        bundle = self.make_bundle(patched_hidapi=True)
+        with ZipFile(bundle) as archive:
+            manifest = json.loads(archive.read("component-manifest.json"))
+        path = self.component / "dependency-lock.json"
+        dependencies = json.loads(path.read_bytes())
+        dependencies["files"]["hidapi-hotplug.dll"].update(
+            patch="test.patch", patch_sha256=verifier.fingerprint(self.component / "test.patch")["sha256"],
+        )
+        path.write_text(json.dumps(dependencies), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "collides with an existing build member"):
+            cache.verify_members(manifest, self.repo)
 
     def test_restored_engine_must_fit_the_runtime_floor(self):
         cache.save(self.cache, self.key, self.make_bundle(linker=(14, 52)))

@@ -68,6 +68,19 @@ def metadata(item):
     return {key: item[key] for key in ("size", "sha256")}
 
 
+def hidapi_patch(dependency_lock, dependencies):
+    item = dependencies["files"].get("hidapi-hotplug.dll", {})
+    if "patch" not in item and "patch_sha256" not in item:
+        return None
+    name = safe_name(item.get("patch"))
+    if len(name.parts) != 1 or name.suffix != ".patch":
+        raise ValueError("HIDAPI patch must be a basename")
+    path = checked(Path(dependency_lock).parent / name)
+    if verifier.fingerprint(path)["sha256"] != item.get("patch_sha256"):
+        raise ValueError("HIDAPI patch SHA256 mismatch")
+    return path
+
+
 def package(args):
     runtime = checked(args.runtime_dir, directory=True)
     sources = checked(args.source_archives_dir, directory=True)
@@ -124,6 +137,12 @@ def package(args):
     add(args.patch, "build/" + str(patch_name))
     if files["build/" + str(patch_name)][1]["sha256"] != lock.get("patch_sha256"):
         raise ValueError("source patch SHA256 mismatch")
+    local_hidapi_patch = hidapi_patch(args.dependency_lock, dependencies)
+    if local_hidapi_patch is not None:
+        name = "build/" + local_hidapi_patch.name
+        add(local_hidapi_patch, name)
+        if files[name][1]["sha256"] != dependencies["files"]["hidapi-hotplug.dll"]["patch_sha256"]:
+            raise ValueError("HIDAPI patch changed during packaging")
     names = set()
     for item in inventory.get("files", []):
         name = str(safe_name(item["name"]))

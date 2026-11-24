@@ -32,6 +32,8 @@ The release directory needs the EXE, three driver/user-mode DLLs, six PawnIO mod
 
 The selected HIDAPI and PawnIOLib DLLs are our source builds, pinned separately in `components/openrgb/dependency-lock.json`. `build_openrgb_dependencies.ps1` builds only those user-mode libraries from the caller's verified extracted source archives. Its PawnIO recipe bypasses the repository's WDK/driver targets. Preserve the BSD-style HIDAPI notices, LGPL2.1 PawnIOLib text, exact source archives and recipe with any redistributed component. A rebuild can have a different binary hash and must pass fresh import/ABI/SDK checks; byte-for-byte reproducibility and Authenticode signing are not claimed.
 
+When the HIDAPI entry pins a local patch, check the unchanged upstream archive and patch SHA-256 separately. Extract into a fresh directory, then run `git apply --check` and `git apply` with that patch before building. The component archive carries the upstream archive under `source/`, the overlay under `build/`, and the matching BSD notice under `licenses/`. The dependency lock pins the resulting DLL separately. An OpenRGB source revision alone cannot authorize an older HIDAPI build.
+
 ```text
 python scripts/components/verify_openrgb_component.py --source-root SOURCE --release-dir RELEASE --source-lock components/openrgb/source-lock.json --dependency-lock components/openrgb/dependency-lock.json --output audit.json
 python scripts/components/test_verify_openrgb_component.py
