@@ -1646,7 +1646,15 @@ async function checkOutputStatusCopy() {
  assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Нет данных о состоянии');
  assert.equal(commands.length,beforeCopy,'copy issues no host commands');
  const connecting={deviceActivity:{labels:{[selected.id]:'Подключается',[neighbor.id]:'Кадры отправлены'}}};
- receiveDeviceState('status',{profileRevision:'profile-A',...connecting});
+ receiveDeviceState('status',{profileRevision:'profile-A',startupStatus:'applied',...connecting});
+ receiveDeviceState('status',{scene:{...scene,brightness:29}});
+ assert.equal(vm.runInContext('deviceStatus(state.devices[0])',context),'Подключается',
+  'the latest scene does not inherit the automatic startup result');
+ receiveDeviceState('status',{profileRevision:'profile-B'});
+ assert.equal(vm.runInContext('deviceStatus(state.devices[0])',context),'Подключается',
+  'a new profile does not inherit the automatic startup result');
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Подключается');
  vm.runInContext('activateScene({...state.scene,brightness:37},null,true)',context);
  const {request,scene:submittedScene}=commands.at(-1);
  assert.equal(commands.at(-1).op,'apply_scene');
@@ -1663,7 +1671,7 @@ async function checkOutputStatusCopy() {
  await click(selected.id);
  assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Подключается\nСцена принята приложением');
  assert.equal(vm.runInContext('deviceStatus(state.devices[0])',context),'Подключается · Сцена принята приложением');
- receiveDeviceState('status',{profileRevision:'profile-B',...connecting});
+ receiveDeviceState('status',{profileRevision:'profile-C',...connecting});
  await click(selected.id);
  assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Подключается');
  assert.equal(commands.length,afterApply,'copy and status updates issue no host commands');

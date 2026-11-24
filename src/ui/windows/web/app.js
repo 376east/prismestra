@@ -717,7 +717,7 @@ function deviceSceneAccepted(device,raw) {
  // separately and does not tie the worker's frame count to a scene revision.
  if(!state?.native||!device?.enabled||device.role!=='canvas'||
     ['Выключено','Выключается','Команда выключения отправлена'].includes(raw))return '';
- if(state.startupStatus!=='applied'&&(!acceptedOutputScene||!same(acceptedOutputScene.scene,state.scene)))return '';
+ if(!acceptedOutputScene||!same(acceptedOutputScene.scene,state.scene))return '';
  return ui('Сцена принята приложением','Scene accepted by the app');
 }
 function reconcileAcceptedOutputScene() {
