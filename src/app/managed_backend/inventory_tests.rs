@@ -40,7 +40,10 @@ fn scans(directory: &Path) -> usize {
         .unwrap_or(0)
 }
 
-fn fixture_manager(directory: &Path) -> (Manager, SocketAddr) {
+fn fixture_manager(
+    directory: &Path,
+    ready_changed: impl FnMut(ReadyCause, u32, u64) + Send + 'static,
+) -> (Manager, SocketAddr) {
     let state = Arc::new(Shared {
         snapshot: Mutex::new(Snapshot::default()),
         cancel: AtomicBool::new(false),
@@ -94,6 +97,7 @@ fn fixture_manager(directory: &Path) -> (Manager, SocketAddr) {
             |endpoint, pid| {
                 probe_owned_sdk(endpoint, pid, &|| child_state.cancel.load(Ordering::SeqCst))
             },
+            ready_changed,
         );
         drop(owned);
     });
@@ -154,7 +158,10 @@ fn late_inventory_after_startup_budget_advances_generation_without_restarting_ch
     let directory = Temp::new();
     let control = directory.0.join("control");
     fs::write(&control, "0").unwrap();
-    let (manager, endpoint) = fixture_manager(&directory.0);
+    let (events, received) = std::sync::mpsc::channel();
+    let (manager, endpoint) = fixture_manager(&directory.0, move |cause, pid, generation| {
+        events.send((cause, pid, generation)).unwrap();
+    });
     until(|| manager.snapshot().ready && manager.snapshot().detail.contains("0 controllers"));
     let empty = manager.snapshot();
     assert_eq!(empty.ready_generation, 1);
@@ -163,6 +170,10 @@ fn late_inventory_after_startup_budget_advances_generation_without_restarting_ch
     assert!(scans(&directory.0) >= 2);
     assert_eq!(manager.snapshot().backend_pid, empty.backend_pid);
     assert_eq!(manager.snapshot().ready_generation, empty.ready_generation);
+    assert!(matches!(
+        received.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
 
     fs::write(&control, "1").unwrap();
     until(|| manager.snapshot().ready_generation > empty.ready_generation);
@@ -171,6 +182,15 @@ fn late_inventory_after_startup_budget_advances_generation_without_restarting_ch
     assert_eq!(populated.backend_pid, empty.backend_pid);
     assert!(populated.detail.contains("inventory 1 controllers"));
     assert!(populated.has_recent_inventory());
+    let pid = empty.backend_pid.unwrap();
+    assert_eq!(
+        received.recv_timeout(Duration::from_secs(5)).unwrap(),
+        (
+            ReadyCause::InventoryFingerprintChanged,
+            pid,
+            populated.ready_generation
+        ),
+    );
     let stable_scan_target = scans(&directory.0) + 5;
     until(|| scans(&directory.0) >= stable_scan_target);
     assert_eq!(
@@ -182,6 +202,14 @@ fn late_inventory_after_startup_budget_advances_generation_without_restarting_ch
     until(|| manager.snapshot().ready_generation > populated.ready_generation);
     let topology = manager.snapshot();
     assert_eq!(topology.ready_generation, populated.ready_generation + 1);
+    assert_eq!(
+        received.recv_timeout(Duration::from_secs(5)).unwrap(),
+        (
+            ReadyCause::InventoryFingerprintChanged,
+            pid,
+            topology.ready_generation
+        ),
+    );
     fs::write(&control, "color").unwrap(); // Identical topology; colors keep changing.
     let stable_scan_target = scans(&directory.0) + 5;
     until(|| scans(&directory.0) >= stable_scan_target);
@@ -215,6 +243,10 @@ fn late_inventory_after_startup_budget_advances_generation_without_restarting_ch
         manager.snapshot().ready_generation,
         topology.ready_generation
     );
+    assert!(matches!(
+        received.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
 
     fs::write(&control, "stall").unwrap();
     let target = scans(&directory.0) + 1;
