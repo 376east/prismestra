@@ -17,6 +17,11 @@ const MAX_BYTES: usize = 16_384;
 const MAX_EVENTS: usize = 32;
 static WRITER: Mutex<()> = Mutex::new(());
 
+#[cfg(all(test, windows))]
+pub(super) fn hold_lifecycle_writer_for_test() -> std::sync::MutexGuard<'static, ()> {
+    WRITER.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 pub(super) fn utc_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

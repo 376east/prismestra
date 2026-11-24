@@ -233,6 +233,9 @@ pub struct Manager {
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
     endpoint: SocketAddr,
+    // Installed helpers retain admission through their terminal journal.
+    // Direct backends keep the lock on the worker, as before.
+    _ownership_lock: Option<File>,
 }
 
 struct InstalledLaunch {
@@ -315,10 +318,15 @@ impl Manager {
             });
             let state = shared.clone();
             let endpoint = config.endpoint;
+            let (worker_lock, ownership_lock) = if installed.is_some() {
+                (None, Some(lock))
+            } else {
+                (Some(lock), None)
+            };
             let worker = thread::Builder::new()
                 .name("managed-openrgb".into())
                 .spawn(move || {
-                    let _lock = lock;
+                    let _lock = worker_lock;
                     run(config, installed.as_ref(), &state);
                 })
                 .map_err(err)?;
@@ -326,6 +334,7 @@ impl Manager {
                 shared,
                 worker: Some(worker),
                 endpoint,
+                _ownership_lock: ownership_lock,
             })
         }
     }
@@ -366,12 +375,17 @@ impl Manager {
         self.shared.restarting.store(false, Ordering::SeqCst);
         self.shared.wake.notify_all();
     }
+
+    /// Signal the owner worker without waiting for the child to shut down.
+    pub(super) fn request_stop(&self) {
+        self.shared.cancel.store(true, Ordering::SeqCst);
+        self.shared.wake.notify_all();
+    }
 }
 
 impl Drop for Manager {
     fn drop(&mut self) {
-        self.shared.cancel.store(true, Ordering::SeqCst);
-        self.shared.wake.notify_all();
+        self.request_stop();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -1384,6 +1398,7 @@ mod tests {
             shared: state.clone(),
             worker: None,
             endpoint: listener.local_addr().unwrap(),
+            _ownership_lock: None,
         };
         let guard = manager.guard();
         assert!(guard().is_ok());
