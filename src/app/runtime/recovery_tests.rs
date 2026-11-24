@@ -1422,6 +1422,9 @@ fn recovery_stop_cancels_pending_initial_connection_retry() {
 #[cfg(windows)]
 #[test]
 fn fresh_status_from_same_helper_restores_frames_after_exhausted_retries() {
+    use crate::{lcd::protocol, lighting::scene::Effect, runtime::network::Wled};
+    use std::{io::ErrorKind, net::UdpSocket};
+
     struct GuardedLink(RgbLink, Cancellation);
     impl RgbDriver for GuardedLink {
         fn protocol(&self) -> Driver {
@@ -1435,6 +1438,56 @@ fn fresh_status_from_same_helper_restores_frames_after_exhausted_retries() {
                 return Err("Managed backend status expired".into());
             }
             self.0.write(colors, cancel)
+        }
+    }
+
+    struct LcdReceiver {
+        reports: Vec<[u8; protocol::REPORT_BYTES]>,
+        accepted: Arc<AtomicUsize>,
+    }
+
+    impl protocol::ReportTransport for LcdReceiver {
+        fn now_ms(&self) -> u64 {
+            crate::clock::monotonic_ms()
+        }
+
+        fn write_report(
+            &mut self,
+            report: &[u8; protocol::REPORT_BYTES],
+            _: u64,
+        ) -> Result<usize, String> {
+            self.reports.push(*report);
+            Ok(report.len())
+        }
+
+        fn read_ack(
+            &mut self,
+            ack: &mut [u8; protocol::ACK_BYTES],
+            _: u64,
+        ) -> Result<usize, String> {
+            let mut jpeg: Vec<u8> = self
+                .reports
+                .iter()
+                .flat_map(|report| report[protocol::REPORT_BYTES - protocol::PAYLOAD..].iter())
+                .copied()
+                .collect();
+            while jpeg.last() == Some(&0) {
+                jpeg.pop();
+            }
+            protocol::validate_jpeg(&jpeg)?;
+            if protocol::packet_count(&jpeg)? != self.reports.len()
+                || self
+                    .reports
+                    .iter()
+                    .enumerate()
+                    .any(|(index, report)| protocol::packet(&jpeg, index).as_ref() != Ok(report))
+            {
+                return Err("LCD receiver got an incomplete or invalid report sequence".into());
+            }
+            self.reports.clear();
+            ack.fill(0);
+            self.accepted.fetch_add(1, Ordering::SeqCst);
+            Ok(ack.len())
         }
     }
 
@@ -1472,9 +1525,72 @@ fn fresh_status_from_same_helper_restores_frames_after_exhausted_retries() {
     assert_eq!(original.ready_generation, 1);
     let mut document = runtime().document().clone();
     document.lighting.setup.devices[0].driver = Driver::OpenRgb;
+    let (document, assets) = arrival_lcd_document(document, "pc-ready-loss", ARRIVAL_LCD_MEDIA);
     let mut runtime = Runtime::new(document, None).unwrap();
     runtime.managed_backend_ids.insert("a".into());
     runtime.managed_backend = Some(backend);
+    let lcd_frames = Arc::new(AtomicUsize::new(0));
+    let accepted = lcd_frames.clone();
+    let lcd_assets = assets.clone();
+    runtime
+        .attach_lcd(
+            "lcd",
+            vec![],
+            Arc::new(move |config, _| {
+                Ok((
+                    lcd::Controller::new(config, &Assets::new(lcd_assets.clone())?)?,
+                    Box::new(LcdReceiver {
+                        reports: vec![],
+                        accepted: accepted.clone(),
+                    }),
+                ))
+            }),
+        )
+        .unwrap();
+    let lan = UdpSocket::bind("127.0.0.1:0").unwrap();
+    lan.set_nonblocking(true).unwrap();
+    let endpoint = lan.local_addr().unwrap();
+    runtime
+        .attach_rgb(
+            "b",
+            vec![],
+            Arc::new(move |_| Ok(Box::new(Wled::connect(endpoint, 1)?))),
+        )
+        .unwrap();
+
+    let sample_neighbors = |runtime: &mut Runtime, now: &mut u64, pixel: [u8; 3], stage: &str| {
+        let before = lcd_frames.load(Ordering::SeqCst);
+        let mut scene = runtime.project().scene.clone();
+        scene.effect = Effect::ColorCycle;
+        scene.colors = vec![u32::from_be_bytes([0, pixel[0], pixel[1], pixel[2]])];
+        scene.brightness = 100;
+        runtime.set_scene(scene).unwrap();
+        let mut source = None;
+        wait(|| {
+            tick(runtime, now);
+            let mut packet = [0; 64];
+            // Read until this phase's color arrives. Queued packets from the
+            // previous phase cannot satisfy the receiver.
+            while source.is_none() {
+                match lan.recv_from(&mut packet) {
+                    Ok((size, from)) => {
+                        assert_eq!(size, 13);
+                        assert_eq!(packet[0], 0x41);
+                        assert!((1..=15).contains(&packet[1]));
+                        assert_eq!(packet[2..10], [0x0b, 1, 0, 0, 0, 0, 0, 3]);
+                        if packet[10..13] == pixel {
+                            source = Some(from);
+                        }
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("Receiving WLED for {stage}: {error}"),
+                }
+            }
+            source.is_some() && lcd_frames.load(Ordering::SeqCst) > before
+        });
+        eprintln!("{stage}: received WLED {pixel:?} and accepted a complete LCD frame");
+        source.unwrap()
+    };
     let link = Arc::new(Link::default());
     let driver_link = link.clone();
     runtime
@@ -1493,6 +1609,10 @@ fn fresh_status_from_same_helper_restores_frames_after_exhausted_retries() {
     runtime.enable_output_recovery("a").unwrap();
     let mut now = 0;
     working(&mut runtime, "a", &mut now);
+    let lan_source = sample_neighbors(&mut runtime, &mut now, [255, 0, 0], "before loss");
+    assert!(runtime.managed_backend.as_ref().unwrap().snapshot().ready);
+    let lan_generation = runtime.host.status("b").unwrap().generation;
+    let lcd_generation = runtime.lcd_status("lcd").unwrap().generation;
 
     block_read.store(true, Ordering::SeqCst);
     blocked.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -1529,7 +1649,16 @@ fn fresh_status_from_same_helper_restores_frames_after_exhausted_retries() {
         let snapshot = runtime.managed_backend.as_ref().unwrap().snapshot();
         !snapshot.ready && snapshot.detail.contains("Fixture status ACL denied")
     });
-    tick(&mut runtime, &mut now);
+    assert_eq!(
+        sample_neighbors(&mut runtime, &mut now, [0, 255, 0], "during loss"),
+        lan_source
+    );
+    assert!(!runtime.managed_backend.as_ref().unwrap().snapshot().ready);
+    assert_eq!(runtime.host.status("b").unwrap().generation, lan_generation);
+    assert_eq!(
+        runtime.lcd_status("lcd").unwrap().generation,
+        lcd_generation
+    );
     assert_eq!(runtime.host.status("a").unwrap().generation, exhausted);
     assert_eq!(link.frames.lock().unwrap().len(), before);
     deny_acl.store(false, Ordering::SeqCst);
@@ -1548,6 +1677,16 @@ fn fresh_status_from_same_helper_restores_frames_after_exhausted_retries() {
     assert!(link.frames.lock().unwrap().len() > before);
     assert_eq!(link.calls.load(Ordering::SeqCst), 2);
     let stable = runtime.host.status("a").unwrap().generation;
+    assert_eq!(
+        sample_neighbors(&mut runtime, &mut now, [0, 0, 255], "after recovery"),
+        lan_source
+    );
+    assert!(runtime.managed_backend.as_ref().unwrap().snapshot().ready);
+    assert_eq!(runtime.host.status("b").unwrap().generation, lan_generation);
+    assert_eq!(
+        runtime.lcd_status("lcd").unwrap().generation,
+        lcd_generation
+    );
     std::thread::sleep(Duration::from_millis(450));
     tick(&mut runtime, &mut now);
     assert_eq!(
@@ -1567,6 +1706,7 @@ fn fresh_status_from_same_helper_restores_frames_after_exhausted_retries() {
         std::fs::remove_file(state.join(file)).unwrap();
     }
     std::fs::remove_dir(state).unwrap();
+    remove_lcd_assets(runtime, assets);
 }
 
 #[test]
