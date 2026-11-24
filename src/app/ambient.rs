@@ -51,6 +51,25 @@ impl Config {
             && !self.routes.iter().any(|r| r.enabled && !r.scene_edges)
     }
 
+    pub(crate) fn monitor_fallback_routes(
+        &self,
+        setup: &Setup,
+    ) -> BTreeMap<String, (bool, OutputSettings)> {
+        self.routes
+            .iter()
+            .filter(|r| {
+                r.enabled
+                    && !r.scene_edges
+                    && setup.devices.iter().any(|d| {
+                        d.id == r.device
+                            && d.enabled
+                            && d.driver != crate::devices::Driver::HomeAssistant
+                    })
+            })
+            .map(|r| (r.device.clone(), (r.zone.reverse, r.output)))
+            .collect()
+    }
+
     pub(crate) fn render_canvas(&self, setup: &Setup) -> Option<crate::devices::Canvas> {
         let mut routes = self
             .routes
@@ -59,38 +78,22 @@ impl Config {
             .peekable();
         routes.peek()?;
         let mut canvas = setup.canvas.clone();
-        let (w, h) = (canvas.width - 1, canvas.height - 1);
-        let span = if w == 0 || h == 0 {
-            w + h + 1
-        } else {
-            2 * (w + h)
-        };
+        let span = canvas.perimeter_len();
         for route in routes {
-            canvas.points.extend((0..route.zone.leds).map(|led| {
-                let i = if route.zone.reverse {
-                    route.zone.leds - 1 - led
-                } else {
-                    led
-                };
-                let at = (i * span as usize / route.zone.leds) as u32;
-                let (x, y) = if w == 0 {
-                    (0, at)
-                } else if h == 0 || at <= w {
-                    (at, 0)
-                } else if at <= w + h {
-                    (w, at - w)
-                } else if at <= 2 * w + h {
-                    (2 * w + h - at, h)
-                } else {
-                    (0, span - at)
-                };
-                crate::devices::Point {
-                    device: route.device.clone(),
-                    led,
-                    x,
-                    y,
-                }
-            }));
+            let points: Vec<_> =
+                crate::devices::perimeter_indices(span, route.zone.leds, route.zone.reverse)
+                    .enumerate()
+                    .map(|(led, index)| {
+                        let (x, y) = canvas.perimeter_point(index);
+                        crate::devices::Point {
+                            device: route.device.clone(),
+                            led,
+                            x,
+                            y,
+                        }
+                    })
+                    .collect();
+            canvas.points.extend(points);
         }
         Some(canvas)
     }

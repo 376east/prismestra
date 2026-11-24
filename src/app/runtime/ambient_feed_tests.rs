@@ -168,8 +168,9 @@ fn attach_blocked(
         .unwrap();
 }
 #[test]
-fn blocked_capture_expires_to_black_without_ui_and_late_expired_pixels_never_reach_rgb() {
+fn blocked_capture_expires_to_scene_without_ui_and_late_expired_pixels_never_reach_rgb() {
     let mut stand = Stand::new();
+    stand.document.lighting.scene.colors = vec![0xff00ff; 5];
     let (mut runtime, trace) = runtime(&mut stand, 150);
     let gate = ConfigurationGate::new();
     let entered = Arc::new(AtomicBool::new(false));
@@ -183,12 +184,19 @@ fn blocked_capture_expires_to_black_without_ui_and_late_expired_pixels_never_rea
     );
     wait(|| trace.0.lock().unwrap().iter().any(red));
     wait(|| entered.load(Ordering::SeqCst));
-    std::thread::sleep(Duration::from_millis(210));
-    wait(|| trace.0.lock().unwrap().last() == Some(&Rgb::default()));
+    wait(|| {
+        trace
+            .0
+            .lock()
+            .unwrap()
+            .last()
+            .is_some_and(|c| c.r > 0 && c.b > 0 && c.g == 0)
+    });
     assert_eq!(
         runtime.capture_status().unwrap().phase,
         capture_worker::Phase::Ready
     );
+    std::thread::sleep(Duration::from_millis(60));
     allow.store(true, Ordering::SeqCst);
     gate.open();
     wait(|| trace.0.lock().unwrap().iter().any(green));
@@ -199,6 +207,7 @@ fn blocked_capture_expires_to_black_without_ui_and_late_expired_pixels_never_rea
 #[test]
 fn coalesced_disable_enable_discards_blocked_cache_even_while_that_cache_is_fresh() {
     let mut stand = Stand::new();
+    stand.document.lighting.scene.colors = vec![0xffff00; 5];
     let (mut runtime, trace) = runtime(&mut stand, 1000);
     let gate = ConfigurationGate::new();
     let entered = Arc::new(AtomicBool::new(false));
@@ -218,9 +227,130 @@ fn coalesced_disable_enable_discards_blocked_cache_even_while_that_cache_is_fres
     gate.open();
     wait(|| polls.load(Ordering::SeqCst) >= 4);
     assert!(!trace.0.lock().unwrap().iter().any(blue));
-    assert_eq!(trace.0.lock().unwrap().last(), Some(&Rgb::default()));
+    wait(|| {
+        trace
+            .0
+            .lock()
+            .unwrap()
+            .last()
+            .is_some_and(|c| c.r > 0 && c.g > 0)
+    });
     allow.store(true, Ordering::SeqCst);
     wait(|| trace.0.lock().unwrap().iter().any(green));
     runtime.stop();
     wait(|| runtime.drained());
+}
+
+#[test]
+fn lost_capture_uses_base_scene_until_fresh_pixels_return_with_current_geometry() {
+    struct Switch(Arc<AtomicU8>);
+    impl ambient::Provider for Switch {
+        fn poll(&mut self, _: &str, crop: Option<Rect>, at: u64) -> Result<Option<Frame>, String> {
+            let frame = match self.0.load(Ordering::SeqCst) {
+                1 => image(Rgb::new(0, 255, 0), crop, at),
+                2 => Frame {
+                    image: Arc::new(
+                        Image::new(2, 1, vec![Rgb::new(0, 0, 255), Rgb::new(0, 255, 0)]).unwrap(),
+                    ),
+                    ..image(Rgb::default(), crop, at)
+                },
+                _ => return Ok(None),
+            };
+            Ok(Some(frame))
+        }
+    }
+
+    fn scene_edges(document: &Document, context: crate::runtime::scene::ContextInput) -> Vec<Rgb> {
+        let mut edges = document.ambient.clone();
+        edges.routes[0].scene_edges = true;
+        let canvas = edges.render_canvas(&document.lighting.setup).unwrap();
+        let mut renderer =
+            crate::runtime::scene::Renderer::new(document.lighting.scene.clone()).unwrap();
+        renderer.set_context(context);
+        renderer
+            .step(&canvas)
+            .unwrap()
+            .split_off(document.lighting.setup.canvas.points.len())
+    }
+
+    let mut stand = Stand::new();
+    let effect = crate::lighting::scene::Effect::DayNight;
+    stand.document.lighting.scene.effect = effect;
+    stand.document.lighting.scene.colors = vec![0xffffff];
+    stand.document.lighting.scene.brightness = 100;
+    stand.document.ambient.sources[0].stale_after_ms = 150;
+    let mut runtime = stand.runtime(false);
+    runtime.enable_autonomous_rgb().unwrap();
+    let record = Arc::new(Record::default());
+    runtime
+        .attach_rgb(
+            "ambient",
+            vec![],
+            rgb_factory(
+                &stand.document,
+                "ambient",
+                record.clone(),
+                Arc::new(AtomicUsize::new(0)),
+            ),
+        )
+        .unwrap();
+    let mode = Arc::new(AtomicU8::new(1));
+    let input = mode.clone();
+    runtime
+        .attach_capture(Arc::new(move |_| Ok(Box::new(Switch(input.clone())))))
+        .unwrap();
+
+    let context = runtime.scene_context(effect, now(), wall());
+    runtime.tick(now(), wall()).unwrap();
+    let original = scene_edges(runtime.document(), context);
+    assert!(original.windows(2).any(|pair| pair[0] != pair[1]));
+    wait(|| record.last().is_some_and(|frame| frame.iter().all(green)));
+    mode.store(0, Ordering::SeqCst);
+    wait(|| record.last().as_ref() == Some(&original));
+    #[cfg(windows)]
+    assert_eq!(
+        runtime.ambient_source_detail("ambient"),
+        Some("Базовая сцена · кадр монитора устарел")
+    );
+    mode.store(2, Ordering::SeqCst);
+    wait(|| {
+        record
+            .last()
+            .is_some_and(|frame| frame.first().is_some_and(blue) && frame.last().is_some_and(green))
+    });
+
+    #[cfg(windows)]
+    assert_eq!(
+        runtime.ambient_source_detail("ambient"),
+        Some("Источник кадров — монитор")
+    );
+
+    let mut changed = runtime.document().clone();
+    changed.lighting.setup.canvas.width = 37;
+    changed.lighting.setup.canvas.height = 9;
+    changed.ambient.routes[0].zone.reverse = true;
+    let reversed = scene_edges(&changed, context);
+    let mut forward_document = changed.clone();
+    forward_document.ambient.routes[0].zone.reverse = false;
+    let forward = scene_edges(&forward_document, context);
+    assert_ne!(reversed, original);
+    assert_eq!(reversed, forward.into_iter().rev().collect::<Vec<_>>());
+
+    let capture_generation = runtime.capture_status().unwrap().generation;
+    let outputs = runtime.output_plan();
+    runtime.request_outputs_for(changed, outputs).unwrap();
+    wait(|| {
+        runtime.tick(now(), wall()).unwrap();
+        !runtime.pending_configuration()
+            && runtime
+                .capture_status()
+                .is_some_and(|s| s.generation != capture_generation)
+            && record.last().is_some_and(|frame| {
+                frame.first().is_some_and(green) && frame.last().is_some_and(blue)
+            })
+    });
+    mode.store(0, Ordering::SeqCst);
+    wait(|| record.last().as_ref() == Some(&reversed));
+    mode.store(1, Ordering::SeqCst);
+    wait(|| record.last().is_some_and(|frame| frame.iter().all(green)));
 }

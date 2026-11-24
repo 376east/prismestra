@@ -199,6 +199,44 @@ pub struct Setup {
     pub canvas: Canvas,
 }
 
+impl Canvas {
+    pub(crate) fn perimeter_len(&self) -> usize {
+        let (w, h) = (self.width - 1, self.height - 1);
+        if w == 0 || h == 0 {
+            (w + h + 1) as usize
+        } else {
+            (2 * (w + h)) as usize
+        }
+    }
+
+    pub(crate) fn perimeter_point(&self, index: usize) -> (u32, u32) {
+        let (w, h) = (self.width - 1, self.height - 1);
+        let at = index as u32;
+        if w == 0 {
+            (0, at)
+        } else if h == 0 || at <= w {
+            (at, 0)
+        } else if at <= w + h {
+            (w, at - w)
+        } else if at <= 2 * w + h {
+            (2 * w + h - at, h)
+        } else {
+            (0, 2 * (w + h) - at)
+        }
+    }
+}
+
+pub(crate) fn perimeter_indices(
+    span: usize,
+    leds: usize,
+    reverse: bool,
+) -> impl Iterator<Item = usize> {
+    (0..leds).map(move |led| {
+        let i = if reverse { leds - 1 - led } else { led };
+        i * span / leds
+    })
+}
+
 impl Setup {
     pub fn validate(&self) -> Result<(), String> {
         if self.version != 1
