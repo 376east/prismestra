@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: 37644dcb75fc6f8d491368f8adb4fb6462275eb2
+          ref: 01fc012b7584cdfca48300b4fd5f7a967246f883
       - name: Check the exact standalone recipe from PR 272
         shell: pwsh
         run: |
