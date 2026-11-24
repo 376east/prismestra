@@ -1226,11 +1226,15 @@ fn own_backend(
         request,
         helper,
         || manager.snapshot(),
-        || manager.stop_restarting(),
+        |control| match control {
+            BackendControl::Pause => manager.stop_restarting(),
+            BackendControl::Stop => manager.request_stop(),
+        },
         &ActiveClock,
         allow_heartbeat_catch_up,
     );
-    manager.stop_restarting();
+    // Also cover errors that have no explicit terminal journal event.
+    manager.request_stop();
     helper_note(
         channels.output,
         request,
@@ -1277,10 +1281,19 @@ fn supervise_helper_with_clock(
         request,
         helper,
         snapshot,
-        stop_restarting,
+        |control| {
+            if matches!(control, BackendControl::Pause) {
+                stop_restarting();
+            }
+        },
         clock,
         false,
     )
+}
+
+enum BackendControl {
+    Pause,
+    Stop,
 }
 
 fn supervise_channels(
@@ -1288,7 +1301,7 @@ fn supervise_channels(
     request: &Request,
     helper: &Identity,
     snapshot: impl Fn() -> super::managed_backend::Snapshot,
-    stop_restarting: impl Fn(),
+    backend_control: impl Fn(BackendControl),
     clock: &impl Clock,
     allow_heartbeat_catch_up: bool,
 ) -> Result<(), String> {
@@ -1315,6 +1328,10 @@ fn supervise_channels(
             helper_note(output, request, event, backend_pid, detail)
         });
     };
+    let stop = |tick: &mut Tick<'_, '_>, detail: &str| {
+        backend_control(BackendControl::Stop);
+        note(tick, "helper_stop", None, detail);
+    };
     loop {
         let mut tick = trace.begin(allow_heartbeat_catch_up && !cfg!(test));
         match tick.measure(Stage::Identity, || {
@@ -1322,19 +1339,15 @@ fn supervise_channels(
         }) {
             Ok(parent) if parent == request.parent => {}
             Ok(_) => {
-                note(
+                stop(
                     &mut tick,
-                    "helper_stop",
-                    None,
                     "Managed helper stopping: parent identity changed",
                 );
                 break;
             }
             Err(error) => {
-                note(
+                stop(
                     &mut tick,
-                    "helper_stop",
-                    None,
                     &format!("Managed helper stopping: parent identity query failed: {error}"),
                 );
                 break;
@@ -1343,10 +1356,8 @@ fn supervise_channels(
         if tick.measure(Stage::ReadCancel, || {
             channels.control("owner-cancel.json", request)
         }) {
-            note(
+            stop(
                 &mut tick,
-                "helper_stop",
-                None,
                 "Managed helper stopping: matching owner cancellation",
             );
             break;
@@ -1358,7 +1369,7 @@ fn supervise_channels(
             .as_ref()
             .is_ok_and(|pause| matches_control(pause, request))
         {
-            stop_restarting();
+            backend_control(BackendControl::Pause);
         }
         let current = tick.measure(Stage::ReadOwner, || {
             channels.read::<Request>("owner-request.json")
@@ -1408,10 +1419,8 @@ fn supervise_channels(
                     })
                     .is_ok_and(|parent| parent == request.parent)
                 {
-                    note(
+                    stop(
                         &mut tick,
-                        "helper_stop",
-                        None,
                         "Managed helper stopping: parent identity lost during heartbeat catch-up",
                     );
                     break;
@@ -1458,10 +1467,8 @@ fn supervise_channels(
                 Some(Ok(_)) => "read".into(),
                 Some(Err(error)) => error.diagnostic_code(),
             };
-            note(
+            stop(
                 &mut tick,
-                "helper_stop",
-                None,
                 &format!(
                     "Managed helper stopping: parent heartbeat lease expired late_ms={} poll_ms={} owner={owner} cancel={cancel}",
                     now.saturating_sub(lease_deadline),
@@ -1481,6 +1488,24 @@ fn supervise_channels(
             }
             Err(ControlRead::Invalid(error)) => return Err(error),
             Ok(current) => {
+                let terminal = if !same_owner_request(&current, request)
+                    || !live_request(&current, now)
+                {
+                    Some(format!(
+                        "Managed helper stopping: owner request invalid/changed or expired (age_ms={})",
+                        now.saturating_sub(current.timestamp_ms),
+                    ))
+                } else if cancellation
+                    .is_some_and(|read| read.is_ok_and(|cancel| matches_control(&cancel, request)))
+                {
+                    Some("Managed helper stopping: matching owner cancellation".into())
+                } else {
+                    None
+                };
+                if terminal.is_some() {
+                    // Preserve journal order even when the recovered read proves ownership loss.
+                    backend_control(BackendControl::Stop);
+                }
                 if owner_read_failed {
                     note(
                         &mut tick,
@@ -1490,34 +1515,15 @@ fn supervise_channels(
                     );
                     owner_read_failed = false;
                 }
-                if !same_owner_request(&current, request) || !live_request(&current, now) {
-                    note(
-                        &mut tick,
-                        "helper_stop",
-                        None,
-                        &format!(
-                            "Managed helper stopping: owner request invalid/changed or expired (age_ms={})",
-                            now.saturating_sub(current.timestamp_ms)
-                        ),
-                    );
-                    break;
-                }
-                if cancellation
-                    .is_some_and(|read| read.is_ok_and(|cancel| matches_control(&cancel, request)))
-                {
-                    note(
-                        &mut tick,
-                        "helper_stop",
-                        None,
-                        "Managed helper stopping: matching owner cancellation",
-                    );
+                if let Some(detail) = terminal {
+                    note(&mut tick, "helper_stop", None, &detail);
                     break;
                 }
                 lease_deadline = clock::deadline(current.timestamp_ms, now)?;
                 last_valid_poll_ms = now;
                 catch_up = None;
                 if !current.restarting {
-                    stop_restarting();
+                    backend_control(BackendControl::Pause);
                 }
                 let snapshot = snapshot();
                 let backend_state = (
@@ -2408,7 +2414,7 @@ mod tests {
                     }
                     super::super::managed_backend::Snapshot::default()
                 },
-                || {},
+                |_| {},
                 &clock,
                 true,
             )
@@ -2547,7 +2553,7 @@ mod tests {
                     ..Default::default()
                 }
             },
-            || {},
+            |_| {},
             &clock,
             false,
         )
@@ -2630,7 +2636,7 @@ mod tests {
                 &request,
                 &helper,
                 super::super::managed_backend::Snapshot::default,
-                || {},
+                |_| {},
                 &clock,
                 false,
             )
@@ -2675,6 +2681,87 @@ mod tests {
         write_json(&directory.join("owner-request.json"), &request).unwrap();
         (directory, request, helper)
     }
+    #[cfg(windows)]
+    #[test]
+    fn terminal_stop_is_requested_while_the_lifecycle_journal_is_blocked() {
+        use std::{sync::mpsc, thread};
+
+        struct ExpiringClock(Cell<u64>);
+        impl Clock for ExpiringClock {
+            fn now_ms(&self) -> Result<u64, String> {
+                let now = self.0.get();
+                self.0.set(now + clock::LEASE_MS);
+                Ok(now)
+            }
+
+            fn sleep(&self, _: Duration) {
+                panic!("Expired supervisor must not poll again");
+            }
+        }
+
+        for (trigger, detail) in [
+            ("cancel", "matching owner cancellation"),
+            ("expiry", "parent heartbeat lease expired"),
+            ("identity", "parent identity changed"),
+        ] {
+            let (directory, mut request, helper) = sharing_fixture(trigger);
+            if trigger == "cancel" {
+                write_json(
+                    &directory.join("owner-cancel.json"),
+                    &Cancel {
+                        version: clock::PROTOCOL,
+                        clock_domain: clock::DOMAIN.into(),
+                        nonce: request.nonce.clone(),
+                    },
+                )
+                .unwrap();
+            } else if trigger == "identity" {
+                request.parent.created += 1;
+            }
+
+            let result = thread::scope(|scope| {
+                let writer = super::super::backend_diagnostics::hold_lifecycle_writer_for_test();
+                let (stopping, stop_requested) = mpsc::channel();
+                let worker = scope.spawn(|| {
+                    supervise_channels(
+                        &HelperChannels::private(&directory),
+                        &request,
+                        &helper,
+                        || panic!("Terminal tick must not publish readiness"),
+                        move |control| match control {
+                            BackendControl::Pause => panic!("Unexpected pause"),
+                            BackendControl::Stop => stopping.send(()).unwrap(),
+                        },
+                        &ExpiringClock(Cell::new(request.timestamp_ms)),
+                        false,
+                    )
+                });
+                let requested = stop_requested.recv_timeout(Duration::from_secs(2));
+                let journal_pending = !directory.join("backend-events.json").exists();
+                let still_running = !worker.is_finished();
+                drop(writer);
+                let result = worker.join().unwrap();
+                (requested, journal_pending, still_running, result)
+            });
+            assert!(result.0.is_ok(), "{trigger}: stop waited for the journal");
+            assert!(result.1 && result.2, "{trigger}: journal did not block");
+            result.3.unwrap();
+            let history: serde_json::Value =
+                read_json(&directory.join("backend-events.json")).unwrap();
+            let events = history["events"].as_array().unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["event"], "helper_stop");
+            assert!(events[0]["detail"].as_str().unwrap().contains(detail));
+
+            fs::remove_file(directory.join("backend-events.json")).unwrap();
+            fs::remove_file(directory.join("owner-request.json")).unwrap();
+            if trigger == "cancel" {
+                fs::remove_file(directory.join("owner-cancel.json")).unwrap();
+            }
+            fs::remove_dir(directory).unwrap();
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn status_and_owner_read_sharing_failures_preserve_supervisor_and_recover() {

@@ -18,7 +18,7 @@ impl Temp {
 }
 impl Drop for Temp {
     fn drop(&mut self) {
-        for name in ["control", "endpoint", "scans"] {
+        for name in ["control", "endpoint", "scans", "prismestra-manager.lock"] {
             let _ = fs::remove_file(self.0.join(name));
         }
         let _ = fs::remove_dir(&self.0);
@@ -103,9 +103,49 @@ fn fixture_manager(directory: &Path) -> (Manager, SocketAddr) {
             shared: state,
             worker: Some(worker),
             endpoint,
+            _ownership_lock: None,
         },
         endpoint,
     )
+}
+
+#[test]
+fn installed_stop_keeps_admission_locked_while_direct_releases_it_with_worker() {
+    let directory = Temp::new();
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = Config {
+        version: 1,
+        enabled: true,
+        executable: std::env::current_exe().unwrap(),
+        config_dir: directory.0.clone(),
+        endpoint: occupied.local_addr().unwrap(),
+        expected_executable_sha256: "a".repeat(64),
+        graceful_shutdown: false,
+    };
+
+    let start_installed = || {
+        Manager::start_inner(
+            config.clone(),
+            Some(InstalledLaunch {
+                windows: directory.0.clone(),
+                system: directory.0.clone(),
+                outbox: directory.0.clone(),
+            }),
+        )
+    };
+    let installed = start_installed().unwrap();
+    installed.request_stop();
+    until(|| installed.worker.as_ref().unwrap().is_finished());
+    let refused = start_installed().err().unwrap();
+    assert!(refused.contains("ownership lock"), "{refused}");
+    drop(installed);
+    drop(start_installed().unwrap());
+
+    let direct = Manager::start(config.clone()).unwrap();
+    direct.request_stop();
+    until(|| direct.worker.as_ref().unwrap().is_finished());
+    drop(Manager::start(config).unwrap());
+    drop(direct);
 }
 
 #[test]
