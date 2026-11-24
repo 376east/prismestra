@@ -5,6 +5,8 @@ use super::installed_policy::{HelperAuthority, InstalledPolicy};
 use super::managed_backend::{Config, Manager};
 mod clock;
 mod control_tick;
+#[cfg(test)]
+mod ipc_ready;
 mod retry;
 use clock::{ActiveClock, Clock};
 use control_tick::{Sample, Stage, Tick, Trace};
@@ -111,6 +113,29 @@ pub struct Snapshot {
     pub ready: bool,
     pub backend_pid: Option<u32>,
     timestamp_ms: u64,
+}
+
+struct ReadyGeneration<K> {
+    current: u64,
+    previous: Option<(K, u64)>,
+}
+
+impl<K: Eq> ReadyGeneration<K> {
+    fn new() -> Self {
+        Self {
+            current: 0,
+            previous: None,
+        }
+    }
+
+    fn observe(&mut self, key: K, stamp: u64, now: u64) {
+        if self.previous.as_ref().is_none_or(|(last_key, last_stamp)| {
+            *last_key != key || now.saturating_sub(*last_stamp) > FRESH_MS
+        }) {
+            self.current = self.current.saturating_add(1);
+        }
+        self.previous = Some((key, stamp));
+    }
 }
 
 pub struct Backend {
@@ -490,8 +515,7 @@ fn proxy_loop(
     let mut attempts = VecDeque::new();
     let mut recovery = retry::RecoveryCredit::default();
     let mut next_attempt = Instant::now();
-    let mut generation = 0u64;
-    let mut previous = None;
+    let mut generation = ReadyGeneration::new();
     let mut failure_detail = String::new();
     let mut heartbeat = Instant::now();
     let mut launch: Option<LaunchWorker> = None;
@@ -513,7 +537,7 @@ fn proxy_loop(
                 Heartbeat::Lost => break,
                 Heartbeat::Retry(error) => {
                     *output.lock().unwrap_or_else(|p| p.into_inner()) = Snapshot {
-                        ready_generation: generation,
+                        ready_generation: generation.current,
                         ready: false,
                         detail: error,
                         ..Snapshot::default()
@@ -610,7 +634,7 @@ fn proxy_loop(
                 && (installed || identity(s.helper.pid).ok().as_ref() == Some(&s.helper))
         });
         let mut snapshot = Snapshot {
-            ready_generation: generation,
+            ready_generation: generation.current,
             ready: false,
             detail: "Waiting for authorized backend helper".into(),
             ..Snapshot::default()
@@ -627,17 +651,10 @@ fn proxy_loop(
                     status.helper.pid,
                     status.ready_generation,
                 );
-                // A verified ready after expiry restores output eligibility
-                // even if the helper itself has not restarted.
-                if previous.is_none_or(|(last_key, last_ready_ms)| {
-                    last_key != key || now.saturating_sub(last_ready_ms) > FRESH_MS
-                }) {
-                    generation = generation.saturating_add(1);
-                }
-                previous = Some((key, status.timestamp_ms));
+                generation.observe(key, status.timestamp_ms, now);
             }
             snapshot = Snapshot {
-                ready_generation: generation,
+                ready_generation: generation.current,
                 ready: status.ready,
                 detail: status.detail,
                 backend_pid: status.backend_pid,
