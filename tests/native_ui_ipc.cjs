@@ -474,7 +474,7 @@ console.log('PASS: device cards select by logical identity and the draft dropdow
  assert.equal(commands.length,start+1,'a failure alone does not re-enable the last ticket');
  receive({kind:'status',state:{deviceActivity:{retryScope:'before',retryTickets:{},reasons:{}}}});
  assert(help.hidden);
- assert.equal(vm.runInContext('deviceStatus(state.devices[0])',context),'Недоступно');
+ assert.equal(vm.runInContext('deviceStatus(state.devices[0])',context),'Нет данных о состоянии');
  receive({kind:'status',state:{deviceActivity:{retryScope:'before',retryTickets:{wled:'first'}}}});
  click();
  assert.equal(commands.length,start+1,'a ticket for another output cannot re-enable the selected one');
@@ -629,6 +629,8 @@ console.log('PASS: candidate identity, applied precedence, metadata replacement,
  receiveDeviceState('status',{startupDiscoveryRetry:false});
  assert.equal(summary.hidden,false,'a later scan keeps the first result visible');
  vm.runInContext('view="devices";pendingView=null',context);
+ receiveDeviceState('snapshot',{...empty,startupStatus:'searching',startupEmptySearchResult:null});
+ assert.equal(summary.textContent,'Ищем поддерживаемые устройства…');
  receiveDeviceState('snapshot',{...empty,startupEmptySearchResult:'continuing'});
  assert.equal(summary.hidden,false);
  receiveDeviceState('status',{deviceCandidates:[foundLcd],pending:true});
@@ -1642,10 +1644,41 @@ async function checkOutputStatusCopy() {
  receiveDeviceState('status',{deviceActivity:{labels:{[selected.id]:privateError}}});
  await click(selected.id);
  assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Нет данных о состоянии');
+ assert.equal(commands.length,beforeCopy,'copy issues no host commands');
+ const connecting={deviceActivity:{labels:{[selected.id]:'Подключается',[neighbor.id]:'Кадры отправлены'}}};
+ receiveDeviceState('status',{profileRevision:'profile-A',startupStatus:'applied',...connecting});
+ receiveDeviceState('status',{scene:{...scene,brightness:29}});
+ assert.equal(vm.runInContext('deviceStatus(state.devices[0])',context),'Подключается',
+  'the latest scene does not inherit the automatic startup result');
+ receiveDeviceState('status',{profileRevision:'profile-B'});
+ assert.equal(vm.runInContext('deviceStatus(state.devices[0])',context),'Подключается',
+  'a new profile does not inherit the automatic startup result');
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Подключается');
+ vm.runInContext('activateScene({...state.scene,brightness:37},null,true)',context);
+ const {request,scene:submittedScene}=commands.at(-1);
+ assert.equal(commands.at(-1).op,'apply_scene');
+ const afterApply=commands.length;
+ const applied=request=>vm.runInContext(
+  'window.prismestraReceive('+JSON.stringify({kind:'scene_activation',request,status:'applied',output:'active_rgb'})+')',context);
+ applied(request+1);
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Подключается');
+ applied(request);
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Подключается','the receipt does not describe the previous scene');
+ receiveDeviceState('status',{scene:submittedScene,...connecting});
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Подключается\nСцена принята приложением');
+ assert.equal(vm.runInContext('deviceStatus(state.devices[0])',context),'Подключается · Сцена принята приложением');
+ receiveDeviceState('status',{profileRevision:'profile-C',...connecting});
+ await click(selected.id);
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Подключается');
+ assert.equal(commands.length,afterApply,'copy and status updates issue no host commands');
  denied=true;
  await click(selected.id);
  assert.equal(feedback.textContent,'Не удалось скопировать статус');
- assert.equal(commands.length,beforeCopy,'copy issues no host commands');
+ assert.equal(commands.length,afterApply,'clipboard denial issues no host commands');
  receiveDeviceState('snapshot',{...initial,draftDevices:[selected],
   editor:{page:'devices',deviceId:selected.id,index:0,targets:[selected.label],fields:[],dirty:true}});
  assert.doesNotMatch(mainMarkup,/data-copy-output/,'draft-only output has no runtime status to copy');
@@ -1764,6 +1797,8 @@ function checkEnglishApplicationLanguage() {
   aliceStatusText('Не удалось получить доступ от Яндекса. Повторите вход.'),
   aliceStatusText('Не удалось загрузить список ламп. Повторите попытку.'),
   aliceStatusText('Вход отменён или доступ не разрешён. Начните вход заново.'),
+  aliceStatusText('Результат команды не подтверждён. Автоматического повтора не будет. Последнее наблюдение перед командой: лампа была включена. Текущая доступность неизвестна.'),
+  aliceStatusText('Результат команды не подтверждён. Автоматического повтора не будет. Последнее наблюдение перед командой: лампа была выключена. Текущая доступность неизвестна.'),
  ]`,preview);
  assert.deepEqual(Array.from(englishAliceStages),[
   'Waiting for your browser. Sign in with Yandex ID, then return to Prismestra.',
@@ -1772,6 +1807,8 @@ function checkEnglishApplicationLanguage() {
   'Could not get access from Yandex. Sign in again.',
   'Could not load available lights. Try again.',
   'Sign-in was cancelled or access was denied. Start sign-in again.',
+  'The lamp command was not confirmed. No automatic retry. Last observed before the command: the light was on. Current availability is unknown.',
+  'The lamp command was not confirmed. No automatic retry. Last observed before the command: the light was off. Current availability is unknown.',
  ]);
  const select=find('#ui-language');
  select.id='ui-language';

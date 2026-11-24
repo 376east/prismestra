@@ -134,6 +134,7 @@ const formStages = new Map();
 const libraryPageSize = 24;
 let libraryLimit = libraryPageSize, libraryEffect = '';
 let sceneActivation = null, sceneActivationRequest = 0, editorSceneResult = null;
+let acceptedOutputScene = null;
 let deviceInspection = null;
 let visibleCandidateIds = new Set();
 const outputRetries = new Map();
@@ -386,7 +387,11 @@ function syncControls(keepRetryFocus) {
  if(emptySearch){
   const result=!state?.devices.length&&!state?.deviceCandidates?.length ? state?.startupEmptySearchResult : null;
   const message=result==='continuing'?ui('Поддерживаемые устройства пока не найдены. Автопоиск продолжится в фоне.','No supported devices found yet. Automatic discovery will continue in the background.')
-   :result==='complete'?ui('Автопоиск завершён. Поддерживаемые устройства не найдены.','Automatic discovery finished. No supported devices found.'):'';
+   :result==='complete'?ui('Автопоиск завершён. Поддерживаемые устройства не найдены.','Automatic discovery finished. No supported devices found.')
+   :view==='devices'&&['searching','searchingMore'].includes(state?.startupStatus)
+    ?ui('Ищем поддерживаемые устройства…','Looking for supported devices…')
+    :view==='devices'&&state?.startupStatus==='noNewDevices'
+     ?ui('Новых устройств не найдено.','No new devices found.'):'';
   emptySearch.hidden=!message;
   if(emptySearch.textContent!==message)emptySearch.textContent=message;
  }
@@ -707,14 +712,31 @@ function nativeProperties() {
   ? `<button class="button" data-action="copy-output-status" data-copy-output="${esc(editor.deviceId)}">${ui('Скопировать статус','Copy status')}</button><span id="output-copy-result" class="muted" role="status"></span>` : '';
  return `<section class="native-properties"><div class="native-inline"><label for="native-target">${ui('Объект','Item')}</label><select id="native-target" class="native-target" data-target data-mutation ${disabled()}>${view==='devices'&&editor.index>=editor.targets.length?`<option value="" disabled selected>${ui('Выберите устройство…','Choose a device…')}</option>`:''}${editor.targets.map((name,i)=>`<option value="${i}" ${i===editor.index?'selected':''}>${esc(name)}</option>`).join('')}</select>${repair}${argb}${copy}</div><div class="parameter-panel">${english&&!outputPage(view)?`<details id="native-runtime-diagnostics" ${state.detail?'':'hidden'}><summary>Technical details</summary><p id="native-runtime-detail">${esc(state.detail||'')}</p></details>`:`<p class="parameter-note" id="native-runtime-detail"${view==='devices'?'':' role="status"'}>${esc(outputDetail(state.detail||''))}</p>`}<div class="native-form">${editor.fields.map((field,i)=>`<div class="native-field"><label for="field-${i}">${esc(english&&view==='devices'?deviceFieldLabels.get(field.key)??field.label:field.label)}</label>${field.choices?.length?`<select id="field-${i}" data-field="${esc(field.key)}" data-mutation ${disabled()}>${field.choices.map(choice=>`<option value="${esc(choice.value)}" ${String(choice.value)===String(field.value)?'selected':''}>${esc(english&&view==='devices'?deviceFieldChoices.get(field.key+':'+choice.value)??choice.label:choice.label)}</option>`).join('')}</select>`:`<div class="native-field-file"><input id="field-${i}" data-field="${esc(field.key)}" value="${esc(genericValue(field))}" data-mutation ${disabled()}>${field.file?`<button class="button" data-asset="${esc(field.key)}" data-mutation ${disabled()}>${ui('Выбрать…','Choose…')}</button>`:''}</div>`}${field.hint?`<small>${esc(deviceFieldHint(field))}</small>`:''}</div>`).join('')||`<p class="muted">${ui('Параметров объекта нет.','No settings for this item.')}</p>`}</div><div class="native-property-actions">${action(applyLabel,'apply-document',true,'data-needs-change="document"')}${action(ui('Отменить изменения','Discard changes'),'revert-document')}${action(ui('Повторить','Retry'),'retry-document')}</div></div></section>${state.nativeAux?.page===view?renderNativeForm(state.nativeAux):''}`;
 }
-const deviceStatus=device=>outputStatusLabel(rawDeviceStatus(device));
+function deviceStatus(device) {
+ const raw=rawDeviceStatus(device);
+ const status=outputStatusLabel(raw);
+ const sceneAccepted=deviceSceneAccepted(device,raw);
+ return sceneAccepted?`${status} · ${sceneAccepted}`:status;
+}
+function deviceSceneAccepted(device,raw) {
+ // The scene receipt belongs to the application. OutputActivity is reported
+ // separately and does not tie the worker's frame count to a scene revision.
+ if(!state?.native||!device?.enabled||device.role!=='canvas'||
+    ['Выключено','Выключается','Команда выключения отправлена'].includes(raw))return '';
+ if(!acceptedOutputScene||!same(acceptedOutputScene.scene,state.scene))return '';
+ return ui('Сцена принята приложением','Scene accepted by the app');
+}
+function reconcileAcceptedOutputScene() {
+ if(acceptedOutputScene&&(!state.native||acceptedOutputScene.profile!==state.profileRevision||
+    !same(acceptedOutputScene.scene,state.scene)))acceptedOutputScene=null;
+}
 function rawDeviceStatus(device) {
  if(!device)return '';
  const labels=state.deviceActivity?.labels;
  if(state.deviceActivity?.reasons?.[device.id]==='endpointLeaseBusy')return 'Подключение занято другим выходом Prismestra';
  if(labels?.[device.id]==='Подключается' && outputRetries.get(device.id)?.awaitingActivity)return 'Кадры отправлены';
  if(labels&&Object.hasOwn(labels,device.id))return labels[device.id];
- return !device.enabled?'Выключено':state.native?'Недоступно':'Предпросмотр';
+ return !device.enabled?'Выключено':state.native?'Нет данных о состоянии':'Предпросмотр';
 }
 const roleLabels = new Map([['canvas','RGB'],['lcd','LCD'],['ambient','Screen lighting']]);
 const transportLabels = new Map([
@@ -729,6 +751,7 @@ const outputStatuses=new Map([
  ['Ожидает повтора','Waiting to retry'],['Кадры отправлены','Frames sent'],['Недоступно','Unavailable'],
  ['Предпросмотр','Preview'],['Подключение занято другим выходом Prismestra','Connection in use by another Prismestra output'],
  ['Проверьте доступ Home Assistant','Check Home Assistant access'],
+ ['Нет данных о состоянии','Status unavailable'],
 ]);
 const outputStatusLabel=label=>ui(label,outputStatuses.get(label)??(label?'Status unavailable':''));
 async function copyOutputStatus(id) {
@@ -744,6 +767,8 @@ async function copyOutputStatus(id) {
  if(rawStatus==='Кадры отправлены'&&typeof frames==='string'&&/^[1-9][0-9]{0,19}$/.test(frames)){
   lines.push(ui(`Отправлено кадров: ${frames}`,`Frames sent: ${frames}`));
  }
+ const sceneAccepted=deviceSceneAccepted(device,rawStatus);
+ if(sceneAccepted)lines.push(sceneAccepted);
  feedback.textContent='';
  try{
   await navigator.clipboard.writeText(lines.join('\n'));
@@ -1060,10 +1085,9 @@ function activateScene(scene,entry=null,editor=false) {
  if(entry&&!entry.builtIn)command.id=entry.id;
  if(!send(command))return;
  if(sceneActivation?.id)syncSceneActivation(sceneActivation.id,null);
- sceneActivation={request,scene:submitted,editor,pending:true};
+ sceneActivation={request,scene:submitted,editor,pending:true,profileRevision:state.profileRevision};
  if(entry)Object.assign(sceneActivation,{
   id:entry.id,name:entry.name,displayName:sceneLabel(entry),binding:entry.aliceLamp,
-  profileRevision:state.profileRevision,
   message:ui(`Применяем «${entry.name}»…`,`Applying “${sceneLabel(entry)}”…`)
  });
  if(editor)editorSceneResult=null;
@@ -1095,6 +1119,9 @@ function syncSceneActivation(id,result) {
 }
 function receiveSceneActivation({request,status,output,message,lamp}) {
  if(!sceneActivation?.pending||request!==sceneActivation.request)return;
+ if(status==='applied'&&['active_rgb','no_active_rgb'].includes(output)&&sceneActivation.profileRevision===state.profileRevision){
+  acceptedOutputScene={profile:state.profileRevision,scene:sceneActivation.scene};
+ }
  if(sceneActivation.editor){
   let result;
   if(status==='failed')result=ui(`Не удалось применить сцену.${message?' '+message:''}`,'Could not apply the scene.');
@@ -1131,6 +1158,9 @@ const englishAliceStatus=new Map([
  ['Дождитесь завершения операции Алисы и примените сцену заново.','Wait for the current Alice operation before applying the scene again.'],
  ['Команда лампе отменена.','The lamp command was cancelled.'],
  ['Яндекс не подтвердил команду. Автоматического повтора не будет.','Yandex did not confirm the command. No automatic retry.'],
+ ['Результат команды не подтверждён. Автоматического повтора не будет. Текущая доступность неизвестна.','The lamp command was not confirmed. No automatic retry. Current availability is unknown.'],
+ ['Результат команды не подтверждён. Автоматического повтора не будет. Последнее наблюдение перед командой: лампа была включена. Текущая доступность неизвестна.','The lamp command was not confirmed. No automatic retry. Last observed before the command: the light was on. Current availability is unknown.'],
+ ['Результат команды не подтверждён. Автоматического повтора не будет. Последнее наблюдение перед командой: лампа была выключена. Текущая доступность неизвестна.','The lamp command was not confirmed. No automatic retry. Last observed before the command: the light was off. Current availability is unknown.'],
  ['Проверьте системное время для входа в Алису.','Check the system clock before signing in to Alice.'],
  ['Доступ к Алисе истёк или отозван. Войдите через Яндекс ID заново.','Alice access expired or was revoked. Sign in with Yandex ID again.'],
  ['Яндекс отклонил доступ. Войдите заново и проверьте права на лампу.','Yandex denied access. Sign in again and check access to the lamp.'],
@@ -1257,6 +1287,7 @@ window.prismestraReceive = message => {
     state={...state,editor:{...editor,fields:editor.fields.map(field=>outputField(editor.page,field))}};
    }
    reconcileSceneLamp();
+   reconcileAcceptedOutputScene();
    sceneActivationRequest=Math.max(sceneActivationRequest,state.lastSceneApplyRequest??0);
    if(Array.isArray(state.effects)){
     effects=Object.create(null);
@@ -1313,6 +1344,7 @@ window.prismestraReceive = message => {
    if(message.state.deviceActivity&&retryScope()!==message.state.deviceActivity.retryScope)outputRetries.clear();
    Object.assign(state,message.state);
    reconcileSceneLamp();
+   reconcileAcceptedOutputScene();
    reconcileRetryActivity(message.state.deviceActivity);
    if(state.pending||Object.hasOwn(message.state,'mapConnection'))window.outputMap?.update(state);
    followActiveScene();
