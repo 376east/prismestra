@@ -11,18 +11,15 @@ permissions:
 
 jobs:
   hidapi-only:
-    name: HIDAPI on Windows 2022 (${{ matrix.replica }})
+    name: Production HIDAPI recipe on Windows 2022
     runs-on: windows-2022
     timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        replica: [1, 2]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Check two clean HIDAPI builds
+          ref: 37644dcb75fc6f8d491368f8adb4fb6462275eb2
+      - name: Check the exact standalone recipe from PR 272
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -32,13 +29,10 @@ jobs:
           $devcmd = Join-Path $vs 'Common7/Tools/VsDevCmd.bat'
           $archive = Join-Path $env:RUNNER_TEMP 'hidapi-238df449.zip'
           Invoke-WebRequest -Uri 'https://codeload.github.com/OpenRGBDevelopers/hidapi-hotplug/zip/238df449ecc0a56a70a3c8f4ebf46bb46857af27' -OutFile $archive
-          $settings = & $env:ComSpec /d /c ('call "' + $devcmd + '" -no_logo -arch=x64 -host_arch=x64 && set')
-          if ($LASTEXITCODE -ne 0) { throw 'MSVC or Windows SDK initialization failed' }
-          foreach ($line in $settings) {
-            if ($line -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process') }
-          }
-          $tools = Join-Path $vs 'Common7/IDE/CommonExtensions/Microsoft/CMake'
-          python scripts/components/hidapi-repro/check_hidapi.py --archive $archive `
-            --patch scripts/components/hidapi-repro/hidapi-common-teardown.patch --scratch $env:RUNNER_TEMP `
-            --cmake (Join-Path $tools 'CMake/bin/cmake.exe') --ninja (Join-Path $tools 'Ninja/ninja.exe')
-          exit $LASTEXITCODE
+          $output = Join-Path $env:RUNNER_TEMP 'hidapi-hotplug.dll'
+          python scripts/components/build_hidapi.py --archive $archive `
+            --patch components/openrgb/hidapi-common-teardown.patch `
+            --dependency-lock components/openrgb/dependency-lock.json `
+            --work (Join-Path $env:RUNNER_TEMP 'hidapi-check') --vsdevcmd $devcmd --output $output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-FileHash -LiteralPath $output -Algorithm SHA256
