@@ -1573,7 +1573,7 @@ fn supervise_channels(
     snapshot: impl Fn() -> super::managed_backend::Snapshot,
     backend_control: impl Fn(BackendControl),
     clock: &impl Clock,
-    allow_heartbeat_catch_up: bool,
+    allow_post_deadline_catch_up: bool,
 ) -> Result<(), String> {
     let output = channels.output;
     let now = clock.now_ms()?;
@@ -1603,7 +1603,8 @@ fn supervise_channels(
         note(tick, "helper_stop", None, detail);
     };
     loop {
-        let mut tick = trace.begin(allow_heartbeat_catch_up && !cfg!(test));
+        // Keep the installed slow-tick Event Log source out of Portable.
+        let mut tick = trace.begin(allow_post_deadline_catch_up && !cfg!(test));
         match tick.measure(Stage::Identity, || {
             channels.parent_identity(request.parent.pid)
         }) {
@@ -1652,7 +1653,7 @@ fn supervise_channels(
         let now = clock.now_ms()?;
         let mut renewed_during_catch_up = false;
         if now >= lease_deadline
-            && allow_heartbeat_catch_up
+            && (cfg!(windows) || allow_post_deadline_catch_up)
             && let Ok(current) = &current
             && same_owner_request(current, request)
             && current.restarting
@@ -1671,7 +1672,8 @@ fn supervise_channels(
                 let tick = current.timestamp_ms;
                 let until = if tick < lease_deadline && !live_request(current, now) {
                     tick.checked_add(DELAYED_HEARTBEAT_MAX_AGE_MS)
-                } else if tick >= lease_deadline
+                } else if allow_post_deadline_catch_up
+                    && tick >= lease_deadline
                     && !covers_lease_deadline(current, lease_deadline, now)
                 {
                     clock::deadline(tick, now).ok()
@@ -2530,7 +2532,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn installed_owner_heartbeat_recovers_after_joint_writer_and_poll_delay() {
+    fn file_owner_heartbeat_recovers_after_joint_writer_and_poll_delay() {
         struct WakeClock<'a> {
             active: Cell<u64>,
             on_sleep: &'a dyn Fn(u64) -> u64,
@@ -2560,7 +2562,7 @@ mod tests {
         }
         use OnLatePoll::*;
         const POLL_MS: u64 = 200;
-        for (late_ms, poll_ms, owner_age_ms, action) in [
+        let legacy = [
             (3_623, 7_965, 7_256, Renew),
             (4_733, 9_339, 9_114, Renew),
             (8_641, 10_420, 9_819, Renew),
@@ -2581,8 +2583,26 @@ mod tests {
             (8_641, 10_420, 9_819, ReplaceNonce),
             (8_641, 10_420, 9_819, NoUnseenTick),
             (8_641, 10_420, 9_819, PublishedAfterDeadline),
-        ] {
-            let (directory, mut request, helper) = sharing_fixture("installed-late-heartbeat");
+        ];
+        // The three offsets in the Portable .24 helper_stop journal.
+        let portable = [
+            Renew,
+            FrozenWriter,
+            CancelOwner,
+            UnreadableCancel,
+            Pause,
+            ReplaceIdentity,
+            ReplaceNonce,
+            NoUnseenTick,
+            PublishedAfterDeadline,
+        ];
+        let cases = legacy.into_iter().map(|case| (true, case)).chain(
+            portable
+                .into_iter()
+                .map(|action| (false, (3_840, 8_366, 6_416, action))),
+        );
+        for (allow_post_deadline_catch_up, (late_ms, poll_ms, owner_age_ms, action)) in cases {
+            let (directory, mut request, helper) = sharing_fixture("file-late-heartbeat");
             let last_poll = 10_000;
             let old_deadline = last_poll + poll_ms - late_ms;
             request.timestamp_ms = old_deadline - clock::LEASE_MS;
@@ -2612,6 +2632,8 @@ mod tests {
                 ));
             };
             let publications = Cell::new(0);
+            let paused = Cell::new(false);
+            let stopped = Cell::new(false);
             let clock = WakeClock {
                 active: Cell::new(last_poll),
                 on_sleep: &|next| {
@@ -2624,6 +2646,14 @@ mod tests {
                         return late_poll;
                     }
                     if next == late_poll + POLL_MS {
+                        let status: Status =
+                            read_json(&directory.join("helper-status.json")).unwrap();
+                        assert!(status.ready && valid_status(&status, &request, last_poll));
+                        assert!(!valid_status(&status, &request, late_poll));
+                        assert_eq!(
+                            status.timestamp_ms, last_poll,
+                            "catch-up refreshed stale Ready"
+                        );
                         match action {
                             Renew => publish(next),
                             CancelOwner => write_control(&cancel_path, &request.nonce),
@@ -2658,14 +2688,24 @@ mod tests {
                         assert_eq!(action, Renew, "unexpected readiness from a stale record");
                         write_control(&cancel_path, &request.nonce);
                     }
-                    super::super::managed_backend::Snapshot::default()
+                    super::super::managed_backend::Snapshot {
+                        ready: true,
+                        ready_generation: 1,
+                        backend_pid: Some(helper.pid),
+                        ..Default::default()
+                    }
                 },
-                |_| {},
+                |control| match control {
+                    BackendControl::Pause => paused.set(true),
+                    BackendControl::Stop => stopped.set(true),
+                },
                 &clock,
-                true,
+                allow_post_deadline_catch_up,
             )
             .unwrap();
             fs::remove_dir_all(&directory).unwrap();
+            assert!(stopped.get(), "{action:?}");
+            assert_eq!(paused.get(), action == Pause, "{action:?}");
             let (expected_publications, ended) = match action {
                 Renew => (2, late_poll + 2 * POLL_MS),
                 FrozenWriter => {
