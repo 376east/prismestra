@@ -11,8 +11,13 @@ permissions:
 
 jobs:
   hidapi-only:
-    runs-on: windows-2025-vs2026
+    name: HIDAPI on Windows 2022 (${{ matrix.replica }})
+    runs-on: windows-2022
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        replica: [1, 2]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -22,23 +27,18 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-          $vs = & $vswhere -version '[18.0,19.0)' -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if ($LASTEXITCODE -ne 0 -or !$vs) { throw 'Visual Studio 2026 x64 tools not found' }
+          $vs = & $vswhere -version '[17.0,18.0)' -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or !$vs) { throw 'Visual Studio 2022 x64 tools not found' }
           $devcmd = Join-Path $vs 'Common7/Tools/VsDevCmd.bat'
           $archive = Join-Path $env:RUNNER_TEMP 'hidapi-238df449.zip'
           Invoke-WebRequest -Uri 'https://codeload.github.com/OpenRGBDevelopers/hidapi-hotplug/zip/238df449ecc0a56a70a3c8f4ebf46bb46857af27' -OutFile $archive
-          $exact = Test-Path (Join-Path $vs 'VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe')
-          $version = if ($exact) { ' -vcvars_ver=14.51.36231' } else { '' }
-          $settings = & $env:ComSpec /d /c ('call "' + $devcmd + '" -no_logo -arch=x64 -host_arch=x64 -winsdk=10.0.26100.0' + $version + ' && set')
+          $settings = & $env:ComSpec /d /c ('call "' + $devcmd + '" -no_logo -arch=x64 -host_arch=x64 && set')
           if ($LASTEXITCODE -ne 0) { throw 'MSVC or Windows SDK initialization failed' }
           foreach ($line in $settings) {
             if ($line -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process') }
           }
           $tools = Join-Path $vs 'Common7/IDE/CommonExtensions/Microsoft/CMake'
-          $strict = @()
-          if ($exact) { $strict += '--require-local-sha' }
-          Write-Host "Local toolset directory found: $exact. Candidate SHA must be checked in the receipt."
           python scripts/components/hidapi-repro/check_hidapi.py --archive $archive `
             --patch scripts/components/hidapi-repro/hidapi-common-teardown.patch --scratch $env:RUNNER_TEMP `
-            --cmake (Join-Path $tools 'CMake/bin/cmake.exe') --ninja (Join-Path $tools 'Ninja/ninja.exe') @strict
+            --cmake (Join-Path $tools 'CMake/bin/cmake.exe') --ninja (Join-Path $tools 'Ninja/ninja.exe')
           exit $LASTEXITCODE
