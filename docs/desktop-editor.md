@@ -12,7 +12,9 @@ Device topology, output groups, LCD media, screen capture and temperature routes
 
 In **Screen**, choose **Scene edges** as the strip source to follow the active RGB scene. LEDs sample the perimeter clockwise from the top left. The existing reverse setting flips the order. The profile keeps the selected source and retains the monitor settings for switching back. A strip using scene edges does not need a local monitor binding. [Routing and geometry](../src/app/ambient.rs)
 
-Closing the editor first requests the latest RGB draft and waits for its atomic save. An error or timeout cancels closing instead of discarding changes. Unsaved device/connection/source forms still require Apply or Revert. The resident session's Stop and Exit paths remain distinct. Source: [close handshake](../src/ui/windows/modern.rs), [resident session](../src/ui/windows/resident.rs).
+Closing the editor first requests the latest RGB draft and waits for its atomic save. An error or timeout cancels closing instead of discarding changes. Unsaved device, connection and source forms still require Apply or Revert. The active scene keeps running in the tray. [Close handshake](../src/ui/windows/modern.rs)
+
+**Turn lights off** in the editor requests darkness for the active lighting groups while the app stays open. **Stop outputs** in the tray releases the devices and keeps Prismestra in the tray. **Exit** releases the devices and closes Prismestra. Some controllers hold their last color after they are released. [Lighting state](../src/app/runtime.rs) · [Tray actions](../src/ui/windows/resident.rs)
 
 ## ARGB channels
 
