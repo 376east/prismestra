@@ -305,6 +305,12 @@ function showError(message,fromCommand=false,{detail='',retrySearch=false,allowR
  box.innerHTML=`<button class="icon-button" data-action="dismiss-error" aria-label="${ui('Закрыть сообщение','Dismiss message')}">×</button><p>${esc(error)}</p>${stagedDirty()?`<button class="button" data-action="discard-fields">${ui('Отменить незавершённый ввод','Discard unfinished input')}</button>`:''}${recovery}${details}`;
 }
 function showRuntimeError(message,fromCommand=false) {
+ const bindingError=message==='Binding does not match supported device driver'
+  ? ui('Локальная привязка не соответствует типу устройства. Проверьте устройство и его привязку.','The local binding does not match the device type. Check the device and its binding.')
+  : message==='Этот протокол пока не поддерживается.'
+   ? ui('Этот протокол пока не поддерживается. Выберите поддерживаемый тип устройства.','This protocol is not supported. Choose a supported device type.')
+   : '';
+ if(bindingError){showError(bindingError,fromCommand,{allowRetry:false});return;}
  if(english)showError((outputPage(view)&&outputErrors.get(message))||'Prismestra could not complete the operation.',fromCommand,{detail:message});
  else showError(message,fromCommand);
 }
@@ -716,7 +722,7 @@ function nativeProperties() {
 }
 function deviceStatus(device) {
  const raw=rawDeviceStatus(device);
- const status=outputStatusLabel(raw);
+ const status=outputStatusLabel(raw,device);
  const sceneAccepted=deviceSceneAccepted(device,raw);
  return sceneAccepted?`${status} · ${sceneAccepted}`:status;
 }
@@ -755,7 +761,9 @@ const outputStatuses=new Map([
  ['Проверьте доступ Home Assistant','Check Home Assistant access'],
  ['Нет данных о состоянии','Status unavailable'],
 ]);
-const outputStatusLabel=label=>ui(label,outputStatuses.get(label)??(label?'Status unavailable':''));
+const outputStatusLabel=(label,device)=>label==='Кадры отправлены'&&device?.driver?.type==='home_assistant'
+ ? ui('Команды отправлены','Commands sent')
+ : ui(label,outputStatuses.get(label)??(label?'Status unavailable':''));
 async function copyOutputStatus(id) {
  if(view!=='devices'||closing||pendingView||commandPending||state?.editor?.page!=='devices'||state.editor.deviceId!==id)return;
  const device=state.devices.find(item=>item.id===id);
@@ -763,11 +771,12 @@ async function copyOutputStatus(id) {
  if(!device||!feedback)return;
  const transport=transportLabels.get(device.driver?.type)??ui('Неизвестен','Unknown');
  const rawStatus=rawDeviceStatus(device);
- const safeStatus=outputStatuses.has(rawStatus)?outputStatusLabel(rawStatus):ui('Нет данных о состоянии','Status unavailable');
+ const safeStatus=outputStatuses.has(rawStatus)?outputStatusLabel(rawStatus,device):ui('Нет данных о состоянии','Status unavailable');
  const frames=state.deviceActivity?.framesSent?.[id];
  const lines=[ui(`Транспорт: ${transport}`,`Transport: ${transport}`),ui(`Состояние: ${safeStatus}`,`Status: ${safeStatus}`)];
  if(rawStatus==='Кадры отправлены'&&typeof frames==='string'&&/^[1-9][0-9]{0,19}$/.test(frames)){
-  lines.push(ui(`Отправлено кадров: ${frames}`,`Frames sent: ${frames}`));
+  lines.push(device.driver?.type==='home_assistant'?ui(`Отправлено команд: ${frames}`,`Commands sent: ${frames}`)
+   :ui(`Отправлено кадров: ${frames}`,`Frames sent: ${frames}`));
  }
  const sceneAccepted=deviceSceneAccepted(device,rawStatus);
  if(sceneAccepted)lines.push(sceneAccepted);
@@ -831,10 +840,18 @@ function renderDevices(candidates) {
  const devices=state.devices.map(d=>{
   const statusId=`device-status-${encodeURIComponent(d.id)}`;
   const label=labelCounts.get(d.label)>1?`${d.label} (${d.id})`:d.label;
+  const type=d.driver?.type;
+  const pixelOutput=d.role!=='lcd'&&type!=='home_assistant'&&type!=='unsupported';
+  const capability=type==='unsupported'?''
+   :type==='home_assistant'?ui('Команды светильнику','Light commands')
+   :d.role==='lcd'?ui('Медиа LCD','LCD media')
+   :d.role==='canvas'?ui('Поток RGB','RGB stream')
+   :d.role==='ambient'?ui('Экранная подсветка','Screen lighting'):d.role;
+  const description=[transportLabels.get(type)??type,capability].filter(Boolean).join(' · ');
   return `<article class="device">
   <div class="device-symbol">${icon('devices')}</div>
-  <div class="device-info"><h2>${esc(label)}</h2><p>${esc(ui(d.driver?.type,transportLabels.get(d.driver?.type)??d.driver?.type))} · ${esc(ui(d.role,roleLabels.get(d.role)??d.role))}</p></div>
-  <div class="device-meta"><span>${esc(d.leds)} LED · ${esc(d.rate_hz)} ${ui('Гц','Hz')}</span><small id="${statusId}" data-output-status="${esc(d.id)}">${esc(deviceStatus(d))}</small></div>
+  <div class="device-info"><h2>${esc(label)}</h2><p>${esc(description)}</p></div>
+  <div class="device-meta">${pixelOutput?`<span>${esc(d.leds)} LED · ${esc(d.rate_hz)} ${ui('Гц','Hz')}</span>`:''}<small id="${statusId}" data-output-status="${esc(d.id)}">${esc(deviceStatus(d))}</small></div>
   <button class="icon-button" data-device-id="${esc(d.id)}" data-mutation aria-disabled="${busy()}" aria-label="${ui('Свойства','Properties')}: ${esc(label)}" aria-describedby="${statusId}">${icon('edit')}</button>
   <div class="device-retry" hidden><span id="${statusId}-retry-help" data-retry-help hidden></span><button class="button" id="${statusId}-retry" data-output-retry="${esc(d.id)}" aria-describedby="${statusId}-retry-help ${statusId}-retry-status" aria-disabled="true" hidden>${ui('Повторить подключение','Retry connection')}</button><span id="${statusId}-retry-status" data-retry-status role="status"></span></div>
  </article>`;
@@ -1161,7 +1178,6 @@ function receiveSceneActivation({request,status,output,message,lamp}) {
  syncControls();
 }
 const englishAliceStatus=new Map([
- ['Применяем яркость лампы сцены…','Applying the scene lamp brightness…'],
  ['Яндекс подтвердил команду лампе.','Yandex confirmed the lamp command.'],
  ['Для лампы сцены войдите через Яндекс ID.','Sign in with Yandex ID to use the scene lamp.'],
  ['Дождитесь завершения операции Алисы и примените сцену заново.','Wait for the current Alice operation before applying the scene again.'],
@@ -1209,6 +1225,7 @@ const englishAliceStatus=new Map([
  ['Яндекс подтвердил выключение лампы.','Yandex confirmed that the light is off.'],
 ]);
 function aliceStatusText(message) {
+ if(message==='Применяем яркость лампы сцены…')return ui('Отправляем разовую команду лампе сцены…','Sending one command to the scene light…');
  if(!english||!message)return message;
  return englishAliceStatus.get(message)??(message.endsWith('Автоматического повтора не будет.')
   ?'The lamp command was not confirmed. No automatic retry.'
