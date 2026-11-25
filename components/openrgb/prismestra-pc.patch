@@ -579,7 +579,7 @@ index 4a5290a8ef3bd45b701d52e6436c854b6c308552..4643da074291c22650c21d5a43226513
  }
  
 diff --git a/DetectionManager.h b/DetectionManager.h
-index 3e334463b96a3eca23501c848f18c2a242d00180..df71275633ca2e5995c7983475a2c4c0567c490e 100644
+index 3e334463b96a3eca23501c848f18c2a242d00180..7932a82cdbb447a7a6a235771150dfcc092af826 100644
 --- a/DetectionManager.h
 +++ b/DetectionManager.h
 @@ -17,6 +17,7 @@
@@ -598,6 +598,17 @@ index 3e334463b96a3eca23501c848f18c2a242d00180..df71275633ca2e5995c7983475a2c4c0
  
  using json = nlohmann::json;
  
+@@ -303,8 +305,8 @@ private:
+     | HID Hotplug handles                                   |
+     \*-----------------------------------------------------*/
+ #if(HID_HOTPLUG_ENABLED)
+-    hid_hotplug_callback_handle                 hotplug_callback_handle;
+-    hid_hotplug_callback_handle                 unplug_callback_handle;
++    hid_hotplug_callback_handle                 hotplug_callback_handle = 0;
++    hid_hotplug_callback_handle                 unplug_callback_handle = 0;
+ #ifdef __linux__
+ #ifdef __GLIBC__
+     hid_hotplug_callback_handle                 libusb_hotplug_callback_handle;
 @@ -341,12 +343,15 @@ private:
      | Background Thread Variables                           |
      \*-----------------------------------------------------*/
