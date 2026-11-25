@@ -15,7 +15,7 @@ use std::{borrow::Cow, collections::HashMap};
 const SCENE_EDGES: &str = "@scene_edges";
 const LEGACY_HOME_ASSISTANT_ROUTE: &str = "Сохранён старый маршрут Home Assistant. Чтобы вернуть свет в сцены, откройте «Устройства», выберите «Общий холст» и снова включите свет.";
 
-fn can_switch_to_ambient(driver: &Driver) -> bool {
+fn supports_ambient_assignment(driver: &Driver) -> bool {
     matches!(
         driver,
         Driver::SkydimoSerial { .. } | Driver::WledDdp | Driver::OpenRgb
@@ -297,7 +297,7 @@ impl Editor {
             preset,
         ];
         let legacy_home_assistant = d.driver == Driver::HomeAssistant && d.role == Role::Ambient;
-        if can_switch_to_ambient(&d.driver) || legacy_home_assistant {
+        if supports_ambient_assignment(&d.driver) || legacy_home_assistant {
             let mut role = field(
                 "role",
                 "Назначение",
@@ -421,7 +421,7 @@ impl Editor {
             .setup
             .devices
             .iter()
-            .filter(|d| d.role == Role::Ambient && d.driver != Driver::HomeAssistant)
+            .filter(|d| d.role == Role::Ambient && supports_ambient_assignment(&d.driver))
             .filter(|d| {
                 !self
                     .document
@@ -448,6 +448,9 @@ impl Editor {
             .ok_or("Выберите устройство экранной подсветки")?;
         if d.driver == Driver::HomeAssistant {
             return Err("Для Home Assistant доступны сцены через «Общий холст».".into());
+        }
+        if !supports_ambient_assignment(&d.driver) {
+            return Err("Выберите устройство экранной подсветки".into());
         }
         if self
             .document
@@ -632,7 +635,7 @@ impl Editor {
             "role" => {
                 let legacy_home_assistant =
                     d.driver == Driver::HomeAssistant && d.role == Role::Ambient;
-                if !can_switch_to_ambient(&d.driver) && !legacy_home_assistant {
+                if !supports_ambient_assignment(&d.driver) && !legacy_home_assistant {
                     return Err("Для этого семейства нельзя сменить назначение".into());
                 }
                 let role = match value {
@@ -1620,6 +1623,7 @@ mod tests {
             page: Page::Ambient,
             index: 0,
         };
+        e.document.lighting.setup.devices[0].driver = Driver::WledDdp;
         e.document.ambient.routes.clear();
         while e.document.ambient.sources.len() < 16 {
             let mut source = e.document.ambient.sources[0].clone();
@@ -1631,6 +1635,64 @@ mod tests {
         assert_eq!(e.document, before);
         e.add_ambient_route("screen", Some("main")).unwrap();
         assert_eq!(e.document.ambient.sources.len(), 16);
+    }
+
+    #[test]
+    fn unsupported_ambient_route_can_be_opened_and_removed_but_not_added() {
+        let saved = document();
+        let mut editor = Editor {
+            document: Document::decode(&saved.encode().unwrap()).unwrap(),
+            page: Page::Ambient,
+            index: 0,
+        };
+        assert_eq!(editor.document, saved);
+        assert_eq!(
+            Editor::targets(&editor.document, Page::Ambient),
+            ["Экранная лента"]
+        );
+        assert!(!editor.fields().is_empty());
+        editor.remove_ambient_route().unwrap();
+        assert_eq!(editor.document.ambient.sources, saved.ambient.sources);
+        assert_eq!(
+            editor.document.lighting.setup.canvas,
+            saved.lighting.setup.canvas
+        );
+        assert_eq!(
+            editor.document.lighting.setup.devices,
+            saved.lighting.setup.devices
+        );
+
+        assert!(editor.ambient_candidates().is_empty());
+        let before = editor.document.clone();
+        assert!(editor.add_ambient_route("screen", Some("main")).is_err());
+        assert_eq!(editor.document, before);
+    }
+
+    #[test]
+    fn supported_ambient_outputs_can_be_configured_before_connection() {
+        for driver in [
+            Driver::SkydimoSerial {
+                model: "SK0410".into(),
+            },
+            Driver::OpenRgb,
+            Driver::WledDdp,
+        ] {
+            let mut editor = Editor {
+                document: document(),
+                page: Page::Ambient,
+                index: 0,
+            };
+            editor.document.ambient.routes.clear();
+            let device = &mut editor.document.lighting.setup.devices[0];
+            device.driver = driver;
+            assert!(!device.enabled);
+            assert_eq!(editor.ambient_candidates()[0].0, "screen");
+            editor.add_ambient_route("screen", Some("main")).unwrap();
+            let route = &editor.document.ambient.routes[0];
+            assert_eq!(route.device, "screen");
+            assert_eq!(route.source, "main");
+            assert!(!route.enabled);
+        }
     }
 
     #[test]
