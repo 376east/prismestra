@@ -526,6 +526,7 @@ struct App {
     first_run: first_run::Startup,
     connections: connections::Editor,
     native_lighting: Option<crate::app::lighting_outputs::Local>,
+    stopped_lighting: Option<crate::app::lighting_outputs::Local>,
     sources: sources::Editor,
     runtime: Client,
     asset_root: PathBuf,
@@ -566,6 +567,29 @@ struct PendingOpen {
 }
 
 impl App {
+    fn set_lighting_group(&mut self, target: Target, on: bool) -> Result<(), String> {
+        if on && let Some(local) = &self.stopped_lighting {
+            if self.runtime.pending_configuration() || self.connection_switching() {
+                return Err("Дождитесь применения подключений.".into());
+            }
+            let document = self.runtime.document().clone();
+            let journal = journal_path(&self.state_dir, self.path.as_deref(), &document);
+            let mut candidate = Runtime::new(document, Some(journal))?;
+            candidate.enable_autonomous_rgb()?;
+            // Until the swap, failures drop only the candidate and its owned outputs/helper.
+            local.validate(candidate.document())?;
+            candidate.configure_managed_backend(&self.state_dir, local)?;
+            local.attach_missing(&mut candidate, &self.asset_root)?;
+            let mut candidate = Client::new(candidate, self.runtime.background())?;
+            candidate.set_group(target, on)?;
+            self.runtime = candidate;
+            self.native_lighting = self.stopped_lighting.take();
+            self.startup_output_labels();
+            return Ok(());
+        }
+        self.runtime.set_group(target, on)
+    }
+
     fn attach_outputs(&mut self) -> Result<(), String> {
         if let Some(local) = &self.native_lighting {
             self.runtime
@@ -2076,7 +2100,7 @@ impl App {
                 } else {
                     Target::Door
                 };
-                let result = self.runtime.set_group(target, self.checked(id));
+                let result = self.set_lighting_group(target, self.checked(id));
                 self.set_check(id, self.runtime.group_on(target));
                 result?;
                 self.status = if self.native_lighting.is_some() {
@@ -2156,6 +2180,7 @@ impl App {
             } = self.pending_open.take().unwrap();
             self.sources.release_lighting();
             self.runtime = Client::new(runtime, self.runtime.background())?;
+            self.stopped_lighting = None;
             self.context_revision = self.context_revision.wrapping_add(1);
             self.profile_revision = self.profile_revision.wrapping_add(1);
             if portable {
@@ -3432,6 +3457,7 @@ fn run_inner_with_language(
         )
         .activation(o.snapshot.is_some(), o.selftest),
         native_lighting,
+        stopped_lighting: None,
         sources: sources::Editor::load(state_dir.join("sensor-sources.json")),
         runtime: Client::new(runtime, o.snapshot.is_none() || o.selftest)?,
         asset_root,
@@ -3539,6 +3565,10 @@ fn run_inner_with_language(
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         if o.selftest {
+            #[cfg(test)]
+            if resident::session_fixture_enabled() {
+                return resident::exercise(&state);
+            }
             #[cfg(test)]
             if webview_recovery_stand::enabled() {
                 if webview_recovery_stand::lcd_retry_enabled() {

@@ -14,7 +14,7 @@ In **Screen**, choose **Scene edges** as the strip source to follow the active R
 
 Closing the editor first requests the latest RGB draft and waits for its atomic save. An error or timeout cancels closing instead of discarding changes. Unsaved device, connection and source forms still require Apply or Revert. The active scene keeps running in the tray. [Close handshake](../src/ui/windows/modern.rs)
 
-**Turn lights off** in the editor requests darkness for the active lighting groups while the app stays open. **Stop outputs** in the tray releases the devices and keeps Prismestra in the tray. **Exit** releases the devices and closes Prismestra. Some controllers hold their last color after they are released. [Lighting state](../src/app/runtime.rs) · [Tray actions](../src/ui/windows/resident.rs)
+**Turn lights off** in the editor requests darkness for the active lighting groups while the app stays open. **Stop outputs** in the tray releases the devices and keeps Prismestra in the tray. Use **Turn lights on** to resume the last applied connections after stopping. **Exit** releases the devices and closes Prismestra. Some controllers hold their last color after they are released. [Lighting state](../src/app/runtime.rs) · [Tray actions](../src/ui/windows/resident.rs)
 
 ## ARGB channels
 

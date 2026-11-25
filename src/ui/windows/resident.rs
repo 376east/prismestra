@@ -1024,7 +1024,9 @@ fn finish_stop(app: &mut App) -> Result<(), String> {
     app.runtime = Client::new(runtime, true)?;
     app.pending_open = None;
     app.was_pending = false;
-    app.native_lighting = None;
+    if let Some(local) = app.native_lighting.take() {
+        app.stopped_lighting = Some(local);
+    }
     app.connections.stopped();
     app.shutdown = Default::default();
     app.groups = [false, false];
@@ -1032,7 +1034,12 @@ fn finish_stop(app: &mut App) -> Result<(), String> {
     app.ambient_image = vec![];
     app.lcd_frame = (0, 0);
     app.ambient_frame = (0, 0);
-    app.status="Работа остановлена. Устройства освобождены; для запуска выберите подключения и нажмите «Применить».".into();
+    app.status = if app.stopped_lighting.is_some() {
+        "Работа остановлена. Устройства освобождены. Включите свет, чтобы возобновить работу."
+            .into()
+    } else {
+        "Работа остановлена. Устройства освобождены; для запуска выберите подключения и нажмите «Применить».".into()
+    };
     app.set_check(PC_ON, false);
     app.set_check(DOOR_ON, false);
     // Undo the shutdown-wide disable, then reapply each control's normal policy.
@@ -1971,6 +1978,26 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     }
     let stopped_editor = state.editor_window.get();
     let stop_epoch_before = state.final_stop_render.get().epoch;
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    receiver.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let endpoint = receiver.local_addr().map_err(|e| e.to_string())?;
+    {
+        let mut slot = state.app.borrow_mut();
+        let app = slot.as_mut().unwrap();
+        app.native_lighting = Some(crate::app::lighting_outputs::Local {
+            version: 1,
+            devices: [(
+                "resident-rgb".into(),
+                crate::devices::Binding::WledDdp {
+                    endpoint,
+                    controller: None,
+                },
+            )]
+            .into(),
+            monitors: Default::default(),
+            door_brightness: 100,
+        });
+    }
     request(state, Action::Stop, false)?;
     {
         let slot = state.app.borrow();
@@ -2069,10 +2096,60 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
     if crate::runtime::output::Lease::acquire(vec!["resident-ui-fixture:rgb".into()]).is_err() {
         return Err("Tray Stop did not release the drained RGB endpoint lease".into());
     }
+    {
+        let mut slot = state.app.borrow_mut();
+        let app = slot.as_mut().unwrap();
+        app.set_lighting_group(Target::Pc, false)?;
+        if !app.runtime.output_plan().rgb.is_empty() || app.native_lighting.is_some() {
+            return Err("Turning a group off after Stop reattached the output".into());
+        }
+        // The old Groups handler wrote intent, but left the drained output plan empty.
+        app.runtime.set_group(Target::Pc, true)?;
+        app.runtime.set_group(Target::Door, true)?;
+        if !app.runtime.group_on(Target::Pc)
+            || !app.runtime.group_on(Target::Door)
+            || !app.runtime.output_plan().rgb.is_empty()
+            || !matches!(receiver.recv(&mut [0; 64]), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        {
+            return Err("Prior Groups handler did not reproduce intent without output".into());
+        }
+        app.runtime
+            .with(|runtime, _| runtime.mute_for_tray_stop())?;
+        let local = app
+            .stopped_lighting
+            .as_mut()
+            .ok_or("Stop lost the binding")?;
+        local.door_brightness = 0;
+        if app.set_lighting_group(Target::Pc, true).is_ok()
+            || app.stopped_lighting.is_none()
+            || !app.runtime.output_plan().rgb.is_empty()
+            || app.runtime.group_on(Target::Pc)
+        {
+            return Err("Failed resume left a live output or lost the retry binding".into());
+        }
+        app.stopped_lighting.as_mut().unwrap().door_brightness = 100;
+        app.set_lighting_group(Target::Pc, true)?;
+        app.set_lighting_group(Target::Door, true)?;
+        if app.stopped_lighting.is_some()
+            || !app.runtime.group_on(Target::Pc)
+            || !app.runtime.group_on(Target::Door)
+        {
+            return Err(
+                "Turning lights on after Stop did not restore the bindings and groups".into(),
+            );
+        }
+    }
+    settle(state, "stop-then-turn-lights-on", |_| {
+        receiver.recv(&mut [0; 64]).is_ok()
+    })?;
+    if state.editor_window.get() != stopped_editor || state.shell_window.get() != shell.hwnd {
+        return Err("Turning lights on replaced a resident window".into());
+    }
     open_editor(state)?;
     {
         let mut slot = state.app.borrow_mut();
         let a = slot.as_mut().unwrap();
+        a.native_lighting = None;
         let doc = a.runtime.document().clone();
         a.runtime
             .request_outputs_for(doc, plan.clone())
@@ -2191,6 +2268,12 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
 #[cfg(test)]
 thread_local! {
     static TRAY_SCENE_FIXTURE: Cell<bool> = const { Cell::new(false) };
+    static SESSION_FIXTURE: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn session_fixture_enabled() -> bool {
+    SESSION_FIXTURE.get()
 }
 
 #[cfg(test)]
@@ -2316,6 +2399,29 @@ fn exercise_tray_scene_selection(state: &State) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires an isolated native Windows editor window"]
+    fn isolated_resident_stop_then_turn_lights_on() {
+        let root = std::env::temp_dir().join(format!(
+            "prismestra-stop-resume-{}-{}",
+            std::process::id(),
+            crate::clock::monotonic_us()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        SESSION_FIXTURE.set(true);
+        let result = super::super::run_inner(
+            vec![
+                "--selftest".into(),
+                "--state-dir".into(),
+                root.clone().into_os_string(),
+            ],
+            None,
+        );
+        SESSION_FIXTURE.set(false);
+        std::fs::remove_dir_all(&root).unwrap();
+        result.unwrap();
+    }
 
     #[test]
     #[ignore = "requires an isolated native Windows editor window"]

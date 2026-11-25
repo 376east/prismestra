@@ -375,7 +375,7 @@ impl App {
         )
     }
 
-    fn startup_output_labels(&mut self) {
+    pub(super) fn startup_output_labels(&mut self) {
         self.set_text(PC_ON, "Подсветка ПК");
         self.set_text(DOOR_ON, "Дополнительный свет");
         self.set_text(SCHED_ON, "Включить расписание подсветки");
