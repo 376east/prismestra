@@ -510,7 +510,12 @@ impl<'a> Resident<'a> {
         Ok(status)
     }
 
-    pub(super) fn record_published(&mut self, status: &Status, observed: u64) {
+    pub(super) fn record_published(
+        &mut self,
+        status: &Status,
+        observed: u64,
+        resident_generation: u64,
+    ) {
         let session = self.session.as_mut().expect("installed IPC session");
         if status.ready
             && let Some(backend) = status.backend_pid
@@ -525,6 +530,7 @@ impl<'a> Resident<'a> {
                     backend,
                     manager_generation: status.ready_generation,
                 },
+                resident_generation,
             );
         } else {
             session.receipt.not_ready();

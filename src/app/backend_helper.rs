@@ -621,7 +621,7 @@ fn proxy_loop(
                     if recovery_endpoint.is_some() {
                         recovery.observe(&status);
                     }
-                    ipc.record_published(&status, now);
+                    ipc.record_published(&status, now, generation.current);
                     continue;
                 }
                 Ok(None) => {

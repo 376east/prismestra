@@ -83,7 +83,12 @@ fn heartbeat_waits_for_a_reply_past_the_normal_send_interval() {
             tick: now,
             reply: protocol::Reply {
                 phase: Phase::Active,
-                backend: Backend::default(),
+                backend: Backend {
+                    pid: 42,
+                    generation: 1,
+                    ready: true,
+                    inventory_confirmed: true,
+                },
             },
         };
         assert!(frame.reply_for(5, 1, now).is_some());
@@ -102,6 +107,36 @@ fn heartbeat_waits_for_a_reply_past_the_normal_send_interval() {
         next_command(750, 700, pending, false, false),
         Some(Command::Pause)
     );
+}
+
+#[test]
+fn rejected_offer_cannot_create_a_ready_receipt_session() {
+    let owner = identity(std::process::id()).unwrap();
+    let now = active_ms().unwrap();
+    let request = Request {
+        version: clock::PROTOCOL,
+        clock_domain: clock::DOMAIN.into(),
+        nonce: "receipt-test".into(),
+        parent: owner.clone(),
+        timestamp_ms: now,
+        previous_timestamp_ms: None,
+        restarting: true,
+    };
+    let mut helper = owner.clone();
+    helper.created += 1;
+    let offer = make_offer(&request, &helper);
+    let output = Mutex::new(Snapshot::default());
+    let mut resident = Resident::new();
+
+    assert_eq!(
+        resident
+            .open(offer, &request, &output)
+            .unwrap_err()
+            .to_string(),
+        "Installed IPC offer does not match the live helper"
+    );
+    assert!(resident.session.is_none());
+    assert!(!output.lock().unwrap().ready);
 }
 
 #[test]
