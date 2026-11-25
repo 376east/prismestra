@@ -2128,11 +2128,14 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
             return Err("Failed resume left a live output or lost the retry binding".into());
         }
         app.stopped_lighting.as_mut().unwrap().door_brightness = 100;
+        let owner_ticks = app.runtime.owner_ticks();
         app.set_lighting_group(Target::Pc, true)?;
         app.set_lighting_group(Target::Door, true)?;
         if app.stopped_lighting.is_some()
             || !app.runtime.group_on(Target::Pc)
             || !app.runtime.group_on(Target::Door)
+            || owner_ticks.is_none()
+            || app.runtime.owner_ticks() < owner_ticks
         {
             return Err(
                 "Turning lights on after Stop did not restore the bindings and groups".into(),
