@@ -282,6 +282,7 @@ pub struct Runtime {
     desired: Desired,
     intent_origins: IntentOrigins,
     lcd: BTreeMap<String, lcd_worker::Worker>,
+    lcd_receipt: Option<lcd_worker::receipt::Request>,
     capture: Option<capture_worker::Worker>,
     #[cfg(windows)]
     sound: sound::Input,
@@ -389,6 +390,7 @@ impl Runtime {
                 door: origin,
             },
             lcd: BTreeMap::new(),
+            lcd_receipt: None,
             capture: None,
             #[cfg(windows)]
             sound: sound::Input::default(),
@@ -1671,18 +1673,25 @@ impl Runtime {
             .clone();
         let generation = self.next_generation()?;
         let f = factory.clone();
-        let worker = lcd_worker::Worker::start_claimed(generation, keys.clone(), move |cancel| {
-            let (controller, transport) = f(config.clone(), cancel)?;
-            if controller.config() != &config {
-                return Err("LCD factory configuration changed".into());
-            }
-            Ok((controller, transport))
-        })?;
+        let receipt =
+            lcd_worker::receipt::Request::claim(&mut self.lcd_receipt, id, generation, &keys);
+        let worker =
+            lcd_worker::Worker::start_claimed(generation, keys.clone(), receipt, move |cancel| {
+                let (controller, transport) = f(config.clone(), cancel)?;
+                if controller.config() != &config {
+                    return Err("LCD factory configuration changed".into());
+                }
+                Ok((controller, transport))
+            })?;
         self.lcd.insert(id.into(), worker);
         self.lcd_specs.insert(id.into(), LcdSpec { keys, factory });
         self.reset_output_recovery(id);
         self.bump_view();
         self.bump()
+    }
+    #[cfg(windows)]
+    pub(crate) fn arm_lcd_receipt(&mut self, request: lcd_worker::receipt::Request) {
+        self.lcd_receipt = Some(request);
     }
     pub fn attach_capture(&mut self, factory: CaptureFactory) -> Result<(), String> {
         self.usable()?;

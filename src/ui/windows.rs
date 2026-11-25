@@ -3329,6 +3329,19 @@ fn run_inner_with_language(
     let feed = super::stand::Feed::default();
     let journal = journal_path(&state_dir, o.project.as_deref(), &document);
     let mut runtime = Runtime::new(document, Some(journal))?;
+    if installed.is_some()
+        && let Ok(spec) = std::env::var("PRISMESTRA_QA_LCD_RECEIPT")
+        && let Some(filetime) = resident::current_creation_filetime()
+        && let Ok(directory) = crate::app::installed::checked_local_path(&state_dir)
+        && let Some(request) = crate::app::lcd_worker::receipt::Request::new(
+            &spec,
+            std::process::id(),
+            filetime,
+            directory,
+        )
+    {
+        runtime.arm_lcd_receipt(request);
+    }
     if o.snapshot.is_none() || o.selftest {
         runtime.enable_autonomous_rgb()?;
     }
