@@ -700,21 +700,48 @@ mod tests {
 
     const RUN_ID: &str = "174e6ed26ab4475283c87a31fbd30a57";
 
-    fn request(stand: &Stand) -> Option<receipt::Request> {
+    fn request(stand: &Stand) -> Option<Arc<receipt::Request>> {
         receipt::Request::new(&format!("{RUN_ID}:lcd"), 71, 123456789, stand.root.clone())
     }
 
     #[test]
-    fn qa_receipt_is_one_shot_after_the_first_active_ack() {
+    fn qa_receipt_survives_failed_and_cancelled_workers_until_first_active_ack() {
         use sha2::{Digest, Sha256};
         let stand = Stand::new();
         let keys = vec![format!("hid:{}", endpoint())];
         let path = stand.root.join(receipt::LEAF);
-        let mut pending = request(&stand);
-        assert!(receipt::Request::claim(&mut pending, "other", 3, &keys).is_none());
-        assert!(receipt::Request::claim(&mut pending, "lcd", 3, &[]).is_none());
-        let armed = receipt::Request::claim(&mut pending, "lcd", 4, &keys).unwrap();
-        assert!(pending.is_none());
+        let pending = request(&stand);
+        assert!(receipt::Request::claim(pending.as_ref(), "other", 3, &keys).is_none());
+        assert!(receipt::Request::claim(pending.as_ref(), "lcd", 3, &[]).is_none());
+
+        let first = receipt::Request::claim(pending.as_ref(), "lcd", 2, &keys).unwrap();
+        let mut failed = Worker::start_claimed::<Fake, _>(2, keys.clone(), Some(first), |_| {
+            Err("Synthetic open failure".into())
+        })
+        .unwrap();
+        until(&failed.shared, |s| s.phase == Phase::Failed);
+        finish(&mut failed);
+        assert!(!path.exists());
+
+        let second = receipt::Request::claim(pending.as_ref(), "lcd", 3, &keys).unwrap();
+        let blocked = Arc::new(Gate::default());
+        let cancelled_log = Arc::new(Log::default());
+        let mut cancelled = Worker::start_claimed(
+            3,
+            keys.clone(),
+            Some(second),
+            stand.factory(cancelled_log.clone(), Some(blocked.clone()), false),
+        )
+        .unwrap();
+        cancelled.submit(intent(1, true, false)).unwrap();
+        cancelled_log.until(|s| s.blocked);
+        cancelled.stop();
+        blocked.release();
+        finish(&mut cancelled);
+        assert_eq!(cancelled_log.observe().acks, 0);
+        assert!(!path.exists());
+
+        let armed = receipt::Request::claim(pending.as_ref(), "lcd", 4, &keys).unwrap();
         let log = Arc::new(Log::default());
         let mut worker = Worker::start_claimed(
             4,
@@ -765,9 +792,10 @@ mod tests {
         until(&worker.shared, |s| s.frames_sent == 3);
         finish(&mut worker);
         assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(receipt::Request::claim(pending.as_ref(), "lcd", 5, &keys).is_none());
 
-        let mut repeated = request(&stand);
-        let armed = receipt::Request::claim(&mut repeated, "lcd", 5, &keys);
+        let repeated = request(&stand);
+        let armed = receipt::Request::claim(repeated.as_ref(), "lcd", 5, &keys);
         let mut restarted = Worker::start_claimed(
             5,
             keys,
@@ -792,8 +820,8 @@ mod tests {
             let stand = Stand::new();
             let log = Arc::new(Log::default());
             let keys = vec![format!("hid:{}", endpoint())];
-            let mut pending = opt_in.then(|| request(&stand).unwrap());
-            let armed = receipt::Request::claim(&mut pending, "lcd", 4, &keys);
+            let pending = opt_in.then(|| request(&stand).unwrap());
+            let armed = receipt::Request::claim(pending.as_ref(), "lcd", 4, &keys);
             let factory = stand.factory(log.clone(), None, timeout);
             let mut worker = Worker::start_claimed(generation, keys, armed, move |cancel| {
                 let (controller, mut transport) = factory(cancel)?;
@@ -812,6 +840,16 @@ mod tests {
             finish(&mut worker);
             assert_eq!(log.observe().acks, u64::from(!partial));
             assert!(!stand.root.join(receipt::LEAF).exists());
+            assert_eq!(
+                receipt::Request::claim(
+                    pending.as_ref(),
+                    "lcd",
+                    6,
+                    &[format!("hid:{}", endpoint())],
+                )
+                .is_some(),
+                opt_in
+            );
         }
     }
 

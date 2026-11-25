@@ -282,7 +282,7 @@ pub struct Runtime {
     desired: Desired,
     intent_origins: IntentOrigins,
     lcd: BTreeMap<String, lcd_worker::Worker>,
-    lcd_receipt: Option<lcd_worker::receipt::Request>,
+    lcd_receipt: Option<Arc<lcd_worker::receipt::Request>>,
     capture: Option<capture_worker::Worker>,
     #[cfg(windows)]
     sound: sound::Input,
@@ -1674,7 +1674,7 @@ impl Runtime {
         let generation = self.next_generation()?;
         let f = factory.clone();
         let receipt =
-            lcd_worker::receipt::Request::claim(&mut self.lcd_receipt, id, generation, &keys);
+            lcd_worker::receipt::Request::claim(self.lcd_receipt.as_ref(), id, generation, &keys);
         let worker =
             lcd_worker::Worker::start_claimed(generation, keys.clone(), receipt, move |cancel| {
                 let (controller, transport) = f(config.clone(), cancel)?;
@@ -1689,8 +1689,8 @@ impl Runtime {
         self.bump_view();
         self.bump()
     }
-    #[cfg(windows)]
-    pub(crate) fn arm_lcd_receipt(&mut self, request: lcd_worker::receipt::Request) {
+    #[cfg(any(windows, test))]
+    pub(crate) fn arm_lcd_receipt(&mut self, request: Arc<lcd_worker::receipt::Request>) {
         self.lcd_receipt = Some(request);
     }
     pub fn attach_capture(&mut self, factory: CaptureFactory) -> Result<(), String> {
