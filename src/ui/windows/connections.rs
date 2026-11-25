@@ -1427,6 +1427,7 @@ impl App {
                     self.reset_editor(0);
                 }
                 self.native_lighting = pending.local;
+                self.stopped_lighting = None;
                 self.connections.previous = if pending.reverting {
                     None
                 } else {

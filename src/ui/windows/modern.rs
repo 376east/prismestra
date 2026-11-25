@@ -1617,8 +1617,8 @@ fn execute(state: &State, command: Command) -> Result<bool, String> {
                     }
                 }
                 Command::Groups { pc, door } => {
-                    a.runtime.set_group(Target::Pc, pc)?;
-                    a.runtime.set_group(Target::Door, door)?;
+                    a.set_lighting_group(Target::Pc, pc)?;
+                    a.set_lighting_group(Target::Door, door)?;
                     a.sync();
                 }
                 Command::Page {
