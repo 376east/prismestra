@@ -572,17 +572,19 @@ impl App {
             if self.runtime.pending_configuration() || self.connection_switching() {
                 return Err("Дождитесь применения подключений.".into());
             }
-            let document = self.runtime.document().clone();
-            let journal = journal_path(&self.state_dir, self.path.as_deref(), &document);
-            let mut candidate = Runtime::new(document, Some(journal))?;
-            candidate.enable_autonomous_rgb()?;
-            // Until the swap, failures drop only the candidate and its owned outputs/helper.
-            local.validate(candidate.document())?;
-            candidate.configure_managed_backend(&self.state_dir, local)?;
-            local.attach_missing(&mut candidate, &self.asset_root)?;
-            let mut candidate = Client::new(candidate, self.runtime.background())?;
-            candidate.set_group(target, on)?;
-            self.runtime = candidate;
+            self.runtime.with(|runtime, _| {
+                let document = runtime.document().clone();
+                let journal = journal_path(&self.state_dir, self.path.as_deref(), &document);
+                let mut candidate = Runtime::new(document, Some(journal))?;
+                candidate.enable_autonomous_rgb()?;
+                // Stage under the existing coordinator so only one runtime can tick the journal.
+                local.validate(candidate.document())?;
+                candidate.configure_managed_backend(&self.state_dir, local)?;
+                local.attach_missing(&mut candidate, &self.asset_root)?;
+                candidate.set_group(target, on)?;
+                *runtime = candidate;
+                Ok(())
+            })?;
             self.native_lighting = self.stopped_lighting.take();
             self.startup_output_labels();
             return Ok(());
