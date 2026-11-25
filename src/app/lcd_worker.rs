@@ -10,6 +10,7 @@ use std::{
     thread::JoinHandle,
     time::Duration,
 };
+pub(crate) mod receipt;
 
 #[derive(Clone, Debug)]
 pub struct Intent {
@@ -88,11 +89,12 @@ impl Worker {
         T: ReportTransport + 'static,
         F: FnOnce(Cancellation) -> Result<(Controller, T), String> + Send + 'static,
     {
-        Self::start_claimed(generation, vec![], factory)
+        Self::start_claimed(generation, vec![], None, factory)
     }
     pub(crate) fn start_claimed<T, F>(
         generation: u64,
         keys: Vec<String>,
+        receipt: Option<receipt::Armed>,
         factory: F,
     ) -> Result<Self, String>
     where
@@ -127,7 +129,7 @@ impl Worker {
             .name("lcd-output".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run(&worker, factory)
+                    run(&worker, generation, receipt, factory)
                 }));
                 // run's controller/transport have been destroyed, even on unwind, before release.
                 drop(lease);
@@ -299,7 +301,12 @@ fn wait(shared: &Shared, epoch: u64, duration: Option<Duration>) {
         }
     }
 }
-fn run<T, F>(shared: &Arc<Shared>, factory: F) -> Result<(), String>
+fn run<T, F>(
+    shared: &Arc<Shared>,
+    generation: u64,
+    mut receipt: Option<receipt::Armed>,
+    factory: F,
+) -> Result<(), String>
 where
     T: ReportTransport,
     F: FnOnce(Cancellation) -> Result<(Controller, T), String>,
@@ -390,8 +397,15 @@ where
                 Ok(())
             };
             publish(shared, &controller, intent.revision);
-            result?;
+            let sent = result?;
             completed_clock?;
+            if intent.active
+                && sent.is_some_and(|frame| frame.frame_index.is_some())
+                && !shared.cancel.cancelled()
+                && let Some(receipt) = receipt.take()
+            {
+                receipt.record(generation, controller.frames_sent(), controller.preview());
+            }
         } else if changed {
             publish(shared, &controller, intent.revision);
         }
@@ -484,6 +498,7 @@ mod tests {
     }
     impl Drop for Stand {
         fn drop(&mut self) {
+            let _ = fs::remove_file(self.root.join(receipt::LEAF));
             let dir = self.root.join("assets");
             if let Ok(entries) = fs::read_dir(&dir) {
                 for entry in entries.flatten() {
@@ -564,6 +579,7 @@ mod tests {
         log: Arc<Log>,
         block: Option<Arc<Gate>>,
         fail: bool,
+        short: bool,
         owner: ThreadId,
         _not_send: Rc<()>,
     }
@@ -576,6 +592,7 @@ mod tests {
                 log,
                 block,
                 fail,
+                short: false,
                 owner,
                 _not_send: Rc::new(()),
             }
@@ -617,7 +634,11 @@ mod tests {
             if first && let Some(gate) = self.block.take() {
                 gate.wait();
             }
-            Ok(REPORT_BYTES)
+            Ok(if self.short {
+                REPORT_BYTES - 1
+            } else {
+                REPORT_BYTES
+            })
         }
         fn read_ack(
             &mut self,
@@ -675,6 +696,123 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         )
+    }
+
+    const RUN_ID: &str = "174e6ed26ab4475283c87a31fbd30a57";
+
+    fn request(stand: &Stand) -> Option<receipt::Request> {
+        receipt::Request::new(&format!("{RUN_ID}:lcd"), 71, 123456789, stand.root.clone())
+    }
+
+    #[test]
+    fn qa_receipt_is_one_shot_after_the_first_active_ack() {
+        use sha2::{Digest, Sha256};
+        let stand = Stand::new();
+        let keys = vec![format!("hid:{}", endpoint())];
+        let path = stand.root.join(receipt::LEAF);
+        let mut pending = request(&stand);
+        assert!(receipt::Request::claim(&mut pending, "other", 3, &keys).is_none());
+        assert!(receipt::Request::claim(&mut pending, "lcd", 3, &[]).is_none());
+        let armed = receipt::Request::claim(&mut pending, "lcd", 4, &keys).unwrap();
+        assert!(pending.is_none());
+        let log = Arc::new(Log::default());
+        let mut worker = Worker::start_claimed(
+            4,
+            keys.clone(),
+            Some(armed),
+            stand.factory(log.clone(), None, false),
+        )
+        .unwrap();
+        worker.submit(intent(1, false, false)).unwrap();
+        until(&worker.shared, |s| s.frames_sent == 1);
+        assert_eq!(log.observe().acks, 1);
+        assert!(!path.exists(), "blank ACK must not produce a receipt");
+
+        worker.submit(intent(2, true, false)).unwrap();
+        let frame = until(&worker.shared, |s| s.frames_sent == 2);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let original = loop {
+            if let Ok(bytes) = fs::read(&path)
+                && bytes.ends_with(b"\n")
+            {
+                break bytes;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "LCD receipt not completed"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        let sha256 = |bytes: &[u8]| {
+            Sha256::digest(bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "version": 1, "run_id": RUN_ID, "device": "lcd",
+                "binding_sha256": sha256(keys[0].strip_prefix("hid:").unwrap().as_bytes()),
+                "generation": 4, "frames_sent": 2, "jpeg_bytes": frame.preview.len(),
+                "jpeg_sha256": sha256(&frame.preview),
+                "role": "installed_resident", "pid": 71, "process_creation_filetime": "123456789"
+            })
+        );
+        log.now.fetch_add(500, Ordering::AcqRel);
+        worker.submit(intent(3, true, false)).unwrap();
+        until(&worker.shared, |s| s.frames_sent == 3);
+        finish(&mut worker);
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        let mut repeated = request(&stand);
+        let armed = receipt::Request::claim(&mut repeated, "lcd", 5, &keys);
+        let mut restarted = Worker::start_claimed(
+            5,
+            keys,
+            armed,
+            stand.factory(Arc::new(Log::default()), None, false),
+        )
+        .unwrap();
+        restarted.submit(intent(1, true, false)).unwrap();
+        until(&restarted.shared, |s| s.frames_sent == 1);
+        finish(&mut restarted);
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn qa_receipt_skips_faulty_reports_stale_generation_and_default_launch() {
+        for (opt_in, generation, timeout, partial) in [
+            (true, 4, true, false),
+            (true, 4, false, true),
+            (true, 5, false, false),
+            (false, 4, false, false),
+        ] {
+            let stand = Stand::new();
+            let log = Arc::new(Log::default());
+            let keys = vec![format!("hid:{}", endpoint())];
+            let mut pending = opt_in.then(|| request(&stand).unwrap());
+            let armed = receipt::Request::claim(&mut pending, "lcd", 4, &keys);
+            let factory = stand.factory(log.clone(), None, timeout);
+            let mut worker = Worker::start_claimed(generation, keys, armed, move |cancel| {
+                let (controller, mut transport) = factory(cancel)?;
+                transport.short = partial;
+                Ok((controller, transport))
+            })
+            .unwrap();
+            worker.submit(intent(1, true, false)).unwrap();
+            until(&worker.shared, |s| {
+                if timeout || partial {
+                    s.phase == Phase::Failed && s.frames_sent == 0
+                } else {
+                    s.frames_sent == 1
+                }
+            });
+            finish(&mut worker);
+            assert_eq!(log.observe().acks, u64::from(!partial));
+            assert!(!stand.root.join(receipt::LEAF).exists());
+        }
     }
 
     #[test]
@@ -762,6 +900,7 @@ mod tests {
         let mut worker = Worker::start_claimed(
             3,
             vec![key.clone()],
+            None,
             stand.factory(log.clone(), Some(gate.clone()), false),
         )
         .unwrap();
@@ -790,7 +929,7 @@ mod tests {
         let base = stand.factory(log.clone(), None, false);
         let held = gate.clone();
         let entered = log.clone();
-        let worker = Worker::start_claimed(4, vec![key.clone()], move |cancel| {
+        let worker = Worker::start_claimed(4, vec![key.clone()], None, move |cancel| {
             entered.state.lock().unwrap().factory = Some(std::thread::current().id());
             entered.wake.notify_all();
             held.wait();

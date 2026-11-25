@@ -36,6 +36,17 @@ cargo build --release --locked --bin pc-control-ui
 
 The final binary is `target/release/pc-control-ui.exe`. The user-facing product name is Prismestra. CLI preview and activation remain separate; see [portable launch](portable-launch.md). Tests that inspect Windows process/listener tables need ordinary native Windows access. A sandbox denial is recorded separately from a passed native rerun.
 
+### LCD ACK receipt for installed QA
+
+Set `PRISMESTRA_QA_LCD_RECEIPT` to `<32 lowercase hexadecimal RunId>:<logical LCD ID>` in the
+environment of a fresh installed resident in the isolated QA profile. Arm the request before
+the selected LCD worker starts. Its first active content frame with a valid ACK can create
+`state/qa-lcd-receipt.json` in the installed profile. The file is created once and never replaced.
+Use a fresh state directory for each run. Read the complete newline-terminated JSON, verify
+the current RunId, resident PID/FILETIME and LCD generation, then compare `jpeg_sha256` and
+`jpeg_bytes` with the receiver. The binding hash covers the canonical lowercase HID path
+without the `hid:` ownership prefix. Leave the environment variable unset for ordinary sessions.
+
 ## Package a specific revision
 
 Use a clean committed checkout and an output directory **outside the repository**:

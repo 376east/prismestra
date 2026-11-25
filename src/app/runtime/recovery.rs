@@ -490,7 +490,9 @@ impl Runtime {
             .config
             .clone();
         let generation = self.next_generation()?;
-        let worker = lcd_worker::Worker::start_claimed(generation, keys, move |cancel| {
+        let receipt =
+            lcd_worker::receipt::Request::claim(&mut self.lcd_receipt, id, generation, &keys);
+        let worker = lcd_worker::Worker::start_claimed(generation, keys, receipt, move |cancel| {
             let (controller, transport) = factory(config.clone(), cancel)?;
             if controller.config() != &config {
                 return Err("LCD factory configuration changed".into());
