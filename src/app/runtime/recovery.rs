@@ -491,7 +491,7 @@ impl Runtime {
             .clone();
         let generation = self.next_generation()?;
         let receipt =
-            lcd_worker::receipt::Request::claim(&mut self.lcd_receipt, id, generation, &keys);
+            lcd_worker::receipt::Request::claim(self.lcd_receipt.as_ref(), id, generation, &keys);
         let worker = lcd_worker::Worker::start_claimed(generation, keys, receipt, move |cancel| {
             let (controller, transport) = factory(config.clone(), cancel)?;
             if controller.config() != &config {

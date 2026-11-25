@@ -2856,6 +2856,11 @@ fn bound_lcd_arrival_renews_exhausted_recovery_without_restarting_other_outputs(
     let link = Arc::new(Link::default());
     link.fail_open.store(true, Ordering::SeqCst);
     let (mut runtime, dir) = arrival_lcd_runtime("late", link.clone());
+    let receipt_path = dir.join("qa-lcd-receipt.json");
+    let run_id = "174e6ed26ab4475283c87a31fbd30a57";
+    runtime.arm_lcd_receipt(
+        lcd_worker::receipt::Request::new(&format!("{run_id}:lcd"), 71, 123, dir.clone()).unwrap(),
+    );
     #[cfg(windows)]
     let device = runtime
         .document()
@@ -2888,6 +2893,7 @@ fn bound_lcd_arrival_renews_exhausted_recovery_without_restarting_other_outputs(
         });
     }
     assert_eq!(link.calls.load(Ordering::SeqCst), 4);
+    assert!(!receipt_path.exists());
     runtime.lcd_interface_arrived("other-interface", true);
     now += 100_000_000;
     tick(&mut runtime, &mut now);
@@ -2907,6 +2913,17 @@ fn bound_lcd_arrival_renews_exhausted_recovery_without_restarting_other_outputs(
     });
     assert_eq!(link.calls.load(Ordering::SeqCst), 5);
     let lcd_generation = runtime.lcd_status("lcd").unwrap().generation;
+    wait(|| std::fs::read(&receipt_path).is_ok_and(|bytes| bytes.ends_with(b"\n")));
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    assert_eq!(receipt["run_id"], run_id);
+    assert_eq!(receipt["generation"], lcd_generation);
+    assert_eq!(receipt["frames_sent"], 1);
+    let media = crate::lcd::media::prepare(Arc::from(ARRIVAL_LCD_MEDIA), 0, || false).unwrap();
+    assert_eq!(
+        receipt["jpeg_sha256"],
+        crate::app::assets::digest(&media.frames[0].jpeg).as_str()
+    );
     runtime.lcd_interface_arrived("bound-interface", true);
     tick(&mut runtime, &mut now);
     now += 100_000_000;
