@@ -2,7 +2,7 @@
 
 Запустите один эффект на клавиатуре, LED-ленте и подсветке за монитором, а на совместимом LCD оставьте температуры. Prismestra работает в Windows и продолжает выводить сцену после закрытия редактора.
 
-**[Скачать для Windows](https://github.com/376east/prismestra/releases/latest)** · [Проверить устройства](docs/compatibility.md) · [Помощь](#помощь) · [English](README.md)
+**[Скачать для Windows](https://github.com/376east/prismestra/releases/latest)** · [Найти устройство](https://376east.github.io/prismestra/) · [Помощь](#помощь) · [English](README.md)
 
 ## Как начать
 

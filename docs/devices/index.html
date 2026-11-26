@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Look up devices by model and see which lighting and display connections Prismestra can use.">
+  <title>Device lookup · Prismestra</title>
+  <link rel="stylesheet" href="lookup.css">
+  <script src="lookup.mjs" type="module"></script>
+</head>
+<body>
+  <main>
+    <nav aria-label="Project">
+      <a href="https://github.com/376east/prismestra">Prismestra</a>
+      <a href="https://github.com/376east/prismestra/releases/latest">Download for Windows</a>
+    </nav>
+    <header>
+      <h1>Find your device</h1>
+      <p>Search by brand, model or USB ID. Each result shows the available connection and what has been verified.</p>
+    </header>
+    <form id="filters" role="search">
+      <div class="query">
+        <label for="query">Brand, model or USB ID</label>
+        <input id="query" name="q" type="search" placeholder="Surplife, Gigabyte, 264A:233C…" autocomplete="off">
+      </div>
+      <div>
+        <label for="route">Catalog</label>
+        <select id="route" name="route">
+          <option value="">All devices</option>
+          <option value="openrgb">OpenRGB lighting</option>
+          <option value="native">Prismestra connections</option>
+          <option value="research">Research candidates</option>
+        </select>
+      </div>
+    </form>
+    <details>
+      <summary>What the results mean</summary>
+      <p>OpenRGB listings come from the bundled Windows backend, including peripherals, boards, displays and controllers. Prismestra connections have an implemented path. Research candidates still need adapter work or verification.</p>
+    </details>
+    <p id="count" role="status">Loading the device catalog…</p>
+    <ul id="results" class="results" aria-label="Matching devices"></ul>
+    <button id="more" type="button" hidden>Show more</button>
+    <noscript><p>JavaScript is required for search. See the <a href="https://github.com/376east/prismestra/blob/master/docs/compatibility.md">compatibility guide</a>.</p></noscript>
+    <footer>
+      <p id="provenance"></p>
+      <a href="https://github.com/376east/prismestra/blob/master/docs/compatibility.md">Compatibility guide</a>
+      <a href="https://openrgb.org/devices_pipeline.html">OpenRGB development catalog</a>
+      <a href="https://github.com/376east/prismestra/issues/new?template=device.yml">Report a device</a>
+    </footer>
+  </main>
+</body>
+</html>
