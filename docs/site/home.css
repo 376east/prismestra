@@ -56,24 +56,26 @@
   background: #17191e;
 }
 .scene-shot {
-  --light-mask: url("./shots/01-mask.webp");
+  --light-mask: url("./shots/opening-mask.webp");
   position: absolute;
   inset: 0;
   isolation: isolate;
 }
 .scene-photo {
+  position: absolute;
+  inset: 0 auto auto 0;
   display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  filter: saturate(.32) brightness(.86);
+  width: var(--sheet-width, 100%);
+  height: var(--sheet-height, 100%);
+  transform: translate(var(--sheet-x, 0%), var(--sheet-y, 0%));
+  filter: saturate(.25) brightness(.86);
 }
 .scene-shot .scene-light {
   position: absolute;
   inset: 0;
   overflow: hidden;
-  -webkit-mask: var(--light-mask) center / 100% 100% no-repeat;
-  mask: var(--light-mask) center / 100% 100% no-repeat;
+  -webkit-mask: var(--light-mask) var(--tile-position, center) / var(--tile-size, 100% 100%) no-repeat;
+  mask: var(--light-mask) var(--tile-position, center) / var(--tile-size, 100% 100%) no-repeat;
   mix-blend-mode: screen;
   pointer-events: none;
 }
@@ -104,26 +106,27 @@
   content: "";
   position: absolute;
   inset: 0 -200% 0 0;
-  background: linear-gradient(90deg, #bba8ff, #ffa26c 24%, #f6db85 46%, #81e3bf 68%, #83b9ff 86%, #bba8ff);
-  opacity: .9;
+  background: linear-gradient(90deg, #bc71ff, #ff74bf 18%, #ff993f 34%, #ddf059 49%, #47e5a1 65%, #39c9ff 82%, #bc71ff);
+  opacity: .98;
   background-size: calc(100% / 3) 100%;
   transform: translateX(var(--phase, 0%));
-  animation: light-travel 4s linear infinite;
+  animation: light-travel 3.2s linear infinite;
 }
 #scene-breathing:checked ~ .scene-frame .scene-light::before {
-  background: #ff9a42;
-  animation: light-breathing 3.8s ease-in-out infinite;
+  background: #ff922b;
+  animation: light-breathing 2.6s ease-in-out infinite;
 }
 #scene-noise:checked ~ .scene-frame .scene-light::before {
-  background-image: linear-gradient(90deg, #6578f6, #52e9d1 50%, #6578f6);
-  animation: light-travel 6s ease-in-out infinite reverse;
+  background-image: linear-gradient(90deg, #4759dc, #60e8d1 50%, #4759dc);
+  opacity: .7;
+  animation: light-travel 7s ease-in-out infinite reverse;
 }
 #scene[data-preview-reset] .scene-frame .scene-light::before { animation-name: none; }
 @media (prefers-reduced-motion: reduce) {
   #scene:not([data-preview-triggered]) .scene-frame .scene-light::before { animation-name: none; }
 }
 @keyframes light-travel { to { transform: translateX(calc(var(--phase, 0%) - 33.333%)); } }
-@keyframes light-breathing { 50% { opacity: .16; } }
+@keyframes light-breathing { 50% { opacity: .08; } }
 .scene-controls {
   min-height: 3.75rem;
   padding: .5rem .85rem .5rem 1.12rem;
