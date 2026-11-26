@@ -1,5 +1,5 @@
 import { connectWindowsSetup } from './setup-download.mjs';
-import { connectScenePreview } from './scene-preview.mjs?v=preview-controls';
+import { connectScenePreview } from './scene-preview.mjs?v=scene-picker';
 
 const params = new URLSearchParams(location.search);
 const language = document.getElementById('language');
@@ -40,8 +40,6 @@ function showRussian() {
     'effect-rainbow': 'Радуга',
     'effect-breathing': 'Дыхание',
     'effect-noise': 'Мягкий свет',
-    'preview-play': 'Смотреть анимацию',
-    'preview-pause': 'Пауза',
     'description-rainbow': 'Цвет проходит от клавиатуры к вентиляторам.',
     'description-breathing': 'Вся подсветка плавно разгорается и затихает.',
     'description-noise': 'Оттенки медленно перетекают от одного устройства к другому.',

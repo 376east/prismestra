@@ -52,13 +52,10 @@
   isolation: isolate;
   overflow: hidden;
   aspect-ratio: 1.5;
-  background:
-    linear-gradient(90deg, #d6dde30c 1px, transparent 1px) center / 8% 12%,
-    linear-gradient(#d6dde30c 1px, transparent 1px) center / 8% 12%,
-    radial-gradient(ellipse at 42% 72%, #30353d, #191c22 72%);
+  background: radial-gradient(ellipse at 42% 72%, #373839, #202123 72%);
 }
 .scene-wall-wash {
-  --phase: -.8s;
+  --phase: -9.6%;
   position: absolute;
   inset: 44% 0 29%;
   opacity: .31;
@@ -88,7 +85,7 @@
   background: linear-gradient(180deg, #272c35, #171a20 60%, #11141a);
 }
 .scene-desk-wash {
-  --phase: -.8s;
+  --phase: -9.6%;
   position: absolute;
   inset: 0 0 16%;
   opacity: .47;
@@ -122,23 +119,41 @@
   box-shadow: 0 3px 4px #0b0e13aa;
 }
 .scene-screen {
-  position: relative;
+  display: grid;
+  grid-template-columns: 19% 1fr;
   height: 100%;
   overflow: hidden;
   border: 1px solid #0b0d12;
   border-radius: 3% / 4%;
-  background: linear-gradient(155deg, #303744, #161b23 65%);
+  background: #17191f;
 }
-.scene-screen::before, .scene-screen::after {
-  content: "";
+.scene-editor-sidebar {
+  border-right: 1px solid #454853;
+  background:
+    linear-gradient(#b8a8e3, #b8a8e3) center 14% / 52% 3% no-repeat,
+    repeating-linear-gradient(#454851 0 15%, transparent 15% 34%) center 49% / 52% 43% no-repeat,
+    #23252d;
+}
+.scene-editor-canvas {
+  position: relative;
+  margin: 8% 7% 7%;
+  border: 1px solid #444753;
+  border-radius: 4%;
+  background:
+    radial-gradient(circle, #595c6970 .6px, transparent 1px) center / 8% 12%,
+    #1d2027;
+}
+.editor-device {
   position: absolute;
-  inset: 17% 17%;
-  clip-path: polygon(0 77%, 28% 22%, 46% 52%, 62% 25%, 100% 77%, 97% 77%, 62% 29%, 46% 57%, 28% 27%, 3% 77%);
+  border: 1px solid #8e85a8;
+  border-radius: 8%;
+  background: #353442;
 }
-.scene-screen::before { background: #4a535f; }
-.scene-screen::after { background: #35404e; transform: translateY(14%); }
+.editor-display { inset: 20% 39% 39% 16%; }
+.editor-case { inset: 26% 15% 26% 69%; }
+.editor-keys { inset: 71% 42% 17% 21%; }
 .scene-halo {
-  --phase: -1s;
+  --phase: -12%;
   position: absolute;
   inset: 17% 39% 34% 11%;
   border-radius: 10%;
@@ -146,7 +161,7 @@
   opacity: .7;
 }
 .scene-strip {
-  --phase: -.8s;
+  --phase: -9.6%;
   position: absolute;
   inset: 70.7% 7% auto;
   height: .7%;
@@ -194,9 +209,9 @@
   border-radius: 50%;
   box-shadow: 0 0 5px #cdd7ee32;
 }
-.scene-fan:nth-child(1) { --phase: -2.05s; }
-.scene-fan:nth-child(2) { --phase: -2.22s; }
-.scene-fan:nth-child(3) { --phase: -2.39s; }
+.scene-fan:nth-child(1) { --phase: -24.6%; }
+.scene-fan:nth-child(2) { --phase: -26.64%; }
+.scene-fan:nth-child(3) { --phase: -28.68%; }
 .scene-fan::after {
   content: "";
   position: absolute;
@@ -205,6 +220,15 @@
   background:
     radial-gradient(circle, #626e7e 0 16%, #1a1e26 18% 25%, transparent 27%),
     repeating-conic-gradient(from 25deg, #2f3642 0deg 30deg, #171b23 30deg 60deg);
+}
+.scene-mat {
+  position: absolute;
+  inset: 73% 29% 10% 12%;
+  transform: skewX(-12deg);
+  border: 1px solid #60636a;
+  border-radius: 5%;
+  background: repeating-linear-gradient(45deg, #24262d 0 2px, #2b2d34 2px 3px);
+  box-shadow: 0 3px 4px #151618;
 }
 .scene-keyboard {
   position: absolute;
@@ -218,7 +242,7 @@
   box-shadow: 3px 6px 7px #080910bd, inset 0 1px #b1b8c845;
 }
 .scene-keys {
-  --phase: -.25s;
+  --phase: -3%;
   position: relative;
   height: 100%;
   border-radius: 4%;
@@ -242,24 +266,26 @@
 .scene-light::before {
   content: "";
   position: absolute;
-  inset: 0 -100% 0 0;
-  background: linear-gradient(90deg, #bba8ff 0%, #ffa26c 12%, #f6db85 23%, #81e3bf 34%, #83b9ff 43%, #bba8ff 50%, #ffa26c 62%, #f6db85 73%, #81e3bf 84%, #83b9ff 93%, #bba8ff 100%);
+  inset: 0 -200% 0 0;
+  background: linear-gradient(90deg, #bba8ff, #ffa26c 24%, #f6db85 46%, #81e3bf 68%, #83b9ff 86%, #bba8ff);
   opacity: .9;
-  animation: light-travel 4s linear var(--phase, 0s) infinite;
+  background-size: calc(100% / 3) 100%;
+  transform: translateX(var(--phase, 0%));
+  animation: light-travel 4s linear both;
 }
 #scene-breathing:checked ~ .scene-frame .scene-light::before {
   background: #ff9a42;
-  animation: light-breathing 3.8s ease-in-out infinite;
+  animation: light-breathing 3.8s ease-in-out both;
 }
 #scene-noise:checked ~ .scene-frame .scene-light::before {
-  background: linear-gradient(90deg, #6578f6 0%, #52e9d1 25%, #6578f6 50%, #52e9d1 75%, #6578f6 100%);
-  animation: light-travel 9s linear var(--phase, 0s) infinite;
+  background-image: linear-gradient(90deg, #6578f6, #52e9d1 50%, #6578f6);
+  animation: light-travel 4.7s ease-in-out reverse both;
 }
-#scene-pause:checked ~ .scene-frame .scene-light::before { animation-play-state: paused; }
+#scene[data-preview-reset] .scene-frame .scene-light::before { animation-name: none; }
 @media (prefers-reduced-motion: reduce) {
-  #scene-auto:checked ~ .scene-frame .scene-light::before { animation-play-state: paused; }
+  #scene:not([data-preview-triggered]) .scene-frame .scene-light::before { animation-name: none; }
 }
-@keyframes light-travel { to { transform: translateX(-50%); } }
+@keyframes light-travel { to { transform: translateX(calc(var(--phase, 0%) - 33.333%)); } }
 @keyframes light-breathing { 50% { opacity: .16; } }
 .scene-controls {
   min-height: 4.35rem;
@@ -298,27 +324,16 @@
 }
 #scene-rainbow:checked ~ .scene-controls label[for="scene-rainbow"],
 #scene-breathing:checked ~ .scene-controls label[for="scene-breathing"],
-#scene-noise:checked ~ .scene-controls label[for="scene-noise"],
-#scene-play:checked ~ .scene-controls label[for="scene-play"],
-#scene-pause:checked ~ .scene-controls label[for="scene-pause"] {
+#scene-noise:checked ~ .scene-controls label[for="scene-noise"] {
   color: var(--site-text);
   border-color: #48435d;
   background: #202034;
 }
 #scene-rainbow:focus ~ .scene-controls label[for="scene-rainbow"],
 #scene-breathing:focus ~ .scene-controls label[for="scene-breathing"],
-#scene-noise:focus ~ .scene-controls label[for="scene-noise"],
-#scene-play:focus ~ .scene-controls label[for="scene-play"],
-#scene-pause:focus ~ .scene-controls label[for="scene-pause"] {
+#scene-noise:focus ~ .scene-controls label[for="scene-noise"] {
   outline: 2px solid var(--site-accent);
   outline-offset: 2px;
-}
-.scene-playback { display: flex; gap: .18rem; margin-inline-start: auto; }
-@media (prefers-reduced-motion: reduce) {
-  #scene-auto:checked ~ .scene-controls label[for="scene-play"] {
-    color: var(--site-on-accent);
-    background: var(--site-accent);
-  }
 }
 .scene-description { display: none; flex-basis: 100%; padding-bottom: .35rem; }
 #scene-rainbow:checked ~ .scene-controls #description-rainbow,
