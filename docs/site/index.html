@@ -9,8 +9,8 @@
   <link rel="icon" href="favicon.ico" sizes="any">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="stylesheet" href="site.css">
-  <link rel="stylesheet" href="home.css?v=scene-mouse">
-  <script type="module" src="home.mjs?v=scene-mouse"></script>
+  <link rel="stylesheet" href="home.css?v=scene-montage">
+  <script type="module" src="home.mjs?v=scene-montage"></script>
 </head>
 <body class="home-page">
   <nav class="site-nav" aria-label="Main navigation">
@@ -38,46 +38,21 @@
         <input class="scene-choice" type="radio" name="effect" id="scene-rainbow" checked>
         <input class="scene-choice" type="radio" name="effect" id="scene-breathing">
         <input class="scene-choice" type="radio" name="effect" id="scene-noise">
-        <div class="scene-frame" id="scene-art" role="img" aria-label="Illustrated desk with synchronized lights on the keyboard, mouse, PC fans and behind the monitor">
-          <div class="scene-wall-wash scene-light" aria-hidden="true"></div>
-          <div class="scene-desk" aria-hidden="true">
-            <div class="scene-desk-wash scene-light"></div>
+        <div class="scene-frame" id="scene-art" role="img" aria-label="Three desk setups with synchronized lighting and Prismestra on the monitors">
+          <div class="scene-shot scene-shot-graphite" aria-hidden="true">
+            <img class="scene-photo" src="shots/graphite.webp" alt="" width="1200" height="800" fetchpriority="high">
+            <div class="scene-light"></div>
+            <div class="scene-wordmark"><img src="favicon.svg" alt="" width="40" height="40">Prismestra</div>
           </div>
-          <div class="scene-halo scene-light" aria-hidden="true"></div>
-          <div class="scene-strip scene-light" aria-hidden="true"></div>
-          <div class="scene-monitor" aria-hidden="true">
-            <div class="scene-screen">
-              <span class="scene-editor-title">Prismestra</span>
-              <div class="scene-editor-sidebar"></div>
-              <div class="scene-editor-canvas">
-                <i class="editor-device editor-display"></i>
-                <i class="editor-device editor-case"></i>
-                <i class="editor-device editor-keys"></i>
-              </div>
-            </div>
+          <div class="scene-shot scene-shot-peripherals" aria-hidden="true">
+            <img class="scene-photo" src="shots/peripherals.webp" alt="" width="1200" height="800" decoding="async">
+            <div class="scene-light"></div>
+            <div class="scene-wordmark"><img src="favicon.svg" alt="" width="40" height="40">Prismestra</div>
           </div>
-          <div class="scene-tower" aria-hidden="true">
-            <div class="scene-fan scene-light"></div>
-            <div class="scene-fan scene-light"></div>
-            <div class="scene-fan scene-light"></div>
-          </div>
-          <div class="scene-mat" aria-hidden="true"></div>
-          <div class="scene-keyboard" aria-hidden="true">
-            <div class="scene-keys scene-light">
-              <div class="scene-key-row"></div>
-              <div class="scene-key-row"></div>
-              <div class="scene-key-row"></div>
-              <div class="scene-key-row"></div>
-              <div class="scene-space-row"></div>
-            </div>
-          </div>
-          <div class="scene-mouse" aria-hidden="true">
-            <div class="scene-mouse-pool scene-light"></div>
-            <div class="scene-mouse-rim scene-light"></div>
-            <div class="scene-mouse-shell">
-              <div class="scene-mouse-buttons"></div>
-              <div class="scene-mouse-wheel scene-light"></div>
-            </div>
+          <div class="scene-shot scene-shot-daylight" aria-hidden="true">
+            <img class="scene-photo" src="shots/daylight.webp" alt="" width="1200" height="800" decoding="async">
+            <div class="scene-light"></div>
+            <div class="scene-wordmark"><img src="favicon.svg" alt="" width="40" height="40">Prismestra</div>
           </div>
         </div>
         <figcaption class="scene-controls">
