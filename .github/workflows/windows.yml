@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: ${{ github.event_name == 'push' && github.ref_type == 'tag' && '0' || '2' }}
+          fetch-depth: 2
       - name: Verify the release tag and green master commit
         id: release
         if: github.event_name == 'push' && github.ref_type == 'tag'
@@ -416,7 +416,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -441,7 +440,8 @@ jobs:
           $title = "Prismestra $($tag.Substring(1))"
           $setupUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$asset"
           $runUrl = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-          $notes = "**[Download Windows x64 Setup]($setupUrl)** · Windows 10 or 11 (x64).`n`nSetup includes the background OpenRGB backend and required runtimes. See the [device compatibility guide](https://github.com/$env:GITHUB_REPOSITORY/blob/$env:GITHUB_SHA/docs/compatibility.md) and [Windows release checks]($runUrl). The source ZIP contains the corresponding sources.`n`nSetup SHA-256: $($candidate.SetupSha256)"
+          $sourceUrl = "https://github.com/$env:GITHUB_REPOSITORY/blob/$env:GITHUB_SHA"
+          $notes = "**[Download Windows x64 Setup]($setupUrl)** · Windows 10 or 11 (x64).`n`nSetup includes OpenRGB and the required Windows runtimes. The ZIP contains the corresponding sources.`n`n[Changelog]($sourceUrl/CHANGELOG.md) · [Device compatibility]($sourceUrl/docs/compatibility.md) · [Windows release checks]($runUrl)`n`nSetup SHA-256: $($candidate.SetupSha256)"
           $null = ./scripts/installer/verify_release_tag.ps1 -Tag $tag -Commit $env:GITHUB_SHA -Repository $env:GITHUB_REPOSITORY -ExpectedTagObject $env:TAG_OBJECT
-          gh release create $tag $candidate.Setup $sources --repo $env:GITHUB_REPOSITORY --verify-tag --title $title --notes $notes --generate-notes
+          gh release create $tag $candidate.Setup $sources --repo $env:GITHUB_REPOSITORY --verify-tag --latest --title $title --notes $notes
           if ($LASTEXITCODE) { throw 'Publishing the tested Setup failed.' }
