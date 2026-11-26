@@ -1,6 +1,6 @@
 # Windows installer
 
-Download the Windows 10/11 x64 Setup EXE from the [project README](../README.md) or [GitHub Releases](https://github.com/376east/prismestra/releases). The current public build is [Preview 10](https://github.com/376east/prismestra/releases/tag/v0.1.0-preview.10), `Prismestra-Setup-0.1.0.10-x64.exe`. Device support depends on the model and firmware. See the [compatibility guide](compatibility.md).
+Download the Windows 10/11 x64 Setup EXE from the [project README](../README.md) or [GitHub Releases](https://github.com/376east/prismestra/releases). Choose the latest Windows x64 Setup EXE. If you have an older Preview installed, run the current Setup over it to switch to the stable channel. Device support depends on the model and firmware. See the [compatibility guide](compatibility.md).
 
 ## Install and use
 

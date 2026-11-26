@@ -17,7 +17,7 @@ POWERSHELL = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/Window
 BUNDLE = "Prismestra-OpenRGB-component.zip"
 PINNED_INPUTS = {
     "Prismestra-Sources-0.1.0.5.zip": (
-        "https://github.com/malyarq/prismestra/releases/download/v0.1.0-preview.5/Prismestra-Sources-0.1.0.5.zip",
+        "https://github.com/376east/prismestra/releases/download/build-inputs-v1/Prismestra-Sources-0.1.0.5.zip",
         "a3ed186b4d08cf25930689902a0f1d260cc3eca678379d897281a51bc2b0307e",
         55900191,
     ),
