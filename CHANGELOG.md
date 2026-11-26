@@ -1,23 +1,37 @@
 # Changelog
 
-For downloads, see [GitHub Releases](https://github.com/376east/prismestra/releases). For physical device coverage, see the [compatibility table](docs/compatibility.md).
+This file records notable changes to Prismestra. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Public release numbers use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.2.0
+[Download for Windows](https://github.com/376east/prismestra/releases/latest) · [Device compatibility](docs/compatibility.md)
 
-### Startup and recovery
+## Unreleased
 
-- Restore the saved lighting profile at sign-in. Editing the installed profile keeps that same copy available at the next launch. [Profile save](https://github.com/376east/prismestra/pull/255)
-- Resume the applied scene after Stop from the tray. The installed OpenRGB helper and resident use an authenticated local connection and coordinate recovery so a restart can resume the latest lighting state. [Resume](https://github.com/376east/prismestra/pull/286) · [Local backend control](https://github.com/376east/prismestra/pull/266)
-- If screen capture stops providing fresh frames, monitor lighting falls back to the base scene. The app reports scene acceptance and delivery per output, so a saved scene can still show which device needs attention. [Screen fallback](https://github.com/376east/prismestra/pull/281) · [Output status](https://github.com/376east/prismestra/pull/278)
+## 0.2.0 - 2026-11-26
 
-### Editor and devices
+### Added
 
-- English is the default, with Russian available in Settings. **Apply scene** updates the active scene. **Save to library** stores a version for later. [Editor and language](https://github.com/376east/prismestra/pull/240)
-- Preview an ARGB channel before setting its first LED count. Save a guarded channel size for the selected controller. [ARGB preview](https://github.com/376east/prismestra/pull/233) · [Channel save](https://github.com/376east/prismestra/pull/209)
-- Keep the saved LCD temperature card where you placed it. Static LCD images skip duplicate frame writes, and the LCD worker can recover when the matching HID interface returns. [Card placement](https://github.com/376east/prismestra/pull/215) · [LCD recovery](https://github.com/376east/prismestra/pull/258)
-- Link an Alice lamp through Yandex ID and optionally set its brightness from a saved scene. If Yandex cannot confirm a command, Prismestra reports the uncertainty separately from lamp availability. [Scene lamp binding](https://github.com/376east/prismestra/pull/221) · [Command status](https://github.com/376east/prismestra/pull/279)
+- **Alice lamps.** Sign in with Yandex ID under Settings → Lamp controls, select a lamp, and optionally save its brightness with a scene. [Scene lamp binding](https://github.com/376east/prismestra/pull/221)
+- **ARGB channel preview.** Preview the LED layout for a motherboard channel before configuring its first LED count. [ARGB preview](https://github.com/376east/prismestra/pull/233)
+- **English and Russian.** The app starts in English by default. Choose Russian in Settings to use it on future launches. [Language settings](https://github.com/376east/prismestra/pull/240)
 
-See the [device compatibility guide](docs/compatibility.md) for supported models, firmware and remaining hardware verification.
+### Changed
+
+- **Scene editor.** Apply scene changes the active lighting. Save to library stores a version for later. Each action has its own confirmation. [Scene actions](https://github.com/376east/prismestra/pull/240)
+- **Device status.** After a scene is applied, Devices shows delivery separately for each output. A failed write is visible even if the scene itself was accepted. [Output status](https://github.com/376east/prismestra/pull/278)
+- **Connection settings.** Save pending connection edits before applying a scene. The editor points you to the unsaved settings. [Connection edits](https://github.com/376east/prismestra/pull/284)
+
+### Fixed
+
+- **Startup profile.** Saving the active installed profile updates the copy loaded at the next Windows sign-in. [Profile save](https://github.com/376east/prismestra/pull/255)
+- **Tray controls.** After Stop outputs, turning lighting on again resumes the last applied scene. [Resume](https://github.com/376east/prismestra/pull/286)
+- **Monitor lighting.** When screen capture stops, the output uses the scene’s edge colors. It returns to screen colors when capture resumes. [Screen fallback](https://github.com/376east/prismestra/pull/281)
+- **LCD.** Temperature cards keep their saved position. Static images skip duplicate frame writes, and the LCD can resume when the same USB interface returns. [Card placement](https://github.com/376east/prismestra/pull/215) · [LCD recovery](https://github.com/376east/prismestra/pull/258)
+- **Surplife E1.** Turning the strip off works with the default Bluetooth packet size. [BLE lights off](https://github.com/376east/prismestra/pull/257)
+- **Alice lamps.** If the response to a command is lost, the app keeps the last observed lamp state and reports that the command outcome is unknown. [Command status](https://github.com/376east/prismestra/pull/279)
+
+### Upgrading from a Preview
+
+Run the current Windows Setup over the existing installation to switch to the stable channel. Setup keeps saved profiles. [Installation guide](docs/windows-installer.md)
 
 ## Preview 10 (0.1.0.10) · 2026-11-23
 
