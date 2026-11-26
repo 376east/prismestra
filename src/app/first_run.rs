@@ -1213,6 +1213,10 @@ fn save_lcd_media(root: &Path) -> Result<AssetId, String> {
 mod openrgb_peer;
 
 #[cfg(test)]
+#[path = "first_run/mixed_outputs.rs"]
+mod mixed_outputs;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{

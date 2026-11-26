@@ -1941,9 +1941,7 @@ impl App {
         if self.runtime.autonomous_rgb() {
             candidate.enable_autonomous_rgb()?;
         }
-        if portable {
-            self.first_run.cancel_for_import();
-        }
+        self.first_run.profile_open_requested(portable);
         self.sources.release_lighting();
         self.runtime.stop();
         self.pending_open = Some(PendingOpen {
