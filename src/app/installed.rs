@@ -767,6 +767,12 @@ pub(crate) mod tests {
 
     pub(crate) struct Fixture(PathBuf);
     impl Fixture {
+        pub(crate) fn reopen_profile(&self) -> Result<Vec<OsString>, String> {
+            let executable = self.0.join("Prismestra.exe");
+            let manifest = Manifest::read(&executable)?;
+            bootstrap(&manifest, &executable, &self.0.join("user"))
+        }
+
         fn new() -> Self {
             let stamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)

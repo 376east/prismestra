@@ -23,6 +23,18 @@ pub fn atomic_write(path: &Path, bytes: &[u8], max_bytes: usize) -> io::Result<(
     atomic_write_with(path, bytes, max_bytes, Publication::Durable, replace)
 }
 
+#[cfg(windows)]
+pub(crate) fn atomic_create(path: &Path, bytes: &[u8], max_bytes: usize) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH;
+    atomic_write_with(
+        path,
+        bytes,
+        max_bytes,
+        Publication::Durable,
+        |source, name| move_windows(source, name, MOVEFILE_WRITE_THROUGH),
+    )
+}
+
 /// Publish a live helper record while existing readers permit delete sharing.
 /// On Windows these expiring records require atomic visibility, not durability
 /// across power loss. Persistent configuration and control writes use atomic_write.
@@ -156,6 +168,11 @@ fn replace_live(source: &Path, destination: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn replace_windows(source: &Path, destination: &Path, flags: u32) -> io::Result<()> {
     use windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING;
+    move_windows(source, destination, MOVEFILE_REPLACE_EXISTING | flags)
+}
+
+#[cfg(windows)]
+fn move_windows(source: &Path, destination: &Path, flags: u32) -> io::Result<()> {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn MoveFileExW(source: *const u16, destination: *const u16, flags: u32) -> i32;
@@ -164,14 +181,7 @@ fn replace_windows(source: &Path, destination: &Path, flags: u32) -> io::Result<
     let destination = wide(destination)?;
     // Same-directory source. No copy, deferred-at-reboot, registry or power flags.
     // https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-movefileexw
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | flags,
-        )
-    } == 0
-    {
+    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), flags) } == 0 {
         Err(io::Error::last_os_error())
     } else {
         Ok(())
@@ -221,14 +231,9 @@ fn wide(path: &Path) -> io::Result<Vec<u16>> {
 
 #[cfg(windows)]
 fn replace_shared_target(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::mem::{offset_of, size_of};
-    use std::os::windows::{
-        fs::{MetadataExt, OpenOptionsExt},
-        io::AsRawHandle,
-    };
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     use windows_sys::Win32::Storage::FileSystem::{
-        DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_RENAME_INFO,
-        FileRenameInfoEx, SetFileInformationByHandle,
+        DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FileRenameInfoEx,
     };
 
     let file = OpenOptions::new()
@@ -241,6 +246,34 @@ fn replace_shared_target(source: &Path, destination: &Path) -> io::Result<()> {
             "Live record staging path must be a regular file",
         ));
     }
+    const REPLACE_IF_EXISTS: u32 = 1;
+    const POSIX_SEMANTICS: u32 = 2;
+    rename_handle(
+        &file,
+        destination,
+        FileRenameInfoEx,
+        REPLACE_IF_EXISTS | POSIX_SEMANTICS,
+    )
+}
+
+/// Rename the already-open file to a vacant path without displacing its occupant.
+#[cfg(windows)]
+pub(crate) fn rename_new(file: &File, destination: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::FileRenameInfo;
+    rename_handle(file, destination, FileRenameInfo, 0)
+}
+
+#[cfg(windows)]
+fn rename_handle(
+    file: &File,
+    destination: &Path,
+    class: windows_sys::Win32::Storage::FileSystem::FILE_INFO_BY_HANDLE_CLASS,
+    flags: u32,
+) -> io::Result<()> {
+    use std::mem::{offset_of, size_of};
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_RENAME_INFO, SetFileInformationByHandle};
+
     let name = wide(destination)?;
     // FILE_RENAME_INFO ends in a flexible UTF-16 array. Keep the NUL in the
     // buffer and exclude it from FileNameLength, which is measured in bytes.
@@ -249,12 +282,10 @@ fn replace_shared_target(source: &Path, destination: &Path) -> io::Result<()> {
     let length = u32::try_from(bytes).map_err(io::Error::other)?;
     let mut buffer = vec![0u64; bytes.div_ceil(size_of::<u64>())];
     let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-    const REPLACE_IF_EXISTS: u32 = 1;
-    const POSIX_SEMANTICS: u32 = 2;
     // The aligned allocation includes the header and the full UTF-16 name.
     // The zero RootDirectory selects the absolute path above.
     unsafe {
-        (*info).Anonymous.Flags = REPLACE_IF_EXISTS | POSIX_SEMANTICS;
+        (*info).Anonymous.Flags = flags;
         (*info).FileNameLength = ((name.len() - 1) * size_of::<u16>()) as u32;
         buffer
             .as_mut_ptr()
@@ -262,11 +293,32 @@ fn replace_shared_target(source: &Path, destination: &Path) -> io::Result<()> {
             .add(offset)
             .cast::<u16>()
             .copy_from_nonoverlapping(name.as_ptr(), name.len());
-        (SetFileInformationByHandle(file.as_raw_handle(), FileRenameInfoEx, info.cast(), length)
-            != 0)
+        (SetFileInformationByHandle(file.as_raw_handle(), class, info.cast(), length) != 0)
             .then_some(())
             .ok_or_else(io::Error::last_os_error)
     }
+}
+
+#[cfg(windows)]
+pub(crate) fn remove_open(file: &File) -> io::Result<()> {
+    use std::{mem::size_of, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle,
+    };
+    let delete = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // The file was opened with DELETE access. Only its handle is affected.
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfo,
+            (&raw const delete).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(not(windows))]

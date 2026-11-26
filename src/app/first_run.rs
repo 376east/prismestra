@@ -787,6 +787,10 @@ const LOCAL_NAME: &str = "lighting-local.json";
 const JOURNAL_NAME: &str = ".first-run-transaction.json";
 const JOURNAL_LIMIT: usize = 2 * (super::document::MAX_BYTES + devices::MAX_JSON_BYTES) + 4096;
 
+pub(crate) fn recovery_is_pending(state_dir: &Path) -> bool {
+    state_dir.join(JOURNAL_NAME).symlink_metadata().is_ok()
+}
+
 #[derive(Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Baseline {
@@ -798,6 +802,8 @@ pub(crate) struct Baseline {
 #[serde(deny_unknown_fields)]
 struct Transaction {
     version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nonce: Option<[u8; 16]>,
     before: Baseline,
     after: Baseline,
     document: String,
@@ -871,8 +877,18 @@ impl Paths {
 }
 
 fn io_error(error: io::Error) -> String {
+    use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+    if matches!(
+        error.raw_os_error().map(|code| code as u32),
+        Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+    ) {
+        return BUSY.to_owned();
+    }
     format!("Первичная настройка: {error}")
 }
+
+const BUSY: &str =
+    "Файлы первичной настройки заняты. Закройте другой редактор и перезапустите Prismestra.";
 
 fn check_file(file: &File, limit: usize) -> Result<(), String> {
     let metadata = file.metadata().map_err(io_error)?;
@@ -892,7 +908,11 @@ fn checked_read(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
         .custom_flags(0x0020_0000)
         .open(path)
         .map_err(io_error)?;
-    check_file(&file, limit)?;
+    read_bounded(&file, limit)
+}
+
+fn read_bounded(file: &File, limit: usize) -> Result<Vec<u8>, String> {
+    check_file(file, limit)?;
     let mut bytes = Vec::new();
     file.take(limit as u64 + 1)
         .read_to_end(&mut bytes)
@@ -903,13 +923,14 @@ fn checked_read(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+fn hash(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn hashes(document: &[u8], local: &[u8]) -> Baseline {
-    let hash = |bytes: &[u8]| {
-        Sha256::digest(bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
-    };
     Baseline {
         document: hash(document),
         local: hash(local),
@@ -950,52 +971,223 @@ pub(crate) fn baseline(
     Ok(hashes(&document_bytes, &local_bytes))
 }
 
-fn complete(paths: &Paths, transaction: &Transaction, journal: &[u8]) -> Result<(), String> {
-    let current = paths.hashes()?;
-    let known = |found: &str, before: &str, after: &str| found == before || found == after;
-    if !known(
-        &current.document,
-        &transaction.before.document,
-        &transaction.after.document,
-    ) || !known(
-        &current.local,
-        &transaction.before.local,
-        &transaction.after.local,
-    ) {
-        return Err(conflict());
+/// Retain the identity and bytes we checked until the handle-based rename.
+fn open_transaction_file(path: &Path, locked: bool) -> Result<Option<File>, String> {
+    use windows_sys::Win32::{
+        Foundation::GENERIC_READ,
+        Storage::FileSystem::{
+            DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        },
+    };
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    if locked {
+        options
+            .access_mode(GENERIC_READ | DELETE)
+            .share_mode(FILE_SHARE_READ);
     }
-    if current.local != transaction.after.local {
-        crate::storage::atomic_write(
+    match options.open(path) {
+        Ok(file) => {
+            let metadata = file.metadata().map_err(io_error)?;
+            if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            {
+                return Err(conflict());
+            }
+            Ok(Some(file))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
+struct Publication<'a> {
+    path: &'a Path,
+    previous: PathBuf,
+    staged: PathBuf,
+    before: &'a str,
+    after: &'a str,
+    bytes: &'a [u8],
+    limit: usize,
+}
+
+impl<'a> Publication<'a> {
+    fn new(
+        path: &'a Path,
+        id: &str,
+        before: &'a str,
+        after: &'a str,
+        bytes: &'a str,
+        limit: usize,
+    ) -> Self {
+        let sidecar = |suffix| {
+            let mut name = path.file_name().unwrap().to_os_string();
+            name.push(format!(".first-run-{id}.{suffix}"));
+            path.with_file_name(name)
+        };
+        Self {
+            path,
+            previous: sidecar("previous"),
+            staged: sidecar("staged"),
+            before,
+            after,
+            bytes: bytes.as_bytes(),
+            limit,
+        }
+    }
+
+    fn matches(&self, file: &File, expected: &str) -> Result<bool, String> {
+        Ok(hash(&read_bounded(file, self.limit)?) == expected)
+    }
+
+    fn exact(&self, path: &Path, expected: &str, locked: bool) -> Result<Option<File>, String> {
+        let file = open_transaction_file(path, locked)?;
+        if let Some(file) = &file
+            && !self.matches(file, expected)?
+        {
+            return Err(conflict());
+        }
+        Ok(file)
+    }
+
+    fn check(&self) -> Result<(), String> {
+        match open_transaction_file(self.path, false)? {
+            Some(file) => {
+                let current = hash(&read_bounded(&file, self.limit)?);
+                if current != self.before && current != self.after {
+                    return Err(conflict());
+                }
+            }
+            None => {
+                // Both names survive only if our rename vacated the destination
+                // and the staged file has yet to become the active file.
+                self.interrupted(false)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn interrupted(&self, locked: bool) -> Result<(File, File), String> {
+        let previous = self
+            .exact(&self.previous, self.before, locked)?
+            .ok_or_else(conflict)?;
+        let staged = self
+            .exact(&self.staged, self.after, locked)?
+            .ok_or_else(conflict)?;
+        Ok((previous, staged))
+    }
+
+    fn publish(&self, before_publish: impl FnOnce() -> Result<(), String>) -> Result<File, String> {
+        let (previous, staged) = match open_transaction_file(self.path, true)? {
+            None => self.interrupted(true)?,
+            Some(current) => {
+                let hash = hash(&read_bounded(&current, self.limit)?);
+                if hash == self.after {
+                    return Ok(current);
+                }
+                if hash != self.before || open_transaction_file(&self.previous, false)?.is_some() {
+                    return Err(conflict());
+                }
+                let staged = match self.exact(&self.staged, self.after, true)? {
+                    Some(staged) => staged,
+                    None => {
+                        crate::storage::atomic_create(&self.staged, self.bytes, self.limit)
+                            .map_err(io_error)?;
+                        self.exact(&self.staged, self.after, true)?
+                            .ok_or_else(conflict)?
+                    }
+                };
+                rename_new(&current, &self.previous)?;
+                (current, staged)
+            }
+        };
+        before_publish()?;
+        rename_new(&staged, self.path)?;
+        drop(previous);
+        Ok(staged)
+    }
+
+    fn finish(&self) -> Result<(), String> {
+        for (path, hash) in [(&self.previous, self.before), (&self.staged, self.after)] {
+            if let Some(file) = self.exact(path, hash, true)? {
+                crate::storage::remove_open(&file).map_err(io_error)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn restore_vacant(&self) -> Result<(), String> {
+        match fs::symlink_metadata(self.path) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(error)),
+        }
+        if let (Some(staged), Some(previous)) = (
+            self.exact(&self.staged, self.after, true)?,
+            self.exact(&self.previous, self.before, true)?,
+        ) {
+            // If an editor fills the vacancy meanwhile, its version wins.
+            match rename_new(&previous, self.path) {
+                Err(error) if error == conflict() => {}
+                result => result?,
+            }
+            drop(staged);
+        }
+        Ok(())
+    }
+}
+
+fn rename_new(file: &File, destination: &Path) -> Result<(), String> {
+    match crate::storage::rename_new(file, destination) {
+        Err(error)
+            if error.kind() == io::ErrorKind::AlreadyExists
+                || fs::symlink_metadata(destination).is_ok() =>
+        {
+            Err(conflict())
+        }
+        result => result.map_err(io_error),
+    }
+}
+
+fn publications<'a>(paths: &'a Paths, tx: &'a Transaction, journal: &[u8]) -> [Publication<'a>; 2] {
+    let id = hash(journal);
+    [
+        Publication::new(
             &paths.local,
-            transaction.local.as_bytes(),
+            &id,
+            &tx.before.local,
+            &tx.after.local,
+            &tx.local,
             devices::MAX_JSON_BYTES,
-        )
-        .map_err(io_error)?;
-    }
-    let now = paths.hashes()?;
-    if now.local != transaction.after.local
-        || !known(
-            &now.document,
-            &transaction.before.document,
-            &transaction.after.document,
-        )
-    {
-        return Err(conflict());
-    }
-    if now.document != transaction.after.document {
-        crate::storage::atomic_write(
+        ),
+        Publication::new(
             &paths.profile,
-            transaction.document.as_bytes(),
+            &id,
+            &tx.before.document,
+            &tx.after.document,
+            &tx.document,
             super::document::MAX_BYTES,
-        )
-        .map_err(io_error)?;
+        ),
+    ]
+}
+
+fn complete(writes: &[Publication<'_>; 2], journal: &File) -> Result<(), String> {
+    for write in writes {
+        write.check()?;
     }
-    if paths.hashes()? != transaction.after
-        || checked_read(&paths.journal, JOURNAL_LIMIT)? != journal
-    {
-        return Err(conflict());
+    let _local = writes[0].publish(|| Ok(()))?;
+    let _profile = writes[1].publish(|| Ok(()))?;
+    // Keep the sidecars until the journal is marked complete. An interrupted
+    // retry must still recognize that it already used up a staged replacement.
+    crate::storage::remove_open(journal).map_err(io_error)?;
+    for write in writes {
+        if let Err(error) = write.finish() {
+            eprintln!("Первичная настройка: {error}");
+        }
     }
-    fs::remove_file(&paths.journal).map_err(io_error)
+    Ok(())
 }
 
 /// Publish a private recovery record before changing either participating file.
@@ -1016,24 +1208,33 @@ pub(crate) fn persist(state_dir: &Path, profile_path: &Path, plan: &Plan) -> Res
     let document = String::from_utf8(plan.document.encode()?).map_err(|e| e.to_string())?;
     let local = serde_json::to_string_pretty(&plan.local).map_err(|e| e.to_string())?;
     let after = hashes(document.as_bytes(), local.as_bytes());
+    let mut nonce = [0; 16];
+    getrandom::fill(&mut nonce).map_err(|error| error.to_string())?;
     let transaction = Transaction {
-        version: 1,
+        version: 2,
+        nonce: Some(nonce),
         before,
         after,
         document,
         local,
     };
     let journal = serde_json::to_vec(&transaction).map_err(|e| e.to_string())?;
-    crate::storage::atomic_write(&paths.journal, &journal, JOURNAL_LIMIT).map_err(io_error)?;
-    complete(&paths, &transaction, &journal)
+    crate::storage::atomic_create(&paths.journal, &journal, JOURNAL_LIMIT).map_err(io_error)?;
+    let record = open_transaction_file(&paths.journal, true)?.ok_or_else(conflict)?;
+    if read_bounded(&record, JOURNAL_LIMIT)? != journal {
+        return Err(conflict());
+    }
+    complete(&publications(&paths, &transaction, &journal), &record)
 }
 
 fn parse_transaction(journal: &[u8]) -> Result<Transaction, String> {
     let transaction: Transaction =
         serde_json::from_value(super::strict_json::unique_json(journal, JOURNAL_LIMIT)?)
             .map_err(|e| e.to_string())?;
-    if transaction.version != 1
-        || !devices::openrgb::valid_hash(&transaction.before.document)
+    if !matches!(
+        (transaction.version, transaction.nonce),
+        (1, None) | (2, Some(_))
+    ) || !devices::openrgb::valid_hash(&transaction.before.document)
         || !devices::openrgb::valid_hash(&transaction.before.local)
         || transaction.after
             != hashes(
@@ -1048,44 +1249,22 @@ fn parse_transaction(journal: &[u8]) -> Result<Transaction, String> {
     Ok(transaction)
 }
 
-fn quarantine(paths: &Paths, journal: &[u8], reason: &str) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
-
-    if checked_read(&paths.journal, JOURNAL_LIMIT)? != journal {
-        return Err("Запись восстановления была заменена.".into());
-    }
-    let wide = |path: &Path| {
-        path.as_os_str()
-            .encode_wide()
-            .chain([0])
-            .collect::<Vec<_>>()
-    };
-    let source = wide(&paths.journal);
+fn quarantine(paths: &Paths, journal: &File, reason: &str) -> Result<(), String> {
     for suffix in 0..64 {
         let path = paths.state.join(format!(
             ".first-run-transaction.conflict-{}-{suffix}.json",
             std::process::id()
         ));
-        let destination = wide(&path);
-        // Require a fresh name, preserving every earlier conflict record.
-        if unsafe {
-            MoveFileExW(
-                source.as_ptr(),
-                destination.as_ptr(),
-                MOVEFILE_WRITE_THROUGH,
-            )
-        } != 0
-        {
-            eprintln!(
-                "Первичная настройка: {reason} Запись сохранена в {}.",
-                path.display()
-            );
-            return Ok(());
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::AlreadyExists {
-            return Err(io_error(error));
+        match crate::storage::rename_new(journal, &path) {
+            Ok(()) => {
+                eprintln!(
+                    "Первичная настройка: {reason} Запись сохранена в {}.",
+                    path.display()
+                );
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(io_error(error)),
         }
     }
     Err("Не удалось сохранить конфликтную запись первичной настройки.".into())
@@ -1098,27 +1277,41 @@ pub(crate) fn recover(state_dir: &Path, profile_path: &Path) -> Result<(), Strin
     if !paths.has_journal()? {
         return Ok(());
     }
-    let _lock = paths.lock()?;
-    if !paths.has_journal()? {
-        return Ok(());
+    match recover_pending(&paths) {
+        Err(error)
+            if error == BUSY
+                && checked_read(&paths.profile, super::document::MAX_BYTES).is_ok()
+                && fs::symlink_metadata(&paths.local).is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.file_attributes() & 0x400 == 0
+                }) =>
+        {
+            // Both active names remain in place. The editor can open the
+            // document now, and the next launch can retry the same journal.
+            eprintln!("Первичная настройка: {error}");
+            Ok(())
+        }
+        result => result,
     }
-    let journal = checked_read(&paths.journal, JOURNAL_LIMIT)?;
+}
+
+fn recover_pending(paths: &Paths) -> Result<(), String> {
+    let _lock = paths.lock()?;
+    let Some(record) = open_transaction_file(&paths.journal, true)? else {
+        return Ok(());
+    };
+    let journal = read_bounded(&record, JOURNAL_LIMIT)?;
     let transaction = match parse_transaction(&journal) {
         Ok(transaction) => transaction,
-        Err(error) => return quarantine(&paths, &journal, &error),
+        Err(error) => return quarantine(paths, &record, &error),
     };
-    for path in [&paths.profile, &paths.local] {
-        match fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.is_file() && metadata.file_attributes() & 0x400 == 0 => {}
-            Ok(_) => return quarantine(&paths, &journal, &conflict()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return quarantine(&paths, &journal, &conflict());
+    let writes = publications(paths, &transaction, &journal);
+    match complete(&writes, &record) {
+        Err(error) if error == conflict() => {
+            for write in &writes {
+                write.restore_vacant()?;
             }
-            Err(error) => return Err(io_error(error)),
+            quarantine(paths, &record, &error)
         }
-    }
-    match complete(&paths, &transaction, &journal) {
-        Err(error) if error == conflict() => quarantine(&paths, &journal, &error),
         result => result,
     }
 }
@@ -1980,7 +2173,21 @@ mod tests {
                 serde_json::to_vec_pretty(&local).unwrap(),
             )
             .unwrap();
-            let baseline = baseline(&state, &profile, &document, &local).unwrap();
+            let plan = Self::plan(&state, &profile);
+            (
+                Self {
+                    root,
+                    state,
+                    profile,
+                },
+                plan,
+            )
+        }
+
+        fn plan(state: &Path, profile: &Path) -> Plan {
+            let document = Document::load(profile).unwrap();
+            let local = Local::read(&state.join(LOCAL_NAME), &document).unwrap();
+            let baseline = baseline(state, profile, &document, &local).unwrap();
             let mut plan = assemble(
                 document,
                 local,
@@ -1993,14 +2200,19 @@ mod tests {
             )
             .unwrap();
             plan.baseline = Some(baseline);
-            (
-                Self {
-                    root,
-                    state,
-                    profile,
-                },
-                plan,
-            )
+            plan
+        }
+
+        fn interrupt_before_profile(&self, plan: &Plan) {
+            use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+            let reader = OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(&self.profile)
+                .unwrap();
+            assert!(persist(&self.state, &self.profile, plan).is_err());
+            drop(reader);
+            assert!(self.state.join(JOURNAL_NAME).is_file());
         }
     }
 
@@ -2010,14 +2222,17 @@ mod tests {
             for name in [LOCAL_NAME, JOURNAL_NAME, ".first-run-transaction.lock"] {
                 let _ = fs::remove_file(self.state.join(name));
             }
-            if let Ok(entries) = fs::read_dir(&self.state) {
-                for entry in entries.flatten().filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with(".first-run-transaction.conflict-")
-                }) {
-                    let _ = fs::remove_file(entry.path());
+            for dir in [&self.state, &self.root] {
+                if let Ok(entries) = fs::read_dir(dir) {
+                    for entry in entries.flatten().filter(|entry| {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        name.starts_with(".first-run-transaction.conflict-")
+                            || name.starts_with("profile.json.first-run-")
+                            || name.starts_with("lighting-local.json.first-run-")
+                    }) {
+                        let _ = fs::remove_file(entry.path());
+                    }
                 }
             }
             let _ = fs::remove_dir(&self.state);
@@ -2032,13 +2247,7 @@ mod tests {
             let before = fs::read(&fixture.profile).unwrap();
             // A real Windows reader denies replacement while allowing the
             // preimage check. This interrupts the second atomic write.
-            let reader = OpenOptions::new()
-                .read(true)
-                .share_mode(1)
-                .open(&fixture.profile)
-                .unwrap();
-            assert!(persist(&fixture.state, &fixture.profile, &plan).is_err());
-            drop(reader);
+            fixture.interrupt_before_profile(&plan);
             let journal = fixture.state.join(JOURNAL_NAME);
             assert!(journal.is_file());
             let journal_bytes = fs::read(&journal).unwrap();
@@ -2078,6 +2287,180 @@ mod tests {
                 written_local
             );
         }
+    }
+
+    #[test]
+    fn external_editor_claiming_vacant_name_keeps_its_file_and_both_proposals() {
+        let (fixture, plan) = SavedFixture::new();
+        let original = fs::read(&fixture.profile).unwrap();
+        let mut user_edit = original.clone();
+        user_edit.push(b'\n');
+        fixture.interrupt_before_profile(&plan);
+        let paths = Paths::checked(&fixture.state, &fixture.profile).unwrap();
+        let journal = fs::read(&paths.journal).unwrap();
+        let transaction = parse_transaction(&journal).unwrap();
+        let writes = publications(&paths, &transaction, &journal);
+
+        // The competing editor creates a real file after the old profile has
+        // moved and before the validated proposal claims the active name.
+        assert_eq!(
+            writes[1]
+                .publish(|| {
+                    assert!(!paths.profile.exists());
+                    crate::storage::atomic_write(
+                        &paths.profile,
+                        &user_edit,
+                        super::super::document::MAX_BYTES,
+                    )
+                    .unwrap();
+                    Ok(())
+                })
+                .unwrap_err(),
+            conflict()
+        );
+        recover(&fixture.state, &fixture.profile).unwrap();
+        assert_eq!(fs::read(&paths.profile).unwrap(), user_edit);
+        assert_eq!(fs::read(&writes[1].previous).unwrap(), original);
+        assert_eq!(fs::read(&writes[1].staged).unwrap(), writes[1].bytes);
+        assert!(!paths.journal.exists());
+        let current = Document::load(&paths.profile).unwrap();
+        assert!(Local::read(&paths.local, &current).is_err());
+        assert!(Local::read_draft(&paths.local, &current).is_ok());
+    }
+
+    #[test]
+    fn recovery_defers_while_an_editor_keeps_a_readable_profile_busy() {
+        let (fixture, plan) = SavedFixture::new();
+        fixture.interrupt_before_profile(&plan);
+        let paths = Paths::checked(&fixture.state, &fixture.profile).unwrap();
+        let journal = fs::read(&paths.journal).unwrap();
+        let original = Document::load(&paths.profile).unwrap();
+        let reader = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&paths.profile)
+            .unwrap();
+        recover(&fixture.state, &fixture.profile).unwrap();
+        assert_eq!(Document::load(&paths.profile).unwrap(), original);
+        assert_eq!(fs::read(&paths.journal).unwrap(), journal);
+        drop(reader);
+        recover(&fixture.state, &fixture.profile).unwrap();
+        assert_eq!(Document::load(&paths.profile).unwrap(), plan.document);
+        assert!(!paths.journal.exists());
+    }
+
+    #[test]
+    fn installed_bootstrap_passes_a_conflicting_profile_to_editor_without_activation() {
+        let (fixture, profile, state, preview_args) =
+            super::super::installed::tests::fresh_profile();
+        let original = fs::read(&profile).unwrap();
+        let plan = SavedFixture::plan(&state, &profile);
+        let reader = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&profile)
+            .unwrap();
+        assert_eq!(persist(&state, &profile, &plan).unwrap_err(), BUSY);
+        let local = state.join(LOCAL_NAME);
+        let journal = state.join(JOURNAL_NAME);
+        let tentative = fs::read(&local).unwrap();
+
+        // The real installed bootstrap passes the document only. Native
+        // activation is deferred even if the private draft is still busy.
+        assert_eq!(fixture.reopen_profile().unwrap(), preview_args);
+        assert!(
+            !preview_args
+                .iter()
+                .any(|arg| arg == "--start-connected" || arg == "--native-lighting")
+        );
+        assert!(journal.is_file());
+        assert!(recovery_is_pending(&state));
+        assert_eq!(fs::read(&profile).unwrap(), original);
+        drop(reader);
+        let mut external = Document::load(&profile).unwrap();
+        external.lighting.scene.brightness = 84;
+        external.save(&profile).unwrap();
+
+        assert_eq!(fixture.reopen_profile().unwrap(), preview_args);
+        assert!(!journal.exists());
+        assert!(!recovery_is_pending(&state));
+        assert_eq!(Document::load(&profile).unwrap(), external);
+        assert_eq!(fs::read(&local).unwrap(), tentative);
+        assert!(Local::read(&local, &external).is_err());
+        assert!(Local::read_draft(&local, &external).is_ok());
+    }
+
+    #[test]
+    fn recovery_finishes_a_vacancy_but_respects_a_later_deletion() {
+        for deleted_after_publish in [false, true] {
+            let (fixture, plan) = SavedFixture::new();
+            fixture.interrupt_before_profile(&plan);
+            let paths = Paths::checked(&fixture.state, &fixture.profile).unwrap();
+            let journal = fs::read(&paths.journal).unwrap();
+            let transaction = parse_transaction(&journal).unwrap();
+            let writes = publications(&paths, &transaction, &journal);
+            if deleted_after_publish {
+                drop(writes[1].publish(|| Ok(())).unwrap());
+                fs::remove_file(&paths.profile).unwrap();
+            } else {
+                // Drop the handles and leave the on-disk state that a process
+                // interruption at this step would leave behind.
+                let interruption = "interrupt before publication".to_owned();
+                assert_eq!(
+                    writes[1].publish(|| Err(interruption.clone())).unwrap_err(),
+                    interruption
+                );
+                assert!(writes[1].staged.is_file());
+            }
+            assert!(!paths.profile.exists());
+            recover(&fixture.state, &fixture.profile).unwrap();
+            assert!(!paths.journal.exists());
+            if deleted_after_publish {
+                assert!(!paths.profile.exists());
+                assert!(writes[1].previous.is_file());
+            } else {
+                assert_eq!(Document::load(&paths.profile).unwrap(), plan.document);
+                assert!(!writes[1].previous.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_respects_an_editor_reinstating_the_original_bytes() {
+        let (fixture, plan) = SavedFixture::new();
+        let original = fs::read(&fixture.profile).unwrap();
+        fixture.interrupt_before_profile(&plan);
+        let paths = Paths::checked(&fixture.state, &fixture.profile).unwrap();
+        let journal = fs::read(&paths.journal).unwrap();
+        let transaction = parse_transaction(&journal).unwrap();
+        let writes = publications(&paths, &transaction, &journal);
+        drop(writes[1].publish(|| Ok(())).unwrap());
+        fs::write(&paths.profile, &original).unwrap();
+        recover(&fixture.state, &fixture.profile).unwrap();
+        assert_eq!(fs::read(&paths.profile).unwrap(), original);
+        assert!(!writes[1].staged.exists());
+        assert!(!paths.journal.exists());
+    }
+
+    #[test]
+    fn recovery_accepts_an_interrupted_version_one_journal() {
+        let (fixture, plan) = SavedFixture::new();
+        let paths = Paths::checked(&fixture.state, &fixture.profile).unwrap();
+        let document = String::from_utf8(plan.document.encode().unwrap()).unwrap();
+        let local = serde_json::to_string_pretty(&plan.local).unwrap();
+        let transaction = Transaction {
+            version: 1,
+            nonce: None,
+            before: plan.baseline.unwrap(),
+            after: hashes(document.as_bytes(), local.as_bytes()),
+            document,
+            local,
+        };
+        fs::write(&paths.journal, serde_json::to_vec(&transaction).unwrap()).unwrap();
+        fs::write(&paths.local, transaction.local).unwrap();
+        recover(&fixture.state, &fixture.profile).unwrap();
+        assert_eq!(Document::load(&paths.profile).unwrap(), plan.document);
+        assert!(!paths.journal.exists());
     }
 
     #[test]

@@ -138,6 +138,12 @@ impl App {
         self.first_run.status_label = Some((label, self.status.clone()));
     }
 
+    fn show_profile_repair(&mut self, message: impl Into<String>) -> bool {
+        self.first_run.cancel(CancellationReason::Error);
+        self.set_first_run_status("profileNeedsAttention", message);
+        true
+    }
+
     pub(super) fn first_run_status_label(&self) -> Option<&'static str> {
         // Other routes also write the shared status line.
         self.first_run
@@ -359,10 +365,27 @@ impl App {
             }
             // The bootstrap deliberately loaded migrated live sessions in preview until drain.
             if self.native_lighting.is_none() {
-                let local = Local::read(
+                if first_run::recovery_is_pending(&self.state_dir) {
+                    let tip = self.language.text(
+                        "Профиль открыт для предпросмотра. Закройте другой редактор и перезапустите Prismestra, чтобы закончить восстановление.",
+                        "The profile is open in preview. Close the other editor and restart Prismestra to finish recovery.",
+                    );
+                    return Ok(self.show_profile_repair(tip));
+                }
+                let local = match Local::read(
                     &self.state_dir.join("lighting-local.json"),
                     self.runtime.document(),
-                )?;
+                ) {
+                    Ok(local) => local,
+                    Err(error) => {
+                        eprintln!("Prismestra saved output restore: {error}");
+                        let tip = self.language.text(
+                            "Профиль открыт для предпросмотра. Проверьте «Подключения». Если остались лишние привязки, нажмите «Убрать отсутствующие», затем «Сохранить». Также можно восстановить согласованные профиль и привязки.",
+                            "The profile is open in preview. Check Connections. If unused bindings remain, choose Remove unused bindings, then Save. You can also restore a matching profile and bindings.",
+                        );
+                        return Ok(self.show_profile_repair(tip));
+                    }
+                };
                 let document = self.runtime.document().clone();
                 let outputs = local.prepare(&document, &self.asset_root)?;
                 self.first_run.restoring = Some(self.runtime.with(|runtime, _| {
