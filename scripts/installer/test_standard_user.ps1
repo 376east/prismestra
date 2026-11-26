@@ -7,6 +7,7 @@ param(
     [Parameter(Mandatory)][string]$ReportDirectory,
     [string]$WebViewProbe,
     [ValidatePattern('^[0-9a-f]{64}$')][string]$WebViewProbeSha256,
+    [ValidateRange(0, 2)][int]$DdpDevices = 0,
     [switch]$DisposableRunner
 )
 
@@ -138,7 +139,7 @@ public static class PrismestraCiLogon {
 '@
 
 $worker = @'
-param($Install, $Id, $ExpectedSid)
+param($Install, $Id, $ExpectedSid, [int]$DdpDevices)
 $ErrorActionPreference = 'Stop'
 $env:PSModulePath = Join-Path $PSHOME Modules
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -150,9 +151,10 @@ $result = [ordered]@{ sid = $identity.User.Value; standard_user = $true; startup
     empty_profile = $false; local_bindings = $false; backend_pin = $false; resident_shell = 'not_observed';
     automatic_setup = $false; first_run = $null; native_identity_probe = $false; native_profile_prepare = $false;
     native_current_sid = $false; native_startup = $false; native_webview_probe = $false;
-    native_bootstrap = $false }
+    native_bootstrap = $false; seeded_ddp_devices = $DdpDevices; first_scene = $null }
 $app = $null
 $stop = $null
+$receivers = @()
 try {
     $profile = Join-Path $local 'Prismestra'
     if (Test-Path -LiteralPath $profile) { throw 'The standard-user profile was not fresh.' }
@@ -263,11 +265,41 @@ try {
     $result.native_startup = $true
     $manifest = Get-Content -LiteralPath (Join-Path $Install 'install-manifest.json') -Raw | ConvertFrom-Json
     if ($null -ne $manifest.data_namespace) { throw 'Expected the installed production manifest.' }
-    $app = Start-Process -FilePath $image -ArgumentList '--installed', '--autostart' -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $PSScriptRoot 'app.stderr.log') -RedirectStandardOutput (Join-Path $PSScriptRoot 'app.stdout.log')
-    $null = $app.Handle
     $documentPath = Join-Path $profile 'profile.json'
     $configPath = Join-Path $profile 'state\managed-openrgb.json'
     $bindingPath = Join-Path $profile 'state\lighting-local.json'
+    if ($DdpDevices) {
+        Add-Type -Path (Join-Path $PSScriptRoot 'first_scene_receiver.cs')
+        if ([PrismestraCiDdpReceiver]::SdkOwner() -ne 0 -or (Test-Path -LiteralPath $profile)) {
+            throw 'Positive first-scene fixture requires an unused profile and SDK port.'
+        }
+        $devices = @(
+            for ($i = 0; $i -lt $DdpDevices; $i++) {
+                @{name = "Prismestra CI DDP $i"; ip = '127.0.0.1'; port = 14048 + $i; num_leds = 2 + $i}
+            }
+        )
+        foreach ($device in $devices) {
+            $receivers += [PrismestraCiDdpReceiver]::new($device.port, $device.num_leds)
+        }
+        $seedDir = Join-Path $profile 'state\openrgb'
+        [void][IO.Directory]::CreateDirectory($seedDir)
+        $seed = Join-Path $seedDir 'OpenRGB.json'
+        @{DDPDevices = @{devices = $devices}} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $seed -Encoding ASCII
+        $before = @(Get-ChildItem -LiteralPath $profile -File -Recurse -Force)
+        if ($before.Count -ne 1 -or $before[0].FullName -ine $seed) {
+            throw 'Only the OpenRGB device configuration may exist before launch.'
+        }
+        $result.first_scene = [ordered]@{
+            prelaunch_files = @('state/openrgb/OpenRGB.json')
+            openrgb_ddp_devices = $devices
+            ticks_per_second = [Diagnostics.Stopwatch]::Frequency
+        }
+        $result.empty_profile = -not (Test-Path -LiteralPath $documentPath)
+        $result.local_bindings = -not (Test-Path -LiteralPath $bindingPath)
+        $result.first_scene.launch_tick = [Diagnostics.Stopwatch]::GetTimestamp()
+    }
+    $app = Start-Process -FilePath $image -ArgumentList '--installed', '--autostart' -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $PSScriptRoot 'app.stderr.log') -RedirectStandardOutput (Join-Path $PSScriptRoot 'app.stdout.log')
+    $null = $app.Handle
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     while ([DateTime]::UtcNow -lt $deadline -and
         -not ((Test-Path -LiteralPath $documentPath) -and (Test-Path -LiteralPath $configPath) -and
@@ -275,14 +307,16 @@ try {
         if ($app.HasExited) { throw ('App exited before writing its bootstrap files: ' + $app.ExitCode) }
         Start-Sleep -Milliseconds 200
     }
-    $document = Get-Content -LiteralPath $documentPath -Raw | ConvertFrom-Json
-    $bindings = Get-Content -LiteralPath $bindingPath -Raw | ConvertFrom-Json
     $backend = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-    $result.empty_profile = $document.version -eq 1 -and $document.lighting.version -eq 1 -and
-        $document.lighting.setup.version -eq 1 -and $document.lighting.setup.devices.Count -eq 0 -and
-        $document.lighting.setup.canvas.points.Count -eq 0 -and -not $document.lighting.schedule.enabled
-    $result.local_bindings = $bindings.version -eq 1 -and @($bindings.devices.PSObject.Properties).Count -eq 0 -and
-        $bindings.monitors.monitors.Count -eq 0
+    if (!$DdpDevices) {
+        $document = Get-Content -LiteralPath $documentPath -Raw | ConvertFrom-Json
+        $bindings = Get-Content -LiteralPath $bindingPath -Raw | ConvertFrom-Json
+        $result.empty_profile = $document.version -eq 1 -and $document.lighting.version -eq 1 -and
+            $document.lighting.setup.version -eq 1 -and $document.lighting.setup.devices.Count -eq 0 -and
+            $document.lighting.setup.canvas.points.Count -eq 0 -and -not $document.lighting.schedule.enabled
+        $result.local_bindings = $bindings.version -eq 1 -and @($bindings.devices.PSObject.Properties).Count -eq 0 -and
+            $bindings.monitors.monitors.Count -eq 0
+    }
     $relative = 'components\openrgb\runtime\OpenRGB.exe'
     $pinned = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Install $relative)).Hash.ToLowerInvariant()
     $backendImage = $backend.executable
@@ -305,7 +339,8 @@ try {
             catch { $result.first_run = $null }
             if ($null -ne $result.first_run) {
                 if ($result.first_run.phase -eq 'error') { throw ('Automatic setup failed: ' + $result.first_run.detail) }
-                if ($result.first_run.native_outputs -and $result.first_run.phase -in @('applied','discovered','complete')) {
+                if ($result.first_run.native_outputs -and $result.first_run.phase -in @('applied','discovered','complete') -and
+                    (!$DdpDevices -or $result.first_run.devices -eq $DdpDevices)) {
                     $sdkErrors = @($result.first_run.discovery_issues | Where-Object {
                         $_ -match '^OpenRGB:|^Управляемый OpenRGB недоступен'
                     })
@@ -318,6 +353,75 @@ try {
         Start-Sleep -Milliseconds 200
     }
     if (-not $result.automatic_setup) { throw 'Installed app never automatically restored and discovered outputs.' }
+    if ($DdpDevices) {
+        if ($result.first_run.early_manual_starts -ne 0 -or $result.first_run.process_id -ne $app.Id -or
+            [long]$result.first_run.process_creation_filetime -ne $app.StartTime.ToUniversalTime().ToFileTimeUtc()) {
+            throw 'Automatic setup receipt did not belong to this unassisted launch.'
+        }
+        $document = Get-Content -LiteralPath $documentPath -Raw | ConvertFrom-Json
+        $bindings = Get-Content -LiteralPath $bindingPath -Raw | ConvertFrom-Json
+        $setup = $document.lighting.setup
+        $leds = ($devices | ForEach-Object { $_.num_leds } | Measure-Object -Sum).Sum
+        if ($setup.devices.Count -ne $DdpDevices -or @($bindings.devices.PSObject.Properties).Count -ne $DdpDevices -or
+            $setup.canvas.points.Count -ne $leds -or @($bindings.monitors.monitors).Count -ne 0) {
+            throw 'Automatic setup did not persist the expected device, binding and canvas counts.'
+        }
+        $mapped = @(
+            foreach ($device in $devices) {
+                $rows = @($setup.devices | Where-Object { $_.label -ceq $device.name })
+                $row = $rows[0]
+                if ($rows.Count -ne 1 -or $row.id -cnotmatch '^auto-rgb-[0-9a-f]{40}$' -or
+                    $row.driver.type -cne 'open_rgb' -or !$row.enabled -or $row.leds -ne $device.num_leds) {
+                    throw ("Invalid automatic OpenRGB device for " + $device.name)
+                }
+                $points = @($setup.canvas.points | Where-Object { $_.device -ceq $row.id })
+                $indices = @($points.led | Sort-Object -Unique)
+                $outside = @($points | Where-Object {
+                    $_.x -lt 0 -or $_.x -ge $setup.canvas.width -or $_.y -lt 0 -or $_.y -ge $setup.canvas.height
+                })
+                if ($points.Count -ne $device.num_leds -or ($indices -join ',') -cne ((0..($device.num_leds - 1)) -join ',') -or $outside.Count) {
+                    throw ("Invalid mapped LED geometry for " + $device.name)
+                }
+                $assignment = $bindings.devices.PSObject.Properties[$row.id].Value
+                if ($assignment.type -cne 'open_rgb' -or $assignment.endpoint -cne '127.0.0.1:17422' -or
+                    $assignment.identity -cnotmatch '^[0-9a-f]{64}$' -or $assignment.topology -cnotmatch '^[0-9a-f]{64}$') {
+                    throw ("Invalid local OpenRGB binding for " + $device.name)
+                }
+                @{id = $row.id; binding = $assignment; points = $points; port = $device.port}
+            }
+        )
+        if (@($mapped | ForEach-Object { $_.binding.identity } | Sort-Object -Unique).Count -ne $DdpDevices) {
+            throw 'Configured DDP controllers did not obtain distinct bindings.'
+        }
+        $result.first_scene.map = $mapped
+        $result.first_scene.profile_sha256 = (Get-FileHash -LiteralPath $documentPath).Hash
+        $result.first_scene.bindings_sha256 = (Get-FileHash -LiteralPath $bindingPath).Hash
+        $owner = [PrismestraCiDdpReceiver]::SdkOwner()
+        if ($owner -le 0) { throw 'The installed OpenRGB SDK listener was missing or ambiguous.' }
+        $child = Get-Process -Id $owner
+        try {
+            $null = $child.Handle
+            $info = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $owner)
+            if ($child.MainModule.FileName -ine $backendImage -or $info.ParentProcessId -ne $app.Id -or
+                $child.StartTime -lt $app.StartTime) { throw 'The SDK listener was not the resident-owned OpenRGB process.' }
+            $result.first_scene.backend = @{pid = $owner; parent_pid = $info.ParentProcessId; image = $backendImage;
+                creation_filetime = $child.StartTime.ToUniversalTime().ToFileTimeUtc().ToString()}
+            $frames = [object[]]::new($DdpDevices)
+            $result.first_scene.frames = $frames
+            $until = [DateTime]::UtcNow.AddSeconds(12)
+            do {
+                for ($i = 0; $i -lt $DdpDevices; $i++) {
+                    if (!$frames[$i]) { $frames[$i] = $receivers[$i].ReadFrame($owner) }
+                }
+                if ($frames -notcontains $null) { break }
+                Start-Sleep -Milliseconds 50
+            } while (!$app.HasExited -and !$child.HasExited -and [DateTime]::UtcNow -lt $until)
+            if ($frames -contains $null -or $app.HasExited -or $child.HasExited -or
+                [PrismestraCiDdpReceiver]::SdkOwner() -ne $owner) {
+                throw 'Missing nonblack DDP frames with expected geometry from the resident-owned OpenRGB process.'
+            }
+        } finally { $child.Dispose() }
+    }
     try {
         Add-Type -TypeDefinition @"
 using System;
@@ -361,6 +465,11 @@ public static class PrismestraCiShell {
     if ($result.resident_shell -eq 'process_drained_by_shutdown') {
         $profileHash = (Get-FileHash -LiteralPath $documentPath).Hash
         $bindingsHash = (Get-FileHash -LiteralPath $bindingPath).Hash
+        if ($DdpDevices -and ($profileHash -cne $result.first_scene.profile_sha256 -or
+            $bindingsHash -cne $result.first_scene.bindings_sha256)) {
+            throw 'Saved automatic map or bindings changed before the resident drained.'
+        }
+        if ($DdpDevices) { $result.first_scene.saved_map_stable = $true }
         $prep = Start-Process -FilePath $image -ArgumentList '--setup-prepare-installed', $ExpectedSid -Wait -PassThru -WindowStyle Hidden
         if ($prep.ExitCode -ne 0 -or (Get-FileHash -LiteralPath $documentPath).Hash -cne $profileHash -or
             (Get-FileHash -LiteralPath $bindingPath).Hash -cne $bindingsHash) {
@@ -369,16 +478,17 @@ public static class PrismestraCiShell {
         $result.native_profile_prepare = $true
     }
     $result.startup_error_file = Test-Path -LiteralPath (Join-Path $profile 'state\startup-error.txt')
-    $result | ConvertTo-Json | Set-Content -LiteralPath $receiptPath -Encoding UTF8
+    $result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $receiptPath -Encoding UTF8
     exit 0
 } catch {
     $result.error = $_.Exception.Message
-    $result | ConvertTo-Json | Set-Content -LiteralPath $receiptPath -Encoding UTF8
+    $result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $receiptPath -Encoding UTF8
     exit 1
 } finally {
     # Retained handles are only for this disposable fixture's own processes.
     if ($app -and -not $app.HasExited) { $app.Kill(); [void]$app.WaitForExit(5000) }
     if ($stop -and -not $stop.HasExited) { $stop.Kill(); [void]$stop.WaitForExit(5000) }
+    foreach ($receiver in $receivers) { $receiver.Dispose() }
 }
 '@
 
@@ -420,17 +530,20 @@ try {
         }
     }
     $workerFile = Join-Path $scratch 'worker.ps1'
+    if ($DdpDevices) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'first_scene_receiver.cs') -Destination $scratch
+    }
     # Windows PowerShell 5.1 needs a BOM for non-ASCII source on every system locale.
     [IO.File]::WriteAllText($workerFile, $worker, [Text.UTF8Encoding]::new($true))
     $powershell = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
     $workerLog = Join-Path $scratch 'worker-output.log'
     $wrapperFile = Join-Path $scratch 'invoke-worker.ps1'
     $wrapper = @'
-param($Install, $Id, $ExpectedSid)
+param($Install, $Id, $ExpectedSid, $DdpDevices)
 $ErrorActionPreference = 'Stop'
 $log = Join-Path $PSScriptRoot 'worker-output.log'
 try {
-    & (Join-Path $PSScriptRoot 'worker.ps1') $Install $Id $ExpectedSid *> $log
+    & (Join-Path $PSScriptRoot 'worker.ps1') $Install $Id $ExpectedSid $DdpDevices *> $log
     exit $LASTEXITCODE
 } catch {
     $_ | Out-String | Add-Content -LiteralPath $log -Encoding UTF8
@@ -440,7 +553,7 @@ try {
     [IO.File]::WriteAllText($wrapperFile, $wrapper, [Text.UTF8Encoding]::new($true))
     # CreateProcessWithLogonW has a 1024-character command-line limit.
     # https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw
-    $workerArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $wrapperFile + '" "' + $install + '" ' + $id + ' ' + $sid
+    $workerArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $wrapperFile + '" "' + $install + '" ' + $id + ' ' + $sid + ' ' + $DdpDevices
     Assert-Expected (($powershell.Length + $workerArguments.Length + 4) -lt 1024) 'Fixture logon command line exceeds the Windows limit.'
     $started = Get-Date
     $status = [PrismestraCiLogon]::Run($username, $password, $sid, $powershell, $workerArguments, $scratch)
@@ -490,6 +603,8 @@ try {
     Assert-Expected ($actual.startup_command -ceq ('"' + (Join-Path $install 'Prismestra.exe') + '" --installed --autostart')) 'Standard-user HKCU Run verification failed.'
     Assert-Expected (!$WebViewProbe -or $actual.native_webview_probe) 'Native original-user WebView2 probe was not verified.'
     Assert-Expected (!$WebViewProbe -or $actual.native_bootstrap) 'Native pre-runtime SID and startup commands were not verified.'
+    Assert-Expected ($actual.seeded_ddp_devices -eq $DdpDevices -and (!$DdpDevices -or
+        ($actual.first_scene.saved_map_stable -and $actual.first_scene.frames.Count -eq $DdpDevices))) 'Installed first-scene verification failed. See standard-user.json.'
 } finally {
     try {
         if ($setupAttempted -and (Test-Path -LiteralPath $registry)) {
@@ -520,7 +635,7 @@ try {
             [IO.Directory]::Delete($probeDirectory)
         }
         if (Test-Path -LiteralPath $scratch) {
-            foreach ($name in @('worker.ps1', 'invoke-worker.ps1', 'startup-helper.stderr.log', 'startup-helper.stdout.log', 'worker-output.log', 'app.stderr.log', 'app.stdout.log', 'native-current-sid.log')) {
+            foreach ($name in @('worker.ps1', 'invoke-worker.ps1', 'startup-helper.stderr.log', 'startup-helper.stdout.log', 'worker-output.log', 'app.stderr.log', 'app.stdout.log', 'native-current-sid.log', 'first_scene_receiver.cs')) {
                 $file = Join-Path $scratch $name
                 if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
             }
