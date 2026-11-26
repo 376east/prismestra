@@ -25,8 +25,15 @@ if ($LASTEXITCODE -ne 0 -or $remoteTagObject -cne $tagObject) {
     throw 'The live release tag differs from the checked-out tag.'
 }
 $masterCommit = gh api "repos/$Repository/git/ref/heads/master" --jq .object.sha
-if ($LASTEXITCODE -ne 0 -or $masterCommit -cne $Commit) {
-    throw 'The release commit must be the current master tip.'
+if ($LASTEXITCODE -ne 0 -or $masterCommit -cnotmatch '^[0-9a-f]{40}$') {
+    throw 'Could not verify the live master ref.'
+}
+if ($masterCommit -cne $Commit) {
+    $comparison = gh api --method GET "repos/$Repository/compare/$Commit...$masterCommit" -F per_page=1 `
+        --jq "if .merge_base_commit.sha == `"$Commit`" then .status else `"wrong-base`" end"
+    if ($LASTEXITCODE -ne 0 -or $comparison -cne 'ahead') {
+        throw 'The release commit must be reachable from master.'
+    }
 }
 
 $masterCheck = gh api --method GET "repos/$Repository/actions/workflows/windows.yml/runs" `
@@ -34,6 +41,17 @@ $masterCheck = gh api --method GET "repos/$Repository/actions/workflows/windows.
     --jq '.workflow_runs[0].conclusion'
 if ($LASTEXITCODE -ne 0 -or $masterCheck -cne 'success') {
     throw 'The exact release commit must have successful Windows CI on a master push.'
+}
+
+$publishedTags = gh api --paginate --method GET "repos/$Repository/releases" -F per_page=100 `
+    --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name'
+if ($LASTEXITCODE -ne 0) { throw 'Could not read the public release versions.' }
+$candidateVersion = [version]$Tag.Substring(1)
+foreach ($publishedTag in $publishedTags) {
+    if ($publishedTag -cmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' -and
+        $candidateVersion -le [version]$publishedTag.Substring(1)) {
+        throw "The release version must be newer than the already published $publishedTag."
+    }
 }
 
 [pscustomobject]@{ Version = $version; TagObject = $tagObject }

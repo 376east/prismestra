@@ -408,6 +408,9 @@ jobs:
     if: >-
       github.repository_id == '1450402221' && github.event_name == 'push' &&
       github.ref_type == 'tag' && needs.quick.outputs.tag_object != ''
+    concurrency:
+      group: publish-stable-release
+      queue: max
     runs-on: windows-2025
     timeout-minutes: 15
     permissions:
@@ -427,21 +430,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SUMS_SHA256: ${{ needs.package.outputs.sums_sha256 }}
           TAG_OBJECT: ${{ needs.quick.outputs.tag_object }}
-          INSTALLER_VERSION: ${{ needs.quick.outputs.release_version }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
-          $directory = Join-Path $env:RUNNER_TEMP candidate
-          $candidate = ./scripts/installer/verify_candidate.ps1 -Directory $directory -Commit $env:GITHUB_SHA -SumsSha256 $env:SUMS_SHA256
-          $asset = Split-Path -Leaf $candidate.Setup
-          if ($asset -cne "Prismestra-Setup-$env:INSTALLER_VERSION-x64.exe") {
-            throw 'The tested installer version differs from the release tag.'
-          }
-          $sources = Join-Path $directory "Prismestra-Sources-$env:INSTALLER_VERSION.zip"
-          $title = "Prismestra $($tag.Substring(1))"
-          $setupUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$asset"
-          $runUrl = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-          $sourceUrl = "https://github.com/$env:GITHUB_REPOSITORY/blob/$env:GITHUB_SHA"
-          $notes = "**[Download Windows x64 Setup]($setupUrl)** · Windows 10 or 11 (x64).`n`nSetup includes OpenRGB and the required Windows runtimes. The ZIP contains the corresponding sources.`n`n[Changelog]($sourceUrl/CHANGELOG.md) · [Device compatibility]($sourceUrl/docs/compatibility.md) · [Windows release checks]($runUrl)`n`nSetup SHA-256: $($candidate.SetupSha256)"
-          $null = ./scripts/installer/verify_release_tag.ps1 -Tag $tag -Commit $env:GITHUB_SHA -Repository $env:GITHUB_REPOSITORY -ExpectedTagObject $env:TAG_OBJECT
-          gh release create $tag $candidate.Setup $sources --repo $env:GITHUB_REPOSITORY --verify-tag --latest --title $title --notes $notes
-          if ($LASTEXITCODE) { throw 'Publishing the tested Setup failed.' }
+          ./scripts/installer/publish_release.ps1 -Directory (Join-Path $env:RUNNER_TEMP candidate) -Tag $env:GITHUB_REF_NAME -Commit $env:GITHUB_SHA -Repository $env:GITHUB_REPOSITORY -TagObject $env:TAG_OBJECT -SumsSha256 $env:SUMS_SHA256 -RunId $env:GITHUB_RUN_ID
