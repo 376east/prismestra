@@ -787,6 +787,10 @@ const LOCAL_NAME: &str = "lighting-local.json";
 const JOURNAL_NAME: &str = ".first-run-transaction.json";
 const JOURNAL_LIMIT: usize = 2 * (super::document::MAX_BYTES + devices::MAX_JSON_BYTES) + 4096;
 
+pub(crate) fn recovery_is_pending(state_dir: &Path) -> bool {
+    state_dir.join(JOURNAL_NAME).symlink_metadata().is_ok()
+}
+
 #[derive(Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Baseline {
@@ -2169,7 +2173,21 @@ mod tests {
                 serde_json::to_vec_pretty(&local).unwrap(),
             )
             .unwrap();
-            let baseline = baseline(&state, &profile, &document, &local).unwrap();
+            let plan = Self::plan(&state, &profile);
+            (
+                Self {
+                    root,
+                    state,
+                    profile,
+                },
+                plan,
+            )
+        }
+
+        fn plan(state: &Path, profile: &Path) -> Plan {
+            let document = Document::load(profile).unwrap();
+            let local = Local::read(&state.join(LOCAL_NAME), &document).unwrap();
+            let baseline = baseline(state, profile, &document, &local).unwrap();
             let mut plan = assemble(
                 document,
                 local,
@@ -2182,14 +2200,7 @@ mod tests {
             )
             .unwrap();
             plan.baseline = Some(baseline);
-            (
-                Self {
-                    root,
-                    state,
-                    profile,
-                },
-                plan,
-            )
+            plan
         }
 
         fn interrupt_before_profile(&self, plan: &Plan) {
@@ -2336,6 +2347,47 @@ mod tests {
         recover(&fixture.state, &fixture.profile).unwrap();
         assert_eq!(Document::load(&paths.profile).unwrap(), plan.document);
         assert!(!paths.journal.exists());
+    }
+
+    #[test]
+    fn installed_bootstrap_passes_a_conflicting_profile_to_editor_without_activation() {
+        let (fixture, profile, state, preview_args) =
+            super::super::installed::tests::fresh_profile();
+        let original = fs::read(&profile).unwrap();
+        let plan = SavedFixture::plan(&state, &profile);
+        let reader = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&profile)
+            .unwrap();
+        assert_eq!(persist(&state, &profile, &plan).unwrap_err(), BUSY);
+        let local = state.join(LOCAL_NAME);
+        let journal = state.join(JOURNAL_NAME);
+        let tentative = fs::read(&local).unwrap();
+
+        // The real installed bootstrap passes the document only. Native
+        // activation is deferred even if the private draft is still busy.
+        assert_eq!(fixture.reopen_profile().unwrap(), preview_args);
+        assert!(
+            !preview_args
+                .iter()
+                .any(|arg| arg == "--start-connected" || arg == "--native-lighting")
+        );
+        assert!(journal.is_file());
+        assert!(recovery_is_pending(&state));
+        assert_eq!(fs::read(&profile).unwrap(), original);
+        drop(reader);
+        let mut external = Document::load(&profile).unwrap();
+        external.lighting.scene.brightness = 84;
+        external.save(&profile).unwrap();
+
+        assert_eq!(fixture.reopen_profile().unwrap(), preview_args);
+        assert!(!journal.exists());
+        assert!(!recovery_is_pending(&state));
+        assert_eq!(Document::load(&profile).unwrap(), external);
+        assert_eq!(fs::read(&local).unwrap(), tentative);
+        assert!(Local::read(&local, &external).is_err());
+        assert!(Local::read_draft(&local, &external).is_ok());
     }
 
     #[test]

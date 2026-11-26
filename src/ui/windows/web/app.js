@@ -348,7 +348,11 @@ function syncControls(keepRetryFocus) {
  const startupStatus=english?englishStartupStatus.get(state?.startupStatus):null;
  const playerStatus=$('#player-status');
  const runtimeStatus=state?.status==='Сцена изменена и ещё не сохранена.'?'':state?.status;
- playerStatus.textContent=startupStatus||(runtimeStatus&&ui(runtimeStatus,
+ const profileRepair=state?.startupStatus==='profileNeedsAttention'?runtimeStatus:'';
+ const repairNotice=$('#startup-profile-repair');
+ if(repairNotice.textContent!==profileRepair)repairNotice.textContent=profileRepair;
+ repairNotice.hidden=!profileRepair;
+ playerStatus.textContent=profileRepair?ui('Предпросмотр','Preview'):startupStatus||(runtimeStatus&&ui(runtimeStatus,
   englishRuntimeStatus.get(runtimeStatus)??(outputPage(view)&&runtimeStatus.startsWith('Не удалось применить:')
    ?'Could not apply the output settings.':state.pending?'Working…':'See profile status in Devices')))
   ||(state?'':ui('Подключение к приложению…','Connecting to the app…'));
