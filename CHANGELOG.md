@@ -38,8 +38,6 @@ See the [device compatibility guide](docs/compatibility.md) for supported models
 
 - Apply an ordinary saved scene from the tray after closing the editor without pending changes. [Tray scenes](https://github.com/376east/prismestra/pull/202)
 
-[All changes since Preview 8](https://github.com/376east/prismestra/compare/v0.1.0-preview.8...v0.1.0-preview.10)
-
 ## Preview 8 (0.1.0.8) · 2026-11-22
 
 - Start a lighting scene from the library. Preview and edit remain separate actions. Failed activation links to device status.
@@ -48,7 +46,7 @@ See the [device compatibility guide](docs/compatibility.md) for supported models
 - Reconnect a saved Surplife E1 strip when the Bluetooth radio appears later.
 - The published Windows Setup passed offline installation, upgrade from Preview 7, uninstall, and standard-account startup in CI.
 
-[Windows verification](https://github.com/376east/prismestra/actions/runs/45023869783) · [All changes since Preview 7](https://github.com/376east/prismestra/compare/v0.1.0-preview.7...v0.1.0-preview.8)
+[Windows verification](https://github.com/376east/prismestra/actions/runs/45023869783)
 
 ## Preview 7 (0.1.0.7) · 2026-11-21
 
@@ -72,8 +70,6 @@ See the [device compatibility guide](docs/compatibility.md) for supported models
 - Open the editor from the tray by keyboard. Respect Windows menu alignment and ignore tray activation after exit begins. [Tray access](https://github.com/malyarq/prismestra/pull/43) · [Exit fix](https://github.com/malyarq/prismestra/pull/60)
 - Announce changes to the selected device status and restore keyboard focus to the button that opened a settings page. [Device status](https://github.com/malyarq/prismestra/pull/57) · [Settings focus](https://github.com/malyarq/prismestra/pull/59)
 
-[All changes since Preview 6](https://github.com/376east/prismestra/compare/v0.1.0-preview.6...v0.1.0-preview.7)
-
 ## Preview 6 (0.1.0.6) · 2026-11-19
 
 - At sign-in, restore the saved scene and outputs. With a fresh profile, start discovery and build an initial map for supported devices when they are available.
@@ -84,4 +80,4 @@ See the [device compatibility guide](docs/compatibility.md) for supported models
 
 Known issue. Opening a portable ZIP while outputs are connected can send colors before Apply. This was reproduced from the Preview 6 source tag and fixed in Preview 7.
 
-[Windows verification](https://github.com/malyarq/prismestra/actions/runs/44595285813) · [All changes since Preview 5](https://github.com/malyarq/prismestra/compare/v0.1.0-preview.5...v0.1.0-preview.6)
+[Windows verification](https://github.com/malyarq/prismestra/actions/runs/44595285813)
