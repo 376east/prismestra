@@ -6,45 +6,65 @@ const filters = ['peripherals', 'pc', 'strips', 'displays', 'home', 'other', 'ro
 
 const copy = {
   en: {
-    title: 'Find your device', intro: 'Search by model, device type or USB ID.',
-    download: 'Download for Windows', device: 'Device', filter: 'Filter', all: 'All devices',
+    title: 'Check your devices', intro: 'Search for your model to see which features you can try and how to connect it.',
+    installNote: 'Start with Prismestra Setup for Windows. OpenRGB is included.',
+    download: 'Download for Windows', device: 'Model or device type', filter: 'Category', all: 'All devices',
     examples: 'Try', results: 'Matching devices', more: 'Show more', report: 'Report a device',
     guide: 'Compatibility guide', catalog: 'About the catalog', upstream: 'OpenRGB development catalog',
-    placeholder: 'Surplife E1, keyboard, 264A:233C…', loading: 'Loading devices…',
-    empty: 'No matches. Try a shorter model name, clear the filter or use a USB ID.',
+    placeholder: 'Surplife E1, keyboard, B650 Eagle AX…', loading: 'Loading devices…',
+    empty: 'No matches. Try a shorter model name or clear the category. If it is still missing, tell us the exact model.',
     unavailable: 'The catalog could not be loaded. See the compatibility guide.',
-    partial: ' Part of the catalog could not be loaded.', details: 'Connection and evidence',
+    partial: ' Part of the catalog could not be loaded.', details: 'Technical details',
     byDevice: 'Device type', bySource: 'Connection source',
-    source: 'Source', checked: 'What was tested', noCheck: 'A device listing does not establish physical output.',
+    source: 'Developer source', checked: 'What was tested', noCheck: 'Catalog entries and hardware checks cover different devices and operations.',
     lighting: 'Lighting', display: 'LCD', openrgb: 'Listed in bundled OpenRGB',
-    implemented: 'Connection in Prismestra', research: 'Under research', displayResearch: 'Output unavailable',
+    implemented: 'Connection in Prismestra', research: 'Under research',
     board: 'Check the two ARGB headers in Devices.', wired: 'Connect by cable.',
     skydimo: 'Look for an SK model code on the controller or in its documentation.',
     revision: 'Check your hardware revision in the source notes.',
-    listedHelp: 'For a live scene, the controller needs a usable Direct mode.',
-    nativeHelp: 'Check the connection in Devices.',
-    researchHelp: 'This feature still needs an adapter or verification.',
+    listedHelp: 'Live scenes require a usable Direct mode from the controller.',
+    featureStatuses: {
+      implemented: 'Available to set up', openrgb: 'Possible. Check on your PC',
+      verified: 'Tested on one setup', research: 'Connection not available yet',
+    },
+    featureSteps: {
+      implemented: 'Open Devices and follow the connection steps.',
+      openrgb: 'After installing, open Devices and try a scene on the device.',
+      verified: 'See the test details for the exact device and operation.',
+      research: 'Tell us which model you have.',
+    },
+    setup: 'Setup guide', testedOne: 'Includes a limited hardware test. See details.',
     categories: ['Keyboards and mice', 'PC components', 'Strips and controllers', 'Displays', 'Home lighting', 'Other devices', 'OpenRGB listings', 'Prismestra connections', 'Research candidates'],
   },
   ru: {
-    title: 'Найти устройство', intro: 'Поиск по модели, типу устройства или USB ID.',
-    download: 'Скачать для Windows', device: 'Устройство', filter: 'Фильтр', all: 'Все устройства',
+    title: 'Проверьте свои устройства', intro: 'Найдите свою модель, чтобы узнать, что можно попробовать и как подключить устройство.',
+    installNote: 'Скачайте установщик Prismestra для Windows. OpenRGB уже в комплекте.',
+    download: 'Скачать для Windows', device: 'Модель или тип устройства', filter: 'Категория', all: 'Все устройства',
     examples: 'Для примера', results: 'Найденные устройства', more: 'Показать ещё', report: 'Сообщить об устройстве',
     guide: 'Справочник совместимости', catalog: 'О каталоге', upstream: 'Каталог новых сборок OpenRGB',
-    placeholder: 'Surplife E1, клавиатура, 264A:233C…', loading: 'Загружаем устройства…',
-    empty: 'Совпадений нет. Попробуйте сократить название, убрать фильтр или ввести USB ID.',
+    placeholder: 'Surplife E1, клавиатура, B650 Eagle AX…', loading: 'Загружаем устройства…',
+    empty: 'Совпадений нет. Попробуйте сократить название или убрать фильтр. Если модель так и не нашлась, сообщите о ней.',
     unavailable: 'Каталог не загрузился. Воспользуйтесь справочником совместимости.',
-    partial: ' Часть каталога не загрузилась.', details: 'Подключение и проверка',
+    partial: ' Часть каталога не загрузилась.', details: 'Технические подробности',
     byDevice: 'Тип устройства', bySource: 'Источник подключения',
-    source: 'Источник', checked: 'Что проверяли', noCheck: 'Запись в каталоге не подтверждает физический вывод.',
+    source: 'Исходники для разработчиков', checked: 'Что проверяли', noCheck: 'Каталог и аппаратные проверки покрывают разные модели и функции.',
     lighting: 'Подсветка', display: 'LCD', openrgb: 'Есть в списке встроенного OpenRGB',
-    implemented: 'Есть подключение в Prismestra', research: 'На этапе исследования', displayResearch: 'Вывод пока недоступен',
+    implemented: 'Есть подключение в Prismestra', research: 'На этапе исследования',
     board: 'Проверьте два разъёма ARGB в разделе «Устройства».', wired: 'Подключите кабелем.',
     skydimo: 'Поищите код модели SK… на контроллере или в его документации.',
     revision: 'Сверьте ревизию устройства с источником.',
     listedHelp: 'Для вывода общей сцены контроллеру нужен рабочий режим Direct.',
-    nativeHelp: 'Проверьте подключение в разделе «Устройства».',
-    researchHelp: 'Для этой функции ещё нужен адаптер или проверка.',
+    featureStatuses: {
+      implemented: 'Можно настроить', openrgb: 'Возможна. Проверьте на своём ПК',
+      verified: 'Проверили на одном комплекте', research: 'Подключение пока недоступно',
+    },
+    featureSteps: {
+      implemented: 'Откройте «Устройства» и настройте подключение.',
+      openrgb: 'После установки откройте «Устройства» и попробуйте запустить сцену на этой модели.',
+      verified: 'В подробностях указано, какую модель и что именно проверили.',
+      research: 'Сообщите, какая у вас модель.',
+    },
+    setup: 'Инструкция', testedOne: 'Есть ограниченная проверка на устройстве. См. подробности.',
     categories: ['Клавиатуры и мыши', 'Компоненты ПК', 'Ленты и контроллеры', 'Экраны', 'Домашнее освещение', 'Другие устройства', 'Каталог OpenRGB', 'Подключения Prismestra', 'Исследуемые устройства'],
   },
 };
@@ -77,12 +97,18 @@ function deviceRow(card, t) {
   for (const capability of ['lighting', 'display']) {
     const entries = card.entries.filter((entry) => entry.capability === capability);
     if (!entries.length) continue;
-    const status = ['implemented', 'openrgb', 'research'].find((name) => entries.some((entry) => entry.status === name));
+    const status = ['implemented', 'openrgb', 'verified', 'research'].find((name) => entries.some((entry) => entry.status === name));
     if (status) {
       const feature = node('p', '', 'feature');
-      const label = capability === 'display' && status === 'research' ? t.displayResearch : t[status];
-      feature.append(node('strong', t[capability]), ' · ', label);
+      feature.append(node('strong', t[capability]), ' · ', t.featureStatuses[status]);
       row.append(feature);
+      const step = node('p', t.featureSteps[status], 'connection-hint');
+      if (status === 'research') step.append(' ', sourceLink('https://github.com/376east/prismestra/issues/new?template=device.yml', t.report));
+      if (status === 'openrgb' || status === 'implemented') {
+        step.append(' ', sourceLink('https://github.com/376east/prismestra/blob/master/docs/windows-installer.md', t.setup));
+        if (entries.some((entry) => entry.status === 'verified')) step.append(' ', t.testedOne);
+      }
+      row.append(step);
     }
     const group = node('div', '', 'evidence-group');
     group.append(node('h3', t[capability]));
@@ -95,10 +121,7 @@ function deviceRow(card, t) {
         route.lang = 'en';
         group.append(route);
       }
-      const hint = entry.status === 'openrgb' ? t.listedHelp
-        : entry.status === 'implemented' ? t.nativeHelp
-        : entry.status === 'research' ? t.researchHelp : '';
-      if (hint) group.append(node('p', hint));
+      if (entry.status === 'openrgb') group.append(node('p', t.listedHelp));
       if (entry.detail) {
         const description = node('p', entry.detail);
         description.lang = 'en';
@@ -134,7 +157,7 @@ async function start() {
   const examples = el('examples');
   const language = el('language');
   for (const [id, value] of Object.entries({
-    title: t.title, intro: t.intro, download: t.download, 'query-label': t.device,
+    title: t.title, intro: t.intro, 'install-note': t.installNote, download: t.download, 'query-label': t.device,
     'filter-label': t.filter, count: t.loading, report: t.report, guide: t.guide,
     'catalog-label': t.catalog, upstream: t.upstream, more: t.more, 'report-missing': t.report,
   })) el(id).textContent = value;
