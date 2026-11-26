@@ -5,7 +5,7 @@ import json
 import ntpath
 from pathlib import Path, PureWindowsPath
 
-from shell_acceptance import PROCESS_ID, SCENARIOS, SHA, SHA256
+from shell_acceptance import CONSOLE_CLASSES, PROCESS_ID, SCENARIOS, SHA, SHA256
 
 
 def filetime(value):
@@ -76,6 +76,9 @@ def normalize(capture, scenario, revision, artifact, product_roots, harness_root
         process_id(event['parent_pid'], allow_zero=True)
         process_id(event['session_id'], allow_zero=True)
         time = filetime(event['filetime'])
+        created = event.get('created_filetime')
+        if created is not None and (kind != 'start' or filetime(created) > time):
+            raise ValueError(f'Invalid process creation time for PID {pid}')
         key = (kind, pid, time)
         if kind not in ('start', 'stop') or key in event_index or not PureWindowsPath(event['image']).name:
             raise ValueError(f'Invalid or repeated process event {key!r}')
@@ -94,11 +97,15 @@ def normalize(capture, scenario, revision, artifact, product_roots, harness_root
     for time, kind, pid, event in events:
         if kind == 'stop':
             identity = active.pop(pid, None)
-            if identity is not None and processes[identity]['image'].casefold() != event['image'].casefold():
-                gaps.append(f'Stop does not match the recorded image for {identity}')
+            if identity is not None:
+                process = processes[identity]
+                process['stopped_filetime'] = str(time)
+                if process['image'].casefold() != event['image'].casefold():
+                    gaps.append(f'Stop does not match the recorded image for {identity}')
             continue
         if pid in active:
             gaps.append(f'PID {pid} was reused without a captured stop')
+            processes[active[pid]]['reused_without_stop'] = True
         parent_pid = event['parent_pid']
         parent = active.get(parent_pid)
         if parent is None and parent_pid in observed:
@@ -112,7 +119,8 @@ def normalize(capture, scenario, revision, artifact, product_roots, harness_root
             parent = None if parent_pid == pid else parent
         identity = f'{pid}:{time}'
         processes[identity] = {'id': identity, 'parent': parent, 'image': event['image'],
-                               'session_id': event['session_id']}
+                               'session_id': event['session_id'],
+                               'created_filetime': event.get('created_filetime'), 'stopped_filetime': None}
         active[pid] = identity
         observed.add(pid)
     product_roots = list(product_roots)
@@ -127,6 +135,7 @@ def normalize(capture, scenario, revision, artifact, product_roots, harness_root
         'product_roots': product_roots, 'harness_roots': harness_roots,
         'controls': {'process_start_stop': not gaps, 'visible_console': False, 'full_scenario': False},
         'processes': list(processes.values()), 'windows': [], 'process_capture_gaps': gaps,
+        'process_interval': {'started_filetime': str(started), 'ended_filetime': str(ended)},
     }
     if (process_exit_receipt is None) != (expected_exit is None):
         raise ValueError('Process exit receipt requires a separate expected launch identity')
@@ -138,6 +147,96 @@ def normalize(capture, scenario, revision, artifact, product_roots, harness_root
             raise ValueError('Identified process exit is outside the capture interval')
         # A handle proves only this process exited. It cannot replace a trace event.
         result['identified_process_exit'] = receipt
+    return result
+
+
+def verify_window_controls(capture, witnesses, started, ended):
+    if witnesses['desktop'] != capture['desktop']:
+        raise ValueError('Visible controls name a different desktop or session')
+    controls = {}
+    identities = set()
+    for phase in ('before', 'after'):
+        witness = witnesses[phase]
+        pid = process_id(witness['window_owner_pid'])
+        created = filetime(witness['window_owner_created_filetime'])
+        time = filetime(witness['observed_filetime'])
+        identity = (witness['window'], pid, created)
+        if identity in identities:
+            raise ValueError('Visible controls require two distinct window identities')
+        identities.add(identity)
+        if not (created <= time and (time < started if phase == 'before' else ended <= time)):
+            raise ValueError(f'Visible {phase} control is outside its expected phase')
+        matches = [
+            row for row in capture['observations']
+            if row['reason'] == 'show' and row['class'].casefold() in CONSOLE_CLASSES
+            and all(row[key] == witness[key] for key in (
+                'window', 'window_owner_pid', 'window_owner_created_filetime', 'observed_filetime'))
+        ]
+        if len(matches) != 1:
+            raise ValueError(f'Visible {phase} control lacks one matching console show event')
+        controls[phase] = matches[0]
+    return {'desktop': capture['desktop'], **controls}
+
+
+def add_window_capture(trace, capture, witnesses=None):
+    if capture['format'] != 'prismestra-windows-console-windows-v1':
+        raise ValueError('Unsupported Windows console window capture')
+    started = filetime(trace['process_interval']['started_filetime'])
+    ended = filetime(trace['process_interval']['ended_filetime'])
+    window_start = filetime(capture['started_filetime'])
+    window_end = filetime(capture['ended_filetime'])
+    session = process_id(capture['desktop']['session_id'])
+    if not window_start <= started < ended <= window_end:
+        raise ValueError('The window capture does not enclose the measured process interval')
+
+    owners = {}
+    for process in trace['processes']:
+        created = process['created_filetime']
+        if (created is not None and process['session_id'] == session
+                and not process.get('reused_without_stop')):
+            pid = int(process['id'].split(':')[0])
+            owners.setdefault((pid, filetime(created)), []).append(process)
+
+    windows = list(trace['windows'])
+    outside_interval = {'before': [], 'after': []}
+    gaps = [*trace.get('window_capture_gaps', ()), *capture['window_capture_gaps']]
+    for observation in capture['observations']:
+        time = filetime(observation['observed_filetime'])
+        if not window_start <= time <= window_end:
+            raise ValueError('Window observation lies outside its capture')
+        name = observation['class']
+        if name.casefold() not in CONSOLE_CLASSES or observation['reason'] not in ('initial', 'final', 'show'):
+            raise ValueError('Invalid visible console observation')
+        pid = observation['window_owner_pid']
+        created = observation['window_owner_created_filetime']
+        if pid is not None:
+            process_id(pid)
+        creation_time = filetime(created) if created is not None else None
+        if creation_time is not None and (pid is None or creation_time > time):
+            raise ValueError('Invalid window owner creation time')
+        if not started <= time < ended:
+            phase = 'before' if time < started else 'after'
+            outside_interval[phase].append(observation)
+            continue
+        matches = owners.get((pid, creation_time), ())
+        owner = None
+        if len(matches) == 1:
+            process = matches[0]
+            stop = process['stopped_filetime']
+            if stop is None or time < filetime(stop):
+                owner = process['id']
+        if owner is None:
+            gaps.append(f'Could not attribute visible window {observation["window"]} to a captured process instance')
+        windows.append({'process': owner, 'class': name, 'visible': True})
+    controls = {**trace['controls'], 'visible_console': False, 'full_scenario': False}
+    context = {'desktop': capture['desktop'], **outside_interval}
+    result = {
+        **trace, 'controls': controls, 'windows': windows, 'window_capture_gaps': gaps,
+        'window_boundary_context': [*trace.get('window_boundary_context', ()), context],
+    }
+    if witnesses is not None:
+        verified = verify_window_controls(capture, witnesses, started, ended)
+        result['visible_control_observations'] = [*trace.get('visible_control_observations', ()), verified]
     return result
 
 
@@ -153,6 +252,9 @@ def main():
     parser.add_argument('--expect-exit-pid', type=int)
     parser.add_argument('--expect-exit-created-filetime')
     parser.add_argument('--expect-exit-image')
+    parser.add_argument('--window-capture', type=Path, action='append', default=[])
+    parser.add_argument('--controlled-window-capture', nargs=2, type=Path, action='append', default=[],
+                        metavar=('CAPTURE', 'WITNESSES'))
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     expected_exit = {'pid': args.expect_exit_pid, 'created_filetime': args.expect_exit_created_filetime,
@@ -169,6 +271,13 @@ def main():
                         json.loads(args.process_exit_receipt.read_text(encoding='utf-8-sig')))
         result = normalize(capture, args.scenario, args.revision, args.artifact_sha256,
                            args.product_root, args.harness_root, process_exit, expected_exit)
+        for path in args.window_capture:
+            windows = json.loads(path.read_text(encoding='utf-8-sig'))
+            result = add_window_capture(result, windows)
+        for capture_path, witnesses_path in args.controlled_window_capture:
+            windows = json.loads(capture_path.read_text(encoding='utf-8-sig'))
+            witnesses = json.loads(witnesses_path.read_text(encoding='utf-8-sig'))
+            result = add_window_capture(result, windows, witnesses)
         if args.output is not None:
             with args.output.open('x', encoding='utf-8') as output:
                 json.dump(result, output, indent=2)

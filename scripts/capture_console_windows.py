@@ -38,13 +38,14 @@ def filetime_text(value):
     return str((value.dwHighDateTime << 32) | value.dwLowDateTime)
 
 
-def window_observation(window, window_class, owner_pid, reason, event_tick=None, owner_start=None):
+def window_observation(window, window_class, owner_pid, reason, event_tick=None, owner_start=None,
+                       observed_at=None):
     if window_class.casefold() not in CONSOLE_CLASSES:
         return None
     return {
         'window': str(window), 'class': window_class, 'window_owner_pid': owner_pid or None,
         'window_owner_created_filetime': owner_start, 'reason': reason,
-        'observed_filetime': utc_filetime(), 'event_tick': event_tick,
+        'observed_filetime': observed_at if observed_at is not None else utc_filetime(), 'event_tick': event_tick,
     }
 
 
@@ -137,7 +138,8 @@ class WindowCapture:
         if not thread or current_thread != thread or current_owner.value != owner.value:
             owner.value = 0
             created = None
-        self.observations.append(window_observation(hwnd, name.value, owner.value, reason, event_tick, created))
+        self.observations.append(window_observation(hwnd, name.value, owner.value, reason, event_tick,
+                                                    created, self.process_utc_filetime()))
 
     def owner_created_filetime(self, pid):
         process = self.open_process(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
@@ -215,8 +217,11 @@ class WindowCapture:
             self.gaps.append(f'Could not inspect a show notification: {error}')
 
     def on_enumerated(self, hwnd, _param):
-        if self.is_visible(hwnd):
-            self.observe(hwnd, self.snapshot)
+        try:
+            if self.is_visible(hwnd):
+                self.observe(hwnd, self.snapshot)
+        except (OSError, TypeError, ValueError) as error:
+            self.gaps.append(f'Could not inspect a window in the {self.snapshot} snapshot: {error}')
         return True
 
     def enumerate_boundary(self, reason):
@@ -242,7 +247,7 @@ class WindowCapture:
         if not handle:
             raise ctypes.WinError(ctypes.get_last_error())
         try:
-            started = utc_filetime()
+            started = self.process_utc_filetime()
             self.enumerate_boundary('initial')
             print(f'Window capture ready on desktop {desktop["name"]} for {duration} seconds.', flush=True)
             deadline = time.monotonic() + duration
@@ -255,7 +260,7 @@ class WindowCapture:
             if not self.drain_messages(message):
                 self.gaps.append('The desktop was still delivering notifications at the capture boundary')
             self.enumerate_boundary('final')
-            ended = utc_filetime()
+            ended = self.process_utc_filetime()
         finally:
             if not self.unhook(handle):
                 raise ctypes.WinError(ctypes.get_last_error())

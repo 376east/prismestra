@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock, call, patch
 
 from capture_console_windows import WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, WindowCapture, window_observation
-from normalize_process_events import normalize
+from normalize_process_events import add_window_capture, normalize
 from shell_acceptance import check_trace
 
 
@@ -196,6 +196,133 @@ class NormalizeProcessEventsTests(unittest.TestCase):
 
 
 class ConsoleWindowCaptureTests(unittest.TestCase):
+    def window_capture(self, owner_created='109', session=1, observed_at='140'):
+        return {
+            'format': 'prismestra-windows-console-windows-v1',
+            'started_filetime': '95', 'ended_filetime': '205',
+            'desktop': {'name': 'Default', 'session_id': session}, 'window_capture_gaps': [],
+            'observations': [{
+                'window': '100', 'class': 'ConsoleWindowClass', 'reason': 'show',
+                'observed_filetime': observed_at, 'window_owner_pid': 2,
+                'window_owner_created_filetime': owner_created,
+            }],
+        }
+
+    def process_capture_with_owner(self):
+        data = capture()
+        next(row for row in data['events'] if row['kind'] == 'start' and row['pid'] == 2)['created_filetime'] = '109'
+        return normalize(data, 'setup', REVISION, ARTIFACT, ['2:110'])
+
+    def window_controls(self):
+        windows = self.window_capture()
+        show = windows['observations'][0]
+        before = {**show, 'window': '80', 'observed_filetime': '98',
+                  'window_owner_pid': 8, 'window_owner_created_filetime': '97'}
+        after = {**show, 'window': '90', 'observed_filetime': '204',
+                 'window_owner_pid': 8, 'window_owner_created_filetime': '201'}
+        windows['observations'].extend([before, after])
+        witnesses = {'desktop': windows['desktop'], 'before': dict(before), 'after': dict(after)}
+        return windows, witnesses
+
+    def test_visible_controls_match_distinct_console_shows_and_keep_evidence_partial(self):
+        windows, witnesses = self.window_controls()
+        trace = add_window_capture(self.process_capture_with_owner(), windows, witnesses)
+        self.assertEqual(trace['visible_control_observations'], [witnesses])
+        self.assertEqual(len(trace['windows']), 1)
+        self.assertFalse(trace['controls']['visible_console'])
+        self.assertFalse(trace['controls']['full_scenario'])
+
+    def test_visible_controls_reject_wrong_phase_desktop_owner_and_snapshot(self):
+        for case in ('phase', 'desktop', 'owner', 'snapshot', 'reuse', 'duplicate'):
+            with self.subTest(case=case):
+                windows, witnesses = self.window_controls()
+                before, after = windows['observations'][1:]
+                if case == 'phase':
+                    witnesses['before'] = dict(after)
+                elif case == 'desktop':
+                    witnesses['desktop'] = {'name': 'Default', 'session_id': 2}
+                elif case == 'owner':
+                    witnesses['after']['window_owner_created_filetime'] = '97'
+                elif case == 'snapshot':
+                    before['reason'] = 'initial'
+                elif case == 'reuse':
+                    after.update({**before, 'observed_filetime': '204'})
+                    witnesses['after'] = dict(after)
+                elif case == 'duplicate':
+                    windows['observations'].append(dict(after))
+                with self.assertRaisesRegex(ValueError, 'Visible'):
+                    add_window_capture(self.process_capture_with_owner(), windows, witnesses)
+
+    def test_exact_owner_match_identifies_a_product_console_without_claiming_coverage(self):
+        trace = add_window_capture(self.process_capture_with_owner(), self.window_capture())
+        self.assertEqual(trace['windows'][0]['process'], '2:110')
+        self.assertFalse(trace['controls']['visible_console'])
+        self.assertFalse(trace['controls']['full_scenario'])
+        self.assertEqual(check_trace(trace, REVISION, ARTIFACT)['status'], 'fail')
+
+    def test_missing_identity_wrong_session_or_stopped_owner_stays_unattributed(self):
+        for windows in (self.window_capture(owner_created=None), self.window_capture(owner_created='99'),
+                        self.window_capture(session=2), self.window_capture(observed_at='190'),
+                        self.window_capture(observed_at='195')):
+            with self.subTest(windows=windows):
+                trace = add_window_capture(self.process_capture_with_owner(), windows)
+                self.assertIsNone(trace['windows'][0]['process'])
+                self.assertEqual(check_trace(trace, REVISION, ARTIFACT)['status'], 'inconclusive')
+
+    def test_process_without_kernel_time_stays_unattributed(self):
+        trace = normalize(capture(), 'setup', REVISION, ARTIFACT, ['2:110'])
+        trace = add_window_capture(trace, self.window_capture())
+        self.assertIsNone(trace['windows'][0]['process'])
+        self.assertEqual(check_trace(trace, REVISION, ARTIFACT)['status'], 'inconclusive')
+
+    def test_session_zero_does_not_provide_interactive_window_evidence(self):
+        trace = self.process_capture_with_owner()
+        with self.assertRaisesRegex(ValueError, 'Invalid process identifier'):
+            add_window_capture(trace, self.window_capture(session=0))
+
+    def test_reused_pid_window_belongs_to_the_new_instance(self):
+        data = capture()
+        next(row for row in data['events'] if row['kind'] == 'start' and row['pid'] == 2)['created_filetime'] = '109'
+        reused = event('start', 2, 192, 'Auxiliary.exe', 1)
+        reused['created_filetime'] = '191'
+        data['events'].append(reused)
+        trace = normalize(data, 'setup', REVISION, ARTIFACT, ['2:110'])
+        trace = add_window_capture(trace, self.window_capture(owner_created='191', observed_at='195'))
+        self.assertEqual(trace['windows'][0]['process'], '2:192')
+        self.assertEqual(check_trace(trace, REVISION, ARTIFACT)['status'], 'inconclusive')
+
+    def test_missing_stop_keeps_superseded_owner_unattributed(self):
+        data = capture()
+        data['events'].remove(event('stop', 2, 190, 'Setup.exe'))
+        next(row for row in data['events'] if row['kind'] == 'start' and row['pid'] == 2)['created_filetime'] = '109'
+        data['events'].append(dict(event('start', 2, 192, 'Auxiliary.exe', 1), created_filetime='191'))
+        trace = normalize(data, 'setup', REVISION, ARTIFACT, ['2:110'])
+        trace = add_window_capture(trace, self.window_capture(observed_at='195'))
+        self.assertEqual(trace['processes'][0]['created_filetime'], '109')
+        self.assertIsNone(trace['windows'][0]['process'])
+        self.assertEqual(check_trace(trace, REVISION, ARTIFACT)['status'], 'inconclusive')
+
+    def test_outside_windows_remain_context_and_a_short_capture_fails_early(self):
+        windows = self.window_capture(owner_created='96', observed_at='97')
+        before = windows['observations'][0]
+        before['reason'] = 'initial'
+        after = {**before, 'reason': 'final', 'observed_filetime': '203'}
+        windows['observations'].append(after)
+        trace = add_window_capture(self.process_capture_with_owner(), windows)
+        self.assertEqual(trace['windows'], [])
+        self.assertEqual(trace['window_boundary_context'], [
+            {'desktop': windows['desktop'], 'before': [before], 'after': [after]},
+        ])
+        self.assertEqual(check_trace(trace, REVISION, ARTIFACT)['status'], 'inconclusive')
+        windows['started_filetime'] = '101'
+        with self.assertRaisesRegex(ValueError, 'does not enclose'):
+            add_window_capture(self.process_capture_with_owner(), windows)
+
+    def test_invalid_owner_time_is_rejected_even_for_outside_windows(self):
+        windows = self.window_capture(owner_created='98', observed_at='97')
+        with self.assertRaisesRegex(ValueError, 'owner creation time'):
+            add_window_capture(self.process_capture_with_owner(), windows)
+
     def test_records_both_console_classes_without_guessing_an_unresolved_owner(self):
         for class_name in ('ConsoleWindowClass', 'CASCADIA_HOSTING_WINDOW_CLASS'):
             row = window_observation(50, class_name, 0, 'show', 123)
@@ -218,6 +345,19 @@ class ConsoleWindowCaptureTests(unittest.TestCase):
         observer.observe.side_effect = OSError('synthetic window access failure')
         observer.on_show(None, 0, 50, 0, 0, 7, 100)
         self.assertIn('synthetic window access failure', observer.gaps[0])
+
+    def test_snapshot_callback_keeps_enumerating_and_records_inspection_errors(self):
+        observer = WindowCapture.__new__(WindowCapture)
+        observer.gaps = []
+        observer.snapshot = 'initial'
+        observer.is_visible = Mock(side_effect=[False, True, True])
+        observer.observe = Mock(side_effect=[OSError('synthetic access failure'), None])
+        self.assertTrue(observer.on_enumerated(10, None))
+        observer.observe.assert_not_called()
+        self.assertTrue(observer.on_enumerated(11, None))
+        self.assertTrue(observer.on_enumerated(12, None))
+        observer.observe.assert_called_with(12, 'initial')
+        self.assertEqual(observer.gaps, ['Could not inspect a window in the initial snapshot: synthetic access failure'])
 
 
 class ProcessExitCaptureTests(unittest.TestCase):
