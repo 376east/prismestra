@@ -11,7 +11,9 @@ from zipfile import BadZipFile
 from zlib import error as ZlibError
 
 import openrgb_cache
-from build_openrgb_component import POWERSHELL, REPO, build_component, checkout, read, recipe, run
+from build_openrgb_component import (
+    POWERSHELL, REPO, build_component, checkout, read, recipe, run, verify_openrgb_gitlink,
+)
 from component_archive import sha256
 from package_installer import WEBVIEW_PROBE
 from package_release import retain_binary_zip
@@ -144,6 +146,7 @@ def main():
     from package_release import clean_commit
 
     clean_commit(REPO, args.commit)
+    verify_openrgb_gitlink(REPO)
     root.mkdir(parents=True)
     vsdevcmd = args.vsdevcmd.resolve(strict=True)
     if args.openrgb_only:

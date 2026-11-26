@@ -36,6 +36,59 @@ class OpenRGBCacheTests(unittest.TestCase):
         path.write_bytes(data)
         return data
 
+    def git(self, repo, *args):
+        return builder.git_output(repo, *args)
+
+    def commit(self, repo):
+        self.git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "-c", "commit.gpgsign=false", "commit", "-qm", "Fixture")
+
+    def pin_submodule(self, revision):
+        self.git(self.repo, "update-index", "--add", "--cacheinfo",
+                 f"160000,{revision},{builder.OPENRGB_UPSTREAM}")
+        self.git(self.repo, "add", ".gitmodules", "components/openrgb/source-lock.json")
+        self.commit(self.repo)
+
+    def test_committed_gitlink_matches_repository_source_lock(self):
+        lock = builder.read(builder.COMPONENT / "source-lock.json")
+        self.assertEqual(builder.verify_openrgb_gitlink(builder.REPO), lock["revision"])
+
+    def test_source_stage_reads_only_from_the_pinned_submodule_commit(self):
+        self.repo.mkdir()
+        self.git(self.repo, "init", "-q")
+        upstream = self.repo / builder.OPENRGB_UPSTREAM
+        upstream.mkdir(parents=True)
+        self.git(upstream, "init", "-q")
+        (upstream / ".gitignore").write_bytes(b"generated.h\n")
+        (upstream / "OpenRGB.pro").write_bytes(b"CONFIG += console\n")
+        self.git(upstream, "add", ".gitignore", "OpenRGB.pro")
+        self.commit(upstream)
+        revision = self.git(upstream, "rev-parse", "HEAD")
+        self.write(".gitmodules", (
+            '[submodule "openrgb-headless"]\n'
+            f"    path = {builder.OPENRGB_UPSTREAM}\n    url = {self.source}\n"
+        ).encode())
+        self.write("components/openrgb/source-lock.json",
+                   json.dumps({"repository": self.source, "revision": revision}).encode())
+        self.pin_submodule(revision)
+
+        (upstream / "OpenRGB.pro").write_bytes(b"uncommitted source\n")
+        (upstream / "generated.h").write_bytes(b"ignored source\n")
+        source = builder.checkout_openrgb(self.repo, self.root / "build-source")
+        self.assertEqual(self.git(source, "rev-parse", "HEAD"), revision)
+        self.assertEqual((source / "OpenRGB.pro").read_text(), "CONFIG += console\n")
+        self.assertFalse((source / "generated.h").exists())
+        self.assertEqual(self.git(source, "status", "--porcelain"), "")
+
+        self.git(upstream, "add", "OpenRGB.pro")
+        self.commit(upstream)
+        incorrect = self.git(upstream, "rev-parse", "HEAD")
+        with self.assertRaisesRegex(ValueError, "Initialize the pinned OpenRGB checkout"):
+            builder.checkout_openrgb(self.repo, self.root / "rejected-source")
+        self.pin_submodule(incorrect)
+        with self.assertRaisesRegex(ValueError, "gitlink differs"):
+            builder.verify_openrgb_gitlink(self.repo)
+
     @unittest.skipUnless(sys.platform == "win32", "requires Windows cmd.exe")
     def test_hidapi_dev_command_path_can_contain_spaces(self):
         script = self.root / "Visual Studio Tools" / "VsDevCmd.bat"
@@ -143,6 +196,9 @@ class OpenRGBCacheTests(unittest.TestCase):
     def key_fixture(self):
         for path in cache.build_input_pins(cache.REPO):
             self.write(path, (cache.REPO / path).read_bytes())
+        self.git(self.repo, "init", "-q")
+        pin = builder.read(self.component / "source-lock.json")
+        self.pin_submodule(pin["revision"])
         lock = "scripts/installer/prerequisites.lock.json"
         self.write(lock, (cache.REPO / lock).read_bytes())
         tool = self.root / "cl.exe"
@@ -182,6 +238,7 @@ class OpenRGBCacheTests(unittest.TestCase):
         key = lambda: cache.cache_key(self.repo, "win/1", "14.51/26100", {"cl": tool})
         baseline = key()
         paths = (
+            ".gitmodules",
             "scripts/build_openrgb_component.py", "scripts/pinned_setup_download.py",
             "scripts/components/openrgb_cache_key.ps1", "scripts/components/build_openrgb.ps1",
             "scripts/components/test_verify_openrgb_component.py", "scripts/component_archive.py",
@@ -278,6 +335,7 @@ class OpenRGBCacheTests(unittest.TestCase):
         with (
             patch.object(sys, "argv", argv),
             patch("package_release.clean_commit"),
+            patch.object(candidate, "verify_openrgb_gitlink"),
             patch.multiple(candidate, fetch=DEFAULT, checkout=DEFAULT, run=DEFAULT,
                            load_or_build_component=DEFAULT, package_candidate=DEFAULT) as stages,
         ):
@@ -297,6 +355,7 @@ class OpenRGBCacheTests(unittest.TestCase):
         with (
             patch.object(sys, "argv", argv),
             patch("package_release.clean_commit"),
+            patch.object(candidate, "verify_openrgb_gitlink"),
             patch.object(cache, "restore", side_effect=lambda *args: restore(*args, repo=self.repo)) as verify,
             patch.multiple(candidate, fetch=DEFAULT, checkout=DEFAULT, run=DEFAULT,
                            build_component=DEFAULT, package_candidate=DEFAULT) as stages,
@@ -367,7 +426,7 @@ class OpenRGBCacheTests(unittest.TestCase):
         with (
             patch.dict(builder.os.environ, {"ProgramFiles": str(self.root)}),
             patch.multiple(builder, COMPONENT=self.component, run=run, recipe=recipe, sha256=digest),
-            patch.object(builder, "checkout", return_value=source),
+            patch.object(builder, "checkout_openrgb", return_value=source),
             patch.object(builder, "fetch", side_effect=lambda _, name, *pin: downloads / name),
             patch.object(verifier, "working_diff", return_value=patch_path.read_bytes()) as exported,
         ):

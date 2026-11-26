@@ -13,6 +13,7 @@ from pinned_setup_download import fetch
 
 REPO = Path(__file__).resolve().parent.parent
 COMPONENT = REPO / "components/openrgb"
+OPENRGB_UPSTREAM = "components/openrgb/upstream"
 POWERSHELL = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
 BUNDLE = "Prismestra-OpenRGB-component.zip"
 PINNED_INPUTS = {
@@ -47,6 +48,24 @@ def read(path):
     return json_object(path.read_bytes())
 
 
+def git_output(path, *args):
+    return subprocess.check_output(["git", "-C", path, *args], encoding="utf-8").strip()
+
+
+def verify_openrgb_gitlink(repo):
+    lock = read(repo / "components/openrgb/source-lock.json")
+    revision = lock["revision"]
+    link = git_output(repo, "ls-tree", "HEAD", "--", OPENRGB_UPSTREAM)
+    if link != f"160000 commit {revision}\t{OPENRGB_UPSTREAM}":
+        raise ValueError("Committed OpenRGB gitlink differs from its source lock")
+    for key, expected in (("path", OPENRGB_UPSTREAM), ("url", lock["repository"])):
+        values = git_output(repo, "config", "--blob", "HEAD:.gitmodules", "--get-all",
+                            f"submodule.openrgb-headless.{key}")
+        if values != expected:
+            raise ValueError(f"Committed OpenRGB submodule {key} differs from its source lock")
+    return revision
+
+
 def checkout(lock, path):
     run("git", "init", "-q", path)
     run("git", "-C", path, "config", "core.autocrlf", "true")
@@ -54,6 +73,18 @@ def checkout(lock, path):
     run("git", "-C", path, "fetch", "--depth=1", "origin", lock["revision"])
     run("git", "-C", path, "checkout", "--detach", lock["revision"])
     return path
+
+
+def checkout_openrgb(repo, path):
+    revision = verify_openrgb_gitlink(repo)
+    upstream = repo / OPENRGB_UPSTREAM
+    if (not (upstream / ".git").exists()
+            or Path(git_output(upstream, "rev-parse", "--show-toplevel")).resolve() != upstream.resolve()
+            or git_output(upstream, "rev-parse", "--verify", "HEAD") != revision):
+        raise ValueError(f"Initialize the pinned OpenRGB checkout with git submodule update --init -- {OPENRGB_UPSTREAM}")
+    # Fetch only the committed objects into an independent checkout. The build
+    # cannot consume changes, ignored files or generated objects in the submodule.
+    return checkout({"repository": upstream, "revision": revision}, path)
 
 
 def apply_locked_patch(source, patch, expected_sha256):
@@ -89,7 +120,7 @@ def build_component(root, vsdevcmd):
     dependency_lock = COMPONENT / "dependency-lock.json"
     lock = read(source_lock)
     patch = COMPONENT / lock["patch"]
-    source = checkout(lock, root / "openrgb-source")
+    source = checkout_openrgb(REPO, root / "openrgb-source")
     apply_locked_patch(source, patch, lock["patch_sha256"])
     tools = {name: fetch(root, name, *PINNED_INPUTS[name])
              for name in PINNED_INPUTS}
