@@ -22,7 +22,7 @@ test('catalog retains true provenance and supported evidence labels', () => {
   for (const entry of entries) {
     assert.ok(entry.name.trim());
     assert.match(entry.source, /^https:\/\//);
-    assert.ok(['openrgb', 'no-direct', 'implemented', 'verified', 'research'].includes(entry.status));
+    assert.ok(['openrgb', 'no-direct', 'implemented', 'verified', 'research', 'unconfirmed'].includes(entry.status));
     assert.ok(['lighting', 'display'].includes(entry.capability));
     assert.ok(!entry.scope || ['family', 'protocol'].includes(entry.scope));
   }
@@ -41,6 +41,19 @@ test('known missing Direct mode applies only to checked models on the pinned Ope
   assert.match(vengeance.entries[0].modesSource, /RGBController_CorsairVengeance.cpp/);
   const newRevision = buildCatalog({ ...openrgb, revision: 'new' }, null);
   assert.equal(findCards(newRevision, '17EF:619A')[0].entries[0].status, 'openrgb');
+});
+
+test('distinguishes built-in keyboard effects from a live scene', () => {
+  for (const query of ['Redragon K551', 'Redragon K580', 'Redragon K556', 'Pulsar PCMK TKL',
+    'Surmen V400', 'Keychron K3 V2 Optical RGB', 'MSI Katana 15 B13V']) {
+    const [result] = find(query, 'peripherals', 'openrgb');
+    assert.equal(result.name, query);
+    assert.equal(result.entries[0].status, 'no-direct', query);
+    assert.match(result.entries[0].modesSource, new RegExp(locked.revision));
+  }
+  for (const query of ['BYGG CSB ICL01', 'Keychron Q1 V2 ANSI', 'TUXEDO Stellaris 16 Gen7 AMD']) {
+    assert.equal(find(query, 'peripherals', 'openrgb')[0].entries[0].status, 'openrgb', query);
+  }
 });
 
 test('joins exact models with evidence from each route and keeps retail variants separate', () => {
@@ -85,6 +98,16 @@ test('finds retail RAM families and keeps the original driver names searchable',
   assert.match(gskill.entries[0].note, /part number/);
   assert.match(gskill.entries[0].noteRu, /номер/);
   assert.ok(named('ENE DRAM AUDA0-E6K5-0101'));
+});
+
+test('model qualifiers must match a single name or alias', () => {
+  const results = find('G.SKILL Trident Z5 Neo RGB', 'pc');
+  assert.equal(results[0].entries[0].status, 'unconfirmed');
+  assert.match(results[0].name, /F5-6000J3038F16GX2-TZ5NR/);
+  assert.ok(!results.some(({ name }) => name.includes('F5-6400J3239G16G')));
+  assert.equal(find('CMH32GX5M2B6000Z30K')[0].name, 'Corsair Vengeance RGB DDR5');
+  assert.equal(find('FF3D532G6000HC30DC01', 'pc', 'research')[0].entries[0].status, 'unconfirmed');
+  assert.equal(find('GV-N5070GAMING OC-12GD', 'pc')[0].name, 'Gigabyte GeForce RTX 5070 Gaming OC');
 });
 
 test('links the B650 EAGLE AX to its native evidence and keeps the Fusion 2 family', () => {
@@ -201,6 +224,22 @@ test('keeps wired keyboard variants, precise display capabilities and network an
   assert.equal(named('E1.31').entries[0].scope, 'protocol');
   assert.equal(named('EVision Keyboard 320F:5084').entries[0].scope, 'family');
   assert.equal(named('WLED').entries[0].scope, 'protocol');
+});
+
+test('finds additional retail models with their exact route and level of evidence', () => {
+  const expect = (query, category, route, status, connection) => {
+    const [card] = find(query, category, route);
+    assert.ok(card, query);
+    const entry = card.entries.find((candidate) => candidate.route === route);
+    assert.equal(entry.status, status, query);
+    assert.equal(entry.connection, connection, query);
+  };
+  expect('Dig-Quad v4', 'strips', 'native', 'implemented', 'LAN / UDP DDP');
+  expect('Hue Bridge V2', 'home', 'native', 'implemented', 'LAN / HTTP(S)');
+  expect('ASRock X870E Nova WiFi', 'pc', 'openrgb', 'openrgb', 'USB HID');
+  expect('RL-KN240-B1', 'displays', 'research', 'research', 'USB HID / bulk');
+  expect('SP630E', 'strips', 'research', 'research', 'Bluetooth LE');
+  expect('KD98A Sunset', 'peripherals', 'research', 'unconfirmed', 'USB');
 });
 
 test('keeps the generic Skydimo serial detector distinct from cataloged models', () => {

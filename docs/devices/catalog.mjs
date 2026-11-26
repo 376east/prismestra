@@ -26,6 +26,8 @@ const openRgbAliases = new Map([
   ['Elgato Stream Deck MK.2', ['20GBA9901']],
   ['NZXT Hue 2 Ambient', ['NZXT HUE 2 Ambient RGB Lighting Kit']],
   ['Robobloq Monitor Light Strip', ['Robobloq Monitor Sync LED Strip Light']],
+  ['Gigabyte GeForce RTX 5070 Gaming OC', ['Gigabyte GeForce RTX 5070 GAMING OC 12G', 'GV-N5070GAMING OC-12GD']],
+  ['Corsair Vengeance RGB DDR5', ['CMH32GX5M2B6000Z30K']],
 ]);
 const lightingOnly = new Set([
   'YICO 14 LCD', 'Lian Li Universal Screen', 'Gigabyte Aorus Waterforce X II 360',
@@ -42,7 +44,13 @@ const withoutDirect = new Map([
   ['Corsair Vengeance RGB DRAM', { type: 'RAM', source: 'CorsairVengeanceController/RGBController_CorsairVengeance.cpp#L20' }],
   ['Lenovo Legion K510 Mini Pro', { type: 'Keyboard', source: 'LenovoControllers/LenovoLegionK510Controller/RGBController_LenovoK510.cpp#L38' }],
   ['MSI Clutch GM11 controller', { type: 'Mouse', source: 'MSIClutchController/MSIClutchGM11Controller/RGBController_MSIClutchGM11.cpp#L39' }],
+  ['Keychron Gaming Keyboard 1', { type: 'Keyboard', source: 'KeychronKeyboardController/RGBController_KeychronKeyboard.cpp#L419' }],
+  ['MSI Keyboard MS_1565', { type: 'Keyboard', source: 'MSIKeyboardController/MSIKeyboard1565Controller/RGBController_MSIMysticLightKB.cpp#L94' }],
+  ['MSI Katana 15 B13V', { type: 'Keyboard', source: 'MSIKeyboardController/MSIKeyboard1565Controller/RGBController_MSIMysticLightKB.cpp#L94' }],
+  ['Winbond Gaming Keyboard', { type: 'Keyboard', source: 'WinbondGamingKeyboardController/RGBController_WinbondGamingKeyboard.cpp#L17' }],
+  ['Pulsar PCMK TKL', { type: 'Keyboard', source: 'WinbondGamingKeyboardController/RGBController_WinbondGamingKeyboard.cpp#L17' }],
 ]);
+const evisionV1 = '/EVisionKeyboardController/EVisionKeyboardController/EVisionKeyboardControllerDetect.cpp';
 
 const fold = (value) => String(value ?? '')
   .toLowerCase().normalize('NFKD').replace(/\p{M}/gu, '')
@@ -54,7 +62,9 @@ const driverName = (entry) => (entry.source?.split('/Controllers/')[1]?.split('/
 
 function entryFor(device, catalog, inherited) {
   const pinned = inherited && catalog.revision === coverageRevision;
-  const known = pinned ? withoutDirect.get(device.name) : undefined;
+  const known = pinned ? (device.source?.includes(evisionV1) ? {
+    type: 'Keyboard', source: 'EVisionKeyboardController/EVisionV2KeyboardController/RGBController_EVisionKeyboard.cpp#L26',
+  } : withoutDirect.get(device.name)) : undefined;
   const modes = known?.source;
   const status = inherited ? (modes || device.scenes === 'unavailable' ? 'no-direct' : 'openrgb') : device.status;
   const [note, noteRu] = (inherited && openRgbFamilyNotes.get(device.name)) || [];
@@ -73,7 +83,7 @@ function entryFor(device, catalog, inherited) {
     type: device.type ?? known?.type ?? (device.source?.includes('/MSIMotherboardController/') ? 'Motherboard' : undefined),
     status,
     capability: !inherited && device.type === 'LCD' ? 'display' : 'lighting',
-    route: inherited || status === 'openrgb' ? 'openrgb' : status === 'research' ? 'research' : 'native',
+    route: inherited || status === 'openrgb' ? 'openrgb' : ['research', 'unconfirmed'].includes(status) ? 'research' : 'native',
     source: device.source ?? catalog.source,
     ...(note && { note, noteRu }),
     ...(scope && { scope }),
@@ -180,9 +190,11 @@ function termRank(card, entry, query, terms) {
   if (/^Skydimo /i.test(entry.name)) deviceTypes.push('ambient lighting');
   if (/\b(rival|sensei)\b/i.test(entry.name)) deviceTypes.push('mouse');
   if (entry.capability === 'display' || /\bmonitor\b/i.test(deviceTypes.join(' '))) deviceTypes.push('display');
-  const words = [...names, fold(deviceTypes.join(' ')), fold(entry.vendor), fold(entry.connection)]
-    .flatMap((value) => value.split(' '));
-  return terms.every((term) => words.some((word) => word.startsWith(term))) ? 2 : Infinity;
+  const context = fold([...deviceTypes, entry.vendor, entry.connection].join(' ')).split(' ');
+  return names.some((name) => {
+    const words = [...name.split(' '), ...context];
+    return terms.every((term) => words.some((word) => word.startsWith(term)));
+  }) ? 2 : Infinity;
 }
 
 export function findCards(cards, query, category = '', route = '') {

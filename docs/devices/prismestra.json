@@ -21,6 +21,77 @@
       "scope": "protocol"
     },
     {
+      "name": "QuinLED Dig-Uno",
+      "vendor": "QuinLED",
+      "type": "LED controller",
+      "aliases": [
+        "Dig-Uno v4",
+        "QuinLED Dig-Uno Pre-Assembled"
+      ],
+      "connection": "LAN / UDP DDP",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/wled.rs",
+      "modelSource": "https://quinled.info/quinled-dig-boards-wled-platform-ini-settings/",
+      "route": "Prismestra WLED DDP",
+      "status": "implemented",
+      "note": "Works over the local network with WLED firmware that receives DDP.",
+      "noteRu": "Работает по локальной сети с прошивкой WLED, которая принимает DDP.",
+      "detail": "Configure the strip’s LED count and add the controller as a WLED device in Prismestra.",
+      "detailRu": "Задайте число светодиодов в WLED и добавьте контроллер как устройство WLED в Prismestra."
+    },
+    {
+      "name": "QuinLED Dig-Quad",
+      "vendor": "QuinLED",
+      "type": "LED controller",
+      "aliases": [
+        "Dig-Quad v4",
+        "QuinLED Dig-Quad Pre-Assembled"
+      ],
+      "connection": "LAN / UDP DDP",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/wled.rs",
+      "modelSource": "https://quinled.info/quinled-dig-boards-wled-platform-ini-settings/",
+      "route": "Prismestra WLED DDP",
+      "status": "implemented",
+      "note": "Works over the local network with WLED firmware that receives DDP.",
+      "noteRu": "Работает по локальной сети с прошивкой WLED, которая принимает DDP.",
+      "detail": "Configure the strip’s LED count and add the controller as a WLED device in Prismestra.",
+      "detailRu": "Задайте число светодиодов в WLED и добавьте контроллер как устройство WLED в Prismestra."
+    },
+    {
+      "name": "QuinLED Dig-Octa",
+      "vendor": "QuinLED",
+      "type": "LED controller",
+      "aliases": [
+        "Dig-Octa System",
+        "QuinLED Dig-Octa Brainboard"
+      ],
+      "connection": "LAN / UDP DDP",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/wled.rs",
+      "modelSource": "https://quinled.info/quinled-dig-boards-wled-platform-ini-settings/",
+      "route": "Prismestra WLED DDP",
+      "status": "implemented",
+      "note": "Works over the local network with WLED firmware that receives DDP.",
+      "noteRu": "Работает по локальной сети с прошивкой WLED, которая принимает DDP.",
+      "detail": "Configure the strip’s LED count and add the controller as a WLED device in Prismestra.",
+      "detailRu": "Задайте число светодиодов в WLED и добавьте контроллер как устройство WLED в Prismestra."
+    },
+    {
+      "name": "QuinLED dig2go",
+      "vendor": "QuinLED",
+      "type": "LED controller",
+      "aliases": [
+        "dig2go"
+      ],
+      "connection": "LAN / UDP DDP",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/wled.rs",
+      "modelSource": "https://quinled.info/quinled-dig-boards-wled-platform-ini-settings/",
+      "route": "Prismestra WLED DDP",
+      "status": "implemented",
+      "note": "Works over the local network with WLED firmware that receives DDP.",
+      "noteRu": "Работает по локальной сети с прошивкой WLED, которая принимает DDP.",
+      "detail": "Configure the strip’s LED count and add the controller as a WLED device in Prismestra.",
+      "detailRu": "Задайте число светодиодов в WLED и добавьте контроллер как устройство WLED в Prismestra."
+    },
+    {
       "name": "Home Assistant",
       "vendor": "Home Assistant",
       "type": "Light integration",
@@ -35,6 +106,27 @@
       "detail": "Choose a light already connected to Home Assistant. The controls depend on what that light can do.",
       "detailRu": "Выберите светильник, который уже подключён к Home Assistant. Доступные настройки зависят от светильника.",
       "scope": "family"
+    },
+    {
+      "name": "Philips Hue lights (via Home Assistant)",
+      "vendor": "Philips Hue",
+      "type": "Light integration",
+      "aliases": [
+        "Philips Hue Bridge",
+        "Hue Bridge V2",
+        "Philips Hue bulbs",
+        "Philips Hue lights"
+      ],
+      "connection": "LAN / HTTP(S)",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/devices/home_assistant.rs",
+      "modelSource": "https://www.home-assistant.io/integrations/hue/",
+      "route": "Prismestra Home Assistant REST",
+      "status": "implemented",
+      "scope": "family",
+      "note": "Connect the Hue Bridge to Home Assistant and select a Hue light in Prismestra.",
+      "noteRu": "Подключите Hue Bridge к Home Assistant и выберите светильник Hue в Prismestra.",
+      "detail": "Uses the light entity from Home Assistant for whole-light commands. Available controls depend on the lamp.",
+      "detailRu": "Команды идут через Home Assistant на светильник целиком. Доступные настройки зависят от лампы."
     },
     {
       "name": "Alice (Yandex Smart Home)",
@@ -954,6 +1046,191 @@
       "status": "research",
       "detail": "Need a LampArray adapter and tests on one Windows model and OS build covering ownership, topology, visible output and returning control.",
       "scope": "protocol"
+    },
+    {
+      "name": "Dark Project Terra Nova",
+      "vendor": "Dark Project",
+      "type": "Keyboard",
+      "aliases": [
+        "DPT-81 Terra Nova"
+      ],
+      "connection": "USB HID",
+      "source": "https://github.com/IlyaKotomin/alu81a-rgb",
+      "status": "research",
+      "detail": "An external implementation drives the USB RGB controller in a stock ALU81A-family unit. The driver has not been integrated into Prismestra.",
+      "detailRu": "Сторонний драйвер управляет подсветкой устройства семейства ALU81A по USB. В Prismestra этого драйвера пока нет."
+    },
+    {
+      "name": "Dark Project Terra Nostra",
+      "vendor": "Dark Project",
+      "type": "Keyboard",
+      "aliases": [
+        "DPT-81 Nostra",
+        "Dark Project Nostra"
+      ],
+      "connection": "USB HID",
+      "source": "https://github.com/IlyaKotomin/alu81a-rgb",
+      "status": "research",
+      "detail": "An external implementation covers the stock ALU81A USB controller. QMK and Vial variants need their own firmware check.",
+      "detailRu": "Сторонний драйвер описывает штатный USB-контроллер ALU81A. Варианты с QMK и Vial требуют отдельной проверки прошивки."
+    },
+    {
+      "name": "NZXT Kraken 240 (2023)",
+      "vendor": "NZXT",
+      "type": "LCD",
+      "aliases": [
+        "RL-KN240-B1",
+        "1E71:300E"
+      ],
+      "connection": "USB HID / bulk",
+      "source": "https://github.com/liquidctl/liquidctl/blob/v1.16.0/liquidctl/driver/kraken3.py",
+      "modelSource": "https://support.nzxt.com/hc/es-es/articles/47207322896923-Kraken-2023-Especificaciones",
+      "status": "research",
+      "detail": "Liquidctl implements image upload for the 240 × 240 display. Prismestra needs a dedicated LCD driver.",
+      "detailRu": "Liquidctl умеет загружать изображения на экран 240 × 240. Для этого экрана нужен отдельный драйвер в Prismestra."
+    },
+    {
+      "name": "Lian Li UNI FAN TL LCD (wired)",
+      "vendor": "Lian Li",
+      "type": "LCD",
+      "aliases": [
+        "UNI FAN TL LCD",
+        "04FC:7393"
+      ],
+      "connection": "USB",
+      "source": "https://github.com/sgtaziz/lian-li-linux#supported-hardware",
+      "modelSource": "https://lian-li.com/product/uni-fan-tl-lcd/",
+      "status": "research",
+      "detail": "External testing identified the wired 400 × 400 LCD. The RGB controller is a separate connection.",
+      "detailRu": "В стороннем проекте проверили проводной экран 400 × 400. Подсветка использует отдельный контроллер."
+    },
+    {
+      "name": "Thermalright Grand Vision 360",
+      "vendor": "Thermalright",
+      "type": "LCD",
+      "aliases": [
+        "GrandVision 360"
+      ],
+      "connection": "USB bulk",
+      "source": "https://github.com/Lexonight1/thermalright-trcc-linux/blob/main/doc/REFERENCE_DEVICES.md",
+      "modelSource": "https://download.thermalright.com/manuals/GRANDVISION360ARGBBLACK.pdf",
+      "status": "research",
+      "detail": "The external TRCC implementation identifies a 480 × 480 display. Its USB ID is shared, so the protocol handshake must also match.",
+      "detailRu": "Сторонняя реализация TRCC определяет экран 480 × 480. У USB ID есть совпадения с другими устройствами, поэтому нужна проверка протокола."
+    },
+    {
+      "name": "Thermalright Frozen Warframe 360",
+      "vendor": "Thermalright",
+      "type": "LCD",
+      "aliases": [],
+      "connection": "USB HID",
+      "source": "https://github.com/Lexonight1/thermalright-trcc-linux/issues/28",
+      "status": "research",
+      "detail": "The captured 360 mm model uses an HID display path. It requires separate handling from the 240 mm model.",
+      "detailRu": "На проверенной 360-мм модели экран подключается по HID. Для 240-мм модели используется другой способ связи."
+    },
+    {
+      "name": "BanlanX SP630E",
+      "vendor": "BanlanX",
+      "type": "LED controller",
+      "aliases": [
+        "SP630E",
+        "BTF-Lighting SP630E"
+      ],
+      "connection": "Bluetooth LE",
+      "source": "https://github.com/monty68/uniled#-banlanx",
+      "modelSource": "https://www.btf-lighting.com/products/sp630e-all-in-one-led-controller",
+      "status": "research",
+      "detail": "UniLED identifies this controller. It currently needs a Prismestra BLE adapter.",
+      "detailRu": "UniLED распознаёт этот контроллер. Подключение напрямую по Bluetooth требует драйвера Prismestra."
+    },
+    {
+      "name": "LED Chord SP107E",
+      "vendor": "LED Chord",
+      "type": "LED controller",
+      "aliases": [
+        "SP107E",
+        "BTF-Lighting SP107E"
+      ],
+      "connection": "Bluetooth LE",
+      "source": "https://github.com/monty68/uniled#-led-chord",
+      "modelSource": "https://www.btf-lighting.com/en-intl/products/sp107e-spi-music-led-controller-dc5-24v",
+      "status": "research",
+      "detail": "UniLED lists this BLE controller. Its command format differs from the Surplife path.",
+      "detailRu": "UniLED указывает этот контроллер в списке. Формат команд отличается от Surplife."
+    },
+    {
+      "name": "Govee H6181",
+      "vendor": "Govee",
+      "type": "Zone light",
+      "aliases": [
+        "H6181",
+        "Govee H6181 TV Backlight"
+      ],
+      "connection": "Bluetooth LE",
+      "source": "https://github.com/Mezzle/govee-bluetooth#supported-models",
+      "modelSource": "https://community.govee.com/support/faqs/specs",
+      "status": "research",
+      "detail": "An external integration tested BLE control on firmware 2.03.11. Prismestra has no direct BLE connection for this model.",
+      "detailRu": "В сторонней интеграции проверяли управление по Bluetooth на прошивке 2.03.11. Прямого подключения по Bluetooth в Prismestra пока нет."
+    },
+    {
+      "name": "Dark Project KD98A Sunset",
+      "vendor": "Dark Project",
+      "type": "Keyboard",
+      "aliases": [
+        "KD98A Sunset",
+        "Dark Project 98 Sunset"
+      ],
+      "connection": "USB",
+      "source": "https://darkproject.eu/drivers?category=Keyboards",
+      "status": "unconfirmed",
+      "detail": "The manufacturer lists the Sunset variant. The VK99 route observed on a KD98A unit has not been established for this variant.",
+      "detailRu": "Производитель указывает вариант Sunset отдельно. Подключение через VK99, замеченное на KD98A, для этой версии не подтверждено."
+    },
+    {
+      "name": "G.SKILL Trident Z5 Neo RGB F5-6000J3038F16GX2-TZ5NR",
+      "vendor": "G.SKILL",
+      "type": "RAM",
+      "aliases": [
+        "F5-6000J3038F16GX2-TZ5NR",
+        "G.SKILL Trident Z5 Neo RGB"
+      ],
+      "connection": "SMBus",
+      "source": "https://www.gskill.com/product/165/390/1661410135/F5-6000J3038F16GX2-TZ5NR",
+      "status": "unconfirmed",
+      "detail": "This kit has a separate part number. Its lighting controller has not been matched to a Prismestra driver.",
+      "detailRu": "У комплекта отдельный артикул. Его контроллер подсветки пока не сопоставлен с драйвером Prismestra."
+    },
+    {
+      "name": "TEAMGROUP T-FORCE DELTA RGB DDR5 FF3D532G6000HC30DC01",
+      "vendor": "TEAMGROUP",
+      "type": "RAM",
+      "aliases": [
+        "FF3D532G6000HC30DC01",
+        "T-Force Delta RGB DDR5"
+      ],
+      "connection": "SMBus",
+      "source": "https://gitlab.com/CalcProgrammer1/OpenRGB/-/issues/5194",
+      "modelSource": "https://www.teamgroupinc.com/cn/product-detail/memory/T-FORCE/delta-rgb-ddr5-black/delta-rgb-ddr5-black-FF3D532G6000HC30DC01/",
+      "status": "unconfirmed",
+      "detail": "A report from an AM5 system could not detect this kit. Its Windows controller match is still unknown.",
+      "detailRu": "В отчёте с компьютера AM5 этот комплект не обнаружился. Совпадение контроллера в Windows пока не подтверждено."
+    },
+    {
+      "name": "Kingston FURY Renegade DDR5 RGB Limited Edition",
+      "vendor": "Kingston",
+      "type": "RAM",
+      "aliases": [
+        "KF580C36RLAK2-48",
+        "Kingston FURY Renegade RGB Limited Edition"
+      ],
+      "connection": "SMBus",
+      "source": "https://github.com/hello-nexus/openrgb-headless/blob/6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43/Controllers/KingstonFuryDRAMController/KingstonFuryDRAMControllerDetect.cpp#L51",
+      "modelSource": "https://www.kingston.com/unitedkingdom/en/memory/search/discontinuedmodels?partid=KF580C36RLAK2-48",
+      "status": "unconfirmed",
+      "detail": "The standard Renegade SPD detection path excludes the Limited Edition identifier. A working lighting route for this kit is unconfirmed.",
+      "detailRu": "Идентификатор Limited Edition исключён из обычного распознавания Renegade по SPD. Рабочее подключение для этого комплекта пока не подтверждено."
     }
   ]
 }
