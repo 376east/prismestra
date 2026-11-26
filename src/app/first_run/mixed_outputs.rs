@@ -226,7 +226,9 @@ fn first_scene_reaches_healthy_outputs_while_one_lcd_is_claimed() {
         assert_eq!(&first_frame.2[..6], &[14, 0, 0, 0, 2, 0]);
         assert!(
             first_frame.2[6..]
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|pixel| pixel[..3] != [0, 0, 0])
         );
     }
