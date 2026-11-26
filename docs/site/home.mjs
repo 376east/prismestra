@@ -36,13 +36,9 @@ function showRussian() {
     devices: 'Устройства',
     platform: 'Windows 10 (1903+) или 11, x64',
     'manual-download': 'Файлы релиза',
-    'preview-label': 'Предпросмотр сцены',
     'effect-rainbow': 'Радуга',
     'effect-breathing': 'Дыхание',
     'effect-noise': 'Мягкий свет',
-    'description-rainbow': 'Цвет проходит от клавиатуры к вентиляторам.',
-    'description-breathing': 'Вся подсветка плавно разгорается и затихает.',
-    'description-noise': 'Оттенки медленно перетекают от одного устройства к другому.',
     'compatibility-title': 'Подойдёт ли моё устройство?',
     'compatibility-summary': 'Найдите свою модель и узнайте, чем Prismestra может управлять и как её подключить.',
     'browse-pc': 'Комплектующие ПК',
@@ -65,6 +61,7 @@ function showRussian() {
   document.documentElement.lang = 'ru';
   document.title = 'Prismestra · Подсветка ПК и комнаты';
   for (const [id, text] of Object.entries(copy)) document.getElementById(id).textContent = text;
+  document.getElementById('scene-options').setAttribute('aria-label', 'Сцены подсветки');
   document.getElementById('scene-art').setAttribute('aria-label', 'Схема рабочего стола с общей подсветкой клавиатуры, вентиляторов и стены за монитором');
   document.getElementById('model').placeholder = 'Например, Dark Project KD98A';
   document.getElementById('search-language').value = 'ru';
