@@ -154,6 +154,7 @@ pub struct Player {
     frame_index: usize,
     source_aligned: bool,
     blank_pending: bool,
+    refresh_content: bool,
     counters: Counters,
 }
 impl Player {
@@ -189,6 +190,7 @@ impl Player {
             frame_index: 0,
             source_aligned: true,
             blank_pending: false,
+            refresh_content: false,
             counters: Counters::default(),
         })
     }
@@ -214,6 +216,14 @@ impl Player {
             self.next_due
         }
     }
+
+    pub(crate) fn refresh_content(&mut self) {
+        if self.state == State::Running {
+            self.refresh_content = true;
+            self.next_due = None;
+        }
+    }
+
     /// Explicit start/resume. A failed transport requires a new player after revalidation.
     /// Counters are per run; the bounded compositor cache is retained across clean resume.
     pub fn start(&mut self) -> Result<(), String> {
@@ -234,6 +244,7 @@ impl Player {
         self.frame_index = 0;
         self.source_aligned = true;
         self.blank_pending = false;
+        self.refresh_content = false;
         self.counters = Counters::default();
         self.compositor.begin_loop();
         Ok(())
@@ -344,7 +355,9 @@ impl Player {
         // Compare the composed bytes with the last acknowledged frame in this
         // run. Keep polling for readings and expiry; leave animation cadence
         // and the explicit blank transfer unchanged.
-        let sent = self.media.frames.len() != 1 || jpeg.as_ref() != self.sender.latest_frame();
+        let sent = self.refresh_content
+            || self.media.frames.len() != 1
+            || jpeg.as_ref() != self.sender.latest_frame();
         if sent {
             if let Err(error) = self.sender.send_frame(&jpeg, false, now, transport) {
                 return self.failure(error);
@@ -352,6 +365,7 @@ impl Player {
             if applied {
                 self.counters.overlay_frames += 1;
             }
+            self.refresh_content = false;
         }
         let finished = transport.now_ms();
         let Some(work_ms) = finished.checked_sub(now) else {

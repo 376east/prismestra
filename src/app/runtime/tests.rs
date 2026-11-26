@@ -144,6 +144,283 @@ fn lighting_resume_does_not_wait_for_a_stalled_audio_worker() {
     release.send(()).unwrap();
 }
 
+#[test]
+fn lighting_resumes_while_stalled_capture_and_sensor_keep_their_owners() {
+    let mut stand = Stand::new();
+    stand.document.temperatures.sources.push(sensors::Source {
+        key: "gpu".into(),
+        value: sensors::Value::Sensor {
+            input: "gpu-slot".into(),
+        },
+    });
+    let mut runtime = stand.runtime(false);
+    let rgb = Arc::new(Record::default());
+    runtime
+        .attach_rgb(
+            "body",
+            vec![],
+            rgb_factory(
+                &stand.document,
+                "body",
+                rgb.clone(),
+                Arc::new(AtomicUsize::new(0)),
+            ),
+        )
+        .unwrap();
+    runtime
+        .attach_lcd("lcd", vec![], stand.lcd_factory())
+        .unwrap();
+
+    let (release_capture, wait_capture) = std::sync::mpsc::channel();
+    let (capture_entered, capture_started) = std::sync::mpsc::channel();
+    let capture_gate = Mutex::new(Some(wait_capture));
+    runtime
+        .attach_capture(Arc::new(move |_| {
+            if let Some(wait) = capture_gate.lock().unwrap().take() {
+                capture_entered.send(()).map_err(|e| e.to_string())?;
+                wait.recv().map_err(|e| e.to_string())?;
+            }
+            Ok(Box::new(Pixels))
+        }))
+        .unwrap();
+    let (release_sensor, wait_sensor) = std::sync::mpsc::channel();
+    let (sensor_entered, sensor_started) = std::sync::mpsc::channel();
+    let sensor_gate = Mutex::new(Some(wait_sensor));
+    let opens = Arc::new(AtomicUsize::new(0));
+    let gpu = gpu_factory(
+        Arc::new(std::sync::atomic::AtomicI32::new(42)),
+        opens.clone(),
+    );
+    let sensor_key = format!("resume-sensor-fixture:{}", stand.root.display());
+    runtime
+        .attach_sensor(
+            "gpu-slot",
+            vec![sensor_key.clone()],
+            Arc::new(move |cancel| {
+                if let Some(wait) = sensor_gate.lock().unwrap().take() {
+                    sensor_entered.send(()).map_err(|e| e.to_string())?;
+                    wait.recv().map_err(|e| e.to_string())?;
+                }
+                if cancel.cancelled() {
+                    return Err("Fixture sensor opening cancelled".into());
+                }
+                gpu(cancel)
+            }),
+        )
+        .unwrap();
+    capture_started
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap();
+    sensor_started.recv_timeout(Duration::from_secs(3)).unwrap();
+    wait(|| {
+        runtime.tick(now(), wall()).unwrap();
+        rgb.last().is_some() && runtime.lcd_status("lcd").unwrap().frames_sent > 0
+    });
+    let old_rgb = runtime.host.status("body").unwrap().generation;
+    let old_lcd = runtime.lcd_status("lcd").unwrap().generation;
+    let old_capture = runtime.capture_status().unwrap().generation;
+    let old_sensor = runtime.sensor_status("gpu-slot").unwrap().generation;
+    let base = now();
+    runtime.notify_power(true, base).unwrap();
+    runtime.notify_power(false, base + 1_000).unwrap();
+    let mut clock = base + 8_000_000;
+    wait(|| {
+        clock += 50_000;
+        runtime.tick(clock, wall()).unwrap();
+        runtime
+            .host
+            .status("body")
+            .is_some_and(|s| s.generation != old_rgb && s.submitted > 0)
+            && runtime
+                .lcd_status("lcd")
+                .is_some_and(|s| s.generation != old_lcd && s.frames_sent > 0)
+    });
+    let healthy_rgb = runtime.host.status("body").unwrap();
+    let healthy_lcd = runtime.lcd_status("lcd").unwrap().generation;
+    clock += 60_000_000;
+    runtime.tick(clock, wall()).unwrap();
+    assert!(!runtime.power.pending());
+    assert!(runtime.power.error().is_none());
+    assert_eq!(runtime.capture_status().unwrap().generation, old_capture);
+    assert_eq!(
+        runtime.sensor_status("gpu-slot").unwrap().generation,
+        old_sensor
+    );
+    assert!(crate::runtime::output::Lease::acquire(vec![sensor_key]).is_err());
+    assert_eq!(opens.load(Ordering::SeqCst), 0);
+
+    release_capture.send(()).unwrap();
+    wait(|| {
+        clock += 50_000;
+        runtime.tick(clock, wall()).unwrap();
+        runtime
+            .capture_status()
+            .is_some_and(|s| s.generation != old_capture && s.frame_revision > 0)
+    });
+    assert_eq!(
+        runtime.sensor_status("gpu-slot").unwrap().generation,
+        old_sensor
+    );
+
+    release_sensor.send(()).unwrap();
+    wait(|| {
+        clock += 50_000;
+        runtime.tick(clock, wall()).unwrap();
+        runtime
+            .sensor_status("gpu-slot")
+            .is_some_and(|s| s.generation != old_sensor && s.phase == Phase::Ready)
+            && runtime.host.status("body").unwrap().submitted > healthy_rgb.submitted
+    });
+    assert_eq!(opens.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        runtime.host.status("body").unwrap().generation,
+        healthy_rgb.generation
+    );
+    assert_eq!(runtime.lcd_status("lcd").unwrap().generation, healthy_lcd);
+}
+
+#[cfg(windows)]
+#[test]
+fn lcd_on_requires_content_ack_after_blanking_and_coalesced_off() {
+    struct HeldAck {
+        count: usize,
+        clock: Arc<AtomicU64>,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl ReportTransport for HeldAck {
+        fn now_ms(&self) -> u64 {
+            self.clock.load(Ordering::SeqCst)
+        }
+
+        fn write_report(&mut self, _: &[u8; REPORT_BYTES], _: u64) -> Result<usize, String> {
+            Ok(REPORT_BYTES)
+        }
+
+        fn read_ack(&mut self, response: &mut [u8; ACK_BYTES], _: u64) -> Result<usize, String> {
+            self.count += 1;
+            if matches!(self.count, 3 | 4) {
+                self.entered.send(()).map_err(|e| e.to_string())?;
+                self.release.recv().map_err(|e| e.to_string())?;
+            }
+            response.fill(0);
+            Ok(ACK_BYTES)
+        }
+    }
+
+    let mut stand = Stand::new();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(16, 16, image::Rgb([80, 10, 0])))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let assets = stand.root.join("assets");
+    stand.document.lcd[0].config.media = Some(
+        Assets::new(assets.clone())
+            .unwrap()
+            .put(png.get_ref(), crate::lcd::media::MAX_SOURCE)
+            .unwrap(),
+    );
+    let mut runtime = stand.runtime(false);
+    let device = stand
+        .document
+        .lighting
+        .setup
+        .devices
+        .iter()
+        .find(|d| d.id == "lcd")
+        .unwrap();
+    let (entered, waiting) = std::sync::mpsc::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let clock = Arc::new(AtomicU64::new(1_000));
+    let transport = Mutex::new(Some(HeldAck {
+        count: 0,
+        clock: clock.clone(),
+        entered,
+        release: held,
+    }));
+    runtime
+        .attach_lcd(
+            "lcd",
+            vec![],
+            Arc::new(move |config, _| {
+                let controller = lcd::Controller::new(config, &Assets::new(assets.clone())?)?;
+                let transport = transport
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .ok_or("ACK fixture was reused")?;
+                Ok((controller, Box::new(transport)))
+            }),
+        )
+        .unwrap();
+    wait(|| {
+        runtime.tick(now(), wall()).unwrap();
+        matches!(runtime.output_activity(device), OutputActivity::Sent(1))
+    });
+    runtime.set_group(Target::Pc, false).unwrap();
+    wait(|| {
+        runtime.tick(now(), wall()).unwrap();
+        matches!(
+            runtime.output_activity(device),
+            OutputActivity::OffSubmitted
+        )
+    });
+    let blank = runtime.lcd_status("lcd").unwrap();
+    assert_eq!(blank.frames_sent, 2);
+    runtime.set_group(Target::Pc, true).unwrap();
+    assert!(matches!(
+        runtime.output_activity(device),
+        OutputActivity::Connecting
+    ));
+    runtime.tick(now(), wall()).unwrap();
+    waiting.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(matches!(
+        runtime.output_activity(device),
+        OutputActivity::Connecting
+    ));
+    assert_eq!(
+        runtime.lcd_status("lcd").unwrap().frames_sent,
+        blank.frames_sent
+    );
+    release.send(()).unwrap();
+    wait(|| {
+        runtime.tick(now(), wall()).unwrap();
+        matches!(runtime.output_activity(device), OutputActivity::Sent(3))
+    });
+    assert_eq!(
+        runtime.lcd_status("lcd").unwrap().generation,
+        blank.generation
+    );
+
+    runtime.set_group(Target::Pc, false).unwrap();
+    runtime.set_group(Target::Pc, true).unwrap();
+    runtime.tick(now(), wall()).unwrap();
+    waiting.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(matches!(
+        runtime.output_activity(device),
+        OutputActivity::Connecting
+    ));
+    assert_eq!(runtime.lcd_status("lcd").unwrap().frames_sent, 3);
+    release.send(()).unwrap();
+    wait(|| {
+        runtime.tick(now(), wall()).unwrap();
+        matches!(runtime.output_activity(device), OutputActivity::Sent(4))
+    });
+
+    clock.fetch_add(60_000, Ordering::SeqCst);
+    runtime.set_group(Target::Door, false).unwrap();
+    let revision = runtime.revision;
+    wait(|| {
+        runtime.tick(now(), wall()).unwrap();
+        runtime.lcd_status("lcd").unwrap().processed_revision >= revision
+    });
+    assert!(matches!(
+        runtime.output_activity(device),
+        OutputActivity::Sent(4)
+    ));
+}
+
 fn gpu_binding() -> crate::sensors::nvidia::PciIdentity {
     crate::sensors::nvidia::PciIdentity {
         device_id: 0x2684_10de,

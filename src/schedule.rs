@@ -44,7 +44,7 @@ pub enum Target {
     Door,
 }
 impl Target {
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         match self {
             Self::Pc => 0,
             Self::Door => 1,

@@ -102,7 +102,8 @@ impl Runtime {
 
         let id = &device.id;
         let is_lcd = device.role == Role::Lcd;
-        let group_off = !self.desired.on(self.target(id));
+        let target = self.target(id);
+        let group_off = !self.desired.on(target);
         // A registered output still has to submit Off. Keep its failure visible.
         let no_off_status = group_off
             && if is_lcd {
@@ -153,15 +154,25 @@ impl Runtime {
             let Some(status) = self.lcd_status(id) else {
                 return OutputActivity::Unavailable(None);
             };
-            if group_off && status.phase == lcd_worker::Phase::Ready {
+            if status.phase == lcd_worker::Phase::Ready {
+                if group_off {
+                    return match status.lcd_state {
+                        Some(lcd::State::Failed(error)) => failed_activity(Some(error)),
+                        Some(lcd::State::Blanked)
+                            if status.processed_revision == status.last_accepted_revision =>
+                        {
+                            OutputActivity::OffSubmitted
+                        }
+                        _ => OutputActivity::TurningOff,
+                    };
+                }
+                let acknowledged = status.last_ack.is_some_and(|ack| {
+                    ack.active && ack.revision >= self.lcd_power_revision[target.index()]
+                });
                 return match status.lcd_state {
                     Some(lcd::State::Failed(error)) => failed_activity(Some(error)),
-                    Some(lcd::State::Blanked)
-                        if status.processed_revision == status.last_accepted_revision =>
-                    {
-                        OutputActivity::OffSubmitted
-                    }
-                    _ => OutputActivity::TurningOff,
+                    _ if acknowledged => OutputActivity::Sent(status.frames_sent),
+                    _ => OutputActivity::Connecting,
                 };
             }
             let phase = match status.phase {
@@ -252,7 +263,7 @@ impl Runtime {
         self.output_revision
     }
     pub fn outputs_ready(&self) -> Result<bool, String> {
-        self.ready(|_| false)
+        self.ready(|_| false, true)
     }
     /// Reuse the configuration drain/persistence barrier.
     pub fn request_outputs(&mut self, outputs: OutputPlan) -> Result<u64, String> {

@@ -272,6 +272,11 @@ struct CaptureView {
     error: Option<String>,
 }
 
+struct ResumeInputs {
+    capture: bool,
+    sensors: BTreeSet<String>,
+}
+
 pub struct Runtime {
     document: Document,
     document_revision: u64,
@@ -281,6 +286,7 @@ pub struct Runtime {
     schedule: Schedule,
     desired: Desired,
     intent_origins: IntentOrigins,
+    lcd_power_revision: [u64; 2],
     lcd: BTreeMap<String, lcd_worker::Worker>,
     lcd_receipt: Option<Arc<lcd_worker::receipt::Request>>,
     capture: Option<capture_worker::Worker>,
@@ -316,6 +322,7 @@ pub struct Runtime {
     last_wall: Option<i64>,
     power: PowerCoordinator,
     refresh: Option<u64>,
+    resume_inputs: Option<ResumeInputs>,
     suspended: bool,
     stopped: bool,
     refresh_started: bool,
@@ -389,6 +396,7 @@ impl Runtime {
                 pc: origin,
                 door: origin,
             },
+            lcd_power_revision: [1; 2],
             lcd: BTreeMap::new(),
             lcd_receipt: None,
             capture: None,
@@ -424,6 +432,7 @@ impl Runtime {
             last_wall: None,
             power: PowerCoordinator::default(),
             refresh: None,
+            resume_inputs: None,
             suspended: false,
             stopped: false,
             refresh_started: false,
@@ -1384,6 +1393,7 @@ impl Runtime {
         self.store.persist(desired, &self.schedule.encoded()?)?;
         self.desired = desired;
         self.intent_origins.set(target, origin);
+        self.lcd_power_revision[target.index()] = self.revision.saturating_add(1);
         self.apply_mutes()?;
         self.mask_view();
         self.bump_view();
@@ -1702,25 +1712,35 @@ impl Runtime {
         }
         if self.document.ambient.scene_edges_without_capture() {
             self.capture_factory = Some(factory);
+            if let Some(inputs) = &mut self.resume_inputs {
+                inputs.capture = false;
+            }
             return Ok(());
         }
+        self.restart_capture(factory.clone())?;
+        if let Some(inputs) = &mut self.resume_inputs {
+            inputs.capture = false;
+        }
+        self.capture_factory = Some(factory);
+        self.bump_view();
+        self.bump()
+    }
+
+    fn restart_capture(&mut self, factory: CaptureFactory) -> Result<(), String> {
         let generation = self.next_generation()?;
-        let f = factory.clone();
         self.capture = Some(capture_worker::Worker::start(
             generation,
             self.document.ambient.clone(),
             self.document.lighting.setup.clone(),
-            move |c| f(c),
+            move |c| factory(c),
         )?);
-        self.capture_factory = Some(factory);
         self.capture_active = None;
         self.host.clear_external_feed();
         self.host
-            .bind_external_feed(self.capture.as_ref().unwrap().frame_reader())?;
-        self.bump_view();
-        self.bump()
+            .bind_external_feed(self.capture.as_ref().unwrap().frame_reader())
     }
     fn stop_channels(&mut self) {
+        self.resume_inputs = None;
         #[cfg(windows)]
         {
             self.authorized_capture = None;
@@ -1776,24 +1796,23 @@ impl Runtime {
     }
     fn lighting_drained(&mut self) -> bool {
         let rgb_drained = self.host.drained();
-        self.other_channels_drained(false) && rgb_drained
+        let lcd_drained = self.lcd_channels_drained(false);
+        let capture_drained = self.capture.as_mut().is_none_or(|worker| worker.reap());
+        let mut sensors_drained = true;
+        for worker in self.sensors.values_mut() {
+            sensors_drained = worker.reap() && sensors_drained;
+        }
+        self.sensors
+            .retain(|input, worker| self.sensor_specs.contains_key(input) || !worker.is_reaped());
+        rgb_drained && lcd_drained && capture_drained && sensors_drained
     }
-    fn other_channels_drained(&mut self, allow_recoverable_lcd: bool) -> bool {
+    fn lcd_channels_drained(&mut self, allow_recoverable_lcd: bool) -> bool {
         let mut drained = true;
         for (id, worker) in &mut self.lcd {
             let reaped = worker.reap();
             let can_recover = allow_recoverable_lcd && self.output_recovery.contains_key(id);
             drained = (reaped || can_recover) && drained;
         }
-        if let Some(w) = &mut self.capture {
-            drained = w.reap() && drained;
-        }
-        for worker in self.sensors.values_mut() {
-            let reaped = worker.reap();
-            drained = reaped && drained;
-        }
-        self.sensors
-            .retain(|input, worker| self.sensor_specs.contains_key(input) || !worker.is_reaped());
         drained
     }
     fn resume_owners_drained(&mut self) -> bool {
@@ -1801,7 +1820,7 @@ impl Runtime {
             return self.lighting_drained();
         }
         self.host.clock_drained()
-            && self.other_channels_drained(true)
+            && self.lcd_channels_drained(true)
             && self.host.rgb_outputs_drained(
                 self.rgb_specs
                     .keys()
@@ -1913,17 +1932,7 @@ impl Runtime {
         if !self.document.ambient.scene_edges_without_capture()
             && let Some(f) = self.capture_factory.clone()
         {
-            let generation = self.next_generation()?;
-            self.capture = Some(capture_worker::Worker::start(
-                generation,
-                self.document.ambient.clone(),
-                self.document.lighting.setup.clone(),
-                move |c| f(c),
-            )?);
-            self.capture_active = None;
-            self.host.clear_external_feed();
-            self.host
-                .bind_external_feed(self.capture.as_ref().unwrap().frame_reader())?;
+            self.restart_capture(f)?;
         }
         let sensors = self
             .sensor_specs
@@ -1934,14 +1943,76 @@ impl Runtime {
             if self.sensors.get(&input).is_some_and(|w| !w.is_reaped()) {
                 continue;
             }
-            let generation = self.next_generation()?;
-            self.sensors.insert(
-                input,
-                sensor_worker::Worker::start_claimed(generation, keys, factory)?,
-            );
+            self.restart_sensor(input, keys, factory)?;
         }
         self.sensor_stamps.clear();
         self.bump()
+    }
+
+    fn restart_sensor(
+        &mut self,
+        input: String,
+        keys: Vec<String>,
+        factory: sensor_worker::Factory,
+    ) -> Result<(), String> {
+        let generation = self.next_generation()?;
+        self.sensors.insert(
+            input,
+            sensor_worker::Worker::start_claimed(generation, keys, factory)?,
+        );
+        Ok(())
+    }
+
+    fn restart_after_resume(&mut self) -> Result<(), String> {
+        self.host.clear_external_feed();
+        self.restart_registered_rgb(None, false)?;
+        self.restart_registered_lcd(None)?;
+        self.resume_inputs = Some(ResumeInputs {
+            capture: self.capture_factory.is_some()
+                && !self.document.ambient.scene_edges_without_capture(),
+            sensors: self.sensor_specs.keys().cloned().collect(),
+        });
+        self.bump()
+    }
+
+    fn restart_drained_resume_inputs(&mut self) {
+        let Some(mut pending) = self.resume_inputs.take() else {
+            return;
+        };
+        if pending.capture
+            && self
+                .capture
+                .as_ref()
+                .is_none_or(|worker| worker.is_reaped())
+        {
+            pending.capture = false;
+            if let Some(factory) = self.capture_factory.clone()
+                && let Err(error) = self.restart_capture(factory)
+            {
+                self.error = Some(error);
+            }
+        }
+        pending.sensors.retain(|input| {
+            let Some(spec) = self.sensor_specs.get(input) else {
+                return false;
+            };
+            if self
+                .sensors
+                .get(input)
+                .is_some_and(|worker| !worker.is_reaped())
+            {
+                return true;
+            }
+            if let Err(error) =
+                self.restart_sensor(input.clone(), spec.keys.clone(), spec.factory.clone())
+            {
+                self.error = Some(error);
+            }
+            false
+        });
+        if pending.capture || !pending.sensors.is_empty() {
+            self.resume_inputs = Some(pending);
+        }
     }
 
     fn restart_registered_lcd(&mut self, added: Option<&BTreeSet<String>>) -> Result<(), String> {
@@ -1957,7 +2028,11 @@ impl Runtime {
         }
         Ok(())
     }
-    fn ready(&self, recovers_independently: impl Fn(&str) -> bool) -> Result<bool, String> {
+    fn ready(
+        &self,
+        recovers_independently: impl Fn(&str) -> bool,
+        wait_for_capture: bool,
+    ) -> Result<bool, String> {
         let mut ready = true;
         if let Some(error) = self
             .output_recovery
@@ -2014,7 +2089,7 @@ impl Runtime {
                 _ => return Err(s.error.unwrap_or_else(|| "LCD refresh stopped".into())),
             }
         }
-        if let Some(w) = &self.capture {
+        if wait_for_capture && let Some(w) = &self.capture {
             let s = w.snapshot();
             match s.phase {
                 capture_worker::Phase::Ready => {}
@@ -2039,9 +2114,10 @@ impl Runtime {
             }
             // Healthy outputs can submit while others connect, retry, or wait
             // for the user to resolve an authorization failure.
-            match self
-                .ready(|id| self.output_recovery.contains_key(id) || self.rgb_requires_action(id))
-            {
+            match self.ready(
+                |id| self.output_recovery.contains_key(id) || self.rgb_requires_action(id),
+                self.resume_inputs.is_none(),
+            ) {
                 Ok(true) => {
                     self.power
                         .refreshed(generation, now / 1000, Ok(()))
@@ -2079,8 +2155,10 @@ impl Runtime {
                                 .to_owned()),
                             Err(error) => Err(error),
                         }
-                    } else {
+                    } else if retry_action_required {
                         self.restart_registered(retry_action_required)
+                    } else {
+                        self.restart_after_resume()
                     };
                     if let Err(e) = restart {
                         self.stop_channels();
@@ -2121,6 +2199,7 @@ impl Runtime {
             )?;
             if self.desired != desired {
                 self.intent_origins.set(d.target, IntentOrigin::Schedule);
+                self.lcd_power_revision[d.target.index()] = self.revision.saturating_add(1);
             }
             self.desired = desired;
             self.apply_mutes()?;
@@ -2141,6 +2220,7 @@ impl Runtime {
             {
                 w.submit(lcd_worker::Intent {
                     revision: self.revision,
+                    power_revision: self.lcd_power_revision[self.target(id).index()],
                     active: self.desired.on(self.target(id)),
                     suspended: false,
                     samples: self.samples.clone(),
@@ -2214,6 +2294,7 @@ impl Runtime {
             if !self.power_tick(now_us)? {
                 return Ok(());
             }
+            self.restart_drained_resume_inputs();
             self.reconcile_registry(now_us)?;
             self.temperatures_tick(now_us / 1000)?;
             if self.last_wall != Some(unix_seconds) {
