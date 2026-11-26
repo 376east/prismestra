@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Find your device and see which lighting and display features Prismestra can use.">
-  <title>Find your device · Prismestra</title>
+  <meta name="description" content="Check which lighting and display features to try in Prismestra and how to get started.">
+  <title>Check your devices · Prismestra</title>
   <link rel="stylesheet" href="lookup.css">
   <script src="lookup.mjs" type="module"></script>
 </head>
@@ -13,21 +13,22 @@
     <nav aria-label="Project">
       <a href="https://github.com/376east/prismestra">Prismestra</a>
       <span class="nav-links">
-        <a id="download" href="https://github.com/376east/prismestra/releases/latest">Download for Windows</a>
+        <a id="download" class="download" href="https://github.com/376east/prismestra/releases/latest">Download for Windows</a>
         <a id="language" href="?lang=ru" hreflang="ru" lang="ru">Русский</a>
       </span>
     </nav>
     <header>
-      <h1 id="title">Find your device</h1>
-      <p id="intro">Search by model, device type or USB ID.</p>
+      <h1 id="title">Check your devices</h1>
+      <p id="intro">Search for your model to see which features you can try and how to connect it.</p>
+      <p id="install-note">Start with Prismestra Setup for Windows. OpenRGB is included.</p>
     </header>
     <form id="filters" role="search">
       <div class="query">
-        <label for="query" id="query-label">Device</label>
-        <input id="query" name="q" type="search" placeholder="Surplife E1, keyboard, 264A:233C…" autocomplete="off">
+        <label for="query" id="query-label">Model or device type</label>
+        <input id="query" name="q" type="search" placeholder="Surplife E1, keyboard, B650 Eagle AX…" autocomplete="off">
       </div>
       <div>
-        <label for="filter" id="filter-label">Filter</label>
+        <label for="filter" id="filter-label">Category</label>
         <select id="filter" name="filter">
           <option value="">All devices</option>
         </select>
