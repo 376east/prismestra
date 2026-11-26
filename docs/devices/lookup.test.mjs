@@ -20,9 +20,20 @@ test('catalog retains true provenance and supported evidence labels', () => {
   for (const entry of entries) {
     assert.ok(entry.name.trim());
     assert.match(entry.source, /^https:\/\//);
-    assert.ok(['openrgb', 'implemented', 'verified', 'research'].includes(entry.status));
+    assert.ok(['openrgb', 'no-direct', 'implemented', 'verified', 'research'].includes(entry.status));
     assert.ok(['lighting', 'display'].includes(entry.capability));
   }
+});
+
+test('known missing Direct mode applies only to checked models on the pinned OpenRGB revision', () => {
+  for (const id of ['17EF:619A', '0DB0:0D11']) {
+    const [card] = find(id, '', 'openrgb');
+    assert.equal(card.entries[0].status, 'no-direct');
+    assert.match(card.entries[0].modesSource, new RegExp(locked.revision));
+  }
+  assert.equal(named('Acer Nitro keyboard controller').entries[0].status, 'openrgb');
+  const newRevision = buildCatalog({ ...openrgb, revision: 'new' }, null);
+  assert.equal(findCards(newRevision, '17EF:619A')[0].entries[0].status, 'openrgb');
 });
 
 test('joins exact models with evidence from each route and keeps retail variants separate', () => {

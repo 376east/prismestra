@@ -4,7 +4,7 @@
 
 **[Установщик для Windows](https://376east.github.io/prismestra/?download=1&lang=ru)** · [Найти устройство](https://376east.github.io/prismestra/devices/?lang=ru) · [Помощь](#помощь) · [English](README.md)
 
-Установщик подходит для 64-разрядных Windows 10 и 11. В него входит OpenRGB, который в фоне управляет совместимой подсветкой ПК. [Все файлы релиза](https://github.com/376east/prismestra/releases/latest)
+Для установки нужна Windows 10 версии 1903 или новее либо Windows 11 (x64). В установщик входит OpenRGB, который в фоне управляет совместимой подсветкой ПК. [Все файлы релиза](https://github.com/376east/prismestra/releases/latest)
 
 ## Как начать
 

@@ -7,6 +7,11 @@ const openRgbCardNames = new Map([
   ['NZXT Kraken 2024 ELITE Series RGB', kraken],
   ['AcerNitroHidKeyboardController', 'Acer Nitro keyboard controller'],
 ]);
+const directEvidenceRevision = '6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43';
+const withoutDirect = new Map([
+  ['Lenovo Legion K510 Mini Pro', 'LenovoControllers/LenovoLegionK510Controller/RGBController_LenovoK510.cpp#L38'],
+  ['MSI Clutch GM11 controller', 'MSIClutchController/MSIClutchGM11Controller/RGBController_MSIClutchGM11.cpp#L39'],
+]);
 
 const fold = (value) => String(value ?? '')
   .toLowerCase().normalize('NFKD').replace(/\p{M}/gu, '')
@@ -17,7 +22,8 @@ const driverName = (entry) => (entry.source?.split('/Controllers/')[1]?.split('/
   .replace(/([a-z])([A-Z])/g, '$1 $2');
 
 function entryFor(device, catalog, inherited) {
-  const status = inherited ? 'openrgb' : device.status;
+  const modes = inherited && catalog.revision === directEvidenceRevision && withoutDirect.get(device.name);
+  const status = inherited ? (modes ? 'no-direct' : 'openrgb') : device.status;
   return {
     ...device,
     status,
@@ -25,6 +31,7 @@ function entryFor(device, catalog, inherited) {
     route: inherited ? 'openrgb' : status === 'research' ? 'research' : 'native',
     routeLabel: device.route,
     source: device.source ?? catalog.source,
+    ...(modes && { modesSource: `https://github.com/hello-nexus/openrgb-headless/blob/${directEvidenceRevision}/Controllers/${modes}` }),
   };
 }
 

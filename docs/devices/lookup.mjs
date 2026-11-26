@@ -18,23 +18,24 @@ const copy = {
     partial: ' Part of the catalog could not be loaded.', details: 'Technical details',
     byDevice: 'Device type', bySource: 'Connection source',
     source: 'Developer source', checked: 'What was tested', noCheck: 'Catalog entries and hardware checks cover different devices and operations.',
-    lighting: 'Lighting', display: 'LCD', openrgb: 'Listed in bundled OpenRGB',
+    lighting: 'Lighting', display: 'LCD', openrgb: 'Listed in bundled OpenRGB', 'no-direct': 'Listed in OpenRGB without Direct mode',
     implemented: 'Connection in Prismestra', research: 'Under research',
     board: 'Check the two ARGB headers in Devices.', wired: 'Connect by cable.',
     skydimo: 'Look for an SK model code on the controller or in its documentation.',
     revision: 'Check your hardware revision in the source notes.',
     listedHelp: 'Live scenes require a usable Direct mode from the controller.',
     featureStatuses: {
-      implemented: 'Available to set up', openrgb: 'Possible. Check on your PC',
+      implemented: 'Available to set up', openrgb: 'Scene support unverified', 'no-direct': 'Live scenes unavailable',
       verified: 'Tested on one setup', research: 'Connection not available yet',
     },
     featureSteps: {
       implemented: 'Open Devices and follow the connection steps.',
-      openrgb: 'After installing, open Devices and try a scene on the device.',
+      openrgb: 'OpenRGB lists this model. After installing, check in Devices whether it can run a scene.',
+      'no-direct': 'The included driver offers device effects but cannot stream a Prismestra scene.',
       verified: 'See the test details for the exact device and operation.',
       research: 'Tell us which model you have.',
     },
-    setup: 'Setup guide', testedOne: 'Includes a limited hardware test. See details.',
+    setup: 'Setup guide', testedOne: 'Includes a limited hardware test. See details.', modesSource: 'Driver modes',
     categories: ['Keyboards and mice', 'PC components', 'Strips and controllers', 'Displays', 'Home lighting', 'Other devices', 'OpenRGB listings', 'Prismestra connections', 'Research candidates'],
   },
   ru: {
@@ -49,23 +50,24 @@ const copy = {
     partial: ' Часть каталога не загрузилась.', details: 'Технические подробности',
     byDevice: 'Тип устройства', bySource: 'Источник подключения',
     source: 'Исходники для разработчиков', checked: 'Что проверяли', noCheck: 'Каталог и аппаратные проверки покрывают разные модели и функции.',
-    lighting: 'Подсветка', display: 'LCD', openrgb: 'Есть в списке встроенного OpenRGB',
+    lighting: 'Подсветка', display: 'LCD', openrgb: 'Есть в списке встроенного OpenRGB', 'no-direct': 'Есть в OpenRGB без режима Direct',
     implemented: 'Есть подключение в Prismestra', research: 'На этапе исследования',
     board: 'Проверьте два разъёма ARGB в разделе «Устройства».', wired: 'Подключите кабелем.',
     skydimo: 'Поищите код модели SK… на контроллере или в его документации.',
     revision: 'Сверьте ревизию устройства с источником.',
     listedHelp: 'Для вывода общей сцены контроллеру нужен рабочий режим Direct.',
     featureStatuses: {
-      implemented: 'Можно настроить', openrgb: 'Возможна. Проверьте на своём ПК',
+      implemented: 'Можно настроить', openrgb: 'Вывод сцен не проверен', 'no-direct': 'Вывод сцен недоступен',
       verified: 'Проверили на одном комплекте', research: 'Подключение пока недоступно',
     },
     featureSteps: {
       implemented: 'Откройте «Устройства» и настройте подключение.',
-      openrgb: 'После установки откройте «Устройства» и попробуйте запустить сцену на этой модели.',
+      openrgb: 'Модель есть в списке OpenRGB. После установки проверьте в «Устройствах», может ли она выводить сцену.',
+      'no-direct': 'Комплектный драйвер поддерживает встроенные эффекты устройства. Передачу кадров сцены Prismestra он не поддерживает.',
       verified: 'В подробностях указано, какую модель и что именно проверили.',
       research: 'Сообщите, какая у вас модель.',
     },
-    setup: 'Инструкция', testedOne: 'Есть ограниченная проверка на устройстве. См. подробности.',
+    setup: 'Инструкция', testedOne: 'Есть ограниченная проверка на устройстве. См. подробности.', modesSource: 'Режимы драйвера',
     categories: ['Клавиатуры и мыши', 'Компоненты ПК', 'Ленты и контроллеры', 'Экраны', 'Домашнее освещение', 'Другие устройства', 'Каталог OpenRGB', 'Подключения Prismestra', 'Исследуемые устройства'],
   },
 };
@@ -98,7 +100,7 @@ function deviceRow(card, t) {
   for (const capability of ['lighting', 'display']) {
     const entries = card.entries.filter((entry) => entry.capability === capability);
     if (!entries.length) continue;
-    const status = ['implemented', 'openrgb', 'verified', 'research'].find((name) => entries.some((entry) => entry.status === name));
+    const status = ['implemented', 'verified', 'openrgb', 'no-direct', 'research'].find((name) => entries.some((entry) => entry.status === name));
     if (status) {
       const feature = node('p', '', 'feature');
       feature.append(node('strong', t[capability]), ' · ', t.featureStatuses[status]);
@@ -130,6 +132,8 @@ function deviceRow(card, t) {
       }
       const source = sourceLink(entry.source, t.source);
       if (source) group.append(source);
+      const modesSource = sourceLink(entry.modesSource, t.modesSource);
+      if (modesSource) group.append(' · ', modesSource);
     }
     evidence.append(group);
   }

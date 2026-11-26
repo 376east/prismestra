@@ -2,9 +2,18 @@
 
 This file records notable changes to Prismestra. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Public release numbers use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-[Download for Windows](https://github.com/376east/prismestra/releases/latest) · [Device compatibility](docs/compatibility.md)
+[Download for Windows](https://376east.github.io/prismestra/?download=1) · [Device compatibility](docs/compatibility.md)
 
 ## Unreleased
+
+### Changed
+
+- **Download and device lookup.** Download Setup from the product website, README or device catalog. The catalog separates models listed by OpenRGB from models where live-scene support has been checked.
+
+### Fixed
+
+- **First-run discovery.** Find devices remains available after Prismestra automatically connects the first device. The search can be repeated after saving edits to the same profile.
+- **Scene edges and RGB status.** Effects that use audio or other inputs can start when monitor lighting is the only scene output. After turning a group back on, its RGB status waits for a new frame submission.
 
 ## 0.2.0 - 2026-11-26
 
