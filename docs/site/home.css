@@ -57,18 +57,44 @@
     linear-gradient(#d6dde30c 1px, transparent 1px) center / 8% 12%,
     radial-gradient(ellipse at 42% 72%, #30353d, #191c22 72%);
 }
+.scene-wall-wash {
+  --phase: -.8s;
+  position: absolute;
+  inset: 44% 0 29%;
+  opacity: .31;
+  -webkit-mask: linear-gradient(180deg, transparent, #000);
+  mask: linear-gradient(180deg, transparent, #000);
+}
 .scene-desk {
   position: absolute;
-  inset: 81% -3% 0;
-  background: linear-gradient(180deg, #292e37, #15181e);
-  border-top: 1px solid #747a84;
+  inset: 71% 0 0;
+  background: #101318;
 }
 .scene-desk::before {
   content: "";
   position: absolute;
-  inset: 56% 0 auto;
-  border-top: 1px solid #606771;
-  box-shadow: 0 4px 0 #111318;
+  inset: 0 0 16%;
+  clip-path: polygon(8% 0, 92% 0, 100% 80%, 100% 100%, 0 100%, 0 80%);
+  background:
+    repeating-linear-gradient(180deg, #c0c5d309 0 1px, transparent 1px 5px),
+    linear-gradient(180deg, #444b56, #262b34 39%, #363b43);
+  box-shadow: inset 0 1px #999fa8;
+}
+.scene-desk::after {
+  content: "";
+  position: absolute;
+  inset: 84% 0 0;
+  border-top: 1px solid #6c7482;
+  background: linear-gradient(180deg, #272c35, #171a20 60%, #11141a);
+}
+.scene-desk-wash {
+  --phase: -.8s;
+  position: absolute;
+  inset: 0 0 16%;
+  opacity: .47;
+  mix-blend-mode: screen;
+  -webkit-mask: radial-gradient(ellipse at 50% 0%, #000 4%, #0009 40%, transparent 76%);
+  mask: radial-gradient(ellipse at 50% 0%, #000 4%, #0009 40%, transparent 76%);
 }
 .scene-monitor {
   position: absolute;
@@ -76,8 +102,8 @@
   padding: 1%;
   border: 1px solid #7d858f;
   border-radius: 4% / 6%;
-  background: #232831;
-  box-shadow: 0 8px 18px #090b10bb;
+  background: linear-gradient(160deg, #444b57, #242a33 22%, #1a1f27 80%, #3b4552);
+  box-shadow: 0 8px 18px #090b10bb, inset 0 0 0 1px #8997aa2c;
 }
 .scene-monitor::before, .scene-monitor::after {
   content: "";
@@ -93,6 +119,7 @@
   top: 124%;
   border: 1px solid #565f6e;
   border-radius: 50%;
+  box-shadow: 0 3px 4px #0b0e13aa;
 }
 .scene-screen {
   position: relative;
@@ -121,24 +148,42 @@
 .scene-strip {
   --phase: -.8s;
   position: absolute;
-  inset: 80.4% 5% auto;
+  inset: 70.7% 7% auto;
   height: .7%;
   min-height: 2px;
   opacity: .9;
-  box-shadow: 0 1px 5px #cbd9fb55;
+  box-shadow: 0 1px 4px #dce5f58a;
 }
 .scene-tower {
   position: absolute;
-  inset: 19% 12% 19% 68%;
+  inset: 19% 15% 19% 68%;
   display: grid;
   place-items: center;
   grid-template-rows: repeat(3, 1fr);
   padding: 4% 1.5%;
   border: 1px solid #687383;
-  border-right-width: clamp(4px, .7vw, 9px);
   border-radius: 8% / 5%;
   background: repeating-linear-gradient(45deg, #1d222b, #1d222b 3px, #242932 3px, #242932 4px);
-  box-shadow: 2px 6px 12px #080a0f;
+  box-shadow: 4px 9px 10px #080a0fcc;
+}
+.scene-tower::before, .scene-tower::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+}
+.scene-tower::before {
+  inset: -1px -27% 0 auto;
+  width: 27%;
+  clip-path: polygon(0 0, 100% 10%, 100% 87%, 0 100%);
+  background: linear-gradient(90deg, #596371, #303946 16%, #1b2029 100%);
+}
+.scene-tower::after {
+  inset: auto -16% -4% -13%;
+  height: 7%;
+  border-radius: 50%;
+  background: #090b0fb8;
+  filter: blur(5px);
+  z-index: -1;
 }
 .scene-fan {
   position: relative;
@@ -170,7 +215,7 @@
   border-bottom-width: clamp(2px, .38vw, 5px);
   border-radius: 6% / 16%;
   background: #171b22;
-  box-shadow: 0 6px 10px #080910bb;
+  box-shadow: 3px 6px 7px #080910bd, inset 0 1px #b1b8c845;
 }
 .scene-keys {
   --phase: -.25s;
