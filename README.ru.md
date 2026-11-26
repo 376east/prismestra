@@ -2,11 +2,13 @@
 
 Запустите один эффект на клавиатуре, LED-ленте и подсветке за монитором, а на совместимом LCD оставьте температуры. Prismestra работает в Windows и продолжает выводить сцену после закрытия редактора.
 
-**[Скачать для Windows](https://github.com/376east/prismestra/releases/latest)** · [Найти устройство](https://376east.github.io/prismestra/?lang=ru) · [Помощь](#помощь) · [English](README.md)
+**[Установщик Prismestra](https://github.com/376east/prismestra/releases/latest)** · [Найти устройство](https://376east.github.io/prismestra/?lang=ru) · [Помощь](#помощь) · [English](README.md)
+
+На странице релиза выберите `Prismestra-Setup-…-x64.exe` для Windows 10 или 11. OpenRGB уже в установщике. Он работает в фоне и управляет совместимой подсветкой ПК.
 
 ## Как начать
 
-1. Скачайте и запустите **Windows x64 Setup** на Windows 10 или 11. OpenRGB и необходимые компоненты Windows уже в комплекте.
+1. Запустите скачанный установщик.
 2. Откройте Prismestra. При первом запуске она ищет поддерживаемые устройства. На странице «Устройства» видно, что найдено и что нужно настроить.
 3. Выберите и примените сцену. В редакторе можно расставить устройства так, как они расположены у вас.
 
@@ -20,4 +22,4 @@ FanControl может продолжать управлять охлаждени
 
 ## Ссылки проекта
 
-[История изменений](CHANGELOG.md) · [Проверка релиза](docs/status.md) · [Сборка из исходников](docs/development.md#check-and-build) · [Как помочь](CONTRIBUTING.md) · [GPL-2.0-or-later](LICENSE)
+[Документация](docs/README.md) · [История изменений](CHANGELOG.md) · [Как помочь](CONTRIBUTING.md) · [GPL-2.0-or-later](LICENSE)
