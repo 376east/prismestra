@@ -5,6 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
+        This form is public. [Report suspected security vulnerabilities privately](https://github.com/376east/prismestra/security/advisories/new).
+
         Report only what you tested. Remove tokens, serial numbers, MAC addresses, private addresses and personal paths from attachments.
   - type: input
     id: device

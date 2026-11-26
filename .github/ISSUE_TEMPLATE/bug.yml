@@ -2,6 +2,9 @@ name: App or installer bug
 description: Report a problem installing, opening or using Prismestra.
 title: "[Bug] "
 body:
+  - type: markdown
+    attributes:
+      value: This form is public. [Report suspected security vulnerabilities privately](https://github.com/376east/prismestra/security/advisories/new).
   - type: input
     id: version
     attributes:
