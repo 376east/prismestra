@@ -1,5 +1,5 @@
 import { connectWindowsSetup } from './setup-download.mjs';
-import { connectScenePreview } from './scene-preview.mjs';
+import { connectScenePreview } from './scene-preview.mjs?v=preview-controls';
 
 const params = new URLSearchParams(location.search);
 const language = document.getElementById('language');
@@ -10,7 +10,7 @@ if (['q', 'category', 'route'].some((key) => params.has(key))) {
   location.replace(new URL('devices/' + location.search + location.hash, location.href));
 } else {
   if (russian) showRussian();
-  connectScenePreview(russian);
+  connectScenePreview();
   const setup = connectWindowsSetup(document.getElementById('download'));
   if (params.get('download') === '1') {
     params.delete('download');
@@ -40,7 +40,11 @@ function showRussian() {
     'effect-rainbow': 'Радуга',
     'effect-breathing': 'Дыхание',
     'effect-noise': 'Мягкий свет',
-    'scene-description': 'Цвета бегут по устройствам.',
+    'preview-play': 'Смотреть анимацию',
+    'preview-pause': 'Пауза',
+    'description-rainbow': 'Цвета бегут по устройствам.',
+    'description-breathing': 'Вся подсветка плавно разгорается и затихает.',
+    'description-noise': 'Оттенки медленно перетекают от одного устройства к другому.',
     'compatibility-title': 'Подойдёт ли моё устройство?',
     'compatibility-summary': 'Найдите свою модель и узнайте, чем Prismestra может управлять и как её подключить.',
     'browse-pc': 'Комплектующие ПК',

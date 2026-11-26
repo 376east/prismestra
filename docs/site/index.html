@@ -9,8 +9,8 @@
   <link rel="icon" href="favicon.ico" sizes="any">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="stylesheet" href="site.css">
-  <link rel="stylesheet" href="home.css">
-  <script type="module" src="home.mjs"></script>
+  <link rel="stylesheet" href="home.css?v=preview-controls">
+  <script type="module" src="home.mjs?v=preview-controls"></script>
 </head>
 <body class="home-page">
   <nav class="site-nav" aria-label="Main navigation">
@@ -34,20 +34,31 @@
         <a class="text-link" id="manual-download" href="https://github.com/376east/prismestra/releases/latest">Release files</a>
       </div>
 
-      <figure class="scene" id="scene" data-scene="rainbow" data-playing="false">
+      <figure class="scene" id="scene">
+        <input class="scene-choice" type="radio" name="effect" id="scene-rainbow" checked>
+        <input class="scene-choice" type="radio" name="effect" id="scene-breathing">
+        <input class="scene-choice" type="radio" name="effect" id="scene-noise">
+        <input type="radio" name="playback" id="scene-auto" checked hidden>
+        <input class="scene-choice" type="radio" name="playback" id="scene-play">
+        <input class="scene-choice" type="radio" name="playback" id="scene-pause">
         <div class="scene-frame">
           <img class="scene-photo" src="scene-workstation.webp" alt="A desktop PC, monitor and keyboard with synchronized lighting" id="scene-photo" width="1536" height="1024" fetchpriority="high">
           <div class="scene-light" aria-hidden="true"></div>
         </div>
         <figcaption class="scene-controls">
           <span id="preview-label">Scene preview</span>
-          <div class="scene-options" role="group" aria-labelledby="preview-label" hidden>
-            <button type="button" class="scene-option" data-effect="rainbow" aria-pressed="true"><span id="effect-rainbow">Rainbow</span></button>
-            <button type="button" class="scene-option" data-effect="breathing" aria-pressed="false"><span id="effect-breathing">Breathing</span></button>
-            <button type="button" class="scene-option" data-effect="noise" aria-pressed="false"><span id="effect-noise">Soft light</span></button>
+          <div class="scene-options" role="group" aria-labelledby="preview-label">
+            <label class="scene-option" for="scene-rainbow" id="effect-rainbow">Rainbow</label>
+            <label class="scene-option" for="scene-breathing" id="effect-breathing">Breathing</label>
+            <label class="scene-option" for="scene-noise" id="effect-noise">Soft light</label>
           </div>
-          <button type="button" class="scene-option scene-playback" id="scene-playback" hidden>Watch animation</button>
-          <p class="scene-description" id="scene-description">Colors move across the devices.</p>
+          <div class="scene-playback">
+            <label class="scene-option" for="scene-play" id="preview-play">Play</label>
+            <label class="scene-option" for="scene-pause" id="preview-pause">Pause</label>
+          </div>
+          <p class="scene-description" id="description-rainbow">Colors move across the devices.</p>
+          <p class="scene-description" id="description-breathing">All the lights brighten and dim together.</p>
+          <p class="scene-description" id="description-noise">Colors drift slowly across the setup.</p>
         </figcaption>
       </figure>
     </header>
