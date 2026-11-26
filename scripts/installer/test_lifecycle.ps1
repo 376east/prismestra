@@ -196,6 +196,15 @@ Check-Payload $upgrade.Manifest
 Assert-Expected ((Sha256 $profile) -ceq $profileHash -and (Sha256 $bindings) -ceq $bindingsHash -and
     (Sha256 $asset) -ceq $assetHash) 'Upgrade changed saved profile, local bindings or assets.'
 
+$downgrade = Join-Path $report 'blocked-downgrade.log'
+Run-Setup $first.Path '/TASKS=autostart' $downgrade -ExpectFailure
+Assert-Expected ((Get-Content -LiteralPath $downgrade -Raw).Contains(
+    "Installed Prismestra $($upgrade.Manifest.installer_version) is newer than this Setup")) 'Setup did not identify the lower installed version attempt.'
+Check-Payload $upgrade.Manifest
+Assert-Expected ((Get-ItemPropertyValue -LiteralPath $arp -Name DisplayVersion) -ceq $upgrade.Manifest.installer_version -and
+    (Sha256 $profile) -ceq $profileHash -and (Sha256 $bindings) -ceq $bindingsHash -and
+    (Sha256 $asset) -ceq $assetHash) 'Blocked downgrade changed the registered version or saved data.'
+
 if (-not $ElevatedFilesOnly) { $new = Start-TestSession }
 $uninstallCommand = (Get-ItemProperty -LiteralPath $arp).QuietUninstallString
 Assert-Expected ($uninstallCommand -match '^"(.+\\unins\d{3}\.exe)"') 'Expected the isolated registered uninstaller.'
@@ -234,6 +243,7 @@ Assert-Expected ((Sha256 $profile) -ceq $profileHash -and (Sha256 $bindings) -ce
     upgraded_version = $upgrade.Manifest.installer_version
     startup_registry = if ($startupVerified) { 'exact_command_verified_in_original_hive' } else { 'absent_no_linked_token_reported' }
     damaged_manifest_repair = [bool]$ElevatedFilesOnly
+    downgrade_blocked = $true
     native_guard_rejections = if ($guardFixtures) { @('hard_link','reparse_point','unprivileged_writer') } else { @() }
     graceful_upgrade = if ($ElevatedFilesOnly) { 'no_live_session_exercised' } else { 'resident_process_drained' }
     graceful_uninstall = if ($ElevatedFilesOnly) { 'no_live_session_exercised' } else { 'resident_process_drained' }

@@ -29,10 +29,12 @@ $setupUrl = "https://github.com/$Repository/releases/download/$Tag/$setupName"
 $runUrl = "https://github.com/$Repository/actions/runs/$RunId"
 $sourceUrl = "https://github.com/$Repository/blob/$Commit"
 $marker = "<!-- Prismestra release run $RunId, commit $Commit, tag $TagObject -->"
+$signature = Get-AuthenticodeSignature -LiteralPath $candidate.Setup
+$signatureNote = if ($signature.Status -eq 'NotSigned') { 'The Setup is unsigned.' }
 $notes = @"
-**[Download Windows x64 Setup]($setupUrl)** · Windows 10 or 11 (x64).
+**[Download Windows x64 Setup]($setupUrl)** · Windows 10 version 1903 or later, or Windows 11 (x64).
 
-Setup includes OpenRGB and the required Windows runtimes. The ZIP contains the corresponding sources.
+Setup includes OpenRGB and the required Windows runtimes. The ZIP contains the corresponding sources. $signatureNote
 
 [Changelog]($sourceUrl/CHANGELOG.md) · [Device compatibility]($sourceUrl/docs/compatibility.md) · [Windows release checks]($runUrl)
 

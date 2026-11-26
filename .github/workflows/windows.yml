@@ -16,7 +16,7 @@ on:
       installer_version:
         description: Four-part Windows installer version for a candidate build
         required: true
-        default: '0.1.0.8'
+        default: '0.2.0.1'
         type: string
 
 permissions:
@@ -176,6 +176,29 @@ jobs:
           $vsdevcmd = & $vswhere -latest -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find Common7/Tools/VsDevCmd.bat
           if ($LASTEXITCODE -ne 0 -or -not $vsdevcmd) { throw 'MSVC build tools were not found' }
           "vsdevcmd=$vsdevcmd" >> $env:GITHUB_OUTPUT
+      - name: Check Setup version against the published stable baseline
+        if: needs.quick.outputs.release_version != '' || inputs.validation == 'setup'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALLER_VERSION: ${{ needs.quick.outputs.release_version || inputs.installer_version }}
+        run: |
+          $pin = Get-Content -LiteralPath scripts/installer/stable-upgrade-baseline.lock.json -Raw | ConvertFrom-Json
+          $latest = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $latest.tag_name -cnotmatch '^v(\d+\.\d+\.\d+)$') {
+            throw 'Could not identify the published stable release.'
+          }
+          $stableVersion = "$($latest.tag_name.Substring(1)).0"
+          $asset = @($latest.assets | Where-Object name -CEQ $pin.file)
+          if ($pin.version -cne $stableVersion -or $asset.Count -ne 1 -or $asset[0].state -cne 'uploaded' -or
+              $asset[0].digest -cne "sha256:$($pin.sha256)" -or $asset[0].size -ne $pin.size -or
+              $asset[0].browser_download_url -cne $pin.source) {
+            throw 'Update the stable upgrade baseline pin to the current published Setup.'
+          }
+          if ($env:INSTALLER_VERSION -cnotmatch '^\d+\.\d+\.\d+\.\d+$' -or
+              [version]$env:INSTALLER_VERSION -le [version]$stableVersion) {
+            throw "Setup version must be newer than the published stable version $stableVersion."
+          }
       - name: Fingerprint the OpenRGB build environment
         id: openrgb
         if: >-
@@ -303,7 +326,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test: [offline-setup, standard-user, first-scene-one-ddp, first-scene-two-ddp, production-upgrade, upgrade-fixtures]
+        test: [offline-setup, standard-user, first-scene-one-ddp, first-scene-two-ddp, production-upgrade, stable-upgrade, upgrade-fixtures]
         include:
           - test: standard-user
             ddp_devices: 0
@@ -311,6 +334,10 @@ jobs:
             ddp_devices: 1
           - test: first-scene-two-ddp
             ddp_devices: 2
+          - test: production-upgrade
+            upgrade_from: Preview
+          - test: stable-upgrade
+            upgrade_from: Stable
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -321,7 +348,7 @@ jobs:
           name: ${{ needs.package.outputs.candidate }}
           path: ${{ runner.temp }}/candidate
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        if: matrix.test == 'upgrade-fixtures' || matrix.test == 'standard-user' || matrix.ddp_devices > 0 || matrix.test == 'production-upgrade'
+        if: matrix.test == 'upgrade-fixtures' || matrix.test == 'standard-user' || matrix.ddp_devices > 0 || matrix.upgrade_from != null
         with:
           name: ${{ needs.package.outputs.fixtures }}
           path: ${{ runner.temp }}/fixtures
@@ -334,13 +361,15 @@ jobs:
           $candidate = ./scripts/installer/verify_candidate.ps1 -Directory (Join-Path $env:RUNNER_TEMP candidate) -Commit $env:GITHUB_SHA -SumsSha256 $env:SUMS_SHA256
           ./scripts/installer/test_offline_setup.ps1 -Installer $candidate.Setup -Sha256 $candidate.SetupSha256 -Commit $env:GITHUB_SHA -ManifestSha256 $candidate.ManifestSha256 -ReportDirectory evidence -DisposableRunner
       - name: Upgrade the published Setup to this candidate
-        if: matrix.test == 'production-upgrade'
+        if: matrix.upgrade_from != null
         shell: pwsh
         env:
           SUMS_SHA256: ${{ needs.package.outputs.sums_sha256 }}
+          UPGRADE_FROM: ${{ matrix.upgrade_from }}
         run: |
           $candidate = ./scripts/installer/verify_candidate.ps1 -Directory (Join-Path $env:RUNNER_TEMP candidate) -Commit $env:GITHUB_SHA -SumsSha256 $env:SUMS_SHA256
-          $baseline = Get-Content -LiteralPath scripts/installer/upgrade-baseline.lock.json -Raw | ConvertFrom-Json
+          $baselineLock = if ($env:UPGRADE_FROM -ceq 'Stable') { 'stable-upgrade-baseline.lock.json' } else { 'upgrade-baseline.lock.json' }
+          $baseline = Get-Content -LiteralPath (Join-Path scripts/installer $baselineLock) -Raw | ConvertFrom-Json
           $manifest = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'candidate/install-manifest.json') -Raw | ConvertFrom-Json
           if ([version]$manifest.installer_version -le [version]$baseline.version) {
             throw 'The candidate installer version must exceed the published upgrade baseline.'
@@ -349,7 +378,7 @@ jobs:
           Invoke-WebRequest -Uri $baseline.source -OutFile $previous -TimeoutSec 180
           $fixtures = Join-Path $env:RUNNER_TEMP fixtures
           $routeProbeSha = (Get-Content -LiteralPath (Join-Path $fixtures 'upgrade-routes.sha256') -Raw).Trim()
-          ./scripts/installer/test_offline_setup.ps1 -PreviousInstaller $previous -Installer $candidate.Setup -Sha256 $candidate.SetupSha256 -Commit $env:GITHUB_SHA -ManifestSha256 $candidate.ManifestSha256 -ReportDirectory evidence -UpgradeRouteProbe (Join-Path $fixtures 'setup_upgrade_routes.exe') -UpgradeRouteProbeSha256 $routeProbeSha -DisposableRunner
+          ./scripts/installer/test_offline_setup.ps1 -PreviousInstaller $previous -UpgradeFrom $env:UPGRADE_FROM -Installer $candidate.Setup -Sha256 $candidate.SetupSha256 -Commit $env:GITHUB_SHA -ManifestSha256 $candidate.ManifestSha256 -ReportDirectory evidence -UpgradeRouteProbe (Join-Path $fixtures 'setup_upgrade_routes.exe') -UpgradeRouteProbeSha256 $routeProbeSha -DisposableRunner
           ./scripts/installer/verify_upgrade_receipts.ps1 -Directory evidence -Commit $env:GITHUB_SHA -SetupSha256 $candidate.SetupSha256 -ManifestSha256 $candidate.ManifestSha256 -ProbeSha256 $routeProbeSha
       - name: Launch the same Setup payload as a fresh standard user
         if: matrix.test == 'standard-user' || matrix.ddp_devices > 0

@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string]$ManifestSha256,
     [Parameter(Mandatory)][string]$ReportDirectory,
     [string]$PreviousInstaller,
+    [ValidateSet('Preview', 'Stable')][string]$UpgradeFrom = 'Preview',
     [string]$UpgradeRouteProbe,
     [ValidatePattern('^[0-9a-f]{64}$')][string]$UpgradeRouteProbeSha256,
     [switch]$DisposableRunner
@@ -435,7 +436,8 @@ try {
             (Get-Sha256 $UpgradeRouteProbe) -ceq $UpgradeRouteProbeSha256) 'Unexpected upgrade route probe.'
         $temperatureEvidence.probe_sha256 = $UpgradeRouteProbeSha256
         Assert-Expected (-not (Test-Path -LiteralPath $userRoot)) 'Upgrade requires a fresh runner profile.'
-        $baseline = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'upgrade-baseline.lock.json') -Raw | ConvertFrom-Json
+        $baselineLock = if ($UpgradeFrom -eq 'Stable') { 'stable-upgrade-baseline.lock.json' } else { 'upgrade-baseline.lock.json' }
+        $baseline = Get-Content -LiteralPath (Join-Path $PSScriptRoot $baselineLock) -Raw | ConvertFrom-Json
         $previous = Get-Item -LiteralPath $PreviousInstaller
         Assert-Expected ($previous.Name -ceq $baseline.file -and $previous.Length -eq $baseline.size -and
             (Get-Sha256 $previous.FullName) -ceq $baseline.sha256) 'Previous release has an unexpected name, size or SHA-256.'

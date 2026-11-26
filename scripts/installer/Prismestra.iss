@@ -355,12 +355,23 @@ end;
 #endif
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
-#ifndef LifecycleTest
 var
+  DisplayVersion: String;
+  InstalledVersion, SetupVersion: Int64;
+#ifndef LifecycleTest
   Code: Integer;
 #endif
 begin
   Result := '';
+  if RegQueryStringValue(HKLM64,
+    'Software\Microsoft\Windows\CurrentVersion\Uninstall\{' + '{#InstallerAppId}' + '}_is1',
+    'DisplayVersion', DisplayVersion) and StrToVersion(DisplayVersion, InstalledVersion) and
+    StrToVersion('{#InstallerVersion}', SetupVersion) and
+    (ComparePackedVersion(InstalledVersion, SetupVersion) > 0) then begin
+    Result := 'Installed Prismestra ' + DisplayVersion + ' is newer than this Setup ({#InstallerVersion}).';
+    Log(Result);
+    Exit;
+  end;
   if not GuardInstall('Stop') then begin
     Result := 'Prismestra could not close or its installation path could not be verified. ' +
       'Finish pending edits and exit Prismestra from the notification area, then retry.';
