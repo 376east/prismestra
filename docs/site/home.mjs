@@ -30,7 +30,7 @@ if (['q', 'category', 'route'].some((key) => params.has(key))) {
 
 function showRussian() {
   const copy = {
-    title: 'Управление RGB-подсветкой в Windows',
+    title: 'Вся подсветка играет вместе',
     summary: 'Синхронизируйте подсветку клавиатуры, ПК и светодиодных лент. Выберите готовый эффект или создайте свой.',
     download: 'Скачать для Windows',
     devices: 'Устройства',
