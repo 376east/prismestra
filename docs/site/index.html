@@ -9,8 +9,8 @@
   <link rel="icon" href="favicon.ico" sizes="any">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="stylesheet" href="site.css">
-  <link rel="stylesheet" href="home.css?v=scene-cuts">
-  <script type="module" src="home.mjs?v=scene-montage"></script>
+  <link rel="stylesheet" href="home.css?v=full-montage">
+  <script type="module" src="home.mjs?v=full-montage"></script>
 </head>
 <body class="home-page">
   <nav class="site-nav" aria-label="Main navigation">
@@ -38,22 +38,12 @@
         <input class="scene-choice" type="radio" name="effect" id="scene-rainbow" checked>
         <input class="scene-choice" type="radio" name="effect" id="scene-breathing">
         <input class="scene-choice" type="radio" name="effect" id="scene-noise">
-        <div class="scene-frame" id="scene-art" role="img" aria-label="Three desk setups with synchronized lighting and Prismestra on the monitors">
-          <div class="scene-shot scene-shot-graphite" aria-hidden="true">
-            <img class="scene-photo" src="shots/graphite.webp" alt="" width="1200" height="800" fetchpriority="high">
+        <div class="scene-frame" id="scene-art" role="img" aria-label="Prismestra over a montage of different desks with synchronized lighting">
+          <div class="scene-shot" data-shot="01" aria-hidden="true">
+            <img class="scene-photo" src="shots/01.webp" alt="" width="960" height="640" fetchpriority="high">
             <div class="scene-light"></div>
-            <div class="scene-wordmark"><img src="favicon.svg" alt="" width="40" height="40">Prismestra</div>
           </div>
-          <div class="scene-shot scene-shot-peripherals" aria-hidden="true">
-            <img class="scene-photo" src="shots/peripherals.webp" alt="" width="1200" height="800" decoding="async">
-            <div class="scene-light"></div>
-            <div class="scene-wordmark"><img src="favicon.svg" alt="" width="40" height="40">Prismestra</div>
-          </div>
-          <div class="scene-shot scene-shot-daylight" aria-hidden="true">
-            <img class="scene-photo" src="shots/daylight.webp" alt="" width="1200" height="800" decoding="async">
-            <div class="scene-light"></div>
-            <div class="scene-wordmark"><img src="favicon.svg" alt="" width="40" height="40">Prismestra</div>
-          </div>
+          <div class="scene-wordmark" aria-hidden="true"><img src="favicon.svg" alt="" width="40" height="40">Prismestra</div>
         </div>
         <figcaption class="scene-controls">
           <div class="scene-options" id="scene-options" role="group" aria-label="Lighting scenes">

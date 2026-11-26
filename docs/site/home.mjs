@@ -1,5 +1,5 @@
 import { connectWindowsSetup } from './setup-download.mjs';
-import { connectScenePreview } from './scene-preview.mjs?v=scene-picker';
+import { connectScenePreview } from './scene-preview.mjs?v=full-montage';
 
 const params = new URLSearchParams(location.search);
 const language = document.getElementById('language');
@@ -62,7 +62,7 @@ function showRussian() {
   document.title = 'Prismestra · Подсветка ПК и комнаты';
   for (const [id, text] of Object.entries(copy)) document.getElementById(id).textContent = text;
   document.getElementById('scene-options').setAttribute('aria-label', 'Сцены подсветки');
-  document.getElementById('scene-art').setAttribute('aria-label', 'Три рабочих места с синхронной подсветкой и надписью Prismestra на мониторах');
+  document.getElementById('scene-art').setAttribute('aria-label', 'Prismestra на фоне разных рабочих мест с синхронной подсветкой');
   document.getElementById('model').placeholder = 'Например, Dark Project KD98A';
   document.getElementById('search-language').value = 'ru';
   document.getElementById('browse-types').setAttribute('aria-label', 'Каталог по типу устройства');
