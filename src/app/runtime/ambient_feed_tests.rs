@@ -305,13 +305,18 @@ fn lost_capture_uses_base_scene_until_fresh_pixels_return_with_current_geometry(
     let original = scene_edges(runtime.document(), context);
     assert!(original.windows(2).any(|pair| pair[0] != pair[1]));
     wait(|| record.last().is_some_and(|frame| frame.iter().all(green)));
+    #[cfg(windows)]
+    assert!(!runtime.has_active_scene_rgb());
     mode.store(0, Ordering::SeqCst);
     wait(|| record.last().as_ref() == Some(&original));
     #[cfg(windows)]
-    assert_eq!(
-        runtime.ambient_source_detail("ambient"),
-        Some("Базовая сцена · кадр монитора устарел")
-    );
+    {
+        assert!(runtime.has_active_scene_rgb());
+        assert_eq!(
+            runtime.ambient_source_detail("ambient"),
+            Some("Базовая сцена · кадр монитора устарел")
+        );
+    }
     mode.store(2, Ordering::SeqCst);
     wait(|| {
         record
@@ -320,10 +325,13 @@ fn lost_capture_uses_base_scene_until_fresh_pixels_return_with_current_geometry(
     });
 
     #[cfg(windows)]
-    assert_eq!(
-        runtime.ambient_source_detail("ambient"),
-        Some("Источник кадров — монитор")
-    );
+    {
+        assert!(!runtime.has_active_scene_rgb());
+        assert_eq!(
+            runtime.ambient_source_detail("ambient"),
+            Some("Источник кадров — монитор")
+        );
+    }
 
     let mut changed = runtime.document().clone();
     changed.lighting.setup.canvas.width = 37;

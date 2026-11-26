@@ -2229,18 +2229,15 @@ impl Runtime {
                 } else {
                     self.cpu_load = system_load::Load::default();
                 }
-                let group_on = |group| self.group_on(group);
                 let rgb_wanted = self.native_inputs
                     && (effect.uses_audio() || effect.uses_reactive())
-                    && self.document.lighting.setup.devices.iter().any(|device| {
-                        device.role == Role::Canvas
-                            && device.enabled
-                            && self.rgb_specs.contains_key(&device.id)
-                            && ((group_on(Target::Pc)
-                                && self.document.lighting.groups.pc.contains(&device.id))
-                                || (group_on(Target::Door)
-                                    && self.document.lighting.groups.door.contains(&device.id)))
-                    });
+                    && self
+                        .document
+                        .lighting
+                        .setup
+                        .devices
+                        .iter()
+                        .any(|device| self.receives_scene_rgb(device, now_us / 1000));
                 let had_worker = self.sound.has_worker();
                 let audio_wanted = rgb_wanted && effect.uses_audio();
                 self.sound.reconcile(audio_wanted, now_us);

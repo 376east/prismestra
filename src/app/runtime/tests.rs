@@ -86,6 +86,53 @@ fn sensitive_scene_inputs_require_apply_even_after_connected_restore() {
 
 #[cfg(windows)]
 #[test]
+fn scene_edges_enable_reactive_input_for_the_routed_group() {
+    use crate::lighting::scene::Effect;
+
+    let mut stand = Stand::new();
+    stand.document.ambient.routes[0].scene_edges = true;
+    stand
+        .document
+        .lighting
+        .groups
+        .pc
+        .retain(|id| id != "ambient");
+    stand.document.lighting.groups.door.push("ambient".into());
+    stand.document.lighting.scene.effect = Effect::CameraColor;
+    let mut runtime = stand.runtime(false);
+    runtime.enable_native_scene_inputs();
+    runtime
+        .attach_rgb(
+            "ambient",
+            vec![],
+            rgb_factory(
+                &stand.document,
+                "ambient",
+                Arc::new(Record::default()),
+                Arc::new(AtomicUsize::new(0)),
+            ),
+        )
+        .unwrap();
+    runtime.tick(now(), wall()).unwrap();
+    assert!(
+        !runtime.reactive.wanted(),
+        "restored camera effect requires consent"
+    );
+
+    let mut scene = runtime.document().lighting.scene.clone();
+    scene.effect = Effect::GameEvents;
+    runtime.apply_native_scene(scene).unwrap();
+    runtime.tick(now(), wall()).unwrap();
+    assert!(runtime.reactive.wanted());
+
+    runtime.set_group(Target::Door, false).unwrap();
+    runtime.tick(now(), wall()).unwrap();
+    assert!(runtime.group_on(Target::Pc));
+    assert!(!runtime.reactive.wanted());
+}
+
+#[cfg(windows)]
+#[test]
 fn lighting_resume_does_not_wait_for_a_stalled_audio_worker() {
     let stand = Stand::new();
     let mut runtime = stand.runtime(false);

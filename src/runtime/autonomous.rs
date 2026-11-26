@@ -184,15 +184,13 @@ impl Host {
     #[cfg(windows)]
     pub(crate) fn monitor_frame(&self, id: &str, now: u64) -> Result<(), frame_feed::Unavailable> {
         let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
-        let feed = core
-            .feed
-            .as_ref()
-            .ok_or(frame_feed::Unavailable::Disconnected)?;
-        let route = feed
-            .routes()
-            .get(id)
-            .ok_or(frame_feed::Unavailable::Disconnected)?;
-        feed.snapshot().fresh_frame(id, route, now).map(|_| ())
+        core.monitor_frame(id, now)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn monitor_scene_fallback(&self, id: &str, now: u64) -> bool {
+        let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.fallback_routes.contains_key(id) && core.monitor_frame(id, now).is_err()
     }
     /// Explicit real-clock mode. Deterministic/manual callers remain thread-free by default.
     pub fn enable_autonomous(&mut self) -> Result<(), String> {
@@ -292,12 +290,11 @@ impl Host {
             .status(id)
     }
     #[cfg(windows)]
-    pub(crate) fn mute_submitted(&self, id: &str, status: &Snapshot) -> bool {
+    pub(crate) fn submission_matches_intent(&self, id: &str, status: &Snapshot) -> bool {
         let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
-        core.muted_since.get(id).is_some_and(|since| {
-            status.last_submitted.is_some_and(|ticket| {
-                ticket.generation == status.generation && ticket.sequence > *since
-            })
+        let intent = core.power_intent(id);
+        status.last_submitted.is_some_and(|ticket| {
+            ticket.generation == status.generation && ticket.sequence > intent.since
         })
     }
     pub fn configure_scene(&mut self, scene: Scene) -> Result<(), String> {
@@ -353,21 +350,12 @@ impl Host {
             core.endpoint_leases.remove(id);
             core.cadences.remove(id);
             core.requested.remove(id);
-            core.muted_since.remove(id);
+            core.power_intents.remove(id);
             core.external.remove(id);
         }
-        let Core {
-            muted_since,
-            cadences,
-            sequence,
-            ..
-        } = &mut *core;
-        cadences.retain(|id, _| muted_since.contains_key(id) == (muted.get(id) == Some(&true)));
-        muted_since.retain(|id, _| muted.get(id) == Some(&true));
+        core.power_intents.retain(|id, _| muted.contains_key(id));
         for (id, off) in muted {
-            if off {
-                muted_since.entry(id).or_insert(*sequence);
-            }
+            core.update_power_intent(&id, off);
         }
         // Keep the last complete frames of surviving owners until the next
         // scheduled scene step. A new owner needs a frame from the new layout.
