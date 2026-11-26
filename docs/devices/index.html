@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Look up devices by model and see which lighting and display connections Prismestra can use.">
-  <title>Device lookup · Prismestra</title>
+  <meta name="description" content="Find your device and see which lighting and display features Prismestra can use.">
+  <title>Find your device · Prismestra</title>
   <link rel="stylesheet" href="lookup.css">
   <script src="lookup.mjs" type="module"></script>
 </head>
@@ -12,40 +12,40 @@
   <main>
     <nav aria-label="Project">
       <a href="https://github.com/376east/prismestra">Prismestra</a>
-      <a href="https://github.com/376east/prismestra/releases/latest">Download for Windows</a>
+      <span class="nav-links">
+        <a id="download" href="https://github.com/376east/prismestra/releases/latest">Download for Windows</a>
+        <a id="language" href="?lang=ru" hreflang="ru" lang="ru">Русский</a>
+      </span>
     </nav>
     <header>
-      <h1>Find your device</h1>
-      <p>Search by brand, model or USB ID. Each result shows the available connection and what has been verified.</p>
+      <h1 id="title">Find your device</h1>
+      <p id="intro">Search by model, device type or USB ID.</p>
     </header>
     <form id="filters" role="search">
       <div class="query">
-        <label for="query">Brand, model or USB ID</label>
-        <input id="query" name="q" type="search" placeholder="Surplife, Gigabyte, 264A:233C…" autocomplete="off">
+        <label for="query" id="query-label">Device</label>
+        <input id="query" name="q" type="search" placeholder="Surplife E1, keyboard, 264A:233C…" autocomplete="off">
       </div>
       <div>
-        <label for="route">Catalog</label>
-        <select id="route" name="route">
+        <label for="filter" id="filter-label">Filter</label>
+        <select id="filter" name="filter">
           <option value="">All devices</option>
-          <option value="openrgb">OpenRGB lighting</option>
-          <option value="native">Prismestra connections</option>
-          <option value="research">Research candidates</option>
         </select>
       </div>
     </form>
-    <details>
-      <summary>What the results mean</summary>
-      <p>OpenRGB listings come from the bundled Windows backend, including peripherals, boards, displays and controllers. Prismestra connections have an implemented path. Research candidates still need adapter work or verification.</p>
-    </details>
-    <p id="count" role="status">Loading the device catalog…</p>
+    <div id="examples" class="examples" hidden></div>
+    <p id="count" role="status">Loading devices…</p>
     <ul id="results" class="results" aria-label="Matching devices"></ul>
     <button id="more" type="button" hidden>Show more</button>
     <noscript><p>JavaScript is required for search. See the <a href="https://github.com/376east/prismestra/blob/master/docs/compatibility.md">compatibility guide</a>.</p></noscript>
     <footer>
-      <p id="provenance"></p>
-      <a href="https://github.com/376east/prismestra/blob/master/docs/compatibility.md">Compatibility guide</a>
-      <a href="https://openrgb.org/devices_pipeline.html">OpenRGB development catalog</a>
-      <a href="https://github.com/376east/prismestra/issues/new?template=device.yml">Report a device</a>
+      <a id="report" href="https://github.com/376east/prismestra/issues/new?template=device.yml">Report a device</a>
+      <a id="guide" href="https://github.com/376east/prismestra/blob/master/docs/compatibility.md">Compatibility guide</a>
+      <details>
+        <summary id="catalog-label">About the catalog</summary>
+        <p id="provenance"></p>
+        <a id="upstream" href="https://openrgb.org/devices_pipeline.html">OpenRGB development catalog</a>
+      </details>
     </footer>
   </main>
 </body>

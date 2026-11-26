@@ -31,7 +31,7 @@ jobs:
         if: github.ref == 'refs/heads/master'
         run: |
           mkdir _site
-          cp docs/devices/{index.html,lookup.css,lookup.mjs,openrgb.json,prismestra.json} _site/
+          cp docs/devices/{index.html,lookup.css,lookup.mjs,catalog.mjs,openrgb.json,prismestra.json} _site/
       - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         if: github.ref == 'refs/heads/master'
         with:

@@ -1,36 +1,47 @@
+import { buildCatalog, findCards } from './catalog.mjs';
+
 const pageSize = 24;
-const fold = (value) => String(value ?? '')
-  .normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+const exampleQueries = ['B650 Eagle AX', 'Surplife E1', 'NZXT Kraken'];
+const filters = ['peripherals', 'pc', 'strips', 'displays', 'home', 'other', 'route:openrgb', 'route:native', 'route:research'];
 
-const statuses = {
-  openrgb: 'OpenRGB listing',
-  implemented: 'Prismestra connection',
-  verified: 'Hardware observation',
-  research: 'Research candidate',
+const copy = {
+  en: {
+    title: 'Find your device', intro: 'Search by model, device type or USB ID.',
+    download: 'Download for Windows', device: 'Device', filter: 'Filter', all: 'All devices',
+    examples: 'Try', results: 'Matching devices', more: 'Show more', report: 'Report a device',
+    guide: 'Compatibility guide', catalog: 'About the catalog', upstream: 'OpenRGB development catalog',
+    placeholder: 'Surplife E1, keyboard, 264A:233C…', loading: 'Loading devices…',
+    empty: 'No matches. Try a shorter model name, clear the filter or use a USB ID.',
+    unavailable: 'The catalog could not be loaded. See the compatibility guide.',
+    partial: ' Part of the catalog could not be loaded.', details: 'Connection and evidence',
+    byDevice: 'Device type', bySource: 'Connection source',
+    source: 'Source', checked: 'What was tested', noCheck: 'A device listing does not establish physical output.',
+    lighting: 'Lighting', display: 'LCD', openrgb: 'Listed in bundled OpenRGB',
+    implemented: 'Connection in Prismestra', research: 'Under research',
+    listedHelp: 'For a live scene, the controller needs a usable Direct mode.',
+    nativeHelp: 'Check the connection in Devices.',
+    researchHelp: 'This feature still needs an adapter or verification.',
+    categories: ['Keyboards and mice', 'PC components', 'Strips and controllers', 'Displays', 'Home lighting', 'Other devices', 'OpenRGB listings', 'Prismestra connections', 'Research candidates'],
+  },
+  ru: {
+    title: 'Найти устройство', intro: 'Поиск по модели, типу устройства или USB ID.',
+    download: 'Скачать для Windows', device: 'Устройство', filter: 'Фильтр', all: 'Все устройства',
+    examples: 'Для примера', results: 'Найденные устройства', more: 'Показать ещё', report: 'Сообщить об устройстве',
+    guide: 'Справочник совместимости', catalog: 'О каталоге', upstream: 'Каталог новых сборок OpenRGB',
+    placeholder: 'Surplife E1, клавиатура, 264A:233C…', loading: 'Загружаем устройства…',
+    empty: 'Совпадений нет. Попробуйте сократить название, убрать фильтр или ввести USB ID.',
+    unavailable: 'Каталог не загрузился. Воспользуйтесь справочником совместимости.',
+    partial: ' Часть каталога не загрузилась.', details: 'Подключение и проверка',
+    byDevice: 'Тип устройства', bySource: 'Источник подключения',
+    source: 'Источник', checked: 'Что проверяли', noCheck: 'Запись в каталоге не подтверждает физический вывод.',
+    lighting: 'Подсветка', display: 'LCD', openrgb: 'Есть в списке встроенного OpenRGB',
+    implemented: 'Есть подключение в Prismestra', research: 'На этапе исследования',
+    listedHelp: 'Для вывода общей сцены контроллеру нужен рабочий режим Direct.',
+    nativeHelp: 'Проверьте подключение в разделе «Устройства».',
+    researchHelp: 'Для этой функции ещё нужен адаптер или проверка.',
+    categories: ['Клавиатуры и мыши', 'Компоненты ПК', 'Ленты и контроллеры', 'Экраны', 'Домашнее освещение', 'Другие устройства', 'Каталог OpenRGB', 'Подключения Prismestra', 'Исследуемые устройства'],
+  },
 };
-
-export function indexCatalog(catalog, inherited) {
-  return catalog.devices.map((item) => {
-    const status = inherited ? 'openrgb' : item.status;
-    const route = inherited ? 'openrgb' : status === 'research' ? 'research' : 'native';
-    const nameKey = fold(item.name);
-    const key = fold([item.name, item.vendor, item.type, item.connection, ...(item.aliases ?? [])].join(' '));
-    return { ...item, status, route, nameKey, key, compact: key.replaceAll(' ', ''), source: item.source ?? catalog.source };
-  });
-}
-
-export function searchDevices(items, query, route = '') {
-  const name = fold(query);
-  const tokens = name ? name.split(' ') : [];
-  return items.filter((item) => (!route || item.route === route)
-    && tokens.every((token) => item.key.includes(token) || item.compact.includes(token)))
-    .sort((a, b) => {
-      const rank = (item) => item.nameKey === name ? 0
-        : name && item.nameKey.startsWith(name) ? 1
-        : item.status === 'research' ? 3 : 2;
-      return rank(a) - rank(b) || a.name.localeCompare(b.name, 'en');
-    });
-}
 
 function node(tag, value = '', className = '') {
   const element = document.createElement(tag);
@@ -52,66 +63,135 @@ function sourceLink(value, label) {
   }
 }
 
-function deviceRow(item) {
+function deviceRow(card, t) {
   const row = node('li');
-  row.append(node('h2', item.name), node('span', statuses[item.status] ?? 'Catalog entry', 'status'));
-  const metadata = [item.vendor, item.type, item.connection].filter(Boolean).join(' · ');
-  if (metadata) row.append(node('p', metadata, 'metadata'));
-  if (item.detail) row.append(node('p', item.detail, 'details'));
-  const link = sourceLink(item.source, 'Evidence');
-  if (link) {
-    link.setAttribute('aria-label', 'Evidence for ' + item.name);
-    row.append(link);
+  row.append(node('h2', card.name));
+  const evidence = node('details');
+  evidence.append(node('summary', t.details));
+  for (const capability of ['lighting', 'display']) {
+    const entries = card.entries.filter((entry) => entry.capability === capability);
+    if (!entries.length) continue;
+    const status = ['implemented', 'openrgb', 'research'].find((name) => entries.some((entry) => entry.status === name));
+    if (status) {
+      const feature = node('p', '', 'feature');
+      feature.append(node('strong', t[capability]), ' · ', t[status]);
+      row.append(feature);
+    }
+    const group = node('div', '', 'evidence-group');
+    group.append(node('h3', t[capability]));
+    for (const entry of entries) {
+      const statusText = entry.status === 'verified' ? t.checked : t[entry.status];
+      const usbIds = (entry.aliases ?? []).filter((alias) => /^\p{ASCII_Hex_Digit}{4}[: ]\p{ASCII_Hex_Digit}{4}$/u.test(alias));
+      group.append(node('p', [statusText, entry.connection, ...usbIds].filter(Boolean).join(' · ')));
+      if (entry.status === 'implemented' && entry.routeLabel) {
+        const route = node('p', entry.routeLabel);
+        route.lang = 'en';
+        group.append(route);
+      }
+      const hint = entry.status === 'openrgb' ? t.listedHelp
+        : entry.status === 'implemented' ? t.nativeHelp
+        : entry.status === 'research' ? t.researchHelp : '';
+      if (hint) group.append(node('p', hint));
+      if (entry.detail) {
+        const description = node('p', entry.detail);
+        description.lang = 'en';
+        group.append(description);
+      }
+      const source = sourceLink(entry.source, t.source);
+      if (source) group.append(source);
+    }
+    evidence.append(group);
   }
+  row.append(evidence);
   return row;
 }
 
 async function start() {
-  const query = document.getElementById('query');
-  const route = document.getElementById('route');
-  const count = document.getElementById('count');
-  const results = document.getElementById('results');
-  const more = document.getElementById('more');
-  const provenance = document.getElementById('provenance');
+  const el = (id) => document.getElementById(id);
   const params = new URLSearchParams(location.search);
+  const lang = params.get('lang') === 'ru' ? 'ru' : 'en';
+  const t = copy[lang];
+  document.documentElement.lang = lang;
+  document.title = t.title + ' · Prismestra';
+
+  const query = el('query');
+  const filter = el('filter');
+  const count = el('count');
+  const results = el('results');
+  const more = el('more');
+  const examples = el('examples');
+  const language = el('language');
+  for (const [id, value] of Object.entries({
+    title: t.title, intro: t.intro, download: t.download, 'query-label': t.device,
+    'filter-label': t.filter, count: t.loading, report: t.report, guide: t.guide,
+    'catalog-label': t.catalog, upstream: t.upstream, more: t.more,
+  })) el(id).textContent = value;
+  results.setAttribute('aria-label', t.results);
+  query.placeholder = t.placeholder;
   query.value = params.get('q') ?? '';
-  route.value = params.get('route') ?? '';
-  if (route.selectedIndex < 0) route.value = '';
+  filter.options[0].textContent = t.all;
+  const deviceFilters = node('optgroup');
+  const sourceFilters = node('optgroup');
+  deviceFilters.label = t.byDevice;
+  sourceFilters.label = t.bySource;
+  filters.forEach((value, index) => {
+    const option = node('option', t.categories[index]);
+    option.value = value;
+    (value.startsWith('route:') ? sourceFilters : deviceFilters).append(option);
+  });
+  filter.append(deviceFilters, sourceFilters);
+  const selected = params.get('category') || (params.has('route') ? 'route:' + params.get('route') : '');
+  filter.value = filters.includes(selected) ? selected : '';
 
   const loads = await Promise.allSettled(['openrgb.json', 'prismestra.json'].map(async (path) => {
     const response = await fetch(path);
     if (!response.ok) throw new Error('Catalog request failed: ' + response.status);
-    return response.json();
+    const catalog = await response.json();
+    if (!Array.isArray(catalog.devices)) throw new Error('Invalid catalog');
+    return catalog;
   }));
-  const items = loads.flatMap((result, index) => result.status === 'fulfilled'
-    ? indexCatalog(result.value, index === 0) : []);
+  const [openrgb, native] = loads.map((result) => result.status === 'fulfilled' ? result.value : null);
+  const cards = buildCatalog(openrgb, native);
   const missing = loads.filter((result) => result.status === 'rejected').length;
-  const openrgb = loads[0].status === 'fulfilled' ? loads[0].value : null;
-
+  el('provenance').textContent = t.noCheck;
   if (openrgb) {
-    provenance.append('OpenRGB source revision ', node('code', openrgb.revision.slice(0, 7)),
-      '. These are detector entries from the bundled backend. Operation depends on the device, connection and firmware.');
-    const source = sourceLink(openrgb.source, ' View source.');
-    if (source) provenance.append(source);
+    const source = sourceLink(openrgb.source, 'OpenRGB ' + openrgb.revision.slice(0, 7));
+    if (source) el('provenance').append(' ', source);
   }
 
   let limit = pageSize;
   function render() {
-    const filtered = searchDevices(items, query.value, route.value);
-    const partial = missing ? ' Part of the catalog could not be loaded.' : '';
-    count.textContent = missing === loads.length
-      ? 'The device catalog could not be loaded. See the compatibility guide below.'
-      : (filtered.length ? filtered.length + ' matching ' + (filtered.length === 1 ? 'entry' : 'entries')
-          + (filtered.length > limit ? ' · showing ' + limit : '')
-          : 'No matches. Try a shorter model name or report your device.') + partial;
-    results.replaceChildren(...filtered.slice(0, limit).map(deviceRow));
-    more.hidden = limit >= filtered.length;
+    const currentUrl = new URL(location.href);
+    const otherLang = lang === 'ru' ? 'en' : 'ru';
+    currentUrl.searchParams.set('lang', otherLang);
+    language.href = currentUrl.href;
+    language.hreflang = otherLang;
+    language.lang = otherLang;
+    language.textContent = otherLang === 'ru' ? 'Русский' : 'English';
+
+    const active = query.value.trim() || filter.value;
+    examples.hidden = Boolean(active) || missing === loads.length;
+    const category = filter.value.startsWith('route:') ? '' : filter.value;
+    const route = filter.value.startsWith('route:') ? filter.value.slice(6) : '';
+    const filtered = active ? findCards(cards, query.value, category, route) : [];
+    const size = filtered.length;
+    const shown = size > limit ? ' · ' + (lang === 'ru' ? 'показано ' : 'showing ') + limit : '';
+    const total = (lang === 'ru' ? 'Найдено: ' : 'Matches: ') + size + shown;
+    const message = missing === loads.length ? t.unavailable
+      : ((active ? (size ? total : t.empty) : '') + (missing ? t.partial : ''));
+    count.textContent = message;
+    count.hidden = !message;
+    results.replaceChildren(...filtered.slice(0, limit).map((card) => deviceRow(card, t)));
+    results.hidden = !size;
+    more.hidden = limit >= size;
   }
 
   function applyFilters() {
     limit = pageSize;
     const url = new URL(location.href);
-    for (const [key, value] of [['q', query.value.trim()], ['route', route.value]]) {
+    const selected = filter.value;
+    const route = selected.startsWith('route:') ? selected.slice(6) : '';
+    for (const [key, value] of [['q', query.value.trim()], ['category', route ? '' : selected], ['route', route]]) {
       if (value) url.searchParams.set(key, value);
       else url.searchParams.delete(key);
     }
@@ -119,12 +199,23 @@ async function start() {
     render();
   }
 
-  document.getElementById('filters').addEventListener('submit', (event) => {
+  examples.append(node('span', t.examples));
+  for (const sample of exampleQueries) {
+    const button = node('button', sample);
+    button.type = 'button';
+    button.addEventListener('click', () => {
+      query.value = sample;
+      query.focus();
+      applyFilters();
+    });
+    examples.append(button);
+  }
+  el('filters').addEventListener('submit', (event) => {
     event.preventDefault();
     applyFilters();
   });
   query.addEventListener('input', applyFilters);
-  route.addEventListener('change', applyFilters);
+  filter.addEventListener('change', applyFilters);
   more.addEventListener('click', () => {
     limit += pageSize;
     render();
