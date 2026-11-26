@@ -18,6 +18,16 @@ function lightMask(photo, width, height) {
     pixels.data[i] = pixels.data[i + 1] = pixels.data[i + 2] = 255;
   }
   context.putImageData(pixels, 0, 0);
+  // Clear the monitor and its bezel in the source artwork's coordinates.
+  context.scale(width / photo.naturalWidth, height / photo.naturalHeight);
+  context.globalCompositeOperation = 'destination-out';
+  context.beginPath();
+  context.moveTo(123, 167);
+  context.lineTo(954, 209);
+  context.lineTo(955, 643);
+  context.lineTo(123, 678);
+  context.closePath();
+  context.fill();
   return mask;
 }
 
@@ -77,7 +87,7 @@ export async function connectScenePreview(russian) {
   let elapsed = 0;
 
   function tick(now) {
-    if (previous === undefined || now - previous >= 30) {
+    if (previous === undefined || now - previous >= 16) {
       elapsed += previous === undefined ? 0 : (now - previous) / 1000;
       previous = now;
       paint(context, mask, scene.dataset.scene, elapsed);
