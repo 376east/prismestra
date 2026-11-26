@@ -15,6 +15,8 @@ This file records notable changes to Prismestra. The format follows [Keep a Chan
 
 - **First-run discovery.** Find devices remains available after Prismestra automatically connects the first device. The search can be repeated after saving edits to the same profile.
 - **Scene edges and RGB status.** Effects that use audio or other inputs can start when monitor lighting is the only scene output. After turning a group back on, its RGB status waits for a new frame submission.
+- **Wake from sleep.** RGB and LCD output can resume while a screen capture or temperature reader finishes. Monitor lights can use the scene colors while capture reconnects.
+- **LCD status.** After a quick power change, Devices waits for the LCD to acknowledge the current frame or blanking command.
 
 ## 0.2.0 - 2026-11-26
 

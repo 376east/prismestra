@@ -27,7 +27,7 @@ test('catalog retains true provenance and supported evidence labels', () => {
 
 test('known missing Direct mode applies only to checked models on the pinned OpenRGB revision', () => {
   for (const id of ['17EF:619A', '0DB0:0D11']) {
-    const [card] = find(id, '', 'openrgb');
+    const [card] = find(id, 'peripherals', 'openrgb');
     assert.equal(card.entries[0].status, 'no-direct');
     assert.match(card.entries[0].modesSource, new RegExp(locked.revision));
   }

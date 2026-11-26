@@ -9,8 +9,8 @@ const openRgbCardNames = new Map([
 ]);
 const directEvidenceRevision = '6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43';
 const withoutDirect = new Map([
-  ['Lenovo Legion K510 Mini Pro', 'LenovoControllers/LenovoLegionK510Controller/RGBController_LenovoK510.cpp#L38'],
-  ['MSI Clutch GM11 controller', 'MSIClutchController/MSIClutchGM11Controller/RGBController_MSIClutchGM11.cpp#L39'],
+  ['Lenovo Legion K510 Mini Pro', { type: 'Keyboard', source: 'LenovoControllers/LenovoLegionK510Controller/RGBController_LenovoK510.cpp#L38' }],
+  ['MSI Clutch GM11 controller', { type: 'Mouse', source: 'MSIClutchController/MSIClutchGM11Controller/RGBController_MSIClutchGM11.cpp#L39' }],
 ]);
 
 const fold = (value) => String(value ?? '')
@@ -22,10 +22,12 @@ const driverName = (entry) => (entry.source?.split('/Controllers/')[1]?.split('/
   .replace(/([a-z])([A-Z])/g, '$1 $2');
 
 function entryFor(device, catalog, inherited) {
-  const modes = inherited && catalog.revision === directEvidenceRevision && withoutDirect.get(device.name);
+  const known = inherited ? withoutDirect.get(device.name) : undefined;
+  const modes = catalog.revision === directEvidenceRevision ? known?.source : undefined;
   const status = inherited ? (modes ? 'no-direct' : 'openrgb') : device.status;
   return {
     ...device,
+    type: device.type ?? known?.type,
     status,
     capability: !inherited && device.type === 'LCD' ? 'display' : 'lighting',
     route: inherited ? 'openrgb' : status === 'research' ? 'research' : 'native',
