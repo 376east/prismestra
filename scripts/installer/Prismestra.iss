@@ -368,13 +368,15 @@ begin
     'DisplayVersion', DisplayVersion) and StrToVersion(DisplayVersion, InstalledVersion) and
     StrToVersion('{#InstallerVersion}', SetupVersion) and
     (ComparePackedVersion(InstalledVersion, SetupVersion) > 0) then begin
-    Result := 'Installed Prismestra ' + DisplayVersion + ' is newer than this Setup ({#InstallerVersion}).';
+    Result := 'Prismestra ' + DisplayVersion + ' is already installed. This Setup is for {#InstallerVersion}.'#13#10#13#10 +
+      'Use Setup for your installed version or a newer release.';
     Log(Result);
     Exit;
   end;
   if not GuardInstall('Stop') then begin
-    Result := 'Prismestra could not close or its installation path could not be verified. ' +
-      'Finish pending edits and exit Prismestra from the notification area, then retry.';
+    Result := 'Setup could not close Prismestra or verify its installation folder.'#13#10#13#10 +
+      'If Prismestra is running, apply or discard any pending changes, then choose Exit Prismestra from the notification area and run Setup again. ' +
+      'If Prismestra is already closed, check the Setup log for details.';
     Exit;
   end;
 #ifndef LifecycleTest
@@ -463,7 +465,7 @@ begin
   end;
   if (Step = ssDone) and not WizardSilent and not RebootRequired and
     WizardIsTaskSelected('launch') and not RunOriginalInstalledCommand('--setup-launch-installed') then
-    Log('Prismestra start deferred. Open it from the Start menu under your ordinary account.');
+    Log('Setup could not open Prismestra. Open Prismestra from the Start menu in your usual Windows account.');
 #ifndef LifecycleTest
   if (Step = ssDone) and not WizardSilent and LegacyStartupPermissionsDeferred then
     SuppressibleMsgBox(
@@ -496,8 +498,9 @@ var
 begin
   if Step <> usUninstall then Exit;
   if not GuardInstall('Stop') then
-    RaiseException('Prismestra is still running or its installation path could not be verified. ' +
-      'Finish pending edits and exit it from the notification area before uninstalling.');
+    RaiseException('The uninstaller could not close Prismestra or verify its installation folder.'#13#10#13#10 +
+      'If Prismestra is running, apply or discard any pending changes, then choose Exit Prismestra from the notification area and try uninstalling again. ' +
+      'If Prismestra is already closed, check the uninstall log for details.');
 #ifndef LifecycleTest
   if RegQueryStringValue(HKLM64, ProductKey, 'PolicySid', SID) then begin
     if not RunManagedPolicy('--uninstall', SID) then
