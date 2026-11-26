@@ -60,27 +60,31 @@
   inset: 0;
   isolation: isolate;
   opacity: 0;
-  animation: next-desk 18s linear infinite;
+  animation: next-desk 3s step-end infinite;
 }
 .scene-shot-graphite {
   --light-mask: url("./shots/graphite-mask.webp");
   --screen-x: 35.2%;
   --screen-y: 40.2%;
+  --screen-yaw: 20deg;
   opacity: 1;
 }
 .scene-shot-peripherals {
   --light-mask: url("./shots/peripherals-mask.webp");
   --screen-x: 52.5%;
-  --screen-y: 25.5%;
+  --screen-y: 23.8%;
+  --screen-yaw: -26deg;
+  --screen-roll: -3.2deg;
   --phase: -11%;
-  animation-delay: -12s;
+  animation-delay: -2s;
 }
 .scene-shot-daylight {
   --light-mask: url("./shots/daylight-mask.webp");
   --screen-x: 47%;
   --screen-y: 38.5%;
+  --screen-yaw: -1deg;
   --phase: -21%;
-  animation-delay: -6s;
+  animation-delay: -1s;
 }
 .scene-photo {
   display: block;
@@ -102,11 +106,13 @@
   position: absolute;
   top: var(--screen-y);
   left: var(--screen-x);
-  transform: translate(-50%, -50%);
+  transform: translate(-50%, -50%) perspective(480px) rotateZ(var(--screen-roll, 0deg)) rotateY(var(--screen-yaw));
+  transform: translate(-50%, -50%) perspective(72cqw) rotateZ(var(--screen-roll, 0deg)) rotateY(var(--screen-yaw));
   display: flex;
   align-items: center;
   gap: .27em;
-  color: #f5f4fb;
+  color: #eeeef7;
+  text-shadow: 0 0 .45em #d9deff2b;
   font-size: clamp(1.05rem, 3.2vw, 2.7rem);
   font-size: clamp(1.05rem, 6cqw, 2.7rem);
   font-weight: 720;
@@ -117,11 +123,11 @@
 .scene-wordmark img {
   width: .94em;
   height: .94em;
-  filter: brightness(0) invert(1);
+  filter: brightness(0) invert(.94) drop-shadow(0 0 .32em #d9deff32);
 }
 @keyframes next-desk {
-  0%, 31%, 100% { opacity: 1; }
-  35%, 96% { opacity: 0; }
+  0% { opacity: 1; }
+  33.333333%, 100% { opacity: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   .scene-shot { animation: none; }
