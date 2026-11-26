@@ -2,7 +2,7 @@
 
 Run one lighting scene across a keyboard, an LED strip and the lights behind a monitor. Keep temperatures on a compatible LCD. Prismestra runs on Windows and keeps the scene active when you close the editor.
 
-**[Get the Prismestra installer](https://github.com/376east/prismestra/releases/latest)** · [Find your device](https://376east.github.io/prismestra/) · [Get help](#get-help) · [Русский](README.ru.md)
+**[Get the Prismestra installer](https://github.com/376east/prismestra/releases/latest)** · [Find your device](https://376east.github.io/prismestra/devices/) · [Get help](#get-help) · [Русский](README.ru.md)
 
 On the release page, choose `Prismestra-Setup-…-x64.exe` for Windows 10 or 11. Setup includes OpenRGB, the background component that controls compatible PC lighting.
 

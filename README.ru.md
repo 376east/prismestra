@@ -2,7 +2,7 @@
 
 Запустите один эффект на клавиатуре, LED-ленте и подсветке за монитором, а на совместимом LCD оставьте температуры. Prismestra работает в Windows и продолжает выводить сцену после закрытия редактора.
 
-**[Установщик Prismestra](https://github.com/376east/prismestra/releases/latest)** · [Найти устройство](https://376east.github.io/prismestra/?lang=ru) · [Помощь](#помощь) · [English](README.md)
+**[Установщик Prismestra](https://github.com/376east/prismestra/releases/latest)** · [Найти устройство](https://376east.github.io/prismestra/devices/?lang=ru) · [Помощь](#помощь) · [English](README.md)
 
 На странице релиза выберите `Prismestra-Setup-…-x64.exe` для Windows 10 или 11. OpenRGB уже в установщике. Он работает в фоне и управляет совместимой подсветкой ПК.
 
