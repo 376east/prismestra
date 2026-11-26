@@ -260,6 +260,19 @@ mod tests {
     }
 
     #[test]
+    fn caches_an_offered_stable_migration_until_stable_is_installed() {
+        let preview = Version::from_setup("0.1.0.30").unwrap();
+        let stable = Version::from_setup("0.2.0.0").unwrap();
+        let check = SuccessfulCheck {
+            at: 42,
+            installed_tag: preview.tag(),
+            available_tag: Some(stable.tag()),
+        };
+        assert_eq!(check.available(preview), Some(stable));
+        assert_eq!(check.available(stable), None);
+    }
+
+    #[test]
     fn a_legacy_or_invalid_cache_does_not_postpone_the_next_check() {
         let current = Version::from_setup("0.1.0.7").unwrap();
         let legacy: Preferences =

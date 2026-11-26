@@ -27,6 +27,15 @@ shell_text! {
     CheckForUpdates => "Check for updates…", "Проверить обновления…";
     UpdateAvailable => "Update available", "Доступно обновление";
     CheckForUpdatesAutomatically => "Check for updates automatically", "Автоматически проверять обновления";
+    UpdatesTitle => "Prismestra updates", "Обновления Prismestra";
+    UpdateBuildVersion => "Build version", "Версия сборки";
+    UpdateSetupVersionRequired => "Update checks require an installed Setup release.", "Проверка обновлений доступна для выпуска с известной версией Setup.";
+    UpdateInstalled => "Installed", "Установлено";
+    UpdateOpenRelease => "Open the official release in your browser?", "Открыть официальный выпуск в браузере?";
+    UpdateOpenStable => "Open the stable release in your browser? Run its Setup to switch to the stable channel.", "Открыть стабильный выпуск в браузере? Запустите его Setup, чтобы перейти на стабильный канал.";
+    UpdateOpenFailed => "Couldn’t open the release page in your browser.", "Не удалось открыть страницу выпуска в браузере.";
+    UpdateNoNewer => "No newer release was found on this channel.", "В проверенных выпусках нет более новой версии этого канала.";
+    UpdateCheckFailed => "Couldn’t check for updates.", "Не удалось проверить выпуски.";
     StopOutputs => "Stop outputs", "Остановить работу";
     ExitMenu => "Exit Prismestra", "Выйти";
     ApplySavedScene => "Apply a saved scene", "Включить сохранённую сцену";
