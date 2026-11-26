@@ -40,6 +40,7 @@
 .hero .platform-note:empty { display: none; }
 .hero .text-link { display: inline-block; padding-block: .4rem; min-height: 44px; }
 .scene {
+  position: relative;
   min-width: 0;
   border: 1px solid var(--site-line);
   border-radius: var(--site-radius-large);
@@ -66,6 +67,7 @@
   position: absolute;
   inset: 0;
   overflow: hidden;
+  -webkit-mask: url("./scene-light-mask.webp") center / 100% 100% no-repeat;
   mask: url("./scene-light-mask.webp") center / 100% 100% no-repeat;
   mix-blend-mode: screen;
   pointer-events: none;
@@ -78,15 +80,18 @@
   opacity: .9;
   animation: light-travel 4s linear infinite;
 }
-.scene[data-scene="breathing"] .scene-light::before {
+#scene-breathing:checked ~ .scene-frame .scene-light::before {
   background: #ff9a42;
   animation: light-breathing 3.8s ease-in-out infinite;
 }
-.scene[data-scene="noise"] .scene-light::before {
+#scene-noise:checked ~ .scene-frame .scene-light::before {
   background: linear-gradient(90deg, #6578f6 0%, #52e9d1 25%, #6578f6 50%, #52e9d1 75%, #6578f6 100%);
   animation: light-travel 9s linear infinite;
 }
-.scene[data-playing="false"] .scene-light::before { animation-play-state: paused; }
+#scene-pause:checked ~ .scene-frame .scene-light::before { animation-play-state: paused; }
+@media (prefers-reduced-motion: reduce) {
+  #scene-auto:checked ~ .scene-frame .scene-light::before { animation-play-state: paused; }
+}
 @keyframes light-travel { to { transform: translateX(-50%); } }
 @keyframes light-breathing { 50% { opacity: .16; } }
 .scene-controls {
@@ -116,17 +121,42 @@
   font-size: .83rem;
 }
 .scene-option:hover { color: var(--site-text); }
-.scene-option[aria-pressed="true"] { color: var(--site-text); border-color: #48435d; background: #202034; }
-.scene-playback {
-  margin-inline-start: auto;
-  border-color: var(--site-line);
+/* Native controls remain focusable and work before any script loads. */
+.scene-choice {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  clip-path: inset(50%);
+}
+#scene-rainbow:checked ~ .scene-controls label[for="scene-rainbow"],
+#scene-breathing:checked ~ .scene-controls label[for="scene-breathing"],
+#scene-noise:checked ~ .scene-controls label[for="scene-noise"],
+#scene-play:checked ~ .scene-controls label[for="scene-play"],
+#scene-pause:checked ~ .scene-controls label[for="scene-pause"] {
   color: var(--site-text);
+  border-color: #48435d;
+  background: #202034;
 }
-.scene[data-playing="false"] .scene-playback {
-  color: var(--site-on-accent);
-  background: var(--site-accent);
+#scene-rainbow:focus ~ .scene-controls label[for="scene-rainbow"],
+#scene-breathing:focus ~ .scene-controls label[for="scene-breathing"],
+#scene-noise:focus ~ .scene-controls label[for="scene-noise"],
+#scene-play:focus ~ .scene-controls label[for="scene-play"],
+#scene-pause:focus ~ .scene-controls label[for="scene-pause"] {
+  outline: 2px solid var(--site-accent);
+  outline-offset: 2px;
 }
-.scene-description { flex-basis: 100%; padding-bottom: .35rem; }
+.scene-playback { display: flex; gap: .18rem; margin-inline-start: auto; }
+@media (prefers-reduced-motion: reduce) {
+  #scene-auto:checked ~ .scene-controls label[for="scene-play"] {
+    color: var(--site-on-accent);
+    background: var(--site-accent);
+  }
+}
+.scene-description { display: none; flex-basis: 100%; padding-bottom: .35rem; }
+#scene-rainbow:checked ~ .scene-controls #description-rainbow,
+#scene-breathing:checked ~ .scene-controls #description-breathing,
+#scene-noise:checked ~ .scene-controls #description-noise { display: block; }
 
 .compatibility {
   display: grid;
