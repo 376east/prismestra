@@ -20,14 +20,14 @@ const copy = {
     sources: { openrgb: 'OpenRGB source', native: 'Prismestra source', research: 'Technical reference' },
     checked: 'Hardware check', noCheck: 'The catalog uses Prismestra drivers and the OpenRGB version included in Setup.',
     lighting: 'Lighting', display: 'LCD', openrgb: 'Built-in OpenRGB', 'no-direct': 'Built-in OpenRGB',
-    implemented: 'Prismestra driver', research: 'Research',
+    implemented: 'Prismestra driver', research: 'Research', unconfirmed: 'Model identification',
     board: 'Check the two ARGB headers in Devices.', wired: 'Connect by cable.',
     devicesStep: 'Open Devices in Prismestra to set it up.', lcdStep: 'Open LCD in Prismestra to choose what to display.',
     skydimo: 'Look for an SK model code on the controller or in its documentation.',
     revision: 'Check your hardware revision in the source notes.',
     featureStatuses: {
       implemented: 'Supported', openrgb: 'Supported', 'no-direct': 'Scenes unavailable',
-      verified: 'Supported', research: 'Not supported yet',
+      verified: 'Supported', research: 'Not supported yet', unconfirmed: 'Compatibility unconfirmed',
     },
     featureSteps: {
       'no-direct': 'Use the device’s built-in effects. It can’t follow a Prismestra scene.',
@@ -51,14 +51,14 @@ const copy = {
     sources: { openrgb: 'Исходники OpenRGB', native: 'Исходники Prismestra', research: 'Технический источник' },
     checked: 'Проверка на устройстве', noCheck: 'Каталог основан на драйверах Prismestra и версии OpenRGB, которая входит в установщик.',
     lighting: 'Подсветка', display: 'LCD', openrgb: 'Встроенный OpenRGB', 'no-direct': 'Встроенный OpenRGB',
-    implemented: 'Драйвер Prismestra', research: 'Исследование',
+    implemented: 'Драйвер Prismestra', research: 'Исследование', unconfirmed: 'Идентификация модели',
     board: 'Проверьте два разъёма ARGB в разделе «Устройства».', wired: 'Подключите кабелем.',
     devicesStep: 'Для настройки откройте «Устройства» в Prismestra.', lcdStep: 'Выберите изображение в разделе «LCD» в Prismestra.',
     skydimo: 'Поищите код модели SK… на контроллере или в его документации.',
     revision: 'Сверьте ревизию устройства с источником.',
     featureStatuses: {
       implemented: 'Поддерживается', openrgb: 'Поддерживается', 'no-direct': 'Сцены недоступны',
-      verified: 'Поддерживается', research: 'Пока не поддерживается',
+      verified: 'Поддерживается', research: 'Пока не поддерживается', unconfirmed: 'Совместимость не подтверждена',
     },
     featureSteps: {
       'no-direct': 'Устройство поддерживает собственные эффекты. В общую сцену оно не включается.',
@@ -98,7 +98,7 @@ function deviceRow(card, t, lang) {
   const capabilities = new Set(card.entries.map((entry) => entry.capability));
   for (const capability of capabilities) {
     const entries = card.entries.filter((entry) => entry.capability === capability);
-    const status = ['implemented', 'verified', 'openrgb', 'no-direct', 'research'].find((name) => entries.some((entry) => entry.status === name));
+    const status = ['implemented', 'verified', 'openrgb', 'no-direct', 'research', 'unconfirmed'].find((name) => entries.some((entry) => entry.status === name));
     const supported = entries.filter((entry) => ['implemented', 'verified', 'openrgb'].includes(entry.status));
     const scope = supported[0]?.scope;
     const scoped = scope && supported.every((entry) => entry.scope === scope);
@@ -106,7 +106,7 @@ function deviceRow(card, t, lang) {
     feature.append(node('strong', t[capability]), ' · ', scoped ? t.scopes[scope] : t.featureStatuses[status]);
     row.append(feature);
     const note = entries.find((entry) => entry.note)?.[lang === 'ru' ? 'noteRu' : 'note'];
-    if (status === 'research') {
+    if (status === 'research' || status === 'unconfirmed') {
       const step = node('p', '', 'connection-hint');
       step.append(sourceLink('https://github.com/376east/prismestra/issues/new?template=device.yml', t.report));
       row.append(step);

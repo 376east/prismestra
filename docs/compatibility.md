@@ -4,6 +4,8 @@ Search by model to see whether Prismestra supports the device’s lighting or di
 
 **Compatible models** marks a driver that supports a family of devices or a shared controller. Search for your retail name, board code or USB ID when available. A shared ID can lead to more than one device. **Protocol support** means the device needs the matching firmware or a configured connection. A device can have separate entries for RGB lighting and its LCD.
 
+**Compatibility unconfirmed** means a model has been identified and its controller, firmware or connection still needs checking. **Not supported yet** identifies a known connection that Prismestra does not implement.
+
 | Device family | How to connect | Verification scope |
 | --- | --- | --- |
 | Lighting through OpenRGB | Setup includes an SDK6 backend. First run searches for Direct-capable controllers. Configure the controller manually in **Devices** if needed. | Inventory and frame submissions checked on one kit at `6839f196`. Coverage depends on the controller and backend. |
