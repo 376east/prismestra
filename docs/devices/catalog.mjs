@@ -1,3 +1,5 @@
+import { familyCoverage, retailModels, revision as coverageRevision } from './openrgb-coverage.mjs';
+
 const board = 'Gigabyte B650 EAGLE AX';
 const fusion = 'Gigabyte RGB Fusion 2 USB';
 const kraken = 'NZXT Kraken Elite RGB 2024';
@@ -14,6 +16,20 @@ const openRgbCardNames = new Map([
   ['Corsair Vengeance RGB DRAM', ['Corsair Vengeance RGB DDR4']],
   ['ASRock Motherboard SMBus Controllers', ['ASRock motherboard lighting']],
   ['EVGA Motherboard SMBus Controllers', ['EVGA motherboard lighting']],
+  ['Keychron Gaming Keyboard 1', ['Keychron K3 V2 Optical RGB']],
+  ['Ionico Keyboard', ['Ionico II 17 keyboard']],
+  ['Ionico Light Bar', ['Ionico II 17 light bar']],
+  ['Lian Li Universal Screen', ['Lian Li 8.8-inch Universal Screen']],
+]);
+const openRgbAliases = new Map([
+  ['Lian Li Universal Screen', ['US88v1', 'Lian Li 8.8″ Universal Screen']],
+  ['Elgato Stream Deck MK.2', ['20GBA9901']],
+  ['NZXT Hue 2 Ambient', ['NZXT HUE 2 Ambient RGB Lighting Kit']],
+  ['Robobloq Monitor Light Strip', ['Robobloq Monitor Sync LED Strip Light']],
+]);
+const lightingOnly = new Set([
+  'YICO 14 LCD', 'Lian Li Universal Screen', 'Gigabyte Aorus Waterforce X II 360',
+  'Corsair iCUE Link System Hub',
 ]);
 const openRgbFamilyNotes = new Map([
   ['AcerNitroHidKeyboardController', ['For Acer Nitro laptops with keyboard controller 0CF2:5130.', 'Для ноутбуков Acer Nitro с контроллером клавиатуры 0CF2:5130.']],
@@ -22,7 +38,6 @@ const openRgbFamilyNotes = new Map([
   ['Corsair DRAM', ['Support depends on the lighting controller in the memory module.', 'Поддержка зависит от контроллера подсветки в модуле памяти.']],
   ['ENE SMBus DRAM', ['This driver covers several memory brands. Search by the model or part number printed on your module.', 'С этим драйвером работает память разных брендов. Ищите модель или номер с наклейки модуля.']],
 ]);
-const directEvidenceRevision = '6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43';
 const withoutDirect = new Map([
   ['Corsair Vengeance RGB DRAM', { type: 'RAM', source: 'CorsairVengeanceController/RGBController_CorsairVengeance.cpp#L20' }],
   ['Lenovo Legion K510 Mini Pro', { type: 'Keyboard', source: 'LenovoControllers/LenovoLegionK510Controller/RGBController_LenovoK510.cpp#L38' }],
@@ -38,19 +53,33 @@ const driverName = (entry) => (entry.source?.split('/Controllers/')[1]?.split('/
   .replace(/([a-z])([A-Z])/g, '$1 $2');
 
 function entryFor(device, catalog, inherited) {
-  const known = inherited ? withoutDirect.get(device.name) : undefined;
-  const modes = catalog.revision === directEvidenceRevision ? known?.source : undefined;
-  const status = inherited ? (modes ? 'no-direct' : 'openrgb') : device.status;
+  const pinned = inherited && catalog.revision === coverageRevision;
+  const known = pinned ? withoutDirect.get(device.name) : undefined;
+  const modes = known?.source;
+  const status = inherited ? (modes || device.scenes === 'unavailable' ? 'no-direct' : 'openrgb') : device.status;
   const [note, noteRu] = (inherited && openRgbFamilyNotes.get(device.name)) || [];
+  const [scope, familyNote, familyNoteRu] = pinned ? familyCoverage(device.name) : [];
+  const aliases = pinned ? openRgbAliases.get(device.name) : undefined;
+  const settings = pinned && lightingOnly.has(device.name) ? {
+    note: 'Controls RGB lighting. Display media is outside this connection.',
+    noteRu: 'Это подключение управляет RGB-подсветкой. Изображения на экран через него не выводятся.',
+  } : device.source?.includes('/QMKKeychronController_Devices.cpp') ? {
+    note: 'Use a firmware version that exposes Keychron RGB over USB.',
+    noteRu: 'Используйте прошивку клавиатуры с поддержкой Keychron RGB по USB.',
+  } : {};
   return {
     ...device,
-    type: device.type ?? known?.type,
+    ...settings,
+    type: device.type ?? known?.type ?? (device.source?.includes('/MSIMotherboardController/') ? 'Motherboard' : undefined),
     status,
     capability: !inherited && device.type === 'LCD' ? 'display' : 'lighting',
     route: inherited || status === 'openrgb' ? 'openrgb' : status === 'research' ? 'research' : 'native',
     source: device.source ?? catalog.source,
     ...(note && { note, noteRu }),
-    ...(modes && { modesSource: `https://github.com/hello-nexus/openrgb-headless/blob/${directEvidenceRevision}/Controllers/${modes}` }),
+    ...(scope && { scope }),
+    ...(familyNote && { note: familyNote, noteRu: familyNoteRu }),
+    ...(aliases && { aliases: [...(device.aliases ?? []), ...aliases] }),
+    ...(modes && { modesSource: `https://github.com/hello-nexus/openrgb-headless/blob/${coverageRevision}/Controllers/${modes}` }),
   };
 }
 
@@ -62,8 +91,8 @@ function categoryFor(card) {
   const traits = device + ' ' + drivers;
   if (/\b(light integration|smart bulb|zone light)\b/.test(device)) return 'home';
   if (/\b(led strip|light strip|led controller|skydimo|wled)\b/.test(device) || /\bledstrip\b/.test(drivers)) return 'strips';
-  if (/\b(keyboard|mouse|mousemat|headset|headphone|keypad|rival|arctis|sensei)\b/.test(traits)) return 'peripherals';
-  if (/\b(monitor|display)\b/.test(traits)) return 'displays';
+  if (/\b(keyboard|mouse|mousemat|headset|headphone|keypad|joystick|rival|arctis|sensei)\b/.test(traits)) return 'peripherals';
+  if (/\b(monitor|display|screen|lcd)\b/.test(traits)) return 'displays';
   if (/\b(motherboard|gpu|ram|dram|ddr[345]|memory controller|geforce|radeon|nzxt kraken|cooler|chassis|wraith prism)\b/.test(traits)) return 'pc';
   return 'other';
 }
@@ -75,9 +104,12 @@ export function buildCatalog(openrgb, native) {
     if (!cards.has(key)) cards.set(key, { name, entries: [] });
     cards.get(key).entries.push(entry);
   }
-  for (const device of openrgb?.devices ?? []) {
+  const pinned = openrgb?.revision === coverageRevision;
+  const inherited = [...(openrgb?.devices ?? []), ...(pinned ? retailModels : [])];
+  for (const device of inherited) {
+    if (device.name === 'Debug Controllers') continue;
     const entry = entryFor(device, openrgb, true);
-    for (const name of openRgbCardNames.get(device.name) ?? [device.name]) add(name, entry);
+    for (const name of (pinned && openRgbCardNames.get(device.name)) || [device.name]) add(name, entry);
   }
   for (const device of native?.devices ?? []) {
     const entry = entryFor(device, native, false);

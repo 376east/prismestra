@@ -32,7 +32,9 @@ const copy = {
     featureSteps: {
       'no-direct': 'Use the device’s built-in effects. It can’t follow a Prismestra scene.',
     },
-    setup: 'Setup guide', modesSource: 'Driver modes', modelSource: 'Product specifications',
+    setup: 'Setup guide', modesSource: 'Driver modes', modelSource: 'Model reference',
+    scopes: { family: 'Compatible models', protocol: 'Protocol support' },
+    familyStep: 'Check the exact model or controller in Devices.',
     categories: ['Keyboards and mice', 'PC components', 'Strips and controllers', 'Displays', 'Home lighting', 'Other devices', 'OpenRGB listings', 'Prismestra connections', 'Research candidates'],
   },
   ru: {
@@ -61,7 +63,9 @@ const copy = {
     featureSteps: {
       'no-direct': 'Устройство поддерживает собственные эффекты. В общую сцену оно не включается.',
     },
-    setup: 'Инструкция по установке', modesSource: 'Режимы драйвера', modelSource: 'Характеристики модели',
+    setup: 'Инструкция по установке', modesSource: 'Режимы драйвера', modelSource: 'Сведения о модели',
+    scopes: { family: 'Совместимые модели', protocol: 'Поддержка протокола' },
+    familyStep: 'Сверьте точную модель или контроллер в разделе «Устройства».',
     categories: ['Клавиатуры и мыши', 'Компоненты ПК', 'Ленты и контроллеры', 'Экраны', 'Домашнее освещение', 'Другие устройства', 'Каталог OpenRGB', 'Подключения Prismestra', 'Исследуемые устройства'],
   },
 };
@@ -95,8 +99,11 @@ function deviceRow(card, t, lang) {
   for (const capability of capabilities) {
     const entries = card.entries.filter((entry) => entry.capability === capability);
     const status = ['implemented', 'verified', 'openrgb', 'no-direct', 'research'].find((name) => entries.some((entry) => entry.status === name));
+    const supported = entries.filter((entry) => ['implemented', 'verified', 'openrgb'].includes(entry.status));
+    const scope = supported[0]?.scope;
+    const scoped = scope && supported.every((entry) => entry.scope === scope);
     const feature = node('p', '', 'feature');
-    feature.append(node('strong', t[capability]), ' · ', t.featureStatuses[status]);
+    feature.append(node('strong', t[capability]), ' · ', scoped ? t.scopes[scope] : t.featureStatuses[status]);
     row.append(feature);
     const note = entries.find((entry) => entry.note)?.[lang === 'ru' ? 'noteRu' : 'note'];
     if (status === 'research') {
@@ -104,7 +111,8 @@ function deviceRow(card, t, lang) {
       step.append(sourceLink('https://github.com/376east/prismestra/issues/new?template=device.yml', t.report));
       row.append(step);
     } else {
-      row.append(node('p', t.featureSteps[status] ?? note ?? (capability === 'display' ? t.lcdStep : t.devicesStep), 'connection-hint'));
+      const step = capability === 'display' ? t.lcdStep : scoped && scope === 'family' ? t.familyStep : t.devicesStep;
+      row.append(node('p', t.featureSteps[status] ?? note ?? step, 'connection-hint'));
     }
     const group = node('div', '', 'evidence-group');
     if (capabilities.size > 1) group.append(node('h3', t[capability]));
