@@ -455,8 +455,9 @@ function renderLibrary() {
  const description=lcdOnly
   ? ui('В профиле только LCD. Фон и показания температуры настраиваются отдельно от RGB-сцен.','This profile has only LCD outputs. Set the background and temperatures separately from RGB scenes.')
   : ui('Сцены сохраняют параметры RGB. Устройства и LCD сохраняются в профиле.','Scenes store RGB settings. Devices and LCDs belong to the profile.');
- const outputAction=lcdOnly?pageButton('lcd',ui('Настроить LCD','Set up LCD'),true):startupDiscoveryAction();
- return heading(pages.library,description,outputAction+action(icon('plus')+' '+ui('Новая сцена','New scene'),'new',!lcdOnly&&!state.startupDiscoveryRetry))+startupSearchSummary+`
+ const showStartupSearch=!state.devices.length&&state.startupDiscoveryRetry;
+ const outputAction=lcdOnly?pageButton('lcd',ui('Настроить LCD','Set up LCD'),true):showStartupSearch?startupDiscoveryAction():'';
+ return heading(pages.library,description,outputAction+action(icon('plus')+' '+ui('Новая сцена','New scene'),'new',!lcdOnly&&!showStartupSearch))+startupSearchSummary+`
   <div class="toolbar">
    <select id="library-effect" aria-label="${ui('Тип эффекта','Effect type')}"><option value="">${ui('Все эффекты','All effects')}</option>${options}</select>
    <output class="muted" aria-live="polite">${ui('Показано','Showing')} ${Math.min(libraryLimit,list.length)} ${ui('из','of')} ${list.length}</output>
@@ -829,7 +830,7 @@ function outputPageAvailable(page) {
 }
 
 function startupDiscoveryAction() {
- return state.startupDiscoveryRetry ? action(ui('Найти устройства','Find devices'),'retry-startup-discovery',true) : '';
+ return state.startupDiscoveryRetry ? action(ui('Найти устройства','Find devices'),'retry-startup-discovery',!state.devices.length) : '';
 }
 const startupSearchSummary='<p id="startup-empty-search" class="device-summary" role="status" aria-atomic="true" hidden></p>';
 

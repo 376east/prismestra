@@ -665,6 +665,19 @@ console.log('PASS: candidate identity, applied precedence, metadata replacement,
  console.log('PASS: one rescan from an empty profile; late candidate becomes an applied device');
 }
 {
+ const applied={...foundRgb,leds:1};
+ const mixed={...initial,devices:[applied],draftDevices:[applied],startupDiscoveryRetry:true};
+ vm.runInContext('view="library";pendingView=null',context);
+ receiveDeviceState('snapshot',mixed);
+ assert.doesNotMatch(mainMarkup,/data-action="retry-startup-discovery"/);
+ vm.runInContext('view="devices";pendingView=null',context);
+ receiveDeviceState('snapshot',mixed);
+ assert.match(mainMarkup,/data-action="retry-startup-discovery"/);
+ assert.match(mainMarkup,/data-device-id=/);
+ receiveDeviceState('status',{startupDiscoveryRetry:false});
+ assert.doesNotMatch(mainMarkup,/data-action="retry-startup-discovery"/,'a running scan cannot be started again');
+}
+{
  const empty={...foundState,pending:false,devices:[],draftDevices:[],deviceCandidates:[],startupDiscoveryRetry:false};
  const summary=find('#startup-empty-search');
  vm.runInContext('view="library";pendingView=null',context);
