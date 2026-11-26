@@ -14,7 +14,10 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/wled.rs",
       "route": "Prismestra WLED DDP",
       "status": "implemented",
-      "detail": "WLED runs on networked LED controllers such as ESP32 boards. Prismestra sends per-pixel lighting over DDP. Software receiver tests cover packet submission."
+      "detail": "Prismestra controls individual LEDs on WLED controllers over your local network. Enable DDP on the controller.",
+      "detailRu": "Prismestra управляет отдельными светодиодами по локальной сети. Включите DDP на контроллере.",
+      "note": "Connect the controller to your local network and add it in Devices.",
+      "noteRu": "Подключите контроллер к локальной сети и добавьте его в разделе «Устройства»."
     },
     {
       "name": "Home Assistant",
@@ -28,7 +31,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/devices/home_assistant.rs",
       "route": "Prismestra Home Assistant REST",
       "status": "implemented",
-      "detail": "Binds a light entity and issues capability-aware whole-light commands. Check the entity, integration and model separately."
+      "detail": "Choose a light already connected to Home Assistant. The controls depend on what that light can do.",
+      "detailRu": "Выберите светильник, который уже подключён к Home Assistant. Доступные настройки зависят от светильника."
     },
     {
       "name": "Alice (Yandex Smart Home)",
@@ -44,7 +48,10 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/ui/windows/alice.rs",
       "route": "Prismestra Alice pilot",
       "status": "implemented",
-      "detail": "Supports explicit on/off and brightness controls for selected lamps, plus opted-in brightness on scene Apply. Physical lamp output remains unverified for 0.2.0."
+      "detail": "Sign in with Yandex ID and choose a lamp. Turn it on or off, adjust brightness, or include brightness when applying a scene.",
+      "detailRu": "Войдите с Яндекс ID и выберите лампу. Её можно включать и выключать, менять яркость или применять яркость вместе со сценой.",
+      "note": "Open Settings, go to LAN controls, and sign in with Yandex ID to choose a lamp.",
+      "noteRu": "В настройках откройте управление по сети, войдите с Яндекс ID и выберите лампу."
     },
     {
       "name": "Surplife E1",
@@ -58,7 +65,10 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/docs/surplife-e1-pixels.md",
       "route": "Prismestra Surplife E1 pixels",
       "status": "implemented",
-      "detail": "The native path requires a compatible controller and a confirmed single-segment point count before sending E104 pixel frames. Full optical mapping and physical reconnect need acceptance."
+      "detail": "For a single-segment strip, enter the number of LEDs before applying a scene.",
+      "detailRu": "Для ленты с одним сегментом укажите число светодиодов, затем примените сцену.",
+      "note": "Turn on Bluetooth and look for the strip in Devices.",
+      "noteRu": "Включите Bluetooth и найдите ленту в разделе «Устройства»."
     },
     {
       "name": "Surplife BLE legacy 20 groups",
@@ -73,7 +83,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/app/device_setup.rs#L69-L85",
       "route": "Prismestra Door BLE legacy",
       "status": "implemented",
-      "detail": "20 logical groups via the legacy profile. Select the matching geometry explicitly."
+      "detail": "Select the layout with 20 lighting groups.",
+      "detailRu": "Выберите раскладку на 20 групп подсветки."
     },
     {
       "name": "Surplife BLE legacy 153 LED",
@@ -88,7 +99,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/app/device_setup.rs#L69-L85",
       "route": "Prismestra Door BLE legacy",
       "status": "implemented",
-      "detail": "153-point legacy profile. Visible one-to-one mapping for the legacy 153-point command is unconfirmed."
+      "detail": "Select the legacy layout for 153 LEDs. One-to-one LED mapping on this route is unconfirmed.",
+      "detailRu": "Выберите раскладку на 153 светодиода. Соответствие точек отдельным светодиодам для этого режима ещё не проверено."
     },
     {
       "name": "Surplife E1 153-point optical marker",
@@ -102,7 +114,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/docs/validation/surplife-153.json",
       "route": "Pre-integration E104 probe",
       "status": "verified",
-      "detail": "On 13 November 2026 a single E104 marker at index 0 lit one physical LED on one 153-point, single-segment controller (product 170, LED protocol 11). Hardware revision and firmware were unrecorded. This historical probe leaves other indices, models, and the native build open."
+      "detail": "In a hardware check, a test frame lit the first LED on a 153-LED, single-segment strip. The check covered one position.",
+      "detailRu": "В тесте на ленте из 153 светодиодов загорелся первый светодиод. Проверили одну позицию."
     },
     {
       "name": "Thermaltake LCD 264A:233C",
@@ -111,13 +124,18 @@
       "aliases": [
         "TT LCD",
         "264A:233C MI_01",
-        "264A 233C"
+        "264A 233C",
+        "TH420 V2 Ultra EX",
+        "TH420 V2 Ultra EX ARGB Sync Black",
+        "Thermaltake LCD"
       ],
       "connection": "USB HID",
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/lcd/hid_policy.rs",
       "route": "Prismestra TT LCD",
       "status": "implemented",
-      "detail": "Matches the 264A:233C MI_01 JPEG display interface and reads liquid temperature via MI_00. One historical run recorded JPEG ACKs. Retail SKU, firmware and visible overlay acceptance remain open."
+      "detail": "The TH420 V2 Ultra EX ARGB Sync LCD uses USB ID 264A:233C. Prismestra sends images to the display and reads liquid temperature over a separate interface.",
+      "detailRu": "Экран TH420 V2 Ultra EX ARGB Sync определяется по USB как 264A:233C. Prismestra выводит изображения и получает температуру жидкости через отдельный интерфейс.",
+      "model": "Thermaltake TH420 V2 Ultra EX ARGB Sync"
     },
     {
       "name": "Gigabyte RGB Fusion 2 USB",
@@ -135,7 +153,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/fixtures/fusion2-provenance.md",
       "route": "Prismestra Fusion2 (two ARGB headers)",
       "status": "implemented",
-      "detail": "Native path uses the 048D:5702 IT5702 layout derived from the B650 EAGLE AX's two ARGB controller zones. LED_C is outside the native route. Check the descriptor and exact board revision."
+      "detail": "On the B650 EAGLE AX, the Prismestra driver controls the two addressable ARGB headers. Set the LED count for each connected header.",
+      "detailRu": "На B650 EAGLE AX драйвер Prismestra управляет двумя адресными разъёмами ARGB. Укажите число светодиодов для каждого подключённого разъёма."
     },
     {
       "name": "ENE DRAM AUDA0-E6K5-0101",
@@ -150,7 +169,48 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/ene.rs",
       "route": "Prismestra native ENE DRAM",
       "status": "implemented",
-      "detail": "Native path checks this controller version and an eight-LED layout. DIMMs with other controller versions or layouts need separate acceptance."
+      "detail": "The Prismestra driver supports this controller with eight LEDs per memory module.",
+      "detailRu": "Драйвер Prismestra поддерживает этот контроллер с восемью светодиодами на модуль памяти."
+    },
+    {
+      "name": "G.SKILL Trident Z5 DDR5 F5-6400J3239G16G",
+      "vendor": "G.SKILL",
+      "type": "RAM",
+      "aliases": [
+        "F5-6400J3239G16G",
+        "GSkill Trident Z5 Royal",
+        "Trident Z5 Royal",
+        "Trident Z5 Royal Neo",
+        "Trident Z5 RGB",
+        "F5-6400J3239G16GX2-TR5S",
+        "F5-6400J3239G16GX2-TR5NS",
+        "F5-6400J3239G16GX2-TZ5RK"
+      ],
+      "connection": "SMBus / PawnIO",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/ene.rs",
+      "route": "Prismestra native ENE DRAM",
+      "status": "implemented",
+      "detail": "The F5-6400J3239G16G module was identified with an eight-LED ENE AUDA0-E6K5-0101 controller. The driver matches the controller and LED layout.",
+      "detailRu": "На модуле F5-6400J3239G16G определился контроллер ENE AUDA0-E6K5-0101 с восемью светодиодами. Драйвер проверяет контроллер и число светодиодов.",
+      "note": "Match the part number printed on your memory module. Trident Z5 kits come in several versions.",
+      "noteRu": "Сверьте номер на наклейке модуля памяти. У комплектов Trident Z5 несколько версий."
+    },
+    {
+      "name": "Dark Project KD98A",
+      "vendor": "Dark Project",
+      "type": "Keyboard",
+      "aliases": [
+        "DP-KD-98A-100100-GMS",
+        "KD98",
+        "KD-98A"
+      ],
+      "connection": "USB",
+      "source": "https://github.com/hello-nexus/openrgb-headless/blob/6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43/Controllers/ValkyrieKeyboardController/ValkyrieKeyboardControllerDetect.cpp#L36",
+      "modelSource": "https://darkproject.ru/products/KD98A",
+      "route": "OpenRGB",
+      "status": "openrgb",
+      "detail": "OpenRGB may show this keyboard as “Valkyrie VK99”. Prismestra can send lighting frames through that connection.",
+      "detailRu": "OpenRGB может показывать эту клавиатуру как «Valkyrie VK99». Prismestra передаёт подсветку через это подключение."
     },
     {
       "name": "Valkyrie VK99",
@@ -164,7 +224,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/fixtures/valkyrie-provenance.md",
       "route": "Prismestra native Valkyrie feature HID",
       "status": "implemented",
-      "detail": "102 LEDs, interface 2. Model-specific descriptor checks and packet fixtures are available. Physical layout and recovery need acceptance."
+      "detail": "USB interface 2, 102 LEDs.",
+      "detailRu": "Интерфейс USB 2, 102 светодиода."
     },
     {
       "name": "Valkyrie VK99 Pro",
@@ -178,7 +239,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/fixtures/valkyrie-provenance.md",
       "route": "Prismestra native Valkyrie feature HID",
       "status": "implemented",
-      "detail": "98 LEDs, interface 3. Model-specific descriptor checks and packet fixtures are available. Physical layout and recovery need acceptance."
+      "detail": "USB interface 3, 98 LEDs.",
+      "detailRu": "Интерфейс USB 3, 98 светодиодов."
     },
     {
       "name": "Skydimo SK0121",
@@ -188,7 +250,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 51 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "51 LEDs, three-sided perimeter.",
+      "detailRu": "51 LED, подсветка с трёх сторон."
     },
     {
       "name": "Skydimo SK0124",
@@ -198,7 +261,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 54 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "54 LEDs, three-sided perimeter.",
+      "detailRu": "54 LED, подсветка с трёх сторон."
     },
     {
       "name": "Skydimo SK0127",
@@ -208,7 +272,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 65 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "65 LEDs, three-sided perimeter.",
+      "detailRu": "65 LED, подсветка с трёх сторон."
     },
     {
       "name": "Skydimo SK0132",
@@ -218,7 +283,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 77 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "77 LEDs, three-sided perimeter.",
+      "detailRu": "77 LED, подсветка с трёх сторон."
     },
     {
       "name": "Skydimo SK0134",
@@ -228,7 +294,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 71 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "71 LEDs, three-sided perimeter.",
+      "detailRu": "71 LED, подсветка с трёх сторон."
     },
     {
       "name": "Skydimo SK0149",
@@ -238,7 +305,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 107 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "107 LEDs, three-sided perimeter.",
+      "detailRu": "107 LED, подсветка с трёх сторон."
     },
     {
       "name": "Skydimo SK0201",
@@ -428,7 +496,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 76 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "76 LEDs, four-sided perimeter.",
+      "detailRu": "76 LED, подсветка с четырёх сторон."
     },
     {
       "name": "Skydimo SK0L24",
@@ -438,7 +507,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 80 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "80 LEDs, four-sided perimeter.",
+      "detailRu": "80 LED, подсветка с четырёх сторон."
     },
     {
       "name": "Skydimo SK0L27",
@@ -448,7 +518,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 96 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "96 LEDs, four-sided perimeter.",
+      "detailRu": "96 LED, подсветка с четырёх сторон."
     },
     {
       "name": "Skydimo SK0L32",
@@ -458,7 +529,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 114 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "114 LEDs, four-sided perimeter.",
+      "detailRu": "114 LED, подсветка с четырёх сторон."
     },
     {
       "name": "Skydimo SK0L34",
@@ -468,7 +540,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 112 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "112 LEDs, four-sided perimeter.",
+      "detailRu": "112 LED, подсветка с четырёх сторон."
     },
     {
       "name": "Skydimo SK0M01",
@@ -528,7 +601,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 70 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "70 LEDs, three-sided perimeter.",
+      "detailRu": "70 LED, подсветка с трёх сторон."
     },
     {
       "name": "Skydimo SKA127",
@@ -538,7 +612,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 81 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "81 LEDs, three-sided perimeter.",
+      "detailRu": "81 LED, подсветка с трёх сторон."
     },
     {
       "name": "Skydimo SKA132",
@@ -548,7 +623,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 95 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "95 LEDs, three-sided perimeter.",
+      "detailRu": "95 LED, подсветка с трёх сторон."
     },
     {
       "name": "Skydimo SKA134",
@@ -558,7 +634,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 93 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "93 LEDs, three-sided perimeter.",
+      "detailRu": "93 LED, подсветка с трёх сторон."
     },
     {
       "name": "Skydimo SKB124",
@@ -568,7 +645,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 104 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "104 LEDs, four-sided perimeter.",
+      "detailRu": "104 LED, подсветка с четырёх сторон."
     },
     {
       "name": "Skydimo SKB127",
@@ -578,7 +656,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 122 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "122 LEDs, four-sided perimeter.",
+      "detailRu": "122 LED, подсветка с четырёх сторон."
     },
     {
       "name": "Skydimo SKB132",
@@ -588,7 +667,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 138 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "138 LEDs, four-sided perimeter.",
+      "detailRu": "138 LED, подсветка с четырёх сторон."
     },
     {
       "name": "Skydimo SKB134",
@@ -598,7 +678,8 @@
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
       "route": "Prismestra Skydimo Serial",
       "status": "implemented",
-      "detail": "Native table defines 142 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+      "detail": "142 LEDs, four-sided perimeter.",
+      "detailRu": "142 LED, подсветка с четырёх сторон."
     },
     {
       "name": "BanlanX SP611E",

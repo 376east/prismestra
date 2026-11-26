@@ -32,6 +32,9 @@ test('known missing Direct mode applies only to checked models on the pinned Ope
     assert.match(card.entries[0].modesSource, new RegExp(locked.revision));
   }
   assert.equal(named('Acer Nitro keyboard controller').entries[0].status, 'openrgb');
+  const vengeance = named('Corsair Vengeance RGB DDR4');
+  assert.equal(vengeance.entries[0].status, 'no-direct');
+  assert.match(vengeance.entries[0].modesSource, /RGBController_CorsairVengeance.cpp/);
   const newRevision = buildCatalog({ ...openrgb, revision: 'new' }, null);
   assert.equal(findCards(newRevision, '17EF:619A')[0].entries[0].status, 'openrgb');
 });
@@ -48,6 +51,36 @@ test('joins exact models with evidence from each route and keeps retail variants
   const cases = buildCatalog({ devices: [{ name: 'Model X' }, { name: 'Model X+' }, { name: 'Model X Pro' }] }, null);
   assert.equal(cases.length, 3);
   assert.deepEqual(findCards(cases, 'Model X+').map((card) => card.name), ['Model X+']);
+});
+
+test('finds Dark Project by retail model without merging the Valkyrie entries', () => {
+  const keyboard = named('Dark Project KD98A');
+  for (const query of ['KD98A', 'DP-KD-98A-100100-GMS']) {
+    assert.deepEqual(find(query, 'peripherals', 'openrgb'), [keyboard]);
+  }
+  assert.equal(keyboard.entries.length, 1);
+  assert.ok(!find('Valkyrie VK99').includes(keyboard));
+  assert.ok(!find('05AC:024F').includes(keyboard));
+});
+
+test('finds retail RAM families and keeps the original driver names searchable', () => {
+  for (const [driver, names] of [
+    ['Kingston Fury DDR4 DRAM', ['Kingston FURY Beast RGB DDR4']],
+    ['Kingston Fury DDR5 DRAM', ['Kingston FURY Beast RGB DDR5', 'Kingston FURY Renegade RGB DDR5']],
+    ['HyperX DRAM', ['HyperX Fury RGB', 'HyperX Predator RGB']],
+    ['Gigabyte RGB Fusion 2 DRAM', ['Gigabyte AORUS RGB Memory DDR4']],
+    ['T-Force Xtreem DDR4 DRAM', ['TEAMGROUP T-FORCE XTREEM ARGB DDR4']],
+    ['Corsair Vengeance RGB DRAM', ['Corsair Vengeance RGB DDR4']],
+  ]) {
+    assert.deepEqual(find(driver, 'pc', 'openrgb').map(({ name }) => name), names);
+    for (const name of names) assert.equal(find(name)[0], named(name));
+  }
+  const gskill = named('G.SKILL Trident Z5 DDR5 F5-6400J3239G16G');
+  assert.equal(find('F5-6400J3239G16G', 'pc', 'native')[0], gskill);
+  assert.equal(find('Trident Z5 Royal', 'pc', 'native')[0], gskill);
+  assert.match(gskill.entries[0].note, /part number/);
+  assert.match(gskill.entries[0].noteRu, /номер/);
+  assert.ok(named('ENE DRAM AUDA0-E6K5-0101'));
 });
 
 test('links the B650 EAGLE AX to its native evidence and keeps the Fusion 2 family', () => {
@@ -86,12 +119,14 @@ test('separates Kraken lighting from LCD research under the same model', () => {
 });
 
 test('matches USB pairs and interface IDs exactly across supported formats', () => {
-  const model = named('Thermaltake LCD 264A:233C');
+  const model = named('Thermaltake TH420 V2 Ultra EX ARGB Sync');
   for (const query of ['264a:233c', '264A 233C', '264a233c', '0x264a 0x233c',
     'VID_264A&PID_233C', 'USB\\VID_264A&PID_233C&MI_01', '264A:233C MI_01']) {
     assert.deepEqual(find(query, 'displays', 'native'), [model], query);
   }
   assert.equal(model.entries[0].capability, 'display');
+  assert.equal(find('TH420 V2 Ultra EX')[0], model);
+  assert.equal(find('Thermaltake LCD 264A:233C')[0], model);
   for (const query of ['264a:233d', 'USB\\VID_264A&PID_233C&MI_00', '046d:233c']) assert.deepEqual(find(query), [], query);
   assert.equal(find('046d:c539', '', 'openrgb')[0].name, 'Logitech Lightspeed Receiver');
 });
@@ -107,7 +142,7 @@ test('search respects word boundaries and recognizes common Russian device types
   assert.ok(find('мышь', 'peripherals').includes(howl));
   assert.ok(find('LED лента', 'strips').includes(wled));
   assert.ok(find('монитор', 'displays').includes(named('Alienware AW3225QF')));
-  assert.ok(find('экраны', 'displays').includes(named('Thermaltake LCD 264A:233C')));
+  assert.ok(find('экраны', 'displays').includes(named('Thermaltake TH420 V2 Ultra EX ARGB Sync')));
   assert.ok(find('Gigabyte материнская плата', 'pc').includes(named('Gigabyte B650 EAGLE AX')));
   assert.ok(!find('материнская плата').includes(wled));
   assert.deepEqual(find('WLED', 'peripherals'), []);
@@ -138,7 +173,7 @@ test('one unavailable catalog leaves evidence from the other searchable', () => 
 test('accepts pasted revisions and leads monitor-backlight searches to the right family', () => {
   assert.deepEqual(find('B650 Eagle AX rev. 1.0').map((card) => card.name), ['Gigabyte B650 EAGLE AX']);
   assert.deepEqual(find('Gigabyte B650 EAGLE AX ревизия 1.2').map((card) => card.name), ['Gigabyte B650 EAGLE AX']);
-  assert.deepEqual(find(String.raw`USB\VID_264A&PID_233C&REV_0001&MI_01`).map((card) => card.name), ['Thermaltake LCD 264A:233C']);
+  assert.deepEqual(find(String.raw`USB\VID_264A&PID_233C&REV_0001&MI_01`).map((card) => card.name), ['Thermaltake TH420 V2 Ultra EX ARGB Sync']);
   assert.equal(find(String.raw`USB\VID_264A&PID_233C&REV_0001&MI_03`).length, 0);
   assert.equal(find(String.raw`USB\VID_264A&PID_233C&REV_0001`).length, 1);
   for (const phrase of ['подсветка за монитором', 'lights behind the monitor', 'monitor backlight']) {

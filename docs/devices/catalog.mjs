@@ -4,11 +4,18 @@ const kraken = 'NZXT Kraken Elite RGB 2024';
 const surplife = 'Surplife E1';
 const surplifeMarker = 'Surplife E1 153-point optical marker';
 const openRgbCardNames = new Map([
-  ['NZXT Kraken 2024 ELITE Series RGB', kraken],
-  ['AcerNitroHidKeyboardController', 'Acer Nitro keyboard controller'],
+  ['NZXT Kraken 2024 ELITE Series RGB', [kraken]],
+  ['AcerNitroHidKeyboardController', ['Acer Nitro keyboard controller']],
+  ['Kingston Fury DDR4 DRAM', ['Kingston FURY Beast RGB DDR4']],
+  ['Kingston Fury DDR5 DRAM', ['Kingston FURY Beast RGB DDR5', 'Kingston FURY Renegade RGB DDR5']],
+  ['HyperX DRAM', ['HyperX Fury RGB', 'HyperX Predator RGB']],
+  ['Gigabyte RGB Fusion 2 DRAM', ['Gigabyte AORUS RGB Memory DDR4']],
+  ['T-Force Xtreem DDR4 DRAM', ['TEAMGROUP T-FORCE XTREEM ARGB DDR4']],
+  ['Corsair Vengeance RGB DRAM', ['Corsair Vengeance RGB DDR4']],
 ]);
 const directEvidenceRevision = '6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43';
 const withoutDirect = new Map([
+  ['Corsair Vengeance RGB DRAM', { type: 'RAM', source: 'CorsairVengeanceController/RGBController_CorsairVengeance.cpp#L20' }],
   ['Lenovo Legion K510 Mini Pro', { type: 'Keyboard', source: 'LenovoControllers/LenovoLegionK510Controller/RGBController_LenovoK510.cpp#L38' }],
   ['MSI Clutch GM11 controller', { type: 'Mouse', source: 'MSIClutchController/MSIClutchGM11Controller/RGBController_MSIClutchGM11.cpp#L39' }],
 ]);
@@ -30,8 +37,7 @@ function entryFor(device, catalog, inherited) {
     type: device.type ?? known?.type,
     status,
     capability: !inherited && device.type === 'LCD' ? 'display' : 'lighting',
-    route: inherited ? 'openrgb' : status === 'research' ? 'research' : 'native',
-    routeLabel: device.route,
+    route: inherited || status === 'openrgb' ? 'openrgb' : status === 'research' ? 'research' : 'native',
     source: device.source ?? catalog.source,
     ...(modes && { modesSource: `https://github.com/hello-nexus/openrgb-headless/blob/${directEvidenceRevision}/Controllers/${modes}` }),
   };
@@ -47,7 +53,7 @@ function categoryFor(card) {
   if (/\b(led strip|light strip|led controller|skydimo|wled)\b/.test(device) || /\bledstrip\b/.test(drivers)) return 'strips';
   if (/\b(keyboard|mouse|mousemat|headset|headphone|keypad|rival|arctis|sensei)\b/.test(traits)) return 'peripherals';
   if (/\b(monitor|display)\b/.test(traits)) return 'displays';
-  if (/\b(motherboard|gpu|ram|dram|memory controller|geforce|radeon|nzxt kraken|cooler|chassis|wraith prism)\b/.test(traits)) return 'pc';
+  if (/\b(motherboard|gpu|ram|dram|ddr[345]|memory controller|geforce|radeon|nzxt kraken|cooler|chassis|wraith prism)\b/.test(traits)) return 'pc';
   return 'other';
 }
 
@@ -59,11 +65,12 @@ export function buildCatalog(openrgb, native) {
     cards.get(key).entries.push(entry);
   }
   for (const device of openrgb?.devices ?? []) {
-    add(openRgbCardNames.get(device.name) ?? device.name, entryFor(device, openrgb, true));
+    const entry = entryFor(device, openrgb, true);
+    for (const name of openRgbCardNames.get(device.name) ?? [device.name]) add(name, entry);
   }
   for (const device of native?.devices ?? []) {
     const entry = entryFor(device, native, false);
-    add(device.name === surplifeMarker ? surplife : device.name, entry);
+    add(device.name === surplifeMarker ? surplife : device.model ?? device.name, entry);
     // The family listing remains available. The B650 card cites the exact board used for the native implementation.
     if (device.name === fusion && device.aliases?.some(boardAlias)) add(board, entry);
   }
