@@ -9,7 +9,7 @@
   <link rel="icon" href="favicon.ico" sizes="any">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="stylesheet" href="site.css">
-  <link rel="stylesheet" href="home.css?v=scene-composition">
+  <link rel="stylesheet" href="home.css?v=scene-peripherals">
   <script type="module" src="home.mjs?v=scene-composition"></script>
 </head>
 <body class="home-page">
@@ -62,8 +62,19 @@
             <div class="scene-fan scene-light"></div>
           </div>
           <div class="scene-mat" aria-hidden="true"></div>
-          <div class="scene-keyboard" aria-hidden="true"><div class="scene-keys scene-light"></div></div>
-          <div class="scene-mouse" aria-hidden="true"></div>
+          <div class="scene-keyboard" aria-hidden="true">
+            <div class="scene-keys scene-light">
+              <div class="scene-key-row"></div>
+              <div class="scene-key-row"></div>
+              <div class="scene-key-row"></div>
+              <div class="scene-key-row"></div>
+              <div class="scene-space-row"></div>
+            </div>
+          </div>
+          <div class="scene-mouse" aria-hidden="true">
+            <div class="scene-mouse-buttons"></div>
+            <div class="scene-mouse-wheel"></div>
+          </div>
         </div>
         <figcaption class="scene-controls">
           <div class="scene-options" id="scene-options" role="group" aria-label="Lighting scenes">
