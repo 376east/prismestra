@@ -2,12 +2,22 @@
 
 For downloads, see [GitHub Releases](https://github.com/376east/prismestra/releases). For physical device coverage, see the [compatibility table](docs/compatibility.md).
 
-## Unreleased
+## 0.2.0
 
-- The interface defaults to English. Choose Russian in Settings to use it on future launches. [Language settings](https://github.com/376east/prismestra/pull/240)
-- **Apply scene** updates the active scene. **Save to library** stores a version for later. The editor confirms each action separately. [Scene actions](https://github.com/376east/prismestra/pull/240)
-- A saved scene can also set the brightness of a linked Alice lamp. Using Alice requires a separate Yandex ID sign-in under **Settings → Lamp controls**. [Alice lamp controls](https://github.com/376east/prismestra/pull/162) · [Scene lamp binding](https://github.com/376east/prismestra/pull/221)
-- The first OpenRGB scan gives the bundled backend more time to respond if it times out before reporting any controllers. [Initial OpenRGB scan](https://github.com/376east/prismestra/pull/241)
+### Startup and recovery
+
+- Restore the saved lighting profile at sign-in. Editing the installed profile keeps that same copy available at the next launch. [Profile save](https://github.com/376east/prismestra/pull/255)
+- Resume the applied scene after Stop from the tray. The installed OpenRGB helper and resident use an authenticated local connection and coordinate recovery so a restart can resume the latest lighting state. [Resume](https://github.com/376east/prismestra/pull/286) · [Local backend control](https://github.com/376east/prismestra/pull/266)
+- If screen capture stops providing fresh frames, monitor lighting falls back to the base scene. The app reports scene acceptance and delivery per output, so a saved scene can still show which device needs attention. [Screen fallback](https://github.com/376east/prismestra/pull/281) · [Output status](https://github.com/376east/prismestra/pull/278)
+
+### Editor and devices
+
+- English is the default, with Russian available in Settings. **Apply scene** updates the active scene. **Save to library** stores a version for later. [Editor and language](https://github.com/376east/prismestra/pull/240)
+- Preview an ARGB channel before setting its first LED count. Save a guarded channel size for the selected controller. [ARGB preview](https://github.com/376east/prismestra/pull/233) · [Channel save](https://github.com/376east/prismestra/pull/209)
+- Keep the saved LCD temperature card where you placed it. Static LCD images skip duplicate frame writes, and the LCD worker can recover when the matching HID interface returns. [Card placement](https://github.com/376east/prismestra/pull/215) · [LCD recovery](https://github.com/376east/prismestra/pull/258)
+- Link an Alice lamp through Yandex ID and optionally set its brightness from a saved scene. If Yandex cannot confirm a command, Prismestra reports the uncertainty separately from lamp availability. [Scene lamp binding](https://github.com/376east/prismestra/pull/221) · [Command status](https://github.com/376east/prismestra/pull/279)
+
+See the [device compatibility guide](docs/compatibility.md) for supported models, firmware and remaining hardware verification.
 
 ## Preview 10 (0.1.0.10) · 2026-11-23
 
@@ -28,8 +38,6 @@ For downloads, see [GitHub Releases](https://github.com/376east/prismestra/relea
 
 - Apply an ordinary saved scene from the tray after closing the editor without pending changes. [Tray scenes](https://github.com/376east/prismestra/pull/202)
 
-[Download Preview 10](https://github.com/376east/prismestra/releases/tag/v0.1.0-preview.10) · [All changes since Preview 8](https://github.com/376east/prismestra/compare/v0.1.0-preview.8...v0.1.0-preview.10)
-
 ## Preview 8 (0.1.0.8) · 2026-11-22
 
 - Start a lighting scene from the library. Preview and edit remain separate actions. Failed activation links to device status.
@@ -38,7 +46,7 @@ For downloads, see [GitHub Releases](https://github.com/376east/prismestra/relea
 - Reconnect a saved Surplife E1 strip when the Bluetooth radio appears later.
 - The published Windows Setup passed offline installation, upgrade from Preview 7, uninstall, and standard-account startup in CI.
 
-[Download Preview 8](https://github.com/376east/prismestra/releases/tag/v0.1.0-preview.8) · [Windows verification](https://github.com/376east/prismestra/actions/runs/45023869783) · [All changes since Preview 7](https://github.com/376east/prismestra/compare/v0.1.0-preview.7...v0.1.0-preview.8)
+[Windows verification](https://github.com/376east/prismestra/actions/runs/45023869783)
 
 ## Preview 7 (0.1.0.7) · 2026-11-21
 
@@ -62,8 +70,6 @@ For downloads, see [GitHub Releases](https://github.com/376east/prismestra/relea
 - Open the editor from the tray by keyboard. Respect Windows menu alignment and ignore tray activation after exit begins. [Tray access](https://github.com/malyarq/prismestra/pull/43) · [Exit fix](https://github.com/malyarq/prismestra/pull/60)
 - Announce changes to the selected device status and restore keyboard focus to the button that opened a settings page. [Device status](https://github.com/malyarq/prismestra/pull/57) · [Settings focus](https://github.com/malyarq/prismestra/pull/59)
 
-[Download Preview 7](https://github.com/376east/prismestra/releases/tag/v0.1.0-preview.7) · [All changes since Preview 6](https://github.com/376east/prismestra/compare/v0.1.0-preview.6...v0.1.0-preview.7)
-
 ## Preview 6 (0.1.0.6) · 2026-11-19
 
 - At sign-in, restore the saved scene and outputs. With a fresh profile, start discovery and build an initial map for supported devices when they are available.
@@ -72,6 +78,6 @@ For downloads, see [GitHub Releases](https://github.com/376east/prismestra/relea
 - Give desktop navigation items distinct icons and use **Prismestra** as the window title.
 - Provide one Windows x64 Setup with sign-in startup and uninstall. The published Setup passed installation, an upgrade from Preview 5, uninstall, and standard-account startup on isolated Windows. Repair passed with a separate test package. No physical devices were present on the runner.
 
-Known issue. Opening a portable ZIP while outputs are connected can send colors before Apply. This was reproduced from the Preview 6 source tag and fixed in the unreleased changes above.
+Known issue. Opening a portable ZIP while outputs are connected can send colors before Apply. This was reproduced from the Preview 6 source tag and fixed in Preview 7.
 
-[Download Preview 6](https://github.com/malyarq/prismestra/releases/tag/v0.1.0-preview.6) · [Windows verification](https://github.com/malyarq/prismestra/actions/runs/44595285813) · [All changes since Preview 5](https://github.com/malyarq/prismestra/compare/v0.1.0-preview.5...v0.1.0-preview.6)
+[Windows verification](https://github.com/malyarq/prismestra/actions/runs/44595285813)
