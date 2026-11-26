@@ -65,9 +65,30 @@
 .scene-light {
   position: absolute;
   inset: 0;
+  overflow: hidden;
+  mask: url("./scene-light-mask.webp") center / 100% 100% no-repeat;
   mix-blend-mode: screen;
   pointer-events: none;
 }
+.scene-light::before {
+  content: "";
+  position: absolute;
+  inset: 0 -100% 0 0;
+  background: linear-gradient(90deg, #dd47ff 0%, #ff435c 10%, #fcbd44 20%, #5bff8a 30%, #42a2ff 40%, #dd47ff 50%, #ff435c 60%, #fcbd44 70%, #5bff8a 80%, #42a2ff 90%, #dd47ff 100%);
+  opacity: .9;
+  animation: light-travel 4s linear infinite;
+}
+.scene[data-scene="breathing"] .scene-light::before {
+  background: #ff9a42;
+  animation: light-breathing 3.8s ease-in-out infinite;
+}
+.scene[data-scene="noise"] .scene-light::before {
+  background: linear-gradient(90deg, #6578f6 0%, #52e9d1 25%, #6578f6 50%, #52e9d1 75%, #6578f6 100%);
+  animation: light-travel 9s linear infinite;
+}
+.scene[data-playing="false"] .scene-light::before { animation-play-state: paused; }
+@keyframes light-travel { to { transform: translateX(-50%); } }
+@keyframes light-breathing { 50% { opacity: .16; } }
 .scene-controls {
   min-height: 4.35rem;
   padding: .5rem .85rem .5rem 1.12rem;
@@ -96,7 +117,15 @@
 }
 .scene-option:hover { color: var(--site-text); }
 .scene-option[aria-pressed="true"] { color: var(--site-text); border-color: #48435d; background: #202034; }
-.scene-playback { margin-inline-start: auto; }
+.scene-playback {
+  margin-inline-start: auto;
+  border-color: var(--site-line);
+  color: var(--site-text);
+}
+.scene[data-playing="false"] .scene-playback {
+  color: var(--site-on-accent);
+  background: var(--site-accent);
+}
 .scene-description { flex-basis: 100%; padding-bottom: .35rem; }
 
 .compatibility {

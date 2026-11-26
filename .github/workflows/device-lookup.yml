@@ -36,7 +36,7 @@ jobs:
       - name: Prepare product site
         run: |
           mkdir -p _site/devices
-          cp docs/site/{index.html,site.css,home.css,home.mjs,scene-preview.mjs,setup-download.mjs,scene-workstation.webp} _site/
+          cp docs/site/{index.html,site.css,home.css,home.mjs,scene-preview.mjs,setup-download.mjs,scene-workstation.webp,scene-light-mask.webp} _site/
           cp src/ui/windows/web/assets/favicon.svg _site/
           cp resources/prismestra.ico _site/favicon.ico
           cp docs/devices/{index.html,lookup.css,lookup.mjs,catalog.mjs,openrgb-coverage.mjs,openrgb.json,prismestra.json} _site/devices/
