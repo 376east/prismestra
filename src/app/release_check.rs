@@ -214,8 +214,8 @@ fn check_with(
             break;
         }
     }
-    if newest.is_none() && exhausted {
-        newest = newest_stable;
+    if exhausted && !newest.is_some_and(|version| version.is_update_for(current)) {
+        newest = newest_stable.or(newest);
     }
     match newest {
         Some(version) if version.is_update_for(current) => ResultState::Available(version),
@@ -351,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn offers_stable_migration_only_without_eligible_previews() {
+    fn offers_stable_migration_without_a_newer_preview() {
         let stable = Version::from_tag("v0.2.0").unwrap();
         let mut removed_preview = release("v0.1.0-preview.30");
         removed_preview["assets"] = json!([]);
@@ -363,9 +363,13 @@ mod tests {
         assert_eq!(
             check_fixture(
                 "0.1.0.30",
-                vec![release("v0.1.0-preview.7"), release("v0.2.0")]
+                vec![
+                    release("v0.1.0-preview.7"),
+                    release("v0.1.0-preview.30"),
+                    release("v0.2.0")
+                ]
             ),
-            ResultState::NoNewer
+            ResultState::Available(stable)
         );
         assert_eq!(
             check_fixture("0.3.0.1", vec![release("v0.2.0")]),
