@@ -52,33 +52,155 @@
   isolation: isolate;
   overflow: hidden;
   aspect-ratio: 1.5;
-  background: #141518;
+  background:
+    linear-gradient(90deg, #d6dde30c 1px, transparent 1px) center / 8% 12%,
+    linear-gradient(#d6dde30c 1px, transparent 1px) center / 8% 12%,
+    radial-gradient(ellipse at 42% 72%, #30353d, #191c22 72%);
 }
-.scene-photo, .scene-light {
-  display: block;
-  width: 100%;
+.scene-desk {
+  position: absolute;
+  inset: 81% -3% 0;
+  background: linear-gradient(180deg, #292e37, #15181e);
+  border-top: 1px solid #747a84;
+}
+.scene-desk::before {
+  content: "";
+  position: absolute;
+  inset: 56% 0 auto;
+  border-top: 1px solid #606771;
+  box-shadow: 0 4px 0 #111318;
+}
+.scene-monitor {
+  position: absolute;
+  inset: 18% 40% 35% 12%;
+  padding: 1%;
+  border: 1px solid #7d858f;
+  border-radius: 4% / 6%;
+  background: #232831;
+  box-shadow: 0 8px 18px #090b10bb;
+}
+.scene-monitor::before, .scene-monitor::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #242a33;
+}
+.scene-monitor::before { width: 10%; height: 29%; top: 100%; }
+.scene-monitor::after {
+  width: 36%;
+  height: 4%;
+  top: 124%;
+  border: 1px solid #565f6e;
+  border-radius: 50%;
+}
+.scene-screen {
+  position: relative;
   height: 100%;
+  overflow: hidden;
+  border: 1px solid #0b0d12;
+  border-radius: 3% / 4%;
+  background: linear-gradient(155deg, #303744, #161b23 65%);
 }
-.scene-photo {
-  object-fit: cover;
-  filter: grayscale(1) brightness(.77);
+.scene-screen::before, .scene-screen::after {
+  content: "";
+  position: absolute;
+  inset: 17% 17%;
+  clip-path: polygon(0 77%, 28% 22%, 46% 52%, 62% 25%, 100% 77%, 97% 77%, 62% 29%, 46% 57%, 28% 27%, 3% 77%);
 }
-.scene-light {
+.scene-screen::before { background: #4a535f; }
+.scene-screen::after { background: #35404e; transform: translateY(14%); }
+.scene-halo {
+  --phase: -1s;
+  position: absolute;
+  inset: 17% 39% 34% 11%;
+  border-radius: 10%;
+  filter: blur(clamp(8px, 1.05vw, 16px));
+  opacity: .7;
+}
+.scene-strip {
+  --phase: -.8s;
+  position: absolute;
+  inset: 80.4% 5% auto;
+  height: .7%;
+  min-height: 2px;
+  opacity: .9;
+  box-shadow: 0 1px 5px #cbd9fb55;
+}
+.scene-tower {
+  position: absolute;
+  inset: 19% 12% 19% 68%;
+  display: grid;
+  place-items: center;
+  grid-template-rows: repeat(3, 1fr);
+  padding: 4% 1.5%;
+  border: 1px solid #687383;
+  border-right-width: clamp(4px, .7vw, 9px);
+  border-radius: 8% / 5%;
+  background: repeating-linear-gradient(45deg, #1d222b, #1d222b 3px, #242932 3px, #242932 4px);
+  box-shadow: 2px 6px 12px #080a0f;
+}
+.scene-fan {
+  position: relative;
+  width: 65%;
+  max-height: 92%;
+  aspect-ratio: 1;
+  border: 1px solid #687383;
+  border-radius: 50%;
+  box-shadow: 0 0 5px #cdd7ee32;
+}
+.scene-fan:nth-child(1) { --phase: -2.05s; }
+.scene-fan:nth-child(2) { --phase: -2.22s; }
+.scene-fan:nth-child(3) { --phase: -2.39s; }
+.scene-fan::after {
+  content: "";
+  position: absolute;
+  inset: 12%;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, #626e7e 0 16%, #1a1e26 18% 25%, transparent 27%),
+    repeating-conic-gradient(from 25deg, #2f3642 0deg 30deg, #171b23 30deg 60deg);
+}
+.scene-keyboard {
+  position: absolute;
+  inset: 75% 47% 13% 17%;
+  padding: 1%;
+  transform: skewX(-15deg);
+  border: 1px solid #748191;
+  border-bottom-width: clamp(2px, .38vw, 5px);
+  border-radius: 6% / 16%;
+  background: #171b22;
+  box-shadow: 0 6px 10px #080910bb;
+}
+.scene-keys {
+  --phase: -.25s;
+  position: relative;
+  height: 100%;
+  border-radius: 4%;
+}
+.scene-keys::after {
+  content: "";
   position: absolute;
   inset: 0;
-  overflow: hidden;
-  -webkit-mask: url("./scene-light-mask.webp") center / 100% 100% no-repeat;
-  mask: url("./scene-light-mask.webp") center / 100% 100% no-repeat;
-  mix-blend-mode: screen;
-  pointer-events: none;
+  background: repeating-linear-gradient(90deg, transparent 0 7.9%, #171b22 7.9% 9.1%),
+    repeating-linear-gradient(0deg, transparent 0 20%, #171b22 20% 25%);
 }
+.scene-mouse {
+  position: absolute;
+  inset: 76% 34% 13% 58%;
+  border: 1px solid #687381;
+  border-radius: 48% 48% 38% 38%;
+  background: linear-gradient(90deg, #222832 49%, #65717e 50% 51%, #2d3440 52%);
+  box-shadow: 0 5px 8px #0b0e13aa;
+}
+.scene-light { overflow: hidden; }
 .scene-light::before {
   content: "";
   position: absolute;
   inset: 0 -100% 0 0;
-  background: linear-gradient(90deg, #dd47ff 0%, #ff435c 10%, #fcbd44 20%, #5bff8a 30%, #42a2ff 40%, #dd47ff 50%, #ff435c 60%, #fcbd44 70%, #5bff8a 80%, #42a2ff 90%, #dd47ff 100%);
+  background: linear-gradient(90deg, #bba8ff 0%, #ffa26c 12%, #f6db85 23%, #81e3bf 34%, #83b9ff 43%, #bba8ff 50%, #ffa26c 62%, #f6db85 73%, #81e3bf 84%, #83b9ff 93%, #bba8ff 100%);
   opacity: .9;
-  animation: light-travel 4s linear infinite;
+  animation: light-travel 4s linear var(--phase, 0s) infinite;
 }
 #scene-breathing:checked ~ .scene-frame .scene-light::before {
   background: #ff9a42;
@@ -86,7 +208,7 @@
 }
 #scene-noise:checked ~ .scene-frame .scene-light::before {
   background: linear-gradient(90deg, #6578f6 0%, #52e9d1 25%, #6578f6 50%, #52e9d1 75%, #6578f6 100%);
-  animation: light-travel 9s linear infinite;
+  animation: light-travel 9s linear var(--phase, 0s) infinite;
 }
 #scene-pause:checked ~ .scene-frame .scene-light::before { animation-play-state: paused; }
 @media (prefers-reduced-motion: reduce) {
