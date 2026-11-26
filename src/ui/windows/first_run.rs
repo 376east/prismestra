@@ -1,15 +1,19 @@
 //! Installed startup restores saved routes and builds the first physical map off the UI thread.
 use super::*;
 use crate::app::{
-    first_run::{self, Plan, Worker},
+    first_run::{
+        self, Plan, Worker,
+        startup::{
+            CancellationChecks, Coordinator, EmptySearchResult, Phase, progressive_discovery,
+        },
+    },
     lighting_outputs::Local,
     runtime::IntentReceipt,
 };
 use crate::devices::{Device, Role};
-use std::{thread::JoinHandle, time::Duration};
+use std::thread::JoinHandle;
 
-const STARTUP_SEARCHES: u8 = 3;
-const STARTUP_SEARCH_INTERVAL: Duration = Duration::from_secs(30);
+pub(super) use crate::app::first_run::startup::CancellationReason;
 
 #[derive(serde::Serialize)]
 pub(super) struct DeviceCandidate<'a> {
@@ -46,115 +50,60 @@ struct Applying {
     context: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum CancellationReason {
-    ProfileDirty,
-    EditorDirty,
-    ProfileOpenPending,
-    ProfilePathChanged,
-    ContextChanged,
-    DocumentChanged,
-    ConnectionSwitching,
-    ConnectionEdits,
-    ConnectionScan,
-    ProfileImport,
-    Shutdown,
-    Error,
-}
-
 pub(super) struct Startup {
-    installed: bool,
-    phase: &'static str,
+    coordinator: Coordinator,
     report: Vec<u8>,
-    reported_phase: &'static str,
+    reported_phase: Option<Phase>,
     reported_intent: Option<IntentReceipt>,
     process_creation_filetime: Option<String>,
-    cancellation_reason: Option<CancellationReason>,
-    retry_after_edit: bool,
     status_label: Option<(&'static str, String)>,
     discovery_issues: Vec<String>,
     unconfigured_argb: Vec<crate::transport::openrgb::UnconfiguredArgb>,
     unknown_openrgb_controller: bool,
-    observed_empty_search: bool,
-    enabled: bool,
-    initialized: bool,
     handover: Option<JoinHandle<Result<(), String>>>,
     worker: Worker,
     applying: Option<Applying>,
     restoring: Option<u64>,
-    expected: Option<Document>,
-    path: Option<PathBuf>,
-    context: u64,
-    attempts: u8,
-    search_limit: u8,
-    manual_between_passes: bool,
-    manual_started_since_automatic: bool,
-    early_manual_starts: u64,
-    next: Instant,
 }
 
 impl Startup {
     pub(super) fn new(enabled: bool) -> Self {
         Self {
-            installed: enabled,
-            phase: if enabled { "starting" } else { "disabled" },
+            coordinator: Coordinator::new(enabled, Instant::now()),
             report: Vec::new(),
-            reported_phase: "",
+            reported_phase: None,
             reported_intent: None,
             process_creation_filetime: enabled
                 .then(resident::current_creation_filetime)
                 .flatten()
                 .map(|time| time.to_string()),
-            cancellation_reason: None,
-            retry_after_edit: false,
             status_label: None,
             discovery_issues: Vec::new(),
             unconfigured_argb: Vec::new(),
             unknown_openrgb_controller: false,
-            observed_empty_search: false,
-            enabled,
-            initialized: false,
             handover: None,
             worker: Worker::default(),
             applying: None,
             restoring: None,
-            expected: None,
-            path: None,
-            context: 0,
-            attempts: 0,
-            search_limit: STARTUP_SEARCHES,
-            manual_between_passes: false,
-            manual_started_since_automatic: false,
-            early_manual_starts: 0,
-            next: Instant::now(),
         }
     }
     pub(super) fn cancel(&mut self, reason: CancellationReason) {
-        self.retry_after_edit = self.enabled
-            && matches!(
-                reason,
-                CancellationReason::ProfileDirty | CancellationReason::EditorDirty
-            );
-        if self.enabled {
-            self.cancellation_reason.get_or_insert(reason);
+        self.coordinator.cancel(reason);
+        self.cancel_work();
+    }
+
+    pub(super) fn profile_open_requested(&mut self, portable: bool) {
+        if self.coordinator.profile_open_requested(portable) {
+            self.cancel_work();
         }
-        self.enabled = false;
+    }
+
+    fn cancel_work(&mut self) {
         self.unconfigured_argb.clear();
         self.unknown_openrgb_controller = false;
-        self.phase = "cancelled";
         self.worker.cancel();
     }
-    pub(super) fn profile_open_requested(&mut self, portable: bool) {
-        self.retry_after_edit = false;
-        if self.enabled {
-            self.cancel(if portable {
-                CancellationReason::ProfileImport
-            } else {
-                CancellationReason::ProfileOpenPending
-            });
-        }
-    }
+
     pub(super) fn drained(&self) -> bool {
         self.worker.is_idle() && self.handover.as_ref().is_none_or(|job| job.is_finished())
     }
@@ -163,122 +112,10 @@ impl Startup {
     }
 
     fn needs_report(&self, intent: IntentReceipt) -> bool {
-        self.installed
-            && (self.enabled
-                || self.reported_phase != self.phase
+        self.coordinator.installed()
+            && (self.coordinator.active()
+                || self.reported_phase != Some(self.coordinator.phase())
                 || self.reported_intent != Some(intent))
-    }
-
-    fn can_retry_search(&self, now: Instant) -> bool {
-        // A click can win while the worker is still idle, even if the automatic
-        // pass is due. Once a manual pass has run, let the due automatic pass go next.
-        self.installed
-            && self.initialized
-            && (self.phase == "complete"
-                || (self.phase == "cancelled" && self.retry_after_edit)
-                || (self.between_searches()
-                    && self.attempts < self.search_limit
-                    && (now < self.next || !self.manual_started_since_automatic)))
-            && !self.configuring()
-            && self.drained()
-    }
-
-    fn can_retry_current_profile(
-        &self,
-        path: Option<&Path>,
-        has_unsaved_edits: bool,
-        now: Instant,
-    ) -> bool {
-        !has_unsaved_edits
-            && path.is_some()
-            && self.path.as_deref() == path
-            && self.can_retry_search(now)
-    }
-
-    fn between_searches(&self) -> bool {
-        matches!(self.phase, "discovered" | "applied")
-    }
-
-    fn retry_search(&mut self, document: &Document, path: &Path, context: u64, now: Instant) {
-        self.expected = Some(document.clone());
-        self.path = Some(path.to_path_buf());
-        self.context = context;
-        if self.between_searches() {
-            // A user-requested pass can use the idle time without consuming the
-            // next automatic pass or moving its original deadline.
-            self.manual_between_passes = true;
-        } else {
-            self.attempts = 0;
-            self.search_limit = 1;
-            self.next = now;
-            self.manual_between_passes = false;
-            self.observed_empty_search = false;
-        }
-        self.enabled = true;
-        self.phase = "discovering";
-        self.cancellation_reason = None;
-        self.retry_after_edit = false;
-        self.discovery_issues.clear();
-        self.unknown_openrgb_controller = false;
-    }
-
-    fn search_due(&self, now: Instant) -> bool {
-        self.manual_between_passes || now >= self.next
-    }
-
-    fn record_search_started(&mut self) {
-        self.unconfigured_argb.clear();
-        if self.manual_between_passes {
-            self.manual_started_since_automatic = true;
-            self.early_manual_starts = self.early_manual_starts.saturating_add(1);
-        } else {
-            self.manual_started_since_automatic = false;
-            self.attempts += 1;
-        }
-        self.phase = "discovering";
-    }
-
-    fn record_empty_sdk_inventory(&mut self) -> bool {
-        if self.observed_empty_search || self.attempts >= self.search_limit {
-            return false;
-        }
-        self.observed_empty_search = true;
-        true
-    }
-
-    fn record_search_result(&mut self, empty: bool, now: Instant) {
-        self.phase = "discovered";
-        self.observed_empty_search = empty;
-        self.schedule_next_search(now);
-    }
-
-    fn empty_search_result(&self) -> Option<&'static str> {
-        match self.phase {
-            "complete" => Some("complete"),
-            "discovered" if self.attempts >= self.search_limit => Some("complete"),
-            _ if self.enabled && self.observed_empty_search => Some("continuing"),
-            _ => None,
-        }
-    }
-
-    fn schedule_next_search(&mut self, now: Instant) {
-        if self.manual_between_passes {
-            // A progressive result can be applied before the other probes finish.
-            if self.worker.is_idle() {
-                self.manual_between_passes = false;
-            }
-        } else {
-            self.next = now + STARTUP_SEARCH_INTERVAL;
-        }
-    }
-
-    fn complete_search(&mut self) -> bool {
-        if self.attempts < self.search_limit || !self.worker.is_idle() {
-            return false;
-        }
-        self.enabled = false;
-        self.phase = "complete";
-        true
     }
 }
 
@@ -286,7 +123,11 @@ impl App {
     pub(super) fn startup_unconfigured_argb(
         &self,
     ) -> &[crate::transport::openrgb::UnconfiguredArgb] {
-        if self.path != self.first_run.path || self.context_revision != self.first_run.context {
+        if !self
+            .first_run
+            .coordinator
+            .matches_context(self.path.as_deref(), self.context_revision)
+        {
             return &[];
         }
         &self.first_run.unconfigured_argb
@@ -306,29 +147,35 @@ impl App {
             .map(|(label, _)| *label)
     }
 
-    pub(super) fn startup_empty_search_result(&self) -> Option<&'static str> {
-        if self.path != self.first_run.path
-            || self.context_revision != self.first_run.context
+    pub(super) fn startup_empty_search_result(&self) -> Option<EmptySearchResult> {
+        if !self
+            .first_run
+            .coordinator
+            .matches_context(self.path.as_deref(), self.context_revision)
             || !self.runtime.document().lighting.setup.devices.is_empty()
             || !self.first_run.unconfigured_argb.is_empty()
         {
             return None;
         }
-        self.first_run.empty_search_result()
+        self.first_run.coordinator.empty_search_result()
     }
 
     pub(super) fn startup_discovery_unknown_controller(&self) -> bool {
         self.first_run.unknown_openrgb_controller
-            && self.path == self.first_run.path
-            && self.context_revision == self.first_run.context
+            && self
+                .first_run
+                .coordinator
+                .matches_context(self.path.as_deref(), self.context_revision)
     }
 
     pub(super) fn can_retry_startup_discovery(&self) -> bool {
-        self.first_run.can_retry_current_profile(
+        self.first_run.coordinator.can_retry_current_profile(
             self.path.as_deref(),
             self.dirty || self.editor_dirty,
             Instant::now(),
-        ) && self.native_lighting.is_some()
+        ) && !self.first_run.configuring()
+            && self.first_run.drained()
+            && self.native_lighting.is_some()
             && !self.shutdown.active()
             && self.pending_open.is_none()
             && !self.runtime.pending_configuration()
@@ -341,12 +188,14 @@ impl App {
         if !self.can_retry_startup_discovery() {
             return Err("Повторный поиск сейчас недоступен.".into());
         }
-        self.first_run.retry_search(
+        self.first_run.coordinator.retry_search(
             self.runtime.document(),
             self.path.as_deref().ok_or("Нет пути профиля")?,
             self.context_revision,
             Instant::now(),
         );
+        self.first_run.discovery_issues.clear();
+        self.first_run.unknown_openrgb_controller = false;
         self.set_first_run_status("searching", "Ищу поддерживаемые устройства…");
         Ok(())
     }
@@ -354,37 +203,34 @@ impl App {
     fn startup_cancel_reason(
         &self,
         path_changed: bool,
-        context: u64,
+        context_changed: bool,
         document_changed: impl FnOnce() -> bool,
     ) -> Option<CancellationReason> {
-        use CancellationReason::*;
-        if self.dirty {
-            Some(ProfileDirty)
-        } else if self.editor_dirty {
-            Some(EditorDirty)
-        } else if self.pending_open.is_some() {
-            Some(ProfileOpenPending)
-        } else if path_changed {
-            Some(ProfilePathChanged)
-        } else if self.context_revision != context {
-            Some(ContextChanged)
-        } else if document_changed() {
-            Some(DocumentChanged)
-        } else if self.connection_switching() {
-            Some(ConnectionSwitching)
-        } else if self.guard_connections_close().is_err() {
-            Some(ConnectionEdits)
-        } else if !self.connections.scan.is_idle() {
-            Some(ConnectionScan)
-        } else {
-            None
+        CancellationChecks {
+            profile_dirty: self.dirty,
+            editor_dirty: self.editor_dirty,
+            profile_open_pending: self.pending_open.is_some(),
+            path_changed,
+            context_changed,
+            connection_switching: self.connection_switching(),
+            connection_scan_active: !self.connections.scan.is_idle(),
         }
+        .reason(document_changed, || self.guard_connections_close().is_err())
+    }
+
+    fn tracked_startup_cancel_reason(&self) -> Option<CancellationReason> {
+        let coordinator = &self.first_run.coordinator;
+        self.startup_cancel_reason(
+            coordinator.path_changed(self.path.as_deref()),
+            coordinator.context_changed(self.context_revision),
+            || coordinator.document_changed(self.runtime.document()),
+        )
     }
 
     fn pending_plan_cancel_reason(&self, pending: &Applying) -> Option<CancellationReason> {
         self.startup_cancel_reason(
             self.path.as_ref() != Some(&pending.path),
-            pending.context,
+            pending.context != self.context_revision,
             || {
                 self.runtime.document() != &pending.previous_document
                     && self.runtime.document() != &pending.plan.document
@@ -394,7 +240,7 @@ impl App {
 
     pub(super) fn newly_found_devices(&self) -> impl Iterator<Item = &Device> {
         let proposal = self.first_run.applying.as_ref().filter(|pending| {
-            self.first_run.enabled
+            self.first_run.coordinator.active()
                 && !self.shutdown.active()
                 && self.pending_plan_cancel_reason(pending).is_none()
         });
@@ -415,7 +261,6 @@ impl App {
             Ok(changed) => changed,
             Err(error) => {
                 self.first_run.cancel(CancellationReason::Error);
-                self.first_run.phase = "error";
                 self.set_first_run_status("failed", format!("Автонастройка: {error}"));
                 true
             }
@@ -423,13 +268,13 @@ impl App {
         let intent = self.runtime.intent_receipt();
         if self.first_run.needs_report(intent) {
             let report = serde_json::to_vec_pretty(&serde_json::json!({
-                "version": 1, "phase": self.first_run.phase,
+                "version": 1, "phase": self.first_run.coordinator.phase(),
                 "process_id": std::process::id(),
                 "process_creation_filetime": self.first_run.process_creation_filetime,
-                "cancellation_reason": self.first_run.cancellation_reason,
+                "cancellation_reason": self.first_run.coordinator.cancellation_reason(),
                 "intent": intent,
-                "attempt": self.first_run.attempts,
-                "early_manual_starts": self.first_run.early_manual_starts,
+                "attempt": self.first_run.coordinator.attempts(),
+                "early_manual_starts": self.first_run.coordinator.early_manual_starts(),
                 "native_outputs": self.native_lighting.is_some(),
                 "devices": self.runtime.document().lighting.setup.devices.len(),
                 "discovery_issues": self.first_run.discovery_issues,
@@ -446,7 +291,7 @@ impl App {
                 .is_ok()
             {
                 self.first_run.report = bytes;
-                self.first_run.reported_phase = self.first_run.phase;
+                self.first_run.reported_phase = Some(self.first_run.coordinator.phase());
                 self.first_run.reported_intent = Some(intent);
             }
         }
@@ -455,18 +300,17 @@ impl App {
 
     fn advance_first_run(&mut self) -> Result<bool, String> {
         // Always reap cancellation, including when the editor is closed or Stop was selected.
-        if !self.first_run.enabled || self.shutdown.active() {
+        if !self.first_run.coordinator.active() || self.shutdown.active() {
             self.first_run.worker.cancel();
             let _ = self.first_run.worker.poll();
             let _ = self.first_run.worker.poll_inventory();
             return Ok(false);
         }
-        if !self.first_run.initialized {
-            self.first_run.phase = "handover";
-            self.first_run.initialized = true;
-            self.first_run.expected = Some(self.runtime.document().clone());
-            self.first_run.path = self.path.clone();
-            self.first_run.context = self.context_revision;
+        if self.first_run.coordinator.begin_handover(
+            self.runtime.document(),
+            self.path.as_deref(),
+            self.context_revision,
+        ) {
             let root = self
                 .state_dir
                 .parent()
@@ -505,11 +349,7 @@ impl App {
                 .unwrap()
                 .join()
                 .map_err(|_| "Не удалось завершить перенос сессии")??;
-            if let Some(reason) = self.startup_cancel_reason(
-                self.path != self.first_run.path,
-                self.first_run.context,
-                || self.first_run.expected.as_ref() != Some(self.runtime.document()),
-            ) {
+            if let Some(reason) = self.tracked_startup_cancel_reason() {
                 self.first_run.cancel(reason);
                 self.set_first_run_status(
                     "cancelled",
@@ -534,11 +374,12 @@ impl App {
                         outputs,
                     )
                 })?);
-                self.first_run.phase = "restoring";
+                self.first_run.coordinator.begin_restore();
                 self.native_lighting = Some(local);
             }
-            self.first_run.expected = Some(self.runtime.document().clone());
-            self.first_run.context = self.context_revision;
+            self.first_run
+                .coordinator
+                .update_document(self.runtime.document(), self.context_revision);
         }
         if let Some(revision) = self.first_run.restoring {
             if self.runtime.pending_configuration() {
@@ -548,7 +389,7 @@ impl App {
                 return Err("Не удалось восстановить подключения сохранённой сцены".into());
             }
             self.first_run.restoring = None;
-            self.first_run.phase = "restored";
+            self.first_run.coordinator.restored();
             self.was_pending = false;
             self.startup_output_labels();
             if !self.source_scope_inputs()?.1.is_empty() {
@@ -561,11 +402,7 @@ impl App {
             return Ok(true);
         }
         if self.first_run.applying.is_none()
-            && let Some(reason) = self.startup_cancel_reason(
-                self.path != self.first_run.path,
-                self.first_run.context,
-                || self.first_run.expected.as_ref() != Some(self.runtime.document()),
-            )
+            && let Some(reason) = self.tracked_startup_cancel_reason()
         {
             self.first_run.cancel(reason);
             self.set_first_run_status(
@@ -616,15 +453,13 @@ impl App {
                 return Err(error);
             }
             self.native_lighting = Some(applied.plan.local);
-            self.first_run.phase = if self.first_run.worker.is_idle() {
-                "applied"
-            } else {
-                "discovering"
-            };
+            let scan_idle = self.first_run.worker.is_idle();
+            self.first_run.coordinator.plan_applied(scan_idle);
             self.startup_output_labels();
-            self.first_run.expected = Some(self.runtime.document().clone());
             self.context_revision = self.context_revision.wrapping_add(1);
-            self.first_run.context = self.context_revision;
+            self.first_run
+                .coordinator
+                .update_document(self.runtime.document(), self.context_revision);
             self.was_pending = false;
             self.dirty = false;
             self.reset_editor_preserving_device(0);
@@ -642,7 +477,9 @@ impl App {
                     format!(" {}", applied.plan.issues.join("; "))
                 }
             ));
-            self.first_run.schedule_next_search(Instant::now());
+            self.first_run
+                .coordinator
+                .schedule_next_search(Instant::now(), self.first_run.worker.is_idle());
             return Ok(true);
         }
         if let Some(result) = self.first_run.worker.poll() {
@@ -651,7 +488,7 @@ impl App {
             self.first_run.unknown_openrgb_controller = plan.unknown_openrgb_controller;
             if !plan.changed {
                 if !self.first_run.worker.is_idle() {
-                    self.first_run.phase = "discovering";
+                    self.first_run.coordinator.waiting_for_inventory();
                     self.set_first_run_status(
                         "searchingMore",
                         "Ищу остальные поддерживаемые устройства…",
@@ -680,7 +517,9 @@ impl App {
                     "noNewDevices"
                 };
                 self.set_first_run_status(label, message);
-                self.first_run.record_search_result(empty, Instant::now());
+                self.first_run
+                    .coordinator
+                    .record_search_result(empty, Instant::now());
                 return Ok(true);
             }
             let outputs = plan.local.prepare(&plan.document, &self.asset_root)?;
@@ -701,7 +540,7 @@ impl App {
                 path: self.path.clone().ok_or("Нет пути профиля")?,
                 context: self.context_revision,
             });
-            self.first_run.phase = "applying";
+            self.first_run.coordinator.begin_apply();
             self.set_first_run_status("applying", "Устройства найдены. Подключаю к общей сцене…");
             return Ok(true);
         }
@@ -730,9 +569,9 @@ impl App {
         if !self.first_run.worker.is_idle() {
             return Ok(self.first_run.worker.take_empty_sdk_observation()
                 && self.runtime.document().lighting.setup.devices.is_empty()
-                && self.first_run.record_empty_sdk_inventory());
+                && self.first_run.coordinator.record_empty_sdk_inventory());
         }
-        if self.first_run.complete_search() {
+        if self.first_run.coordinator.complete_search() {
             self.set_first_run_status(
                 "complete",
                 format!(
@@ -743,7 +582,7 @@ impl App {
             );
             return Ok(true);
         }
-        if !self.first_run.search_due(Instant::now()) {
+        if !self.first_run.coordinator.search_due(Instant::now()) {
             return Ok(false);
         }
         let local = self
@@ -751,16 +590,15 @@ impl App {
             .as_ref()
             .ok_or("Не загружены локальные подключения")?;
         let document = self.runtime.document();
-        let progressive = document.lighting.setup.devices.is_empty()
-            && document.ambient.routes.is_empty()
-            && document.temperatures.sources.is_empty();
+        let progressive = progressive_discovery(document);
         let guard = self
             .runtime
             .with(|runtime, _| runtime.managed_discovery_guard(&self.state_dir, endpoint));
         self.first_run
             .worker
             .start(endpoint, guard, local, progressive)?;
-        self.first_run.record_search_started();
+        self.first_run.unconfigured_argb.clear();
+        self.first_run.coordinator.record_search_started();
         self.set_first_run_status(
             "searching",
             "Ищу поддерживаемые устройства. Сцена включится автоматически…",
@@ -773,272 +611,6 @@ impl App {
 mod tests {
     use super::*;
     use crate::devices::Driver;
-
-    #[test]
-    fn sdk_empty_observation_surfaces_while_first_pass_is_still_discovering() {
-        let mut startup = Startup::new(true);
-        startup.initialized = true;
-        let due = startup.next;
-        startup.record_search_started();
-
-        assert_eq!(startup.empty_search_result(), None);
-        assert!(startup.record_empty_sdk_inventory());
-        assert_eq!(startup.empty_search_result(), Some("continuing"));
-        assert!(!startup.record_empty_sdk_inventory());
-        assert_eq!(startup.phase, "discovering");
-        assert_eq!((startup.attempts, startup.next), (1, due));
-        assert!(!startup.can_retry_search(due));
-        assert!(!startup.complete_search());
-    }
-
-    #[test]
-    fn empty_result_is_visible_before_the_automatic_search_finishes() {
-        let mut startup = Startup::new(true);
-        startup.initialized = true;
-        let start = startup.next;
-        // Model the empty SDK inventory window, without sleeping or opening adapters.
-        let probe_time = Duration::from_secs(6);
-        let mut pass_start = start;
-
-        assert_eq!(startup.empty_search_result(), None);
-        for attempt in 1..=STARTUP_SEARCHES {
-            assert!(startup.search_due(pass_start));
-            startup.record_search_started();
-            assert_eq!(startup.attempts, attempt);
-            assert_eq!(
-                startup.empty_search_result(),
-                (attempt > 1).then_some("continuing"),
-                "a later in-flight pass keeps the earlier empty observation"
-            );
-            let finished = pass_start + probe_time;
-            startup.record_search_result(true, finished);
-            if attempt < STARTUP_SEARCHES {
-                assert_eq!(startup.empty_search_result(), Some("continuing"));
-                assert!(startup.can_retry_search(finished));
-                assert!(!startup.complete_search());
-                pass_start = finished + STARTUP_SEARCH_INTERVAL;
-                assert!(!startup.search_due(pass_start - Duration::from_millis(1)));
-            } else {
-                assert_eq!(startup.empty_search_result(), Some("complete"));
-                assert!(startup.complete_search());
-                assert!(startup.can_retry_search(finished));
-                assert_eq!(finished - start, Duration::from_secs(78));
-            }
-        }
-    }
-
-    #[test]
-    fn early_click_is_admitted_when_the_automatic_pass_is_due_but_has_not_started() {
-        let (_fixture, profile, _, _) = crate::app::installed::tests::fresh_profile();
-        let document = Document::load(&profile).unwrap();
-        let mut startup = Startup::new(true);
-        startup.initialized = true;
-        startup.record_search_started();
-        startup.phase = "discovered";
-        startup.schedule_next_search(startup.next);
-        let click = startup.next + Duration::from_millis(1);
-        let scheduled = startup.next;
-        assert!(startup.search_due(click));
-        assert!(startup.can_retry_search(click));
-        startup.retry_search(&document, &profile, 1, click);
-        assert_eq!(startup.early_manual_starts, 0, "queued is not started");
-        assert!(!startup.can_retry_search(click), "no second manual command");
-        startup.record_search_started();
-        assert_eq!((startup.attempts, startup.early_manual_starts), (1, 1));
-
-        let finished = click + Duration::from_secs(6);
-        startup.phase = "discovered";
-        startup.schedule_next_search(finished);
-        assert_eq!(startup.next, scheduled);
-        assert!(startup.search_due(finished));
-        assert!(
-            !startup.can_retry_search(finished),
-            "let the due automatic pass run"
-        );
-        startup.record_search_started();
-        assert_eq!((startup.attempts, startup.early_manual_starts), (2, 1));
-        assert!(
-            !startup.can_retry_search(finished),
-            "automatic pass already started"
-        );
-    }
-
-    #[test]
-    fn empty_first_scan_offers_manual_search_before_the_next_automatic_pass() {
-        let (_fixture, profile, _, _) = crate::app::installed::tests::fresh_profile();
-        let document = Document::load(&profile).unwrap();
-        let mut startup = Startup::new(true);
-        let first_finished = startup.next + Duration::from_secs(6);
-        startup.initialized = true;
-        startup.record_search_started();
-        startup.record_search_result(true, first_finished);
-        let second_automatic = first_finished + Duration::from_secs(30);
-
-        assert!(startup.can_retry_search(first_finished));
-        assert!(startup.can_retry_search(second_automatic));
-        assert!(!startup.search_due(second_automatic - Duration::from_millis(1)));
-        startup.retry_search(&document, &profile, 1, first_finished);
-        assert_eq!(startup.empty_search_result(), Some("continuing"));
-        assert!(!startup.can_retry_search(first_finished));
-        assert!(startup.search_due(first_finished));
-        startup.record_search_started();
-        assert_eq!(startup.attempts, 1);
-        let manual_finished = first_finished + Duration::from_secs(6);
-        startup.phase = "discovered";
-        startup.schedule_next_search(manual_finished);
-        assert!(startup.can_retry_search(manual_finished));
-        assert!(!startup.search_due(second_automatic - Duration::from_millis(1)));
-        assert!(startup.search_due(second_automatic));
-        assert!(!startup.can_retry_search(second_automatic));
-
-        startup.record_search_started();
-        assert_eq!(startup.attempts, 2);
-        let second_finished = second_automatic + Duration::from_secs(6);
-        startup.schedule_next_search(second_finished);
-        let third_automatic = second_finished + Duration::from_secs(30);
-        assert!(!startup.search_due(third_automatic - Duration::from_millis(1)));
-        assert!(startup.search_due(third_automatic));
-        startup.record_search_started();
-        assert_eq!(
-            startup.early_manual_starts, 1,
-            "automatic passes keep the receipt"
-        );
-        assert!(startup.complete_search());
-        assert!(startup.can_retry_search(third_automatic + Duration::from_secs(6)));
-    }
-
-    #[test]
-    fn an_applied_device_does_not_prevent_searching_for_late_neighbors() {
-        let (_fixture, profile, _, _) = crate::app::installed::tests::fresh_profile();
-        let document = profile_with_device(&profile);
-        let mut startup = Startup::new(true);
-        startup.initialized = true;
-        startup.path = Some(profile.clone());
-        let now = startup.next;
-        startup.record_search_started();
-        startup.phase = "applied";
-        startup.schedule_next_search(now);
-        let next_automatic = startup.next;
-        assert!(startup.can_retry_current_profile(Some(&profile), false, now));
-        assert!(!startup.can_retry_current_profile(Some(Path::new("other.json")), false, now));
-
-        startup.retry_search(&document, &profile, 1, now);
-        startup.record_search_started();
-        assert_eq!((startup.attempts, startup.early_manual_starts), (1, 1));
-        assert_eq!(startup.next, next_automatic);
-        assert_eq!(startup.expected, Some(document));
-        assert!(!startup.can_retry_search(now));
-    }
-
-    fn profile_with_device(path: &Path) -> Document {
-        let mut editor = super::super::super::editor::Editor {
-            document: Document::load(path).unwrap(),
-            page: Page::Devices,
-            index: 0,
-        };
-        editor.add_device("openrgb-controller").unwrap();
-        editor.document.save(path).unwrap();
-        editor.document
-    }
-
-    #[test]
-    fn profile_edits_allow_one_explicit_search_after_cancellation() {
-        let (_fixture, profile, _, _) = crate::app::installed::tests::fresh_profile();
-        let mut document = profile_with_device(&profile);
-        for reason in [
-            CancellationReason::ProfileDirty,
-            CancellationReason::EditorDirty,
-        ] {
-            let mut startup = Startup::new(true);
-            startup.initialized = true;
-            startup.path = Some(profile.clone());
-            startup.expected = Some(document.clone());
-            let now = startup.next;
-            startup.record_search_started();
-            startup.record_search_result(false, now);
-            startup.retry_search(&document, &profile, 1, now);
-            startup.record_search_started();
-            assert!(startup.manual_between_passes);
-            startup.cancel(reason);
-            assert!(!startup.enabled);
-            assert!(!startup.can_retry_current_profile(Some(&profile), true, now));
-            assert!(!startup.can_retry_current_profile(Some(Path::new("copy.json")), false, now));
-
-            document.lighting.scene.brightness += 1;
-            document.save(&profile).unwrap();
-            assert!(startup.can_retry_current_profile(Some(&profile), false, now));
-            startup.retry_search(&document, &profile, 2, now);
-            assert_eq!(startup.expected.as_ref(), Some(&document));
-            assert_eq!(startup.search_limit, 1);
-            assert_eq!(startup.attempts, 0);
-            assert!(startup.search_due(now));
-            assert_eq!(startup.cancellation_reason, None);
-            assert!(!startup.manual_between_passes);
-            startup.record_search_started();
-            assert!(startup.complete_search());
-        }
-    }
-
-    #[test]
-    fn profile_switch_import_and_exit_revoke_retry_after_edit() {
-        for (portable, reason) in [
-            (false, CancellationReason::ProfileOpenPending),
-            (true, CancellationReason::ProfileImport),
-        ] {
-            let mut startup = Startup::new(true);
-            startup.initialized = true;
-            startup.profile_open_requested(portable);
-            assert!(!startup.enabled);
-            startup.cancel(CancellationReason::ProfileDirty);
-            assert_eq!(startup.cancellation_reason, Some(reason));
-            assert!(!startup.can_retry_search(startup.next));
-        }
-        for revoke in [
-            (|startup: &mut Startup| startup.profile_open_requested(false)) as fn(&mut Startup),
-            |startup| startup.profile_open_requested(true),
-            |startup| startup.cancel(CancellationReason::Shutdown),
-        ] {
-            let mut startup = Startup::new(true);
-            startup.initialized = true;
-            startup.cancel(CancellationReason::EditorDirty);
-            assert!(startup.can_retry_search(startup.next));
-            revoke(&mut startup);
-            assert_eq!(
-                startup.cancellation_reason,
-                Some(CancellationReason::EditorDirty)
-            );
-            assert!(!startup.can_retry_search(startup.next));
-        }
-    }
-
-    #[test]
-    fn empty_startup_search_can_be_rearmed_for_one_pass_without_handover() {
-        let (_fixture, profile, _, _) = crate::app::installed::tests::fresh_profile();
-        let document = Document::load(&profile).unwrap();
-        let mut startup = Startup::new(true);
-        let now = startup.next;
-        assert!(!startup.can_retry_search(now));
-        startup.initialized = true;
-        startup.attempts = STARTUP_SEARCHES;
-        assert!(startup.complete_search());
-        assert!(startup.can_retry_search(now));
-
-        startup.retry_search(&document, &profile, 7, now);
-        assert!(startup.enabled && startup.initialized);
-        assert!(startup.handover.is_none());
-        assert_eq!(startup.expected.as_ref(), Some(&document));
-        assert_eq!(startup.path.as_ref(), Some(&profile));
-        assert_eq!(startup.context, 7);
-        assert!(!startup.can_retry_search(now));
-        assert!(!startup.complete_search());
-        startup.record_search_started();
-        assert_eq!(startup.early_manual_starts, 0);
-        assert!(startup.complete_search());
-        assert!(startup.can_retry_search(now));
-
-        startup.cancel(CancellationReason::Shutdown);
-        assert!(!startup.can_retry_search(now));
-    }
 
     #[test]
     fn cancelled_startup_reports_new_intent_without_losing_the_first_reason() {
@@ -1056,30 +628,21 @@ mod tests {
         startup.cancel(CancellationReason::ConnectionScan);
         startup.cancel(CancellationReason::Shutdown);
         assert_eq!(
-            serde_json::to_value(startup.cancellation_reason).unwrap(),
+            serde_json::to_value(startup.coordinator.cancellation_reason()).unwrap(),
             "connection_scan"
         );
         assert!(startup.needs_report(runtime.intent_receipt()));
 
-        startup.reported_phase = "cancelled";
+        startup.reported_phase = Some(Phase::Cancelled);
         startup.reported_intent = Some(runtime.intent_receipt());
         assert!(!startup.needs_report(runtime.intent_receipt()));
         runtime.set_group(Target::Door, false).unwrap();
         assert!(startup.needs_report(runtime.intent_receipt()));
 
-        startup.retry_search(runtime.document(), &profile, 1, Instant::now());
-        assert_eq!(startup.cancellation_reason, None);
-    }
-
-    #[test]
-    fn shutdown_after_completed_discovery_does_not_claim_to_have_interrupted_it() {
-        let mut startup = Startup::new(true);
-        startup.initialized = true;
-        startup.attempts = STARTUP_SEARCHES;
-        assert!(startup.complete_search());
-        startup.cancel(CancellationReason::Shutdown);
-        assert_eq!(startup.phase, "cancelled");
-        assert_eq!(startup.cancellation_reason, None);
+        startup
+            .coordinator
+            .retry_search(runtime.document(), &profile, 1, Instant::now());
+        assert_eq!(startup.coordinator.cancellation_reason(), None);
     }
 
     #[test]

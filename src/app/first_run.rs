@@ -1,4 +1,6 @@
 //! First launch discovery produces a proposal. Only the caller can apply or save it.
+pub(crate) mod startup;
+
 use super::{
     assets::{AssetId, Store},
     device_setup,
