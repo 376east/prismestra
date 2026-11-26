@@ -1,0 +1,23 @@
+name: App or installer bug
+description: Report a problem installing, opening or using Prismestra.
+title: "[Bug] "
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Prismestra and Windows versions
+      description: Include the Prismestra version and your Windows version. Say whether you used Setup or the portable app.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: What happened?
+      description: List the steps, what you expected and what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots or logs
+      description: Optional. Remove tokens, serial numbers, network addresses and personal paths before attaching files.

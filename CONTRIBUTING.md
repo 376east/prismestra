@@ -8,4 +8,4 @@ For a device report, include its exact model, revision, firmware, connection mod
 
 For a code change, describe the concrete problem and resulting behavior. Keep the patch focused and preserve upstream licenses and fixture provenance. New transport tests should use owned temporary files or loopback endpoints, with bounded I/O and a reliable exit path. Physical tests require an explicitly selected device and a recovery path.
 
-Run the [development checks](README.md#development) before submitting a pull request. English commits should describe a finished change, for example `Preserve matrix holes in OpenRGB discovery`.
+Run the [development checks](docs/development.md#check-and-build) before submitting a pull request. English commits should describe a finished change, for example `Preserve matrix holes in OpenRGB discovery`.
