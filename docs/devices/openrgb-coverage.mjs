@@ -40,7 +40,6 @@ export const families = new Map([
   ['Gigabyte RGB Fusion', ['family']],
   ['Gigabyte RGB Fusion 2 SMBus', ['family']],
   ['Gigabyte RGB Fusion 2 USB', ['family']],
-  ['Govee', ['family', 'For lights with Govee LAN Control. Enable LAN Control on the device. Available effects depend on the model.', 'Для устройств с Govee LAN Control. Включите управление по локальной сети. Доступные эффекты зависят от модели.']],
   ['HID LampArray Device', ['protocol', 'Requires USB HID LampArray lighting support on the device.', 'Устройство должно поддерживать подсветку по USB HID LampArray.']],
   ['HP Omen 4-Zone Laptop Keyboard', ['family']],
   ['HP Omen 30L', ['family']],
@@ -177,7 +176,6 @@ export const retailModels = [
   ].map(([model, code], index) => ({
     name: `Govee ${model} (${code})`, aliases: [code], type: 'Light integration', connection: 'LAN',
     source: upstream + 'GoveeController/RGBController_Govee.cpp#L' + (52 + index),
-    note: 'Enable LAN Control on the light.', noteRu: 'Включите управление по локальной сети в настройках светильника.',
   })),
   ...[
     ['Light Panels', 'NL22'], ['Canvas', 'NL29'], ['Shapes', 'NL42'], ['Lines', 'NL59'], ['4D Screen Mirror', 'NL69'],

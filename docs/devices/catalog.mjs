@@ -51,6 +51,11 @@ const withoutDirect = new Map([
   ['Pulsar PCMK TKL', { type: 'Keyboard', source: 'WinbondGamingKeyboardController/RGBController_WinbondGamingKeyboard.cpp#L17' }],
 ]);
 const evisionV1 = '/EVisionKeyboardController/EVisionKeyboardController/EVisionKeyboardControllerDetect.cpp';
+const goveeConnection = {
+  type: 'Light integration', connection: 'LAN', scope: 'external-openrgb', connectionGuide: 'govee',
+  note: 'Enable LAN Control in Govee Home and add the light’s IP address to a separate OpenRGB server.',
+  noteRu: 'Включите LAN Control в Govee Home и добавьте IP-адрес светильника в отдельный сервер OpenRGB.',
+};
 
 const fold = (value) => String(value ?? '')
   .toLowerCase().normalize('NFKD').replace(/\p{M}/gu, '')
@@ -70,7 +75,8 @@ function entryFor(device, catalog, inherited) {
   const [note, noteRu] = (inherited && openRgbFamilyNotes.get(device.name)) || [];
   const [scope, familyNote, familyNoteRu] = pinned ? familyCoverage(device.name) : [];
   const aliases = pinned ? openRgbAliases.get(device.name) : undefined;
-  const settings = pinned && lightingOnly.has(device.name) ? {
+  const settings = pinned && device.source?.includes('/Controllers/GoveeController/') ? goveeConnection
+    : pinned && lightingOnly.has(device.name) ? {
     note: 'Controls RGB lighting. Display media is outside this connection.',
     noteRu: 'Это подключение управляет RGB-подсветкой. Изображения на экран через него не выводятся.',
   } : device.source?.includes('/QMKKeychronController_Devices.cpp') ? {
@@ -80,7 +86,7 @@ function entryFor(device, catalog, inherited) {
   return {
     ...device,
     ...settings,
-    type: device.type ?? known?.type ?? (device.source?.includes('/MSIMotherboardController/') ? 'Motherboard' : undefined),
+    type: device.type ?? settings.type ?? known?.type ?? (device.source?.includes('/MSIMotherboardController/') ? 'Motherboard' : undefined),
     status,
     capability: !inherited && device.type === 'LCD' ? 'display' : 'lighting',
     route: inherited || status === 'openrgb' ? 'openrgb' : ['research', 'unconfirmed'].includes(status) ? 'research' : 'native',
