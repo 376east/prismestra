@@ -1,6 +1,6 @@
 # Compatibility
 
-Prismestra supports specific device families and connection modes. The model catalog shows entries from the bundled OpenRGB backend, Prismestra connections and research candidates. Check your model, firmware and connection before relying on an output. [Find your device](https://376east.github.io/prismestra/devices/)
+Search by model to see whether Prismestra supports the device’s lighting or display and how to connect it. The catalog shows support from Prismestra drivers and the version of OpenRGB included in Setup. This guide records which operations we’ve tested and on what hardware. [Find your device](https://376east.github.io/prismestra/devices/)
 
 | Device family | How to connect | Verification scope |
 | --- | --- | --- |
