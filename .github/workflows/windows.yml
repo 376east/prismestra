@@ -14,9 +14,9 @@ on:
         type: choice
         options: [software, setup, openrgb]
       installer_version:
-        description: Four-part Windows installer version for a candidate build
+        description: Four-part Windows candidate version, or auto for the next revision of Stable
         required: true
-        default: '0.2.0.1'
+        default: auto
         type: string
 
 permissions:
@@ -177,28 +177,33 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not $vsdevcmd) { throw 'MSVC build tools were not found' }
           "vsdevcmd=$vsdevcmd" >> $env:GITHUB_OUTPUT
       - name: Check Setup version against the published stable baseline
+        id: setup-version
         if: needs.quick.outputs.release_version != '' || inputs.validation == 'setup'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          INSTALLER_VERSION: ${{ needs.quick.outputs.release_version || inputs.installer_version }}
+          REQUESTED_INSTALLER_VERSION: ${{ needs.quick.outputs.release_version || inputs.installer_version }}
         run: |
           $pin = Get-Content -LiteralPath scripts/installer/stable-upgrade-baseline.lock.json -Raw | ConvertFrom-Json
           $latest = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $latest.tag_name -cnotmatch '^v(\d+\.\d+\.\d+)$') {
             throw 'Could not identify the published stable release.'
           }
-          $stableVersion = "$($latest.tag_name.Substring(1)).0"
+          $stableCore = $latest.tag_name.Substring(1)
+          $stableVersion = "$stableCore.0"
           $asset = @($latest.assets | Where-Object name -CEQ $pin.file)
           if ($pin.version -cne $stableVersion -or $asset.Count -ne 1 -or $asset[0].state -cne 'uploaded' -or
               $asset[0].digest -cne "sha256:$($pin.sha256)" -or $asset[0].size -ne $pin.size -or
               $asset[0].browser_download_url -cne $pin.source) {
             throw 'Update the stable upgrade baseline pin to the current published Setup.'
           }
-          if ($env:INSTALLER_VERSION -cnotmatch '^\d+\.\d+\.\d+\.\d+$' -or
-              [version]$env:INSTALLER_VERSION -le [version]$stableVersion) {
+          $version = $env:REQUESTED_INSTALLER_VERSION
+          if ($version -ceq 'auto') { $version = "$stableCore.1" }
+          if ($version -cnotmatch '^\d+\.\d+\.\d+\.\d+$' -or
+              [version]$version -le [version]$stableVersion) {
             throw "Setup version must be newer than the published stable version $stableVersion."
           }
+          "version=$version" >> $env:GITHUB_OUTPUT
       - name: Fingerprint the OpenRGB build environment
         id: openrgb
         if: >-
@@ -241,7 +246,7 @@ jobs:
         id: build
         shell: pwsh
         env:
-          INSTALLER_VERSION: ${{ needs.quick.outputs.release_version || inputs.installer_version }}
+          INSTALLER_VERSION: ${{ steps.setup-version.outputs.version }}
           VSDEVCMD: ${{ steps.msvc.outputs.vsdevcmd }}
           OPENRGB_CACHE_KEY: ${{ steps.openrgb.outputs.key }}
           OPENRGB_ONLY: ${{ inputs.validation == 'openrgb' }}
