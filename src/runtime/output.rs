@@ -117,6 +117,12 @@ pub struct Ticket {
     pub generation: u64,
     pub sequence: u64,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct PowerIntent {
+    pub muted: bool,
+    /// Only submissions after this request sequence belong to the intent.
+    pub since: u64,
+}
 pub enum WriteResult {
     Submitted,
     /// The last accepted value is unchanged; no transport request was sent.
@@ -139,8 +145,8 @@ pub trait RgbDriver {
     fn prepare(&mut self, _: &Cancellation) -> Result<(), PrepareError> {
         Ok(())
     }
-    /// Begin a new explicit mute so cached color cannot stand in for delivery.
-    fn begin_mute(&mut self) {}
+    /// Invalidate cached color once for each change of power intent.
+    fn power_intent_changed(&mut self) {}
     /// Submitted is a transport completion, never a physical LED acknowledgement.
     fn write(&mut self, colors: &[Rgb], cancel: &Cancellation) -> Result<WriteResult, String>;
 }
@@ -167,7 +173,7 @@ pub struct Snapshot {
 struct Frame {
     ticket: Ticket,
     colors: Vec<Rgb>,
-    muted_since: Option<u64>,
+    intent: PowerIntent,
 }
 struct State {
     pending: Option<Frame>,
@@ -283,14 +289,14 @@ impl Output {
         })
     }
     pub fn submit(&self, ticket: Ticket, colors: &[Rgb]) -> Result<bool, String> {
-        self.submit_frame(ticket, colors, None)
+        self.submit_frame(ticket, colors, PowerIntent::default())
     }
 
     pub(super) fn submit_frame(
         &self,
         ticket: Ticket,
         colors: &[Rgb],
-        muted_since: Option<u64>,
+        intent: PowerIntent,
     ) -> Result<bool, String> {
         if colors.len() != self.leds || ticket.sequence == 0 {
             return Err("RGB frame dimensions/ticket mismatch".into());
@@ -316,7 +322,7 @@ impl Output {
             .replace(Frame {
                 ticket,
                 colors: colors.to_vec(),
-                muted_since,
+                intent,
             })
             .is_some()
         {
@@ -403,7 +409,7 @@ where
         state.snapshot.phase = Phase::Ready;
     }
     let mut retry = Instant::now();
-    let mut muted_since = None;
+    let mut intent = PowerIntent::default();
     loop {
         let frame = {
             let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -432,10 +438,10 @@ where
         if shared.cancel.cancelled() {
             return Ok(Stop::Cancelled);
         }
-        if frame.muted_since.is_some() && frame.muted_since != muted_since {
-            driver.begin_mute();
+        if frame.intent != intent {
+            driver.power_intent_changed();
+            intent = frame.intent;
         }
-        muted_since = frame.muted_since;
         let result = driver.write(&frame.colors, &shared.cancel)?;
         match result {
             WriteResult::Submitted => {

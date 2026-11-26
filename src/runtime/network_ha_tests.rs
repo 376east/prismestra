@@ -1114,7 +1114,7 @@ fn saved_scene_ha_opt_in_off_during_outage_and_explicit_reselect() {
 }
 
 #[test]
-fn ha_off_status_waits_for_a_new_submission_after_a_color_frame() {
+fn ha_power_status_waits_for_a_submission_for_the_current_intent() {
     use crate::{
         app::{
             config::{Groups, Project},
@@ -1139,9 +1139,12 @@ fn ha_off_status_waits_for_a_new_submission_after_a_color_frame() {
             ("200 OK", LIGHT),
             ("200 OK", "[]"),
             ("200 OK", "[]"),
+            ("200 OK", "[]"),
+            ("200 OK", "[]"),
+            ("200 OK", "[]"),
         ],
         move |index| {
-            if index == 2 {
+            if matches!(index, 2 | 5 | 6) {
                 observed.send(()).unwrap();
                 let _ = proceed.recv_timeout(Duration::from_secs(2));
             }
@@ -1223,6 +1226,12 @@ fn ha_off_status_waits_for_a_new_submission_after_a_color_frame() {
         Some(previous)
     );
     let delayed = runtime.output_activity(&device);
+    runtime.set_group(Target::Pc, true).unwrap();
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Connecting
+    ));
+    runtime.set_group(Target::Pc, false).unwrap();
     release.send(()).unwrap();
     wait(
         &mut runtime,
@@ -1246,6 +1255,10 @@ fn ha_off_status_waits_for_a_new_submission_after_a_color_frame() {
     // No color frame is submitted between these intents. HA's cached black
     // must not stand in for delivery of the next explicit Off.
     runtime.set_group(Target::Pc, true).unwrap();
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Connecting
+    ));
     runtime.set_group(Target::Pc, false).unwrap();
     assert!(matches!(
         runtime.output_activity(&device),
@@ -1254,16 +1267,60 @@ fn ha_off_status_waits_for_a_new_submission_after_a_color_frame() {
     wait(
         &mut runtime,
         "new Off after toggle",
+        Box::new(|_| arrived.try_recv().is_ok()),
+    );
+    runtime.set_group(Target::Pc, true).unwrap();
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Connecting
+    ));
+    release.send(()).unwrap();
+    wait(
+        &mut runtime,
+        "late successful Off",
         Box::new(|r| r.host().status("ha").unwrap().submitted == 3),
     );
     assert!(matches!(
         runtime.output_activity(&device),
-        OutputActivity::OffSubmitted
+        OutputActivity::Connecting
     ));
+    release.send(()).unwrap();
+    wait(
+        &mut runtime,
+        "new color after Off",
+        Box::new(|r| matches!(r.output_activity(&device), OutputActivity::Sent(4))),
+    );
+
+    let mut scene = runtime.document().lighting.scene.clone();
+    scene.brightness = 0;
+    runtime.set_scene(scene).unwrap();
+    runtime.set_group(Target::Pc, false).unwrap();
+    wait(
+        &mut runtime,
+        "Off before re-enabling a black scene",
+        Box::new(|r| matches!(r.output_activity(&device), OutputActivity::OffSubmitted)),
+    );
+    runtime.set_group(Target::Pc, true).unwrap();
+    assert!(matches!(
+        runtime.output_activity(&device),
+        OutputActivity::Connecting
+    ));
+    wait(
+        &mut runtime,
+        "black scene submitted after Off",
+        Box::new(|r| matches!(r.output_activity(&device), OutputActivity::Sent(6))),
+    );
     runtime.stop();
     let requests = peer.join().unwrap();
     assert!(requests[1].starts_with("POST /ha/api/services/light/turn_on "));
-    for request in [&requests[2], &requests[4], &requests[5]] {
+    assert!(requests[6].starts_with("POST /ha/api/services/light/turn_on "));
+    for request in [
+        &requests[2],
+        &requests[4],
+        &requests[5],
+        &requests[7],
+        &requests[8],
+    ] {
         assert!(request.starts_with("POST /ha/api/services/light/turn_off "));
         let body: serde_json::Value =
             serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();

@@ -14,7 +14,7 @@ use crate::{
     lighting::color::Rgb,
 };
 pub use autonomous::{ClockStatus, Host};
-use output::{Cancellation, Output, Phase, RgbDriver, Snapshot, Ticket};
+use output::{Cancellation, Output, Phase, PowerIntent, RgbDriver, Snapshot, Ticket};
 use scene::{Renderer, Scene};
 use std::collections::BTreeMap;
 
@@ -69,7 +69,7 @@ struct Core {
     generation: u64,
     sequence: u64,
     last_us: Option<u64>,
-    muted_since: BTreeMap<String, u64>,
+    power_intents: BTreeMap<String, PowerIntent>,
     requested: BTreeMap<String, Ticket>,
 }
 impl Core {
@@ -95,7 +95,7 @@ impl Core {
             generation: 0,
             sequence: 0,
             last_us: None,
-            muted_since: BTreeMap::new(),
+            power_intents: BTreeMap::new(),
             requested: BTreeMap::new(),
         })
     }
@@ -128,7 +128,7 @@ impl Core {
         self.frame = Default::default();
         self.external.clear();
         self.feed = None;
-        self.muted_since.clear();
+        self.power_intents.clear();
         self.requested.clear();
 
         self.scene_cadence = Cadence::default();
@@ -201,16 +201,27 @@ impl Core {
         {
             return Err("Unknown RGB device".into());
         }
-        if off {
-            self.muted_since
-                .entry(id.to_owned())
-                .or_insert(self.sequence);
-        } else {
-            self.muted_since.remove(id);
-        }
+        self.update_power_intent(id, off);
         self.cadences.remove(id);
         Ok(())
     }
+    fn power_intent(&self, id: &str) -> PowerIntent {
+        self.power_intents.get(id).copied().unwrap_or_default()
+    }
+
+    fn update_power_intent(&mut self, id: &str, muted: bool) {
+        if self.power_intent(id).muted != muted {
+            self.power_intents.insert(
+                id.to_owned(),
+                PowerIntent {
+                    muted,
+                    since: self.sequence,
+                },
+            );
+            self.cadences.remove(id);
+        }
+    }
+
     /// Ambient preparation is independent of canvas animation and may run at its
     /// own capture/render cadence. Missing input is no-write, not synthetic black.
     pub fn set_external(&mut self, id: &str, colors: Vec<Rgb>) -> Result<(), String> {
@@ -257,6 +268,14 @@ impl Core {
             }
         }
     }
+    #[cfg(windows)]
+    fn monitor_frame(&self, id: &str, now: u64) -> Result<(), frame_feed::Unavailable> {
+        use frame_feed::Unavailable;
+        let feed = self.feed.as_ref().ok_or(Unavailable::Disconnected)?;
+        let route = feed.routes().get(id).ok_or(Unavailable::Disconnected)?;
+        feed.snapshot().fresh_frame(id, route, now).map(|_| ())
+    }
+
     fn refresh_feed(&mut self, now_us: u64) -> Result<(), String> {
         let Some(feed) = &self.feed else {
             return Ok(());
@@ -376,8 +395,8 @@ impl Core {
                 .get(&device.id)
                 .map(Vec::as_slice)
                 .or_else(|| self.external.get(&device.id).map(|v| v.as_ref()));
-            let muted_since = self.muted_since.get(&device.id).copied();
-            let off = muted_since.is_some();
+            let intent = self.power_intent(&device.id);
+            let off = intent.muted;
             if device.role == Role::Canvas && !off && source.is_none() {
                 continue;
             }
@@ -435,7 +454,7 @@ impl Core {
                 generation: output.snapshot().generation,
                 sequence,
             };
-            if output.submit_frame(ticket, colors, muted_since)? {
+            if output.submit_frame(ticket, colors, intent)? {
                 self.sequence = sequence;
                 self.requested.insert(device.id.clone(), ticket);
                 accepted += 1;

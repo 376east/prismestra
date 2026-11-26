@@ -72,17 +72,27 @@ impl OutputPlan {
 }
 impl Runtime {
     #[cfg(windows)]
-    pub(crate) fn has_active_scene_rgb(&self) -> bool {
-        self.document.lighting.setup.devices.iter().any(|device| {
-            let receives_scene =
-                match device.role {
-                    Role::Canvas => true,
-                    Role::Ambient => self.document.ambient.routes.iter().any(|route| {
+    pub(super) fn receives_scene_rgb(&self, device: &crate::devices::Device, now_ms: u64) -> bool {
+        device.enabled
+            && self.group_on(self.target(&device.id))
+            && self.rgb_specs.contains_key(&device.id)
+            && match device.role {
+                Role::Canvas => true,
+                Role::Ambient => {
+                    self.document.ambient.routes.iter().any(|route| {
                         route.device == device.id && route.enabled && route.scene_edges
-                    }),
-                    Role::Lcd => false,
-                };
-            receives_scene && matches!(self.output_activity(device), OutputActivity::Sent(_))
+                    }) || self.host.monitor_scene_fallback(&device.id, now_ms)
+                }
+                Role::Lcd => false,
+            }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn has_active_scene_rgb(&self) -> bool {
+        let now_ms = crate::clock::monotonic_ms();
+        self.document.lighting.setup.devices.iter().any(|device| {
+            self.receives_scene_rgb(device, now_ms)
+                && matches!(self.output_activity(device), OutputActivity::Sent(_))
         })
     }
 
@@ -169,11 +179,12 @@ impl Runtime {
             if status.requires_action {
                 return OutputActivity::Unavailable(status.error);
             }
-            if group_off && status.phase == Phase::Ready {
-                return if self.host.mute_submitted(id, &status) {
-                    OutputActivity::OffSubmitted
-                } else {
-                    OutputActivity::TurningOff
+            if status.phase == Phase::Ready {
+                return match (group_off, self.host.submission_matches_intent(id, &status)) {
+                    (true, true) => OutputActivity::OffSubmitted,
+                    (true, false) => OutputActivity::TurningOff,
+                    (false, true) => OutputActivity::Sent(status.submitted),
+                    (false, false) => OutputActivity::Connecting,
                 };
             }
             (status.phase, status.submitted, status.error)
