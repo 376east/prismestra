@@ -1337,10 +1337,12 @@ fn menu(state: &State, hwnd: HWND, anchor_to_icon: bool) {
     }
     let result = match id as u32 {
         OPEN => open_editor(state),
-        CHECK_UPDATES => super::updates::start(None),
+        CHECK_UPDATES => super::updates::start(None, state.language),
         VIEW_UPDATE => updates
             .and_then(|(_, version)| version)
-            .map_or(Ok(()), |version| super::updates::start(Some(version))),
+            .map_or(Ok(()), |version| {
+                super::updates::start(Some(version), state.language)
+            }),
         TOGGLE_UPDATES => state
             .update_schedule
             .borrow_mut()

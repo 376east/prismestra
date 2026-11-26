@@ -1,4 +1,4 @@
-use super::wide;
+use super::{locale::Language, shell_text::Text, wide};
 use crate::app::{
     installed,
     release_check::{self, ResultState, Version},
@@ -26,35 +26,75 @@ pub(super) fn try_check(current: Version) -> Option<ResultState> {
     Some(release_check::check(current))
 }
 
-pub(super) fn start(available: Option<Version>) -> Result<(), String> {
+pub(super) fn start(available: Option<Version>, language: Language) -> Result<(), String> {
     std::thread::Builder::new()
         .name("release-check".into())
         .spawn(move || {
-            let Ok(_manual) = MANUAL.try_lock() else { return };
-            let Some(current) = installed::release_version() else {
-                show(&format!("Версия сборки: {}.\nПроверка обновлений доступна для выпуска с известной версией Setup.", env!("CARGO_PKG_VERSION")), MB_OK);
+            let Ok(_manual) = MANUAL.try_lock() else {
                 return;
             };
-            let version = format!("Установлено: {} ({})", current.tag(), current.channel());
+            let text = |item: Text| item.get(language);
+            let Some(current) = installed::release_version() else {
+                show(
+                    &format!(
+                        "{}: {}\n{}",
+                        text(Text::UpdateBuildVersion),
+                        env!("CARGO_PKG_VERSION"),
+                        text(Text::UpdateSetupVersionRequired)
+                    ),
+                    MB_OK,
+                    language,
+                );
+                return;
+            };
+            let version = format!(
+                "{}: {} ({})",
+                text(Text::UpdateInstalled),
+                current.tag(),
+                current.channel()
+            );
             let result = if let Some(available) = available {
                 ResultState::Available(available)
             } else {
-                CHECK.lock().map_or(ResultState::Unavailable, |_check| release_check::check(current))
+                CHECK.lock().map_or(ResultState::Unavailable, |_check| {
+                    release_check::check(current)
+                })
             };
             match result {
                 ResultState::Available(available) => {
-                    if show(&format!("{version}\nДоступно: {}\n\nОткрыть официальный выпуск в браузере?", available.tag()),
-                            MB_YESNO | MB_DEFBUTTON2) == IDYES
-                        && let Err(error) = open_page(available)
+                    let prompt = if available.is_stable_migration_from(current) {
+                        Text::UpdateOpenStable
+                    } else {
+                        Text::UpdateOpenRelease
+                    };
+                    if show(
+                        &format!(
+                            "{version}\n{} {}\n\n{}",
+                            text(Text::UpdateAvailable),
+                            available.tag(),
+                            text(prompt)
+                        ),
+                        MB_YESNO | MB_DEFBUTTON2,
+                        language,
+                    ) == IDYES
+                        && open_page(available).is_err()
                     {
-                        show(&error, MB_OK | MB_ICONERROR);
+                        show(text(Text::UpdateOpenFailed), MB_OK | MB_ICONERROR, language);
                     }
                 }
                 ResultState::NoNewer => {
-                    show(&format!("{version}\nВ проверенных выпусках нет более новой версии этого канала."), MB_OK);
+                    show(
+                        &format!("{version}\n{}", text(Text::UpdateNoNewer)),
+                        MB_OK,
+                        language,
+                    );
                 }
                 ResultState::Unavailable => {
-                    show(&format!("{version}\nНе удалось проверить выпуски."), MB_OK);
+                    show(
+                        &format!("{version}\n{}", text(Text::UpdateCheckFailed)),
+                        MB_OK,
+                        language,
+                    );
                 }
             }
         })
@@ -62,7 +102,7 @@ pub(super) fn start(available: Option<Version>) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn show(message: &str, flags: u32) -> i32 {
+fn show(message: &str, flags: u32, language: Language) -> i32 {
     let style = if flags & MB_ICONERROR == 0 {
         flags | MB_ICONINFORMATION
     } else {
@@ -72,7 +112,7 @@ fn show(message: &str, flags: u32) -> i32 {
         MessageBoxW(
             null_mut(),
             wide(message).as_ptr(),
-            wide("Обновления Prismestra").as_ptr(),
+            wide(Text::UpdatesTitle.get(language)).as_ptr(),
             style | MB_SETFOREGROUND,
         )
     }

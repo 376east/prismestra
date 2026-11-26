@@ -98,7 +98,14 @@ impl Version {
     }
 
     pub(crate) fn is_update_for(self, current: Self) -> bool {
-        self.same_channel(current) && self.order() > current.order()
+        (self.same_channel(current) || self.is_stable_migration_from(current))
+            && self.order() > current.order()
+    }
+
+    pub(crate) fn is_stable_migration_from(self, current: Self) -> bool {
+        // A stable Setup has revision zero, so it only upgrades Windows'
+        // four-part installed version when the three-part version increases.
+        self.preview.is_none() && current.preview.is_some() && self.core > current.core
     }
 
     fn setup_asset(self) -> String {
@@ -141,28 +148,24 @@ pub(crate) enum ResultState {
     Unavailable,
 }
 
-fn newest_on_channel(current: Version, releases: Vec<Release>) -> Option<Version> {
-    releases
-        .into_iter()
-        .filter_map(|release| {
-            let version = Version::from_tag(&release.tag_name)?;
-            if release.draft
-                || release.prerelease != version.preview.is_some()
-                || !version.same_channel(current)
-                || release.html_url != version.page()
-            {
-                return None;
-            }
-            let name = version.setup_asset();
-            let mut assets = release.assets.iter().filter(|asset| asset.name == name);
-            let asset = assets.next()?;
-            if assets.next().is_some() || asset.state != "uploaded" || asset.size == 0 {
-                return None;
-            }
-            let digest = asset.digest.as_deref()?.strip_prefix("sha256:")?;
-            (digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit())).then_some(version)
-        })
-        .max_by_key(|version| version.order())
+fn eligible_releases(releases: Vec<Release>) -> impl Iterator<Item = Version> {
+    releases.into_iter().filter_map(|release| {
+        let version = Version::from_tag(&release.tag_name)?;
+        if release.draft
+            || release.prerelease != version.preview.is_some()
+            || release.html_url != version.page()
+        {
+            return None;
+        }
+        let name = version.setup_asset();
+        let mut assets = release.assets.iter().filter(|asset| asset.name == name);
+        let asset = assets.next()?;
+        if assets.next().is_some() || asset.state != "uploaded" || asset.size == 0 {
+            return None;
+        }
+        let digest = asset.digest.as_deref()?.strip_prefix("sha256:")?;
+        (digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit())).then_some(version)
+    })
 }
 
 fn check_with(
@@ -170,7 +173,9 @@ fn check_with(
     mut fetch: impl FnMut(&Request<'_>, Instant) -> Result<Vec<u8>, winhttp_get::Error>,
 ) -> ResultState {
     let deadline = Instant::now() + DEADLINE;
-    let mut newest = None;
+    let mut newest: Option<Version> = None;
+    let mut newest_stable = None;
+    let mut exhausted = false;
     for page in 1..=MAX_PAGES {
         if Instant::now() >= deadline {
             return ResultState::Unavailable;
@@ -192,14 +197,25 @@ fn check_with(
         if releases.len() > PAGE_SIZE {
             return ResultState::Unavailable;
         }
-        let last_page = releases.len() < PAGE_SIZE;
-        newest = newest
-            .into_iter()
-            .chain(newest_on_channel(current, releases))
-            .max_by_key(|version| version.order());
-        if last_page {
+        exhausted = releases.len() < PAGE_SIZE;
+        for version in eligible_releases(releases) {
+            let slot = if version.same_channel(current) {
+                &mut newest
+            } else if version.is_stable_migration_from(current) {
+                &mut newest_stable
+            } else {
+                continue;
+            };
+            if slot.is_none_or(|item| version.order() > item.order()) {
+                *slot = Some(version);
+            }
+        }
+        if exhausted {
             break;
         }
+    }
+    if exhausted && !newest.is_some_and(|version| version.is_update_for(current)) {
+        newest = newest_stable.or(newest);
     }
     match newest {
         Some(version) if version.is_update_for(current) => ResultState::Available(version),
@@ -332,6 +348,37 @@ mod tests {
         );
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].1, calls[1].1);
+    }
+
+    #[test]
+    fn offers_stable_migration_without_a_newer_preview() {
+        let stable = Version::from_tag("v0.2.0").unwrap();
+        let mut removed_preview = release("v0.1.0-preview.30");
+        removed_preview["assets"] = json!([]);
+        assert_eq!(
+            check_fixture("0.1.0.30", vec![removed_preview, release("v0.2.0")]),
+            ResultState::Available(stable)
+        );
+        assert!(stable.is_update_for(Version::from_setup("0.1.0.30").unwrap()));
+        assert_eq!(
+            check_fixture(
+                "0.1.0.30",
+                vec![
+                    release("v0.1.0-preview.7"),
+                    release("v0.1.0-preview.30"),
+                    release("v0.2.0")
+                ]
+            ),
+            ResultState::Available(stable)
+        );
+        assert_eq!(
+            check_fixture("0.3.0.1", vec![release("v0.2.0")]),
+            ResultState::Unavailable
+        );
+        assert_eq!(
+            check_fixture("0.2.0.1", vec![release("v0.2.0")]),
+            ResultState::Unavailable
+        );
     }
 
     #[test]
