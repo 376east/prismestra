@@ -43,9 +43,29 @@ function Receive-ProcessEvents {
             if ($events.Count -ge 50000) {
                 throw 'Process capture exceeded 50,000 events. Use a cleaner guest or a shorter interval.'
             }
+            $eventTime = [uint64]$event.TIME_CREATED
+            $createdTime = $null
+            if ($kind -eq 'start' -and [uint32]$event.ProcessID -ne 0) {
+                $live = Get-Process -Id $event.ProcessID -ErrorAction SilentlyContinue
+                if ($null -ne $live) {
+                    try {
+                        $name = [IO.Path]::GetFileNameWithoutExtension([string]$event.ProcessName)
+                        $created = $live.StartTime.ToUniversalTime().ToFileTimeUtc()
+                        if ($live.ProcessName -ieq $name -and $live.SessionId -eq $event.SessionID -and
+                            $created -gt 0 -and $created -le $eventTime) {
+                            $createdTime = $created.ToString([Globalization.CultureInfo]::InvariantCulture)
+                        }
+                    } catch {
+                        # The process can exit before CIM delivers the event.
+                    } finally {
+                        $live.Dispose()
+                    }
+                }
+            }
             $events.Add([ordered]@{
                 kind = $kind
-                filetime = ([uint64]$event.TIME_CREATED).ToString([Globalization.CultureInfo]::InvariantCulture)
+                filetime = $eventTime.ToString([Globalization.CultureInfo]::InvariantCulture)
+                created_filetime = $createdTime
                 pid = [uint32]$event.ProcessID
                 parent_pid = [uint32]$event.ParentProcessID
                 session_id = [uint32]$event.SessionID
