@@ -9,6 +9,7 @@ This file records notable changes to Prismestra. The format follows [Keep a Chan
 ### Changed
 
 - **Download and device lookup.** Download Setup from the product website, README or device catalog. The catalog separates models listed by OpenRGB from models where live-scene support has been checked.
+- **Updates.** The tray check uses the app language. If there is no newer Preview, it can offer a newer Stable release. Setup blocks installation over a newer version.
 
 ### Fixed
 
