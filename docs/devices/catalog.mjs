@@ -12,6 +12,15 @@ const openRgbCardNames = new Map([
   ['Gigabyte RGB Fusion 2 DRAM', ['Gigabyte AORUS RGB Memory DDR4']],
   ['T-Force Xtreem DDR4 DRAM', ['TEAMGROUP T-FORCE XTREEM ARGB DDR4']],
   ['Corsair Vengeance RGB DRAM', ['Corsair Vengeance RGB DDR4']],
+  ['ASRock Motherboard SMBus Controllers', ['ASRock motherboard lighting']],
+  ['EVGA Motherboard SMBus Controllers', ['EVGA motherboard lighting']],
+]);
+const openRgbFamilyNotes = new Map([
+  ['AcerNitroHidKeyboardController', ['For Acer Nitro laptops with keyboard controller 0CF2:5130.', 'Для ноутбуков Acer Nitro с контроллером клавиатуры 0CF2:5130.']],
+  ['ASRock Motherboard SMBus Controllers', ['For boards with a compatible ASRock RGB LED or Polychrome controller.', 'Для плат с совместимым контроллером ASRock RGB LED или Polychrome.']],
+  ['EVGA Motherboard SMBus Controllers', ['Support depends on the lighting controller on the board.', 'Поддержка зависит от контроллера подсветки на плате.']],
+  ['Corsair DRAM', ['Support depends on the lighting controller in the memory module.', 'Поддержка зависит от контроллера подсветки в модуле памяти.']],
+  ['ENE SMBus DRAM', ['This driver covers several memory brands. Search by the model or part number printed on your module.', 'С этим драйвером работает память разных брендов. Ищите модель или номер с наклейки модуля.']],
 ]);
 const directEvidenceRevision = '6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43';
 const withoutDirect = new Map([
@@ -32,6 +41,7 @@ function entryFor(device, catalog, inherited) {
   const known = inherited ? withoutDirect.get(device.name) : undefined;
   const modes = catalog.revision === directEvidenceRevision ? known?.source : undefined;
   const status = inherited ? (modes ? 'no-direct' : 'openrgb') : device.status;
+  const [note, noteRu] = (inherited && openRgbFamilyNotes.get(device.name)) || [];
   return {
     ...device,
     type: device.type ?? known?.type,
@@ -39,6 +49,7 @@ function entryFor(device, catalog, inherited) {
     capability: !inherited && device.type === 'LCD' ? 'display' : 'lighting',
     route: inherited || status === 'openrgb' ? 'openrgb' : status === 'research' ? 'research' : 'native',
     source: device.source ?? catalog.source,
+    ...(note && { note, noteRu }),
     ...(modes && { modesSource: `https://github.com/hello-nexus/openrgb-headless/blob/${directEvidenceRevision}/Controllers/${modes}` }),
   };
 }

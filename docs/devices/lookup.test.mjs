@@ -155,6 +155,10 @@ test('shows a readable Acer label while keeping the exact detector name searchab
   assert.equal(model.entries[0].name, 'AcerNitroHidKeyboardController');
   assert.deepEqual(find('Acer Nitro keyboard controller'), [model]);
   assert.deepEqual(find('AcerNitroHidKeyboardController'), [model]);
+  assert.match(model.entries[0].note, /0CF2:5130/);
+  const asrock = named('ASRock motherboard lighting');
+  assert.equal(find('ASRock Motherboard SMBus Controllers', 'pc')[0], asrock);
+  assert.match(asrock.entries[0].noteRu, /Polychrome/);
 });
 
 test('keeps the generic Skydimo serial detector distinct from cataloged models', () => {
