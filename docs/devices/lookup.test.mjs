@@ -123,3 +123,15 @@ test('one unavailable catalog leaves evidence from the other searchable', () => 
   assert.deepEqual(findCards(buildCatalog(openrgb, null), 'VK99')[0].entries.map((entry) => entry.route), ['openrgb']);
   assert.deepEqual(findCards(buildCatalog(null, prismestra), 'VK99')[0].entries.map((entry) => entry.route), ['native']);
 });
+
+test('accepts pasted revisions and leads monitor-backlight searches to the right family', () => {
+  assert.deepEqual(find('B650 Eagle AX rev. 1.0').map((card) => card.name), ['Gigabyte B650 EAGLE AX']);
+  assert.deepEqual(find('Gigabyte B650 EAGLE AX ревизия 1.2').map((card) => card.name), ['Gigabyte B650 EAGLE AX']);
+  assert.deepEqual(find(String.raw`USB\VID_264A&PID_233C&REV_0001&MI_01`).map((card) => card.name), ['Thermaltake LCD 264A:233C']);
+  assert.equal(find(String.raw`USB\VID_264A&PID_233C&REV_0001&MI_03`).length, 0);
+  assert.equal(find(String.raw`USB\VID_264A&PID_233C&REV_0001`).length, 1);
+  for (const phrase of ['подсветка за монитором', 'lights behind the monitor', 'monitor backlight']) {
+    assert.ok(find(phrase).some((card) => card.name === 'Skydimo SK0121'));
+    assert.ok(!find(phrase).some((card) => card.name === 'Logitech G502 HERO Gaming Mouse'));
+  }
+});

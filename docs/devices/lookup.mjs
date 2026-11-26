@@ -1,4 +1,4 @@
-import { buildCatalog, findCards } from './catalog.mjs';
+import { buildCatalog, findCards, modelWithoutRevision } from './catalog.mjs';
 
 const pageSize = 24;
 const exampleQueries = ['B650 Eagle AX', 'Surplife E1', 'NZXT Kraken'];
@@ -17,7 +17,10 @@ const copy = {
     byDevice: 'Device type', bySource: 'Connection source',
     source: 'Source', checked: 'What was tested', noCheck: 'A device listing does not establish physical output.',
     lighting: 'Lighting', display: 'LCD', openrgb: 'Listed in bundled OpenRGB',
-    implemented: 'Connection in Prismestra', research: 'Under research',
+    implemented: 'Connection in Prismestra', research: 'Under research', displayResearch: 'Output unavailable',
+    board: 'Check the two ARGB headers in Devices.', wired: 'Connect by cable.',
+    skydimo: 'Look for an SK model code on the controller or in its documentation.',
+    revision: 'Check your hardware revision in the source notes.',
     listedHelp: 'For a live scene, the controller needs a usable Direct mode.',
     nativeHelp: 'Check the connection in Devices.',
     researchHelp: 'This feature still needs an adapter or verification.',
@@ -35,7 +38,10 @@ const copy = {
     byDevice: 'Тип устройства', bySource: 'Источник подключения',
     source: 'Источник', checked: 'Что проверяли', noCheck: 'Запись в каталоге не подтверждает физический вывод.',
     lighting: 'Подсветка', display: 'LCD', openrgb: 'Есть в списке встроенного OpenRGB',
-    implemented: 'Есть подключение в Prismestra', research: 'На этапе исследования',
+    implemented: 'Есть подключение в Prismestra', research: 'На этапе исследования', displayResearch: 'Вывод пока недоступен',
+    board: 'Проверьте два разъёма ARGB в разделе «Устройства».', wired: 'Подключите кабелем.',
+    skydimo: 'Поищите код модели SK… на контроллере или в его документации.',
+    revision: 'Сверьте ревизию устройства с источником.',
     listedHelp: 'Для вывода общей сцены контроллеру нужен рабочий режим Direct.',
     nativeHelp: 'Проверьте подключение в разделе «Устройства».',
     researchHelp: 'Для этой функции ещё нужен адаптер или проверка.',
@@ -74,7 +80,8 @@ function deviceRow(card, t) {
     const status = ['implemented', 'openrgb', 'research'].find((name) => entries.some((entry) => entry.status === name));
     if (status) {
       const feature = node('p', '', 'feature');
-      feature.append(node('strong', t[capability]), ' · ', t[status]);
+      const label = capability === 'display' && status === 'research' ? t.displayResearch : t[status];
+      feature.append(node('strong', t[capability]), ' · ', label);
       row.append(feature);
     }
     const group = node('div', '', 'evidence-group');
@@ -102,6 +109,10 @@ function deviceRow(card, t) {
     }
     evidence.append(group);
   }
+  const hint = card.name === 'Gigabyte B650 EAGLE AX' && card.entries.some((entry) => entry.route === 'native') ? t.board
+    : card.name === 'Skydimo Serial' ? t.skydimo
+    : /\(wired\)/i.test(card.name) ? t.wired : '';
+  if (hint) row.append(node('p', hint, 'connection-hint'));
   row.append(evidence);
   return row;
 }
@@ -119,12 +130,13 @@ async function start() {
   const count = el('count');
   const results = el('results');
   const more = el('more');
+  const reportMissing = el('report-missing');
   const examples = el('examples');
   const language = el('language');
   for (const [id, value] of Object.entries({
     title: t.title, intro: t.intro, download: t.download, 'query-label': t.device,
     'filter-label': t.filter, count: t.loading, report: t.report, guide: t.guide,
-    'catalog-label': t.catalog, upstream: t.upstream, more: t.more,
+    'catalog-label': t.catalog, upstream: t.upstream, more: t.more, 'report-missing': t.report,
   })) el(id).textContent = value;
   results.setAttribute('aria-label', t.results);
   query.placeholder = t.placeholder;
@@ -179,8 +191,12 @@ async function start() {
     const total = (lang === 'ru' ? 'Найдено: ' : 'Matches: ') + size + shown;
     const message = missing === loads.length ? t.unavailable
       : ((active ? (size ? total : t.empty) : '') + (missing ? t.partial : ''));
-    count.textContent = message;
+    const trimmed = query.value.trim();
+    const revision = size > 0 && modelWithoutRevision(trimmed) !== trimmed ? ' ' + t.revision : '';
+    count.textContent = message + revision;
     count.hidden = !message;
+    reportMissing.hidden = !active || size > 0 || missing === loads.length;
+    el('report').hidden = !reportMissing.hidden;
     results.replaceChildren(...filtered.slice(0, limit).map((card) => deviceRow(card, t)));
     results.hidden = !size;
     more.hidden = limit >= size;
