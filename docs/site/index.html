@@ -34,10 +34,10 @@
         <a class="text-link" id="manual-download" href="https://github.com/376east/prismestra/releases/latest">Release files</a>
       </div>
 
-      <figure class="scene" id="scene" data-scene="rainbow">
+      <figure class="scene" id="scene" data-scene="rainbow" data-playing="false">
         <div class="scene-frame">
           <img class="scene-photo" src="scene-workstation.webp" alt="A desktop PC, monitor and keyboard with synchronized lighting" id="scene-photo" width="1536" height="1024" fetchpriority="high">
-          <canvas class="scene-light" width="1152" height="768" aria-hidden="true"></canvas>
+          <div class="scene-light" aria-hidden="true"></div>
         </div>
         <figcaption class="scene-controls">
           <span id="preview-label">Scene preview</span>
@@ -46,7 +46,7 @@
             <button type="button" class="scene-option" data-effect="breathing" aria-pressed="false"><span id="effect-breathing">Breathing</span></button>
             <button type="button" class="scene-option" data-effect="noise" aria-pressed="false"><span id="effect-noise">Soft light</span></button>
           </div>
-          <button type="button" class="scene-option scene-playback" id="scene-playback" hidden>Pause</button>
+          <button type="button" class="scene-option scene-playback" id="scene-playback" hidden>Watch animation</button>
           <p class="scene-description" id="scene-description">Colors move across the devices.</p>
         </figcaption>
       </figure>
