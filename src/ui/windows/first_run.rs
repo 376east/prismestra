@@ -367,8 +367,8 @@ impl App {
             if self.native_lighting.is_none() {
                 if first_run::recovery_is_pending(&self.state_dir) {
                     let tip = self.language.text(
-                        "Профиль открыт для предпросмотра. Закройте другой редактор и перезапустите Prismestra, чтобы закончить восстановление.",
-                        "The profile is open in preview. Close the other editor and restart Prismestra to finish recovery.",
+                        "Профиль открыт в предпросмотре. Закройте другую программу, в которой открыт этот профиль, и перезапустите Prismestra.",
+                        "The profile is open in preview. Close the other app that has this profile open, then restart Prismestra.",
                     );
                     return Ok(self.show_profile_repair(tip));
                 }
@@ -380,8 +380,8 @@ impl App {
                     Err(error) => {
                         eprintln!("Prismestra saved output restore: {error}");
                         let tip = self.language.text(
-                            "Профиль открыт для предпросмотра. Проверьте «Подключения». Если остались лишние привязки, нажмите «Убрать отсутствующие», затем «Сохранить». Также можно восстановить согласованные профиль и привязки.",
-                            "The profile is open in preview. Check Connections. If unused bindings remain, choose Remove unused bindings, then Save. You can also restore a matching profile and bindings.",
+                            "Не удалось загрузить сохранённые подключения. Проверьте привязки в «Подключениях» или восстановите профиль и привязки из одной резервной копии.",
+                            "Saved connections couldn’t be loaded. Check them in Connections or restore the profile and its bindings from the same backup.",
                         );
                         return Ok(self.show_profile_repair(tip));
                     }

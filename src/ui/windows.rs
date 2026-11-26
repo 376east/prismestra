@@ -2957,7 +2957,8 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
                 && receipt.invalidated
                 && state.session_action.get() == resident::Action::None
                 && !a.shutdown.active()
-                && a.status.starts_with("Работа остановлена.")
+                && a.status
+                    .starts_with(shell_text::Text::OutputsStopped.get(a.language))
             {
                 let mut current = state.final_stop_render.get();
                 if current.epoch == receipt.epoch && current.hwnd == hwnd {
@@ -3190,7 +3191,10 @@ fn device_activity_detail(
         {
             "Windows не находит LCD по сохранённому подключению. Проверьте питание и USB-кабель экрана. Если экран подключён, откройте его подключение и проверьте привязку.".into()
         }
-        OutputActivity::Sent(frames) => format!("Кадры отправлены: {frames}"),
+        OutputActivity::Sent(frames) if matches!(driver, crate::devices::Driver::HomeAssistant) => {
+            format!("Отправлено команд: {frames}")
+        }
+        OutputActivity::Sent(frames) => format!("Отправлено обновлений: {frames}"),
         OutputActivity::Retrying(error) => format!("Ожидает повтора ({error})"),
         OutputActivity::Unavailable(Some(error)) => format!("Недоступно: {error}"),
         _ => output_activity_label(&activity).into(),
@@ -4565,7 +4569,7 @@ mod tests {
         );
         assert_eq!(
             device_activity_detail(&Driver::TtLcd, OutputActivity::Sent(3)),
-            "Кадры отправлены: 3"
+            "Отправлено обновлений: 3"
         );
     }
 

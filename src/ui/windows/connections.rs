@@ -383,7 +383,10 @@ impl App {
             (REMOVE, language.text("Удалить привязку", "Remove binding")),
             (
                 PRUNE,
-                language.text("Убрать отсутствующие", "Remove unused bindings"),
+                language.text(
+                    "Убрать привязки вне профиля",
+                    "Remove bindings outside this profile",
+                ),
             ),
             (APPLY_OUTPUTS, language.text("Применить", "Apply")),
             (REVERT_OUTPUTS, language.text("Вернуть", "Revert")),
@@ -713,6 +716,14 @@ impl App {
                     })
                     .count()
         });
+        let orphan_note = match language {
+            Language::En => {
+                format!("Bindings for devices and screen sources no longer in this profile: {n}.")
+            }
+            Language::Ru => format!(
+                "Привязки к устройствам и источникам экрана, которых уже нет в профиле: {n}."
+            ),
+        };
         let note = if !self.connections.scan.is_idle() {
             if matches!(self.connections.current(),Some(BindingTarget::Device(d)) if d.driver == crate::devices::Driver::SurplifeE1Pixels)
             {
@@ -728,10 +739,10 @@ impl App {
         } else if self.connections.targets.is_empty() {
             match language {
                 Language::En => {
-                    format!("Add a device in Devices or add a screen source. Unused bindings: {n}.")
+                    format!("Add a device in Devices or add a screen source. {orphan_note}")
                 }
                 Language::Ru => format!(
-                    "Сначала добавьте устройство на вкладке «Устройства» или источник экрана. Привязок удалённых источников: {n}."
+                    "Добавьте устройство на вкладке «Устройства» или добавьте источник экрана. {orphan_note}"
                 ),
             }
         } else if self.connections.current().is_none() {
@@ -781,10 +792,12 @@ impl App {
             };
             match language {
                 Language::En => {
-                    format!("{hint} Saving does not switch active outputs. Unused bindings: {n}.")
+                    format!(
+                        "{hint} Save writes the bindings. Apply switches the active connections. {orphan_note}"
+                    )
                 }
                 Language::Ru => format!(
-                    "{hint} Сохранение не переключает работающие устройства. Привязок удалённых источников: {n}."
+                    "{hint} «Сохранить» записывает привязки, «Применить» переключает подключения. {orphan_note}"
                 ),
             }
         };
@@ -1265,9 +1278,10 @@ impl App {
                 if let Some(w) = &mut self.connections.workspace {
                     w.prune_orphans(self.runtime.document());
                 }
-                self.status =
-                    "Отсутствующие привязки убраны из черновика. Файл изменится после сохранения."
-                        .into();
+                self.status = self.language.text(
+                    "Из черновика убраны привязки к устройствам и источникам экрана вне профиля.",
+                    "Removed draft bindings for devices and screen sources outside this profile.",
+                ).into();
             }
             _ => {}
         }

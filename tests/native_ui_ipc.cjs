@@ -425,7 +425,7 @@ console.log('PASS: device cards select by logical identity and the draft dropdow
   return button;
  };
  vm.runInContext('formStages.clear();view="devices";pendingView=null',context);
- snapshot([working,blocked,lcd],working,'Кадры отправлены: 5');
+ snapshot([working,blocked,lcd],working,'Отправлено обновлений: 5');
  assert.match(mainMarkup,/<h2>ARGB \(rgb-left\)<\/h2>/);
  assert.match(mainMarkup,/<h2>ARGB \(rgb-right\)<\/h2>/);
  assert.match(mainMarkup,/aria-label="Свойства: ARGB \(rgb-right\)" aria-describedby="device-status-rgb-right"/);
@@ -466,8 +466,8 @@ console.log('PASS: device cards select by logical identity and the draft dropdow
  events.click({target:{closest:()=>repair}});
  assert.deepEqual(commands.slice(beforeRepair),[{op:'page',page:'connections',device:missing.id}]);
  vm.runInContext('window.prismestraReceive({kind:"error",message:"Fixture return to Devices"})',context);
- snapshot([neighbor,missing],neighbor,'Кадры отправлены: 5');
- assert.equal(find('#native-runtime-detail').textContent,'Кадры отправлены: 5');
+ snapshot([neighbor,missing],neighbor,'Отправлено обновлений: 5');
+ assert.equal(find('#native-runtime-detail').textContent,'Отправлено обновлений: 5');
  assert.match(mainMarkup,/data-connection-device="neighbor-lcd"/);
  assert.doesNotMatch(mainMarkup,/Windows не находит LCD/);
  snapshot([],undefined,'Добавьте устройство из списка поддерживаемых протоколов.');
@@ -586,7 +586,7 @@ console.log('PASS: targeted OpenRGB retry, duplicate click suppression, isolated
  properties.focus();
  events.focusin();
  updateDeviceStatus('Кадры отправлены','Выключено');
- assert.deepEqual(announcements,['WLED. Подключается.','WLED. Кадры отправлены.']);
+ assert.deepEqual(announcements,['WLED. Подключается.','WLED. Отправлено на устройство.']);
  const escapeProperties = () => events.keydown({key:'Escape',target:properties,preventDefault(){}});
  escapeProperties();
  assert.equal(document.activeElement,inspectedRow);
@@ -1686,17 +1686,17 @@ async function checkOutputStatusCopy() {
  await click(neighbor.id);
  assert.deepEqual(writes,[],'stale or neighboring action cannot copy');
  await click(selected.id);
- assert.deepEqual(writes,['Транспорт: OpenRGB\nСостояние: Кадры отправлены\nОтправлено кадров: 7']);
+ assert.deepEqual(writes,['Транспорт: OpenRGB\nСостояние: Отправлено на устройство\nОтправлено обновлений: 7']);
  assert.equal(feedback.textContent,'Статус скопирован');
  snapshot([selected,neighbor]);
  receiveDeviceState('status',{deviceActivity:{labels:{[selected.id]:'Кадры отправлены'},
   framesSent:{[selected.id]:'18446744073709551615',[neighbor.id]:'100'}}});
  await click(selected.id);
- assert.match(writes.at(-1),/кадров: 18446744073709551615$/);
+ assert.match(writes.at(-1),/обновлений: 18446744073709551615$/);
  receiveDeviceState('status',{deviceActivity:{labels:{[selected.id]:'Кадры отправлены'},
   framesSent:{[selected.id]:'7\n'+privateError}}});
  await click(selected.id);
- assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Кадры отправлены');
+ assert.equal(writes.at(-1),'Транспорт: OpenRGB\nСостояние: Отправлено на устройство');
  receiveDeviceState('status',{deviceActivity:{labels:{[selected.id]:privateError},
   reasons:{[selected.id]:'endpointLeaseBusy'},framesSent:{[neighbor.id]:'100'}}});
  await click(selected.id);
@@ -1845,7 +1845,7 @@ function checkEnglishApplicationLanguage() {
  const device={id:'output1',label:'Личный RGB',role:'rgb',enabled:true,driver:{type:'open_rgb'},leds:8,rate_hz:30};
  receive('snapshot',{...initial,devices:[device],deviceActivity:{labels:{output1:'Кадры отправлены'}},
   editor:{page:'devices',index:0,targets:['Личный RGB'],fields:[]}});
- assert.match(mainMarkup,/Личный RGB.*Frames sent/s,'user labels are preserved and output activity is localized');
+ assert.match(mainMarkup,/Личный RGB.*Sent to device/s,'user labels are preserved and output activity is localized');
  events.click({target:{closest:()=>({dataset:{view:'settings'}})}});
  assert.deepEqual(commands.at(-1),{op:'page',page:'settings'});
  receive('snapshot',{...initial,preferredUiLanguage:'en'});
@@ -1867,8 +1867,8 @@ function checkEnglishApplicationLanguage() {
   'Could not get access from Yandex. Sign in again.',
   'Could not load available lights. Try again.',
   'Sign-in was cancelled or access was denied. Start sign-in again.',
-  'The lamp command was not confirmed. No automatic retry. Last observed before the command: the light was on. Current availability is unknown.',
-  'The lamp command was not confirmed. No automatic retry. Last observed before the command: the light was off. Current availability is unknown.',
+  'Yandex didn’t confirm the result. Prismestra won’t retry automatically. Before the command, the lamp was on. Check the lamp before trying again.',
+  'Yandex didn’t confirm the result. Prismestra won’t retry automatically. Before the command, the lamp was off. Check the lamp before trying again.',
  ]);
  const select=find('#ui-language');
  select.id='ui-language';
@@ -1946,14 +1946,39 @@ function checkOutputPageLanguage(target,isEnglish) {
  const legacy={id:'legacy-lab',label:'Legacy fixture',role:'ambient',driver:{type:'unsupported'},leds:7,enabled:false};
  const rgb={...screen,id:'rgb-lab',role:'canvas'};
  selectPage('devices');
- receive('snapshot',{...base,devices:[lcd,rgb,ha,legacy],deviceActivity:{labels:{[ha.id]:'Кадры отправлены'}}});
+ receive('snapshot',{...base,devices:[lcd,rgb,ha,legacy],deviceActivity:{labels:{[rgb.id]:'Кадры отправлены',[ha.id]:'Кадры отправлены'}},detail:'Отправлено обновлений: 2'});
  assert.match(mainMarkup,isEnglish?/USB HID · LCD media/:/USB HID · Медиа LCD/);
  assert.match(mainMarkup,isEnglish?/WLED \(DDP\) · RGB stream/:/WLED \(DDP\) · Поток RGB/);
+ assert.match(mainMarkup,isEnglish?/RGB stream.*Sent to device/s:/Поток RGB.*Отправлено на устройство/s);
+ assert.equal(find('#native-runtime-detail').textContent,isEnglish?'Updates sent: 2':'Отправлено обновлений: 2');
  assert.match(mainMarkup,isEnglish?/Home Assistant · Light commands.*Commands sent/s:/Home Assistant · Команды светильнику.*Команды отправлены/s);
  assert.match(mainMarkup,isEnglish?/Legacy fixture<\/h2><p>Unsupported<\/p>/:/Legacy fixture<\/h2><p>Не поддерживается<\/p>/);
  assert.doesNotMatch(mainMarkup,/(?:0|1|7) LED/);
  selectPage('connections');
  receive('snapshot',base);
+ for(const message of isEnglish?[
+  'The profile is open in preview. Close the other app that has this profile open, then restart Prismestra.',
+  'Saved connections couldn’t be loaded. Check them in Connections or restore the profile and its bindings from the same backup.',
+ ]:[
+  'Профиль открыт в предпросмотре. Закройте другую программу, в которой открыт этот профиль, и перезапустите Prismestra.',
+  'Не удалось загрузить сохранённые подключения. Проверьте привязки в «Подключениях» или восстановите профиль и привязки из одной резервной копии.',
+ ]){
+  receive('status',{startupStatus:'profileNeedsAttention',status:message});
+  assert.equal(find('#startup-profile-repair').textContent,message);
+ }
+ const stopped=isEnglish
+  ?'Lighting and LCD output stopped. Prismestra is still running. The LCD may keep its last image. Select Turn lights on to resume.'
+  :'Передача на подсветку и LCD остановлена. Prismestra продолжает работу. На LCD может остаться последнее изображение. Нажмите «Включить свет», чтобы возобновить вывод.';
+ receive('status',{startupStatus:null,status:stopped});
+ assert.equal(find('#player-status').textContent,stopped);
+ target.payload=[
+  'Яндекс не подтвердил команду. Автоматического повтора не будет.',
+  'Результат команды не подтверждён. Автоматического повтора не будет. Текущая доступность неизвестна.',
+ ];
+ const ambiguous=isEnglish
+  ?'Yandex didn’t confirm the result. Prismestra won’t retry automatically. Check the lamp before trying again.'
+  :'Яндекс не подтвердил результат. Prismestra не повторит команду автоматически. Проверьте лампу перед повтором.';
+ assert.deepEqual(Array.from(vm.runInContext('payload.map(aliceStatusText)',target)),[ambiguous,ambiguous]);
  receive('error','Binding does not match supported device driver');
  assert.match(find('#native-error').innerHTML,isEnglish?/binding does not match the device type/:/привязка не соответствует типу устройства/);
  assert.doesNotMatch(find('#native-error').innerHTML,/data-action="retry-document"/);
@@ -1997,7 +2022,7 @@ function checkOutputPageLanguage(target,isEnglish) {
  receive('status',{status:'Захват выбранного экрана запрошен; проверьте статус источника.'});
  assert.match(find('#player-status').textContent,isEnglish?/Capture requested/:/Захват выбранного экрана/);
  receive('status',{detail:'Базовая сцена · кадр монитора устарел'});
- assert.equal(find('#native-runtime-detail').textContent,isEnglish?'Base scene · Monitor frame expired':'Базовая сцена · кадр монитора устарел');
+ assert.equal(find('#native-runtime-detail').textContent,isEnglish?'Using scene colors while screen capture is delayed.':'Используем цвета сцены, пока с экрана не поступает новое изображение.');
  receive('status',{detail:'Источник кадров — монитор'});
  assert.equal(find('#native-runtime-detail').textContent,isEnglish?'Frame source: Monitor':'Источник кадров — монитор');
 
@@ -2015,6 +2040,8 @@ function checkOutputPageLanguage(target,isEnglish) {
  assert.match(mainMarkup,/data-preview="scene-2"[^>]+Моя сцена/);
  vm.runInContext('loadEntry(state.library[1]);view="editor";render()',target);
  assert.ok(mainMarkup.includes('<h1>'+translate(['Soft light','Мягкий свет'])+'</h1>'));
+ assert.match(mainMarkup,isEnglish?/Apply scene updates the current lighting scene\. Save to library keeps this draft for later\./:/«Применить сцену» меняет текущую подсветку\. «Сохранить в библиотеку» сохраняет черновик/);
+ assert.match(mainMarkup,isEnglish?/aria-label="Scene draft preview"/:/aria-label="Предпросмотр черновика сцены"/);
  assert.equal(vm.runInContext('draftOrigin.name',target),'Мягкий свет');
  console.log(`PASS: ${isEnglish?'English':'Russian'} LCD and screen lighting presentation, unchanged IPC values and seeded scene labels`);
 }

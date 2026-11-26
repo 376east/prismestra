@@ -1034,12 +1034,16 @@ fn finish_stop(app: &mut App) -> Result<(), String> {
     app.ambient_image = vec![];
     app.lcd_frame = (0, 0);
     app.ambient_frame = (0, 0);
-    app.status = if app.stopped_lighting.is_some() {
-        "Работа остановлена. Устройства освобождены. Включите свет, чтобы возобновить работу."
-            .into()
+    let next = if app.stopped_lighting.is_some() {
+        ShellText::ResumeStoppedOutputs
     } else {
-        "Работа остановлена. Устройства освобождены; для запуска выберите подключения и нажмите «Применить».".into()
+        ShellText::ConfigureStoppedOutputs
     };
+    app.status = format!(
+        "{} {}",
+        ShellText::OutputsStopped.get(app.language),
+        next.get(app.language)
+    );
     app.set_check(PC_ON, false);
     app.set_check(DOOR_ON, false);
     // Undo the shutdown-wide disable, then reapply each control's normal policy.
@@ -2033,7 +2037,10 @@ pub(super) fn exercise(state: &State) -> Result<(), String> {
         if unsafe { IsWindowEnabled(a.h(E_APPLY)) } != 0 {
             return Err("Stop enabled Apply without unapplied changes".into());
         }
-        if !a.status.starts_with("Работа остановлена.") {
+        if !a
+            .status
+            .starts_with(ShellText::OutputsStopped.get(a.language))
+        {
             return Err("Stop retained the closing status".into());
         }
     }
