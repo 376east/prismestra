@@ -4,11 +4,17 @@ import { connectWindowsSetup } from '../setup-download.mjs';
 const pageSize = 24;
 const exampleQueries = ['B650 Eagle AX', 'Surplife E1', 'NZXT Kraken'];
 const filters = ['peripherals', 'pc', 'strips', 'displays', 'home', 'other', 'route:openrgb', 'route:native', 'route:research'];
+const connectionGuides = {
+  govee: 'connect-govee-through-openrgb',
+  wled: 'connect-wled',
+  hue: 'connect-philips-hue-through-home-assistant',
+};
+const connectionDocs = 'https://github.com/376east/prismestra/blob/master/docs/universal-connections.md';
 
 const copy = {
   en: {
     title: 'Check your devices', intro: 'Find your model to see what Prismestra can control and how to set it up.',
-    installNote: 'OpenRGB comes with Prismestra. One installer is all you need.',
+    installNote: 'Setup includes OpenRGB for supported PC lighting.',
     download: 'Get Windows Setup', manualDownload: 'All release files', device: 'Model or device type', filter: 'Category', all: 'All devices',
     examples: 'Try', results: 'Matching devices', more: 'Show more', report: 'Report a device',
     guide: 'Compatibility guide', catalog: 'About the catalog', upstream: 'OpenRGB development catalog',
@@ -33,13 +39,14 @@ const copy = {
       'no-direct': 'Use the device’s built-in effects. It can’t follow a Prismestra scene.',
     },
     setup: 'Setup guide', modesSource: 'Driver modes', modelSource: 'Model reference',
-    scopes: { family: 'Compatible models', protocol: 'Protocol support' },
+    scopes: { family: 'Compatible models', protocol: 'Protocol support', 'external-openrgb': 'Requires a separate OpenRGB server' },
+    connect: 'How to connect',
     familyStep: 'Check the exact model or controller in Devices.',
     categories: ['Keyboards and mice', 'PC components', 'Strips and controllers', 'Displays', 'Home lighting', 'Other devices', 'OpenRGB listings', 'Prismestra connections', 'Research candidates'],
   },
   ru: {
     title: 'Проверьте свои устройства', intro: 'Найдите свою модель, чтобы узнать, чем можно управлять и как подключить устройство.',
-    installNote: 'OpenRGB уже входит в Prismestra. Достаточно одного установщика.',
+    installNote: 'В установщик входит OpenRGB для совместимой подсветки ПК.',
     download: 'Установщик для Windows', manualDownload: 'Все файлы релиза', device: 'Модель или тип устройства', filter: 'Категория', all: 'Все устройства',
     examples: 'Для примера', results: 'Найденные устройства', more: 'Показать ещё', report: 'Сообщить об устройстве',
     guide: 'Справочник совместимости', catalog: 'О каталоге', upstream: 'Каталог новых сборок OpenRGB',
@@ -64,7 +71,8 @@ const copy = {
       'no-direct': 'Устройство поддерживает собственные эффекты. В общую сцену оно не включается.',
     },
     setup: 'Инструкция по установке', modesSource: 'Режимы драйвера', modelSource: 'Сведения о модели',
-    scopes: { family: 'Совместимые модели', protocol: 'Поддержка протокола' },
+    scopes: { family: 'Совместимые модели', protocol: 'Поддержка протокола', 'external-openrgb': 'Нужен отдельный сервер OpenRGB' },
+    connect: 'Как подключить',
     familyStep: 'Сверьте точную модель или контроллер в разделе «Устройства».',
     categories: ['Клавиатуры и мыши', 'Компоненты ПК', 'Ленты и контроллеры', 'Экраны', 'Домашнее освещение', 'Другие устройства', 'Каталог OpenRGB', 'Подключения Prismestra', 'Исследуемые устройства'],
   },
@@ -105,19 +113,25 @@ function deviceRow(card, t, lang) {
     const feature = node('p', '', 'feature');
     feature.append(node('strong', t[capability]), ' · ', scoped ? t.scopes[scope] : t.featureStatuses[status]);
     row.append(feature);
-    const note = entries.find((entry) => entry.note)?.[lang === 'ru' ? 'noteRu' : 'note'];
+    const connection = entries.find((entry) => entry.status === status && entry.note);
+    const note = connection?.[lang === 'ru' ? 'noteRu' : 'note'];
     if (status === 'research' || status === 'unconfirmed') {
-      const step = node('p', '', 'connection-hint');
+      const step = node('p', note ?? '', 'connection-hint');
+      if (note) step.append(' ');
       step.append(sourceLink('https://github.com/376east/prismestra/issues/new?template=device.yml', t.report));
       row.append(step);
     } else {
       const step = capability === 'display' ? t.lcdStep : scoped && scope === 'family' ? t.familyStep : t.devicesStep;
-      row.append(node('p', t.featureSteps[status] ?? note ?? step, 'connection-hint'));
+      const hint = node('p', t.featureSteps[status] ?? note ?? step, 'connection-hint');
+      const anchor = connectionGuides[connection?.connectionGuide];
+      if (anchor) hint.append(' ', sourceLink(`${connectionDocs}#${anchor}`, t.connect));
+      row.append(hint);
     }
     const group = node('div', '', 'evidence-group');
     if (capabilities.size > 1) group.append(node('h3', t[capability]));
     for (const entry of entries) {
-      const statusText = entry.status === 'verified' ? t.checked : t[entry.status];
+      const statusText = entry.scope === 'external-openrgb' ? t.scopes[entry.scope]
+        : entry.status === 'verified' ? t.checked : t[entry.status];
       const usbIds = (entry.aliases ?? []).filter((alias) => /^\p{ASCII_Hex_Digit}{4}[: ]\p{ASCII_Hex_Digit}{4}$/u.test(alias));
       group.append(node('p', [statusText, entry.connection, ...usbIds].filter(Boolean).join(' · ')));
       const detail = lang === 'ru' ? entry.detailRu : entry.detail;

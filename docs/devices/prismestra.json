@@ -18,7 +18,8 @@
       "detailRu": "Prismestra управляет отдельными светодиодами по локальной сети. Включите DDP на контроллере.",
       "note": "Connect the controller to your local network and add it in Devices.",
       "noteRu": "Подключите контроллер к локальной сети и добавьте его в разделе «Устройства».",
-      "scope": "protocol"
+      "scope": "protocol",
+      "connectionGuide": "wled"
     },
     {
       "name": "QuinLED Dig-Uno",
@@ -33,10 +34,11 @@
       "modelSource": "https://quinled.info/quinled-dig-boards-wled-platform-ini-settings/",
       "route": "Prismestra WLED DDP",
       "status": "implemented",
-      "note": "Works over the local network with WLED firmware that receives DDP.",
-      "noteRu": "Работает по локальной сети с прошивкой WLED, которая принимает DDP.",
+      "note": "Use WLED firmware with DDP. In Prismestra, add a WLED device. In Connections, choose Find devices.",
+      "noteRu": "Нужна прошивка WLED с DDP. В Prismestra добавьте устройство WLED. В «Подключениях» нажмите «Найти устройства».",
       "detail": "Configure the strip’s LED count and add the controller as a WLED device in Prismestra.",
-      "detailRu": "Задайте число светодиодов в WLED и добавьте контроллер как устройство WLED в Prismestra."
+      "detailRu": "Задайте число светодиодов в WLED и добавьте контроллер как устройство WLED в Prismestra.",
+      "connectionGuide": "wled"
     },
     {
       "name": "QuinLED Dig-Quad",
@@ -51,10 +53,11 @@
       "modelSource": "https://quinled.info/quinled-dig-boards-wled-platform-ini-settings/",
       "route": "Prismestra WLED DDP",
       "status": "implemented",
-      "note": "Works over the local network with WLED firmware that receives DDP.",
-      "noteRu": "Работает по локальной сети с прошивкой WLED, которая принимает DDP.",
+      "note": "Use WLED firmware with DDP. In Prismestra, add a WLED device. In Connections, choose Find devices.",
+      "noteRu": "Нужна прошивка WLED с DDP. В Prismestra добавьте устройство WLED. В «Подключениях» нажмите «Найти устройства».",
       "detail": "Configure the strip’s LED count and add the controller as a WLED device in Prismestra.",
-      "detailRu": "Задайте число светодиодов в WLED и добавьте контроллер как устройство WLED в Prismestra."
+      "detailRu": "Задайте число светодиодов в WLED и добавьте контроллер как устройство WLED в Prismestra.",
+      "connectionGuide": "wled"
     },
     {
       "name": "QuinLED Dig-Octa",
@@ -69,10 +72,11 @@
       "modelSource": "https://quinled.info/quinled-dig-boards-wled-platform-ini-settings/",
       "route": "Prismestra WLED DDP",
       "status": "implemented",
-      "note": "Works over the local network with WLED firmware that receives DDP.",
-      "noteRu": "Работает по локальной сети с прошивкой WLED, которая принимает DDP.",
+      "note": "Use WLED firmware with DDP. In Prismestra, add a WLED device. In Connections, choose Find devices.",
+      "noteRu": "Нужна прошивка WLED с DDP. В Prismestra добавьте устройство WLED. В «Подключениях» нажмите «Найти устройства».",
       "detail": "Configure the strip’s LED count and add the controller as a WLED device in Prismestra.",
-      "detailRu": "Задайте число светодиодов в WLED и добавьте контроллер как устройство WLED в Prismestra."
+      "detailRu": "Задайте число светодиодов в WLED и добавьте контроллер как устройство WLED в Prismestra.",
+      "connectionGuide": "wled"
     },
     {
       "name": "QuinLED dig2go",
@@ -86,10 +90,11 @@
       "modelSource": "https://quinled.info/quinled-dig-boards-wled-platform-ini-settings/",
       "route": "Prismestra WLED DDP",
       "status": "implemented",
-      "note": "Works over the local network with WLED firmware that receives DDP.",
-      "noteRu": "Работает по локальной сети с прошивкой WLED, которая принимает DDP.",
+      "note": "Use WLED firmware with DDP. In Prismestra, add a WLED device. In Connections, choose Find devices.",
+      "noteRu": "Нужна прошивка WLED с DDP. В Prismestra добавьте устройство WLED. В «Подключениях» нажмите «Найти устройства».",
       "detail": "Configure the strip’s LED count and add the controller as a WLED device in Prismestra.",
-      "detailRu": "Задайте число светодиодов в WLED и добавьте контроллер как устройство WLED в Prismestra."
+      "detailRu": "Задайте число светодиодов в WLED и добавьте контроллер как устройство WLED в Prismestra.",
+      "connectionGuide": "wled"
     },
     {
       "name": "Home Assistant",
@@ -123,10 +128,11 @@
       "route": "Prismestra Home Assistant REST",
       "status": "implemented",
       "scope": "family",
-      "note": "Connect the Hue Bridge to Home Assistant and select a Hue light in Prismestra.",
-      "noteRu": "Подключите Hue Bridge к Home Assistant и выберите светильник Hue в Prismestra.",
+      "note": "Connect Hue Bridge to Home Assistant and select the Hue light in Prismestra. Commands affect the whole light.",
+      "noteRu": "Подключите Hue Bridge к Home Assistant и выберите светильник Hue в Prismestra. Команды меняют светильник целиком.",
       "detail": "Uses the light entity from Home Assistant for whole-light commands. Available controls depend on the lamp.",
-      "detailRu": "Команды идут через Home Assistant на светильник целиком. Доступные настройки зависят от лампы."
+      "detailRu": "Команды идут через Home Assistant на светильник целиком. Доступные настройки зависят от лампы.",
+      "connectionGuide": "hue"
     },
     {
       "name": "Alice (Yandex Smart Home)",
@@ -1084,10 +1090,46 @@
       ],
       "connection": "USB HID / bulk",
       "source": "https://github.com/liquidctl/liquidctl/blob/v1.16.0/liquidctl/driver/kraken3.py",
-      "modelSource": "https://support.nzxt.com/hc/es-es/articles/47207322896923-Kraken-2023-Especificaciones",
+      "modelSource": "https://support.nzxt.com/hc/en-us/articles/47207322896923-Kraken-2023-Specs",
       "status": "research",
-      "detail": "Liquidctl implements image upload for the 240 × 240 display. Prismestra needs a dedicated LCD driver.",
-      "detailRu": "Liquidctl умеет загружать изображения на экран 240 × 240. Для этого экрана нужен отдельный драйвер в Prismestra."
+      "detail": "The 240, 280 and 360 mm Kraken Standard (2023) models share USB ID 1E71:300E. Check the retail model or part number to identify the size. Prismestra does not yet drive the display.",
+      "detailRu": "У Kraken Standard 2023 на 240, 280 и 360 мм общий USB ID 1E71:300E. Сверьте название или артикул, чтобы узнать размер. Prismestra пока не управляет этим экраном.",
+      "note": "USB ID 1E71:300E is shared by the 240, 280 and 360 mm Kraken Standard models.",
+      "noteRu": "USB ID 1E71:300E общий для Kraken Standard на 240, 280 и 360 мм."
+    },
+    {
+      "name": "NZXT Kraken 280 (2023)",
+      "vendor": "NZXT",
+      "type": "LCD",
+      "aliases": [
+        "RL-KN280-B1",
+        "1E71:300E"
+      ],
+      "connection": "USB HID / bulk",
+      "source": "https://github.com/liquidctl/liquidctl/blob/v1.16.0/liquidctl/driver/kraken3.py",
+      "modelSource": "https://support.nzxt.com/hc/en-us/articles/47207322896923-Kraken-2023-Specs",
+      "status": "research",
+      "detail": "The 240, 280 and 360 mm Kraken Standard (2023) models share USB ID 1E71:300E. Check the retail model or part number to identify the size. Prismestra does not yet drive the display.",
+      "detailRu": "У Kraken Standard 2023 на 240, 280 и 360 мм общий USB ID 1E71:300E. Сверьте название или артикул, чтобы узнать размер. Prismestra пока не управляет этим экраном.",
+      "note": "USB ID 1E71:300E is shared by the 240, 280 and 360 mm Kraken Standard models.",
+      "noteRu": "USB ID 1E71:300E общий для Kraken Standard на 240, 280 и 360 мм."
+    },
+    {
+      "name": "NZXT Kraken 360 (2023)",
+      "vendor": "NZXT",
+      "type": "LCD",
+      "aliases": [
+        "RL-KN360-B1",
+        "1E71:300E"
+      ],
+      "connection": "USB HID / bulk",
+      "source": "https://github.com/liquidctl/liquidctl/blob/v1.16.0/liquidctl/driver/kraken3.py",
+      "modelSource": "https://support.nzxt.com/hc/en-us/articles/47207322896923-Kraken-2023-Specs",
+      "status": "research",
+      "detail": "The 240, 280 and 360 mm Kraken Standard (2023) models share USB ID 1E71:300E. Check the retail model or part number to identify the size. Prismestra does not yet drive the display.",
+      "detailRu": "У Kraken Standard 2023 на 240, 280 и 360 мм общий USB ID 1E71:300E. Сверьте название или артикул, чтобы узнать размер. Prismestra пока не управляет этим экраном.",
+      "note": "USB ID 1E71:300E is shared by the 240, 280 and 360 mm Kraken Standard models.",
+      "noteRu": "USB ID 1E71:300E общий для Kraken Standard на 240, 280 и 360 мм."
     },
     {
       "name": "Lian Li UNI FAN TL LCD (wired)",

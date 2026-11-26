@@ -24,7 +24,7 @@ test('catalog retains true provenance and supported evidence labels', () => {
     assert.match(entry.source, /^https:\/\//);
     assert.ok(['openrgb', 'no-direct', 'implemented', 'verified', 'research', 'unconfirmed'].includes(entry.status));
     assert.ok(['lighting', 'display'].includes(entry.capability));
-    assert.ok(!entry.scope || ['family', 'protocol'].includes(entry.scope));
+    assert.ok(!entry.scope || ['family', 'protocol', 'external-openrgb'].includes(entry.scope));
   }
   for (const [family] of families) assert.ok(openrgb.devices.some(({ name }) => name === family), family);
 });
@@ -240,6 +240,31 @@ test('finds additional retail models with their exact route and level of evidenc
   expect('RL-KN240-B1', 'displays', 'research', 'research', 'USB HID / bulk');
   expect('SP630E', 'strips', 'research', 'research', 'Bluetooth LE');
   expect('KD98A Sunset', 'peripherals', 'research', 'unconfirmed', 'USB');
+});
+
+test('finds Kraken Standard models by retail code and does not infer a size from USB ID', () => {
+  const expected = [240, 280, 360].map((size) => `NZXT Kraken ${size} (2023)`);
+  for (const [index, size] of [240, 280, 360].entries()) {
+    const [card] = find(`RL-KN${size}-B1`, 'displays', 'research');
+    assert.equal(card.name, expected[index]);
+    assert.equal(card.entries[0].status, 'research');
+    assert.match(card.entries[0].note, /USB ID 1E71:300E is shared/);
+  }
+  assert.deepEqual(find('1E71:300E', 'displays', 'research').map(({ name }) => name), expected);
+});
+
+test('connects each supported lighting route to its setup guidance', () => {
+  for (const query of ['Govee', 'H619A', 'H607C']) {
+    const [card] = find(query, 'home', 'openrgb');
+    assert.equal(card.entries[0].scope, 'external-openrgb');
+    assert.equal(card.entries[0].connectionGuide, 'govee');
+    assert.match(card.entries[0].note, /separate OpenRGB server/);
+  }
+  assert.equal(find('H6053', 'home', 'research')[0].entries[0].connectionGuide, undefined);
+  assert.equal(find('Dig-Quad v4', 'strips', 'native')[0].entries[0].connectionGuide, 'wled');
+  const [hue] = find('Hue Bridge V2', 'home', 'native');
+  assert.equal(hue.entries[0].connectionGuide, 'hue');
+  assert.match(hue.entries[0].note, /whole light/);
 });
 
 test('keeps the generic Skydimo serial detector distinct from cataloged models', () => {

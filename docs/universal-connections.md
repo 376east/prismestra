@@ -7,11 +7,40 @@ Prismestra reuses backend capabilities instead of treating every physical setup 
 Add the appropriate family in Devices, then open Connections for that logical device. Discovery does not activate RGB output. Select a result, save its local binding, then Apply. Applying a discovered strip length updates its canvas geometry in the same runtime transaction. Existing same-sized layouts remain intact. Discovery does not guess the physical arrangement of a strip.
 
 - **OpenRGB:** in an installed session, leave the SDK endpoint empty to use Prismestra’s managed backend at `127.0.0.1:17422`. To use a separate OpenRGB server with SDK 6, enter its address explicitly, such as `127.0.0.1:6742` for a local server with the standard port. Find reads the inventory and controller geometry. Apply revalidates identity and topology before enabling Direct output. Live scenes require a usable Direct mode for that controller.
-- **WLED:** leave the DDP endpoint empty and Find performs a short LAN DNS-SD browse. Alternatively enter an explicit `IP:4048`. Find reads `/json/info` to obtain the configured point count and MAC-based identity. The optional HTTP origin field supports non-default HTTP ports; its IP must match the DDP destination. A verified route checks the saved MAC and LED count before activation and before starting another frame once its two-second validation interval expires. A failed check stops that output. Recovery checks the same saved binding again before sending. IP reuse can go undetected between checks. Legacy explicit DDP-only bindings still load without metadata verification. UDP submission is not confirmation of visible output.
-- **Home Assistant:** an empty endpoint finds advertised servers without sending a token. Select a server, correct the URL for HTTPS/reverse proxies if needed, save its key in Windows Credential Manager, then Find again to list lights. Choose one light and save its binding. Initial binding rejects unavailable entities and unknown capabilities. Color-capable lights receive color; brightness/color-temperature-only lights receive brightness; on/off lights receive switching. This path controls one whole light at up to 1 Hz, not individual LEDs.
 - **Surplife E1:** the `surplife-e1` family supports an explicitly selected BLE address. Find issues a fixed read-only EA81 capability query, with no configuration or firmware command. Currently only product `0xAA`, LED protocol `11`, one segment and 1..4096 configured points are accepted. Select the result and Apply to adopt the point count. Before output the connection queries capacity again and rejects a mismatch. The 4096 limit bounds host resources; it is not a claim that every controller supports that many physical LEDs. Existing `door_ble` 20-group and 153-point profiles retain their old behavior and are not silently migrated.
 
 A Surplife capability query takes the same in-process endpoint lease as RGB output. An already owned controller must be detached before its discovery query; a rescan never opens a second connection to a running output. External programs still need to relinquish hardware ownership.
+
+### Connect Govee through OpenRGB
+
+1. In Govee Home, enable **LAN Control** for the light and find its local IP address.
+2. Use a separate OpenRGB server with SDK 6 and the Govee LAN detector. In that server’s settings, add the light’s address under `GoveeDevices.devices`. The detector expects entries such as `{"ip":"192.0.2.10"}`. If you edit `OpenRGB.json`, merge this entry into the server’s existing configuration and restart that server. Confirm it lists the light with a usable Direct mode.
+3. In Prismestra, add an **OpenRGB** device. In **Connections**, enter the separate server’s SDK address, for example `127.0.0.1:6742`. Choose **Find devices**, select the light, save its binding and choose **Apply**.
+
+The OpenRGB instance started by Prismestra has no Govee IP setup in the app. Available effects depend on the controller. [Govee LAN setup](https://app-h5.govee.com/user-manual/wlan-guide) · [OpenRGB detector](https://github.com/hello-nexus/openrgb-headless/blob/6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43/Controllers/GoveeController/GoveeControllerDetect.cpp#L22-L65)
+
+### Connect WLED
+
+1. Connect the controller to your local network and set the LED count in WLED. The controller must accept DDP.
+2. In Prismestra, add a **WLED** device and open **Connections**. Leave the DDP endpoint empty to search the local network, or enter `IP:4048`. Choose **Find devices**.
+3. Select the controller, save its binding and choose **Apply**.
+
+Find reads `/json/info` for the controller identity and LED count. You can set an optional HTTP origin with a custom port. Its IP must match the DDP destination. Verified bindings check the saved MAC and LED count before activation and again before sending a frame after the two-second validation interval. If a check fails, Prismestra stops the output and rechecks the saved binding before resuming. IP reuse can go undetected between checks. Legacy DDP-only bindings still load without metadata verification. UDP submission is not confirmation of visible output. [WLED DDP](https://kno.wled.ge/interfaces/ddp/)
+
+### Connect a Home Assistant light
+
+1. In Prismestra, add a **Home Assistant** device and open **Connections**. Choose **Find devices** with the endpoint empty to discover servers without sending a token, or enter your server URL.
+2. Select the server, correct its URL if you use HTTPS or a reverse proxy, and choose **Save key** to store its access token in Windows Credential Manager. Choose **Find devices** again to list lights.
+3. Choose a light, save its binding and choose **Apply**.
+
+Initial binding rejects unavailable lights and unknown capabilities. Color-capable lights receive color, brightness and color-temperature lights receive brightness, and on/off lights receive switching. Updates affect the whole light at up to once a second.
+
+### Connect Philips Hue through Home Assistant
+
+1. Add your Hue Bridge with the [Philips Hue integration in Home Assistant](https://www.home-assistant.io/integrations/hue/).
+2. Follow [Connect a Home Assistant light](#connect-a-home-assistant-light) and choose the Hue light in Prismestra.
+
+Prismestra controls the whole light through Home Assistant. For Hue, this route does not animate individual LEDs.
 
 ## Choose one write path for a WLED controller
 
