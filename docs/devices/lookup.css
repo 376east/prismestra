@@ -34,7 +34,8 @@ header p, footer, [hidden] { display: none !important; }
 .results { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
 .results li { padding-block: .9rem; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
 .results h2 { font-size: 1.12rem; margin: 0 0 .25rem; }
-.feature { color: var(--muted); }
+.feature, .connection-hint { color: var(--muted); }
+.connection-hint { margin-top: .2rem; }
 .feature strong { color: var(--text); font-weight: 650; }
 .results details { margin-top: .35rem; font-size: .9rem; }
 .evidence-group { padding-left: .85rem; border-left: 1px solid var(--line); margin-block: .7rem; }

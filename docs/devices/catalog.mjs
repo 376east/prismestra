@@ -65,6 +65,8 @@ const usbPair = /^(?:(?:usb|hid)\\)?vid[_\s:=]*([a-f0-9]{4})[&\s:/_-]+pid[_\s:=]
 const usbSuffix = /(?:[&\s]+mi[_\s:=]*([a-f0-9]{2}))$/i;
 
 function parseUsb(value) {
+  // Windows can include REV_ before MI_ in the hardware ID.
+  value = value.replace(/&rev_[a-f0-9]{4}(?=&|$)/i, '');
   const suffix = value.match(usbSuffix);
   const pair = (suffix ? value.slice(0, suffix.index) : value).trim().match(usbPair);
   return pair ? {
@@ -90,7 +92,14 @@ function entryUsb(entry) {
   return ids.map(parseUsb).filter(Boolean);
 }
 
+export function modelWithoutRevision(query) {
+  return String(query ?? '').trim().replace(/\s+(?:rev(?:ision)?\.?|рев(?:изия)?\.?)\s*[:=]?\s*\d+(?:[.-]\d+)*\s*$/iu, '');
+}
+
 function queryTerms(query) {
+  if (/^(?:подсветка (?:за|для) монитор[а-я]*|(?:back)?lights? behind (?:the )?monitor|monitor backlight(?:ing)?|ambilight)$/u.test(query)) {
+    return ['ambient', 'lighting'];
+  }
   const words = query.replace(/(?:^| )материнск[а-я]* плат[а-я]*(?= |$)/g, ' motherboard');
   return words.split(' ').filter(Boolean).map((token) => {
     if (/^клавиатур[а-я]*$/.test(token)) return 'keyboard';
@@ -109,6 +118,7 @@ function termRank(card, entry, query, terms) {
   if (names.some((name) => name.startsWith(query + ' '))) return 1;
   const deviceTypes = [entry.type, driverName(entry)];
   if (card.category === 'strips') deviceTypes.push('LED strip');
+  if (/^Skydimo /i.test(entry.name)) deviceTypes.push('ambient lighting');
   if (/\b(rival|sensei)\b/i.test(entry.name)) deviceTypes.push('mouse');
   if (entry.capability === 'display' || /\bmonitor\b/i.test(deviceTypes.join(' '))) deviceTypes.push('display');
   const words = [...names, fold(deviceTypes.join(' ')), fold(entry.vendor), fold(entry.connection)]
@@ -120,6 +130,7 @@ export function findCards(cards, query, category = '', route = '') {
   const usb = parseUsb(String(query ?? '').trim());
   const name = fold(query);
   const terms = queryTerms(name);
+  const baseModel = fold(modelWithoutRevision(query));
   const matches = [];
   for (const card of cards) {
     if (category && card.category !== category) continue;
@@ -131,6 +142,10 @@ export function findCards(cards, query, category = '', route = '') {
         candidate.id === usb.id && (!usb.interface || candidate.interface === usb.interface)))) continue;
     } else if (name) {
       rank = Math.min(...card.entries.map((entry) => termRank(card, entry, name, terms)));
+      if (rank === Infinity && baseModel && baseModel !== name) {
+        const baseTerms = queryTerms(baseModel);
+        rank = 3 + Math.min(...card.entries.map((entry) => termRank(card, entry, baseModel, baseTerms)));
+      }
       if (rank === Infinity) continue;
     }
     matches.push({ card, rank });
