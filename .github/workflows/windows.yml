@@ -303,7 +303,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test: [offline-setup, standard-user, production-upgrade, upgrade-fixtures]
+        test: [offline-setup, standard-user, first-scene-one-ddp, first-scene-two-ddp, production-upgrade, upgrade-fixtures]
+        include:
+          - test: standard-user
+            ddp_devices: 0
+          - test: first-scene-one-ddp
+            ddp_devices: 1
+          - test: first-scene-two-ddp
+            ddp_devices: 2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -314,7 +321,7 @@ jobs:
           name: ${{ needs.package.outputs.candidate }}
           path: ${{ runner.temp }}/candidate
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        if: matrix.test == 'upgrade-fixtures' || matrix.test == 'standard-user' || matrix.test == 'production-upgrade'
+        if: matrix.test == 'upgrade-fixtures' || matrix.test == 'standard-user' || matrix.ddp_devices > 0 || matrix.test == 'production-upgrade'
         with:
           name: ${{ needs.package.outputs.fixtures }}
           path: ${{ runner.temp }}/fixtures
@@ -345,15 +352,16 @@ jobs:
           ./scripts/installer/test_offline_setup.ps1 -PreviousInstaller $previous -Installer $candidate.Setup -Sha256 $candidate.SetupSha256 -Commit $env:GITHUB_SHA -ManifestSha256 $candidate.ManifestSha256 -ReportDirectory evidence -UpgradeRouteProbe (Join-Path $fixtures 'setup_upgrade_routes.exe') -UpgradeRouteProbeSha256 $routeProbeSha -DisposableRunner
           ./scripts/installer/verify_upgrade_receipts.ps1 -Directory evidence -Commit $env:GITHUB_SHA -SetupSha256 $candidate.SetupSha256 -ManifestSha256 $candidate.ManifestSha256 -ProbeSha256 $routeProbeSha
       - name: Launch the same Setup payload as a fresh standard user
-        if: matrix.test == 'standard-user'
+        if: matrix.test == 'standard-user' || matrix.ddp_devices > 0
         shell: pwsh
         env:
           SUMS_SHA256: ${{ needs.package.outputs.sums_sha256 }}
+          DDP_DEVICES: ${{ matrix.ddp_devices }}
         run: |
           $candidate = ./scripts/installer/verify_candidate.ps1 -Directory (Join-Path $env:RUNNER_TEMP candidate) -Commit $env:GITHUB_SHA -SumsSha256 $env:SUMS_SHA256
           $fixtures = Join-Path $env:RUNNER_TEMP fixtures
           $probeSha = (Get-Content -LiteralPath (Join-Path $fixtures 'webview-probe.sha256') -Raw).Trim()
-          ./scripts/installer/test_standard_user.ps1 -Installer $candidate.Setup -InstallerSha256 $candidate.SetupSha256 -ManifestSha256 $candidate.ManifestSha256 -Commit $env:GITHUB_SHA -ReportDirectory evidence -WebViewProbe (Join-Path $fixtures 'Prismestra-Setup-Probe.exe') -WebViewProbeSha256 $probeSha -DisposableRunner
+          ./scripts/installer/test_standard_user.ps1 -Installer $candidate.Setup -InstallerSha256 $candidate.SetupSha256 -ManifestSha256 $candidate.ManifestSha256 -Commit $env:GITHUB_SHA -ReportDirectory evidence -WebViewProbe (Join-Path $fixtures 'Prismestra-Setup-Probe.exe') -WebViewProbeSha256 $probeSha -DdpDevices ([int]$env:DDP_DEVICES) -DisposableRunner
       - name: Exercise repair, upgrade and retention in an isolated namespace
         if: matrix.test == 'upgrade-fixtures'
         shell: pwsh
