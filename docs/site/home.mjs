@@ -1,4 +1,5 @@
 import { connectWindowsSetup } from './setup-download.mjs';
+import { connectScenePreview } from './scene-preview.mjs';
 
 const params = new URLSearchParams(location.search);
 const language = document.getElementById('language');
@@ -9,7 +10,7 @@ if (['q', 'category', 'route'].some((key) => params.has(key))) {
   location.replace(new URL('devices/' + location.search + location.hash, location.href));
 } else {
   if (russian) showRussian();
-  connectScenePreview();
+  connectScenePreview(russian);
   const setup = connectWindowsSetup(document.getElementById('download'));
   if (params.get('download') === '1') {
     params.delete('download');
@@ -27,32 +28,19 @@ if (['q', 'category', 'route'].some((key) => params.has(key))) {
   }
 }
 
-function connectScenePreview() {
-  const scene = document.getElementById('scene');
-  const options = scene.querySelector('.scene-options');
-  const buttons = options.querySelectorAll('button[data-palette]');
-  options.hidden = false;
-  for (const button of buttons) {
-    button.addEventListener('click', () => {
-      scene.dataset.scene = button.dataset.palette;
-      for (const option of buttons) option.setAttribute('aria-pressed', String(option === button));
-    });
-  }
-}
-
 function showRussian() {
   const copy = {
-    'title-first': 'Весь свет.',
-    'title-accent': 'Одна сцена.',
-    summary: 'Настройте один эффект для клавиатуры, ПК и подсветки вокруг стола в Prismestra для Windows.',
+    title: 'Управление RGB-подсветкой в Windows',
+    summary: 'Синхронизируйте подсветку клавиатуры, ПК и светодиодных лент. Выберите готовый эффект или создайте свой.',
     download: 'Скачать для Windows',
     devices: 'Устройства',
     platform: 'Windows 10 (1903+) или 11, x64',
     'manual-download': 'Файлы релиза',
     'preview-label': 'Предпросмотр сцены',
-    'palette-violet': 'Сирень',
-    'palette-lagoon': 'Лагуна',
-    'palette-ember': 'Угли',
+    'effect-rainbow': 'Радуга',
+    'effect-breathing': 'Дыхание',
+    'effect-noise': 'Мягкий свет',
+    'scene-description': 'Цвета бегут по устройствам.',
     'compatibility-title': 'Подойдёт ли моё устройство?',
     'compatibility-summary': 'Найдите свою модель и узнайте, чем Prismestra может управлять и как её подключить.',
     'browse-pc': 'Комплектующие ПК',

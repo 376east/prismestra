@@ -26,25 +26,28 @@
   <main>
     <header class="hero site-wrap">
       <div class="hero-copy">
-        <h1 id="title"><span id="title-first">Your lights.</span><br><span id="title-accent">One scene.</span></h1>
-        <p id="summary" class="lead">Match the lights on your keyboard, PC, and around your desk in Prismestra for Windows.</p>
+        <h1 id="title">RGB lighting control for Windows</h1>
+        <p id="summary" class="lead">Run the same effect on your keyboard, PC and LED strips. Pick a built-in scene or create your own.</p>
         <a class="primary-button" id="download" href="https://github.com/376east/prismestra/releases/latest">Download for Windows</a>
         <p class="platform-note" id="platform">Windows 10 (1903+) or 11, x64</p>
         <p id="download-status" class="platform-note" role="status"></p>
         <a class="text-link" id="manual-download" href="https://github.com/376east/prismestra/releases/latest">Release files</a>
       </div>
 
-      <figure class="scene" id="scene" data-scene="violet">
+      <figure class="scene" id="scene" data-scene="rainbow">
         <div class="scene-frame">
-          <img class="scene-photo" src="scene-workstation.webp" alt="A desktop PC, monitor and keyboard lit in the same scene" id="scene-photo" width="1536" height="1024" fetchpriority="high">
+          <img class="scene-photo" src="scene-workstation.webp" alt="A desktop PC, monitor and keyboard with synchronized lighting" id="scene-photo" width="1536" height="1024" fetchpriority="high">
+          <canvas class="scene-light" width="600" height="400" aria-hidden="true"></canvas>
         </div>
         <figcaption class="scene-controls">
           <span id="preview-label">Scene preview</span>
           <div class="scene-options" role="group" aria-labelledby="preview-label" hidden>
-            <button type="button" class="scene-option" data-palette="violet" aria-pressed="true"><span class="swatch" aria-hidden="true"></span><span id="palette-violet">Violet</span></button>
-            <button type="button" class="scene-option" data-palette="lagoon" aria-pressed="false"><span class="swatch" aria-hidden="true"></span><span id="palette-lagoon">Lagoon</span></button>
-            <button type="button" class="scene-option" data-palette="ember" aria-pressed="false"><span class="swatch" aria-hidden="true"></span><span id="palette-ember">Ember</span></button>
+            <button type="button" class="scene-option" data-effect="rainbow" aria-pressed="true"><span id="effect-rainbow">Rainbow</span></button>
+            <button type="button" class="scene-option" data-effect="breathing" aria-pressed="false"><span id="effect-breathing">Breathing</span></button>
+            <button type="button" class="scene-option" data-effect="noise" aria-pressed="false"><span id="effect-noise">Soft light</span></button>
           </div>
+          <button type="button" class="scene-option scene-playback" id="scene-playback" hidden>Pause</button>
+          <p class="scene-description" id="scene-description">Colors move across the devices.</p>
         </figcaption>
       </figure>
     </header>
