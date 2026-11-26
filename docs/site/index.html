@@ -9,8 +9,8 @@
   <link rel="icon" href="favicon.ico" sizes="any">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="stylesheet" href="site.css">
-  <link rel="stylesheet" href="home.css?v=scene-peripherals">
-  <script type="module" src="home.mjs?v=scene-composition"></script>
+  <link rel="stylesheet" href="home.css?v=scene-mouse">
+  <script type="module" src="home.mjs?v=scene-mouse"></script>
 </head>
 <body class="home-page">
   <nav class="site-nav" aria-label="Main navigation">
@@ -38,7 +38,7 @@
         <input class="scene-choice" type="radio" name="effect" id="scene-rainbow" checked>
         <input class="scene-choice" type="radio" name="effect" id="scene-breathing">
         <input class="scene-choice" type="radio" name="effect" id="scene-noise">
-        <div class="scene-frame" id="scene-art" role="img" aria-label="Illustrated desk with synchronized lights on the keyboard, PC fans and behind the monitor">
+        <div class="scene-frame" id="scene-art" role="img" aria-label="Illustrated desk with synchronized lights on the keyboard, mouse, PC fans and behind the monitor">
           <div class="scene-wall-wash scene-light" aria-hidden="true"></div>
           <div class="scene-desk" aria-hidden="true">
             <div class="scene-desk-wash scene-light"></div>
@@ -72,8 +72,12 @@
             </div>
           </div>
           <div class="scene-mouse" aria-hidden="true">
-            <div class="scene-mouse-buttons"></div>
-            <div class="scene-mouse-wheel"></div>
+            <div class="scene-mouse-pool scene-light"></div>
+            <div class="scene-mouse-rim scene-light"></div>
+            <div class="scene-mouse-shell">
+              <div class="scene-mouse-buttons"></div>
+              <div class="scene-mouse-wheel scene-light"></div>
+            </div>
           </div>
         </div>
         <figcaption class="scene-controls">
