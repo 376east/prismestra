@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - docs/devices/**
+      - docs/site/**
       - .github/workflows/device-lookup.yml
   push:
     branches: [master]
     paths:
       - docs/devices/**
+      - docs/site/**
       - .github/workflows/device-lookup.yml
   workflow_dispatch:
 
@@ -27,11 +29,11 @@ jobs:
         with:
           persist-credentials: false
       - run: node --test docs/devices/lookup.test.mjs
-      - name: Prepare public catalog
-        if: github.ref == 'refs/heads/master'
+      - name: Prepare product site
         run: |
-          mkdir _site
-          cp docs/devices/{index.html,lookup.css,lookup.mjs,catalog.mjs,openrgb.json,prismestra.json} _site/
+          mkdir -p _site/devices
+          cp docs/site/{index.html,home.css,home.mjs} _site/
+          cp docs/devices/{index.html,lookup.css,lookup.mjs,catalog.mjs,openrgb.json,prismestra.json} _site/devices/
       - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         if: github.ref == 'refs/heads/master'
         with:

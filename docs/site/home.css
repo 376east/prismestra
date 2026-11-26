@@ -1,0 +1,13 @@
+header { margin-block: clamp(2.5rem, 8vw, 5rem) 2.75rem; }
+h1 { max-width: 17ch; letter-spacing: -.035em; text-wrap: balance; }
+.lead { margin-top: 1rem; font-size: clamp(1.05rem, 2vw, 1.25rem); }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1.25rem; margin-block: 1.6rem .85rem; }
+.install { display: inline-block; padding: .6rem .85rem; background: var(--accent); color: var(--bg); font-weight: 700; text-decoration: none; }
+.install:hover { text-decoration: underline; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.install-note { color: var(--muted); margin-top: .35rem; }
+.install-note code { overflow-wrap: anywhere; }
+section { border-top: 1px solid var(--line); padding-block: 1rem .5rem; }
+h2 { font-size: 1.3rem; margin-block: .4rem; }
+ol { padding-left: 1.4rem; }
+li { margin-block: .5rem; }

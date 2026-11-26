@@ -7,8 +7,8 @@ const filters = ['peripherals', 'pc', 'strips', 'displays', 'home', 'other', 'ro
 const copy = {
   en: {
     title: 'Check your devices', intro: 'Search for your model to see which features you can try and how to connect it.',
-    installNote: 'Start with Prismestra Setup for Windows. OpenRGB is included.',
-    download: 'Download for Windows', device: 'Model or device type', filter: 'Category', all: 'All devices',
+    installNote: 'On the release page, choose Prismestra-Setup-…-x64.exe. It installs Prismestra and includes OpenRGB, which controls compatible PC lighting in the background.',
+    download: 'Prismestra Setup for Windows', device: 'Model or device type', filter: 'Category', all: 'All devices',
     examples: 'Try', results: 'Matching devices', more: 'Show more', report: 'Report a device',
     guide: 'Compatibility guide', catalog: 'About the catalog', upstream: 'OpenRGB development catalog',
     placeholder: 'Surplife E1, keyboard, B650 Eagle AX…', loading: 'Loading devices…',
@@ -38,8 +38,8 @@ const copy = {
   },
   ru: {
     title: 'Проверьте свои устройства', intro: 'Найдите свою модель, чтобы узнать, что можно попробовать и как подключить устройство.',
-    installNote: 'Скачайте установщик Prismestra для Windows. OpenRGB уже в комплекте.',
-    download: 'Скачать для Windows', device: 'Модель или тип устройства', filter: 'Категория', all: 'Все устройства',
+    installNote: 'На странице релиза выберите Prismestra-Setup-…-x64.exe. Он устанавливает Prismestra и OpenRGB, который в фоне управляет совместимой подсветкой ПК.',
+    download: 'Установщик Prismestra', device: 'Модель или тип устройства', filter: 'Категория', all: 'Все устройства',
     examples: 'Для примера', results: 'Найденные устройства', more: 'Показать ещё', report: 'Сообщить об устройстве',
     guide: 'Справочник совместимости', catalog: 'О каталоге', upstream: 'Каталог новых сборок OpenRGB',
     placeholder: 'Surplife E1, клавиатура, B650 Eagle AX…', loading: 'Загружаем устройства…',
@@ -145,6 +145,7 @@ async function start() {
   const params = new URLSearchParams(location.search);
   const lang = params.get('lang') === 'ru' ? 'ru' : 'en';
   const t = copy[lang];
+  if (lang === 'ru') el('home').href = '../?lang=ru';
   document.documentElement.lang = lang;
   document.title = t.title + ' · Prismestra';
 
