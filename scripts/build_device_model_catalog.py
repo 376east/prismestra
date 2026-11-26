@@ -8,12 +8,11 @@ components/openrgb/distribution-assets.json). Generate with:
 Pass --check to verify that the checked-in JSON is current. No compilation,
 hardware access, or source extraction is required.
 
-Coverage is limited to enabled named detector registrations and the explicit
-Gigabyte Fusion 2 motherboard tables. Generic detector names may be present.
+Coverage includes enabled detector registrations and the model tables handled
+in retail_models(). Some registrations identify a family or protocol.
 VID:PID aliases cover HID and USB serial registrations whose IDs are numeric
 literals or resolve to numeric definitions in that detector's source file.
-Runtime-discovered names (such as ASUS motherboard names from DMI or QMK names
-from settings) and other model tables are outside this extract. A match is a
+Runtime-discovered names without a source model table are outside this extract. A match is a
 source indication. Hardware revisions, driver access, and lighting modes need
 separate verification. The OpenRGB source is GPL-2.0; see the linked source
 and components/openrgb/licenses/OpenRGB-GPL-2.0.txt.
@@ -178,6 +177,123 @@ def gigabyte_board_names(archive):
         yield smbus, line, json.loads(model[0]), "SMBus"
 
 
+def table_body(source, declaration):
+    match = re.search(rf"{declaration}\s*=\s*\{{(.*?)^\}};", source, re.M | re.S)
+    if not match:
+        raise ValueError(f"Model table not found: {declaration}")
+    return match[1], source.count("\n", 0, match.start(1)) + 1
+
+
+def retail_models(archive, registrations, blob):
+    for path, line, name, connection in gigabyte_board_names(archive):
+        yield model_row(f"Gigabyte {name}", path, line, blob, connection, "Motherboard")
+
+    corsair = "Controllers/CorsairDRAMController/CorsairDRAMDevices.cpp"
+    source = remove_comments(archive.read(corsair).decode("utf-8-sig"))
+    table, _ = table_body(source, r"corsair_dram_device\* device_list\[\]")
+    for device in re.findall(r"&(\w+)\b", table):
+        model = re.search(rf"corsair_dram_device {re.escape(device)}\s*=\s*\{{\s*({CPP_STRING})", source)
+        if not model:
+            raise ValueError(f"Corsair DRAM device definition not found: {device}")
+        line = source.count("\n", 0, model.start(1)) + 1
+        row = model_row(json.loads(model[1]), corsair, line, blob, "SMBus", "RAM")
+        row["scope"] = "family"
+        yield row
+
+    nvidia = "NVIDIAIlluminationController/NVIDIAIlluminationControllerDetect_Windows_Linux.cpp"
+    hydro = "CorsairHydroController/CorsairHydroControllerDetect.cpp"
+    sol = "ThrustmasterSolController/ThrustmasterSolControllerDetect.cpp"
+    for file, struct, connection, kind in (
+        (nvidia, "nv_gpu_pci_device", "PCI / NVAPI", "GPU"),
+        (hydro, "corsair_hydro_device", "USB", "Cooler"),
+        (sol, "thrustmaster_sol_device", "USB", "Joystick"),
+    ):
+        path = "Controllers/" + file
+        source = remove_comments(archive.read(path).decode("utf-8-sig"))
+        table, start = table_body(source, rf"{struct} device_list\[\]")
+        for offset, line in enumerate(table.splitlines()):
+            if model := re.search(rf",\s*({CPP_STRING})\s*\}}", line):
+                name = json.loads(model[1])
+                if name in {"NVIDIA GeForce RTX 3060 Ti V1 LHR", "NVIDIA GeForce RTX 3060 Ti LHR"}:
+                    # The table labels the chip/subsystem, without a specific retail variant.
+                    continue
+                row = model_row(name, path, start + offset, blob, connection, kind)
+                if file == nvidia and name.endswith(" FE"):
+                    row["aliases"] = [name.removesuffix(" FE") + " Founders Edition"]
+                yield row
+
+    yield from msi_boards(archive, registrations, blob)
+    yield from keychron_layouts(archive, blob)
+
+
+def msi_boards(archive, registrations, blob):
+    msi = "Controllers/MSIMotherboardController/MSIMotherboard{size}Controller/MSIMotherboard{size}Controller.cpp"
+    by_name = {row["name"]: row for row in registrations}
+    for size in (162, 185):
+        path = msi.format(size=size)
+        source = archive.read(path).decode("utf-8-sig")
+        # These comments identify individual rows of the model-specific lighting table.
+        for line, text in enumerate(source.splitlines(), 1):
+            row = re.match(r"\s*\{\s*0x([0-9A-Fa-f]{4}),(.+?)\}\s*,?\s*//\s*(.+)", text)
+            if not row:
+                continue
+            code, config, name = row.groups()
+            code = code.upper()
+            registration = by_name.get(f"MSI Mystic Light MS_{code}")
+            if not registration or not re.search(r"\b(?:[ABHXZ]\d{3}|TRX40)\w*\b", name, re.I):
+                continue
+            name = re.sub(rf"\s*\(MS-{code}\)\s*$", "", name, flags=re.I)
+            if re.search(r"/|\(|\b(?:OR|UNKNOWN|COMMON)\b", name, re.I):
+                continue
+            name = name.replace("GAMIING", "GAMING")
+            result = model_row("MSI " + name.removeprefix("MSI "), path, line, blob, "HID", "Motherboard")
+            result["aliases"] = [f"MS-{code}", *registration.get("aliases", ())]
+            if "DIRECT_MODE_DISABLED" in config:
+                result["scenes"] = "unavailable"
+            yield result
+
+    path = msi.format(size=761)
+    source = remove_comments(archive.read(path).decode("utf-8-sig"))
+    table, start = table_body(source, r"std::string board_names\[\]")
+    configs, _ = table_body(source, r"\w+ board_configs\[\]")
+    indices = {int(index) for index in re.findall(r"&\(board_names\[(\d+)\]\)", configs)}
+    for index, match in enumerate(re.finditer(CPP_STRING, table)):
+        if index not in indices:
+            continue
+        model = json.loads(match[0])
+        result = model_row(re.sub(r"\s*\(MS-[\dA-Z]+\)$", "", model), path,
+                           start + table.count("\n", 0, match.start()), blob, "HID", "Motherboard")
+        if code := re.search(r"\((MS-[\dA-Z]+)\)$", model):
+            result["aliases"] = [code[1]]
+        yield result
+
+
+def keychron_layouts(archive, blob):
+    qmk = "Controllers/QMKController/QMKKeychronController/"
+    path = qmk + "QMKKeychronController_Devices.cpp"
+    source = archive.read(path).decode("utf-8-sig")
+    stripped = remove_comments(source)
+    header = archive.read(qmk + "QMKKeychronController_Devices.h").decode("utf-8-sig")
+    vendor_header = archive.read(qmk + "QMKKeychronController.h").decode("utf-8-sig")
+    definitions = dict((match[1], match[2][2:].upper()) for line in (header + "\n" + vendor_header).splitlines()
+                       if (match := ID_DEFINE.fullmatch(line)))
+    table, _ = table_body(stripped, r"keychron_patch\* const keychron_patches\[\]")
+    active = set(re.findall(r"&(\w+)\b", table))
+    product_ids = {definitions[pid] for entry, pid in re.findall(
+        r"keychron_patch (\w+)\s*=\s*\{\s*(\w+),", stripped
+    ) if entry in active and pid in definitions}
+    if not product_ids:
+        raise ValueError("Keychron layout table contains no resolved product IDs")
+    for line, text in enumerate(source.splitlines(), 1):
+        model = re.match(r"\|\s*0x([0-9A-Fa-f]{4})\s+(Keychron.*?)\s*\|\s*$", text)
+        if model and model[1].upper() in product_ids:
+            name = re.sub(r"\b([QV])([0-9]+)V([0-9]+)\b", r"\1\2 V\3", model[2])
+            row = model_row(name, path, line, blob, "USB HID", "Keyboard", f"3434:{model[1].upper()}")
+            if name != model[2]:
+                row["aliases"].append(model[2])
+            yield row
+
+
 def vendor_for(name):
     folded = name.casefold()
     return next((brand for brand in BRAND_PREFIXES if folded.startswith(brand.casefold() + " ")), None)
@@ -203,6 +319,8 @@ def unique_models(rows):
         for key in ("connection", "type"):
             if len({match[key] for match in matches if key in match}) > 1:
                 best.pop(key, None)
+        if any(match.get("scenes") != "unavailable" for match in matches):
+            best.pop("scenes", None)
         aliases = sorted({alias for match in matches for alias in match.get("aliases", ())})
         if aliases:
             best["aliases"] = aliases
@@ -232,8 +350,7 @@ def build_catalog(source_zip):
                 source = archive.read(path).decode("utf-8-sig")
                 for line, name, connection, device_type, alias in detector_names(source, macros):
                     rows.append(model_row(name, path, line, blob, connection, device_type, alias))
-        for path, line, name, connection in gigabyte_board_names(archive):
-            rows.append(model_row(f"Gigabyte {name}", path, line, blob, connection, "Motherboard"))
+        rows.extend(retail_models(archive, rows, blob))
     return {
         "revision": revision,
         "source": f"{lock['repository']}/tree/{revision}",
@@ -258,7 +375,7 @@ def main():
     catalog = build_catalog(args.source_zip)
     data = render(catalog)
     if args.check:
-        if OUTPUT.read_bytes() != data:
+        if OUTPUT.read_bytes().replace(b"\r\n", b"\n") != data:
             parser.exit(1, "OpenRGB catalog does not match the pinned source\n")
     else:
         OUTPUT.parent.mkdir(parents=True, exist_ok=True)

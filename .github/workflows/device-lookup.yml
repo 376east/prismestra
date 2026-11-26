@@ -39,7 +39,7 @@ jobs:
           cp docs/site/{index.html,home.css,home.mjs,setup-download.mjs} _site/
           cp src/ui/windows/web/assets/favicon.svg _site/
           cp resources/prismestra.ico _site/favicon.ico
-          cp docs/devices/{index.html,lookup.css,lookup.mjs,catalog.mjs,openrgb.json,prismestra.json} _site/devices/
+          cp docs/devices/{index.html,lookup.css,lookup.mjs,catalog.mjs,openrgb-coverage.mjs,openrgb.json,prismestra.json} _site/devices/
       - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         if: github.ref == 'refs/heads/master'
         with:

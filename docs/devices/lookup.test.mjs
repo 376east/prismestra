@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { buildCatalog, findCards } from './catalog.mjs';
+import { families, retailModels } from './openrgb-coverage.mjs';
 
 const load = async (name) => JSON.parse(await readFile(new URL(name, import.meta.url), 'utf8'));
 const openrgb = await load('./openrgb.json');
@@ -16,13 +17,16 @@ test('catalog retains true provenance and supported evidence labels', () => {
   assert.ok(openrgb.devices.length > 100);
   assert.ok(prismestra.devices.some((device) => device.status === 'research'));
   const entries = new Set(cards.flatMap((card) => card.entries));
-  assert.equal(entries.size, openrgb.devices.length + prismestra.devices.length);
+  assert.equal(entries.size, openrgb.devices.length + prismestra.devices.length + retailModels.length - 1);
+  assert.deepEqual(find('Debug Controllers'), []);
   for (const entry of entries) {
     assert.ok(entry.name.trim());
     assert.match(entry.source, /^https:\/\//);
     assert.ok(['openrgb', 'no-direct', 'implemented', 'verified', 'research'].includes(entry.status));
     assert.ok(['lighting', 'display'].includes(entry.capability));
+    assert.ok(!entry.scope || ['family', 'protocol'].includes(entry.scope));
   }
+  for (const [family] of families) assert.ok(openrgb.devices.some(({ name }) => name === family), family);
 });
 
 test('known missing Direct mode applies only to checked models on the pinned OpenRGB revision', () => {
@@ -72,7 +76,7 @@ test('finds retail RAM families and keeps the original driver names searchable',
     ['T-Force Xtreem DDR4 DRAM', ['TEAMGROUP T-FORCE XTREEM ARGB DDR4']],
     ['Corsair Vengeance RGB DRAM', ['Corsair Vengeance RGB DDR4']],
   ]) {
-    assert.deepEqual(find(driver, 'pc', 'openrgb').map(({ name }) => name), names);
+    assert.deepEqual(find(driver, 'pc', 'openrgb').slice(0, names.length).map(({ name }) => name), names);
     for (const name of names) assert.equal(find(name)[0], named(name));
   }
   const gskill = named('G.SKILL Trident Z5 DDR5 F5-6400J3239G16G');
@@ -102,7 +106,10 @@ test('keeps an optical marker as historical evidence on the E1 card', () => {
   assert.deepEqual(model.entries.map((entry) => entry.status), ['implemented', 'verified']);
   assert.equal(model.entries[1].name, 'Surplife E1 153-point optical marker');
   assert.deepEqual(find('Surplife E1 153-point optical marker'), [model]);
-  assert.equal(find('door153')[0].name, 'Surplife BLE legacy 153 LED');
+  const preview = named('Surplife BLE 153-point preview profile');
+  assert.equal(find('door153')[0], preview);
+  assert.ok(find('E104').includes(preview));
+  assert.ok(!find('E103').includes(preview));
 });
 
 test('separates Kraken lighting from LCD research under the same model', () => {
@@ -153,12 +160,47 @@ test('shows a readable Acer label while keeping the exact detector name searchab
   const model = named('Acer Nitro keyboard controller');
   assert.equal(model.category, 'peripherals');
   assert.equal(model.entries[0].name, 'AcerNitroHidKeyboardController');
-  assert.deepEqual(find('Acer Nitro keyboard controller'), [model]);
+  assert.equal(find('Acer Nitro keyboard controller')[0], model);
   assert.deepEqual(find('AcerNitroHidKeyboardController'), [model]);
   assert.match(model.entries[0].note, /0CF2:5130/);
   const asrock = named('ASRock motherboard lighting');
   assert.equal(find('ASRock Motherboard SMBus Controllers', 'pc')[0], asrock);
   assert.match(asrock.entries[0].noteRu, /Polychrome/);
+});
+
+test('finds models from the driver tables with the correct source, mode and identity', () => {
+  const cases = [
+    ['Dominator Titanium', 'Corsair Dominator Titanium RGB DDR5', /CorsairDRAMDevices.cpp/],
+    ['RTX 5090 FE', 'NVIDIA GeForce RTX 5090 FE', /NVIDIAIlluminationControllerDetect/],
+    ['MEG Z390 ACE', 'MSI MEG Z390 ACE', /MSIMotherboard162Controller.cpp/],
+    ['3434:0106', 'Keychron Q1 V2 ANSI', /QMKKeychronController_Devices.cpp/],
+    ['Thrustmaster Sol-R Left', 'Thrustmaster Sol-R Left', /ThrustmasterSolControllerDetect.cpp/],
+    ['Corsair H115i PRO RGB', 'Corsair H115i PRO RGB', /CorsairHydroControllerDetect.cpp/],
+  ];
+  for (const [query, name, source] of cases) {
+    assert.equal(find(query)[0]?.name, name, query);
+    assert.match(find(query)[0].entries[0].source, source);
+  }
+  const msi = find('MS-7E48', 'pc').map(({ name }) => name);
+  assert.deepEqual(msi, ['MSI MEG X870E GODLIKE', 'MSI MEG X870E GODLIKE MAX']);
+  assert.equal(find('MPG Z490M GAMING EDGE', 'pc')[0].entries[0].status, 'no-direct');
+});
+
+test('keeps wired keyboard variants, precise display capabilities and network and BLE routes separate', () => {
+  for (const name of ['Dark Project KD87A', 'Dark Project KD104A', 'AULA F98', 'Pulsar PCMK TKL', 'Redragon K556']) {
+    assert.equal(find(name, 'peripherals', 'openrgb')[0], named(name));
+    assert.ok(!find('05AC:024F').includes(named(name)));
+  }
+  assert.equal(find('05AC:024F')[0].name, 'Keychron K3 V2 Optical RGB');
+  assert.equal(find('CL-W417-PL14SW-A', 'displays')[0].entries[0].capability, 'display');
+  assert.equal(find('US88v1', 'displays')[0].entries[0].capability, 'lighting');
+  assert.match(find('US88v1')[0].entries[0].note, /display media/i);
+  assert.equal(find('H619A', 'home', 'openrgb')[0].entries[0].connection, 'LAN');
+  assert.equal(find('H6053', 'home', 'research')[0].entries[0].status, 'research');
+  assert.equal(find('NL42', 'home')[0].name, 'Nanoleaf Shapes');
+  assert.equal(named('E1.31').entries[0].scope, 'protocol');
+  assert.equal(named('EVision Keyboard 320F:5084').entries[0].scope, 'family');
+  assert.equal(named('WLED').entries[0].scope, 'protocol');
 });
 
 test('keeps the generic Skydimo serial detector distinct from cataloged models', () => {

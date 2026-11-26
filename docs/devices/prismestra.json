@@ -17,7 +17,8 @@
       "detail": "Prismestra controls individual LEDs on WLED controllers over your local network. Enable DDP on the controller.",
       "detailRu": "Prismestra управляет отдельными светодиодами по локальной сети. Включите DDP на контроллере.",
       "note": "Connect the controller to your local network and add it in Devices.",
-      "noteRu": "Подключите контроллер к локальной сети и добавьте его в разделе «Устройства»."
+      "noteRu": "Подключите контроллер к локальной сети и добавьте его в разделе «Устройства».",
+      "scope": "protocol"
     },
     {
       "name": "Home Assistant",
@@ -32,7 +33,8 @@
       "route": "Prismestra Home Assistant REST",
       "status": "implemented",
       "detail": "Choose a light already connected to Home Assistant. The controls depend on what that light can do.",
-      "detailRu": "Выберите светильник, который уже подключён к Home Assistant. Доступные настройки зависят от светильника."
+      "detailRu": "Выберите светильник, который уже подключён к Home Assistant. Доступные настройки зависят от светильника.",
+      "scope": "family"
     },
     {
       "name": "Alice (Yandex Smart Home)",
@@ -51,7 +53,8 @@
       "detail": "Sign in with Yandex ID and choose a lamp. Turn it on or off, adjust brightness, or include brightness when applying a scene.",
       "detailRu": "Войдите с Яндекс ID и выберите лампу. Её можно включать и выключать, менять яркость или применять яркость вместе со сценой.",
       "note": "Open Settings, go to LAN controls, and sign in with Yandex ID to choose a lamp.",
-      "noteRu": "В настройках откройте управление по сети, войдите с Яндекс ID и выберите лампу."
+      "noteRu": "В настройках откройте управление по сети, войдите с Яндекс ID и выберите лампу.",
+      "scope": "family"
     },
     {
       "name": "Surplife E1",
@@ -68,7 +71,8 @@
       "detail": "For a single-segment strip, enter the number of LEDs before applying a scene.",
       "detailRu": "Для ленты с одним сегментом укажите число светодиодов, затем примените сцену.",
       "note": "Turn on Bluetooth and look for the strip in Devices.",
-      "noteRu": "Включите Bluetooth и найдите ленту в разделе «Устройства»."
+      "noteRu": "Включите Bluetooth и найдите ленту в разделе «Устройства».",
+      "scope": "family"
     },
     {
       "name": "Surplife BLE legacy 20 groups",
@@ -84,23 +88,26 @@
       "route": "Prismestra Door BLE legacy",
       "status": "implemented",
       "detail": "Select the layout with 20 lighting groups.",
-      "detailRu": "Выберите раскладку на 20 групп подсветки."
+      "detailRu": "Выберите раскладку на 20 групп подсветки.",
+      "scope": "family"
     },
     {
-      "name": "Surplife BLE legacy 153 LED",
+      "name": "Surplife BLE 153-point preview profile",
       "vendor": "Surplife",
       "type": "LED controller profile",
       "aliases": [
+        "Surplife BLE legacy 153 LED",
         "Door BLE",
         "door153",
-        "E103"
+        "E104"
       ],
       "connection": "Bluetooth LE / GATT",
-      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/app/device_setup.rs#L69-L85",
-      "route": "Prismestra Door BLE legacy",
+      "source": "https://github.com/376east/prismestra/blob/62e12900c99482cead2d12f62c4ab9c7685214b6/docs/surplife-e1-pixels.md",
+      "route": "Prismestra 153-point preview",
       "status": "implemented",
-      "detail": "Select the legacy layout for 153 LEDs. One-to-one LED mapping on this route is unconfirmed.",
-      "detailRu": "Выберите раскладку на 153 светодиода. Соответствие точек отдельным светодиодам для этого режима ещё не проверено."
+      "detail": "The 153-point preview uses E104. Use this profile with a single-segment controller that reports 153 points.",
+      "detailRu": "Профиль предпросмотра на 153 точки использует E104. Выберите его для контроллера с одним сегментом на 153 точки.",
+      "scope": "family"
     },
     {
       "name": "Surplife E1 153-point optical marker",
@@ -127,7 +134,8 @@
         "264A 233C",
         "TH420 V2 Ultra EX",
         "TH420 V2 Ultra EX ARGB Sync Black",
-        "Thermaltake LCD"
+        "Thermaltake LCD",
+        "CL-W417-PL14SW-A"
       ],
       "connection": "USB HID",
       "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/lcd/hid_policy.rs",
@@ -135,7 +143,8 @@
       "status": "implemented",
       "detail": "The TH420 V2 Ultra EX ARGB Sync LCD uses USB ID 264A:233C. Prismestra sends images to the display and reads liquid temperature over a separate interface.",
       "detailRu": "Экран TH420 V2 Ultra EX ARGB Sync определяется по USB как 264A:233C. Prismestra выводит изображения и получает температуру жидкости через отдельный интерфейс.",
-      "model": "Thermaltake TH420 V2 Ultra EX ARGB Sync"
+      "model": "Thermaltake TH420 V2 Ultra EX ARGB Sync",
+      "modelSource": "https://thermaltakeusa.com/products/th420-v2-ultra-ex-argb-sync-all-in-one-liquid-cooler-cl-w417-pl14sw-a"
     },
     {
       "name": "Gigabyte RGB Fusion 2 USB",
@@ -154,7 +163,8 @@
       "route": "Prismestra Fusion2 (two ARGB headers)",
       "status": "implemented",
       "detail": "On the B650 EAGLE AX, the Prismestra driver controls the two addressable ARGB headers. Set the LED count for each connected header.",
-      "detailRu": "На B650 EAGLE AX драйвер Prismestra управляет двумя адресными разъёмами ARGB. Укажите число светодиодов для каждого подключённого разъёма."
+      "detailRu": "На B650 EAGLE AX драйвер Prismestra управляет двумя адресными разъёмами ARGB. Укажите число светодиодов для каждого подключённого разъёма.",
+      "scope": "family"
     },
     {
       "name": "ENE DRAM AUDA0-E6K5-0101",
@@ -170,7 +180,8 @@
       "route": "Prismestra native ENE DRAM",
       "status": "implemented",
       "detail": "The Prismestra driver supports this controller with eight LEDs per memory module.",
-      "detailRu": "Драйвер Prismestra поддерживает этот контроллер с восемью светодиодами на модуль памяти."
+      "detailRu": "Драйвер Prismestra поддерживает этот контроллер с восемью светодиодами на модуль памяти.",
+      "scope": "family"
     },
     {
       "name": "G.SKILL Trident Z5 DDR5 F5-6400J3239G16G",
@@ -726,7 +737,9 @@
       "vendor": "Govee",
       "type": "Zone light",
       "aliases": [
-        "H6053"
+        "H6053",
+        "Flow Plus Light Bars",
+        "Govee RGBICWW Flow Plus Light Bars"
       ],
       "connection": "Bluetooth LE / GATT",
       "source": "https://github.com/Jaano/govee_lights/blob/52461db4b5834754f4551a1a284aaf4cec8d70e8/custom_components/govee_lights/govee_ble.py",
@@ -739,7 +752,8 @@
       "vendor": "Govee",
       "type": "Zone light",
       "aliases": [
-        "H6072"
+        "H6072",
+        "Govee RGBICWW Floor Lamp"
       ],
       "connection": "Bluetooth LE / GATT",
       "source": "https://github.com/Jaano/govee_lights/blob/52461db4b5834754f4551a1a284aaf4cec8d70e8/custom_components/govee_lights/govee_ble.py",
@@ -755,7 +769,8 @@
       "source": "https://github.com/dave-code-ruiz/elkbledom/blob/1.6.6/custom_components/elkbledom/model.py",
       "route": "Candidate BLE whole-light commands",
       "status": "research",
-      "detail": "Upstream has multiple command layouts under similar advertised names. Need one revision with a unique descriptor and known write contract before Prismestra implementation."
+      "detail": "Upstream has multiple command layouts under similar advertised names. Need one revision with a unique descriptor and known write contract before Prismestra implementation.",
+      "scope": "family"
     },
     {
       "name": "Corsair H150i ELITE LCD XT",
@@ -805,13 +820,15 @@
       "type": "LCD",
       "aliases": [
         "Kraken Z3",
-        "1E71:3008"
+        "1E71:3008",
+        "RL-KRZ53-01"
       ],
       "connection": "USB HID + bulk",
       "source": "https://github.com/liquidctl/liquidctl/blob/v1.16.0/liquidctl/driver/kraken3.py",
       "route": "Candidate LCD media",
       "status": "research",
-      "detail": "liquidctl covers the Kraken Z3 1E71:3008 path. Need to pair both interfaces to one instance, verify firmware-specific media behavior and check Windows coexistence with CAM."
+      "detail": "liquidctl covers the Kraken Z3 1E71:3008 path. Need to pair both interfaces to one instance, verify firmware-specific media behavior and check Windows coexistence with CAM.",
+      "modelSource": "https://support.nzxt.com/hc/en-us/articles/37914228751899-Kraken-Z3-Series-Specs"
     },
     {
       "name": "NZXT Kraken Z63",
@@ -819,13 +836,15 @@
       "type": "LCD",
       "aliases": [
         "Kraken Z3",
-        "1E71:3008"
+        "1E71:3008",
+        "RL-KRZ63-01"
       ],
       "connection": "USB HID + bulk",
       "source": "https://github.com/liquidctl/liquidctl/blob/v1.16.0/liquidctl/driver/kraken3.py",
       "route": "Candidate LCD media",
       "status": "research",
-      "detail": "liquidctl covers the Kraken Z3 1E71:3008 path. Need to pair both interfaces to one instance, verify firmware-specific media behavior and check Windows coexistence with CAM."
+      "detail": "liquidctl covers the Kraken Z3 1E71:3008 path. Need to pair both interfaces to one instance, verify firmware-specific media behavior and check Windows coexistence with CAM.",
+      "modelSource": "https://support.nzxt.com/hc/en-us/articles/37914228751899-Kraken-Z3-Series-Specs"
     },
     {
       "name": "NZXT Kraken Z73",
@@ -833,13 +852,15 @@
       "type": "LCD",
       "aliases": [
         "Kraken Z3",
-        "1E71:3008"
+        "1E71:3008",
+        "RL-KRZ73-01"
       ],
       "connection": "USB HID + bulk",
       "source": "https://github.com/liquidctl/liquidctl/blob/v1.16.0/liquidctl/driver/kraken3.py",
       "route": "Candidate LCD media",
       "status": "research",
-      "detail": "liquidctl covers the Kraken Z3 1E71:3008 path. Need to pair both interfaces to one instance, verify firmware-specific media behavior and check Windows coexistence with CAM."
+      "detail": "liquidctl covers the Kraken Z3 1E71:3008 path. Need to pair both interfaces to one instance, verify firmware-specific media behavior and check Windows coexistence with CAM.",
+      "modelSource": "https://support.nzxt.com/hc/en-us/articles/37914228751899-Kraken-Z3-Series-Specs"
     },
     {
       "name": "NZXT Kraken Elite 2023",
@@ -905,7 +926,8 @@
       "source": "https://www.home-assistant.io/integrations/matter/",
       "route": "Candidate validation over Home Assistant REST",
       "status": "research",
-      "detail": "Need one exact commissioned model and a stable light entity with reported modes and visible command results. The route relies on Home Assistant and its Matter Server."
+      "detail": "Need one exact commissioned model and a stable light entity with reported modes and visible command results. The route relies on Home Assistant and its Matter Server.",
+      "scope": "family"
     },
     {
       "name": "Zigbee lights via ZHA",
@@ -915,7 +937,8 @@
       "source": "https://www.home-assistant.io/integrations/zha/",
       "route": "Candidate validation over Home Assistant REST",
       "status": "research",
-      "detail": "Need an exact light model, coordinator and entity capability record with visible command results. The route relies on ZHA."
+      "detail": "Need an exact light model, coordinator and entity capability record with visible command results. The route relies on ZHA.",
+      "scope": "family"
     },
     {
       "name": "Windows Dynamic Lighting",
@@ -929,7 +952,8 @@
       "source": "https://learn.microsoft.com/en-us/windows/apps/develop/devices-sensors/lighting-dynamic-lamparray",
       "route": "Candidate native LampArray",
       "status": "research",
-      "detail": "Need a LampArray adapter and tests on one Windows model and OS build covering ownership, topology, visible output and returning control."
+      "detail": "Need a LampArray adapter and tests on one Windows model and OS build covering ownership, topology, visible output and returning control.",
+      "scope": "protocol"
     }
   ]
 }
