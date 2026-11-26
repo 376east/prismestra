@@ -57,11 +57,11 @@ python scripts/package_installer.py --app-exe APP_EXE --app-sha256 APP_SHA256 --
 
 `--test-namespace GUID` creates a separately named lifecycle fixture without drivers, prerequisites or elevated tasks. `test_lifecycle.ps1` distinguishes ordinary interactive startup/live-drain checks from elevated disposable-runner file/repair/upgrade/uninstall checks. Those are different gates. Published release notes record actual results; software fixtures do not certify untested hardware or a cold boot on every Windows version.
 
-### Windows Actions candidate
+### Windows Actions candidates and releases
 
-Pull requests and pushes to `master` run quick checks. For an internal candidate, open the [CI workflow](https://github.com/376east/prismestra/actions/workflows/windows.yml), select **Run workflow** on `master`, choose `validation=setup`, give a four-part `installer_version`, and leave `publish_release=false`. Confirm that the run SHA matches the intended commit. This mode runs full software checks and the Windows lifecycle matrix.
+Pull requests and pushes to `master` run quick checks. For an internal candidate, open the [CI workflow](https://github.com/376east/prismestra/actions/workflows/windows.yml), select **Run workflow** on `master`, choose `validation=setup` and give a four-part `installer_version`. Confirm that the run SHA matches the intended commit. The validation run retains the tested candidate after the full software checks and Windows lifecycle matrix pass.
 
-To publish the tested Setup and source ZIP, manually dispatch `validation=setup` with `publish_release=true` on an annotated release tag whose commit is on `master`. A tag push alone does not build or publish Setup. The workflow takes the installer version from the tag. A preview tag `vX.Y.Z-preview.N` supplies `X.Y.Z.N`, and a stable tag `vX.Y.Z` supplies `X.Y.Z.0`. Increment the patch number before promoting a preview line to stable.
+To publish a stable release, wait for the successful push CI run for the current `master` commit. Create an annotated tag `vMAJOR.MINOR.PATCH` pointing to that commit, then push just that tag. CI derives installer version `MAJOR.MINOR.PATCH.0` and runs the software, package and Windows lifecycle checks on the tagged commit. Keep `master` at that commit through publication. CI rechecks the live tag and `master`, then publishes the tested Setup and corresponding source ZIP as the latest stable release.
 
 The package job uses a native x64 Windows runner with Visual Studio 2022 and pinned Rust, Inno and OpenRGB build inputs. It verifies the complete OpenRGB package before reuse. A cache miss or rejected package triggers a build from pinned inputs, including backend inventory and parent-lease checks with hardware detection disabled.
 
