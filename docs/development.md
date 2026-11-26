@@ -8,7 +8,7 @@ This is the single current Prismestra source repository. It must be a self-conta
 |---|---|
 | `src/` | Rust engine, adapters, device setup and Windows editors; web editor assets live in `src/ui/windows/web/` |
 | `resources/` | Runtime assets and fonts used by the application |
-| `components/openrgb/` | Pinned upstream/dependency revisions, local patch, source/license distribution inventory and notices |
+| `components/openrgb/` | Pinned upstream submodule, dependency locks, local patch and distribution notices |
 | `vendor/openrgb2/` | The explicitly vendored Rust SDK dependency, tracked with its notices |
 | `scripts/` | Maintained packaging/setup/verification tools, with tests beside them |
 | `tests/`, `examples/` | Integration tests and named engineering stands; examples are not the ordinary launch path |
@@ -68,7 +68,7 @@ This includes the source/dependency/license material and portable launchers. Nev
 
 ## Build and package the PC component
 
-Use the pinned source/dependency locks and patch in `components/openrgb`. The build and static/runtime contracts are in [component verification](openrgb-component-verification.md). The evaluated C++ code is reused upstream source with an isolated patch, not another hand-maintained source tree hidden elsewhere.
+To build the PC backend, initialize the pinned OpenRGB source with `git submodule update --init --depth 1 -- components/openrgb/upstream`. See [component verification](openrgb-component-verification.md) for the patch, build and verification steps.
 
 Maintained entrypoints are `scripts/components/build_openrgb_dependencies.ps1`, `build_openrgb.ps1`, `verify_openrgb_component.py`, `test_actual_openrgb.py` and `test_parent_pipe.py`. Execution gates are opt-in and distinct from static packaging. A component package must carry matching source archives, notices, pins, patch and recipes; use the distribution inventory in `components/openrgb/distribution-assets.json` and its `licenses/` files. Source archives are external build inputs, not repeated multi-megabyte Git attachments. Do not install a kernel driver as a side effect of building or verifying a package.
 

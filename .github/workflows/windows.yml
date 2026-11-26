@@ -166,6 +166,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Fetch the pinned OpenRGB source
+        run: git submodule update --init --depth 1 -- components/openrgb/upstream
       - name: Select Visual Studio 2022
         id: msvc
         shell: pwsh

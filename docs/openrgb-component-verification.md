@@ -4,7 +4,7 @@ Status: evaluation candidate, 2026-11-15. The installed public ZIP does not yet 
 
 ## Source and selected features
 
-The standalone engine is [Nexus openrgb-headless at 6bf7d9f5](https://github.com/hello-nexus/openrgb-headless/tree/6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43), derived from OpenRGB. No Nexus AGPL workspace/service code is imported. Our patch and exact hash are in `components/openrgb/source-lock.json`. It is a modified component, not an official OpenRGB binary.
+The standalone engine is [Nexus openrgb-headless at 6bf7d9f5](https://github.com/hello-nexus/openrgb-headless/tree/6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43), derived from OpenRGB. The Git submodule at `components/openrgb/upstream` and `components/openrgb/source-lock.json` pin the same upstream revision. The source lock also records the exact hash of the Prismestra patch. The component uses this engine without the Nexus AGPL workspace and service code.
 
 Build with `CONFIG+=prismestra_pc_backend`. This excludes the entire Philips Hue controller, hueplusplus sources and three mbedTLS link inputs. The vendored [hueplusplus license is LGPLv3](https://github.com/hello-nexus/openrgb-headless/blob/6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43/dependencies/hueplusplus-1.2.0/LICENSE), [mbedTLS 3.2.1 is Apache-2.0](https://github.com/Mbed-TLS/mbedtls/blob/v3.2.1/LICENSE), and the engine includes GPL-2.0-only controller files. Do not treat that full combination as automatically GPLv2-compatible. The PC variant keeps home-lighting integration in the application's separate adapters. This boundary check is not a complete dependency redistribution audit.
 
@@ -20,7 +20,15 @@ If contention begins after discovery has already created buses/controllers, the 
 
 ## Build and inspect
 
-Use an isolated checkout. After checking out the pinned revision, run `git apply --check` and `git apply --intent-to-add` with `components/openrgb/prismestra-pc.patch`. Preserve the source lock beside that patch. Do not apply it to a separately installed user's OpenRGB.
+From the Prismestra Git checkout, fetch the backend source before building a Windows candidate locally:
+
+```text
+git submodule update --init --depth 1 -- components/openrgb/upstream
+```
+
+The candidate builder verifies the committed Git submodule pin and copies the pinned Git objects to a fresh build checkout. It applies the lock's patch there and verifies the resulting diff byte for byte. For a manual component build, use a separate checkout at the pinned revision and run `git apply --check` and `git apply --intent-to-add` with `components/openrgb/prismestra-pc.patch`. The Setup installer bundles the compiled backend and requires no Git checkout.
+
+The corresponding-source bundle includes the hash-pinned upstream and dependency source archives, the patch, licenses and build recipes. A Git-generated archive of the main repository omits submodule content. The HIDAPI and PawnIOLib source recipes use pinned archives, and the Rust SDK client uses the [locally patched crates.io package](../vendor/openrgb2/LOCAL-CHANGES.md).
 
 `scripts/components/build_openrgb.ps1` accepts `-SourceRoot`, `-BuildRoot`, `-QtRoot` (directory containing `bin/qmake.exe`), `-Jom`, `-VsDevCmd` and optional `-Jobs`. It creates temporary short paths, takes an exclusive build-directory lock and compiles the PC variant. It never installs or runs the component. Qt/qmake is a build tool; the produced component must have no Qt imports.
 

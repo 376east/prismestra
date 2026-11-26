@@ -1,0 +1,3 @@
+[submodule "openrgb-headless"]
+	path = components/openrgb/upstream
+	url = https://github.com/hello-nexus/openrgb-headless

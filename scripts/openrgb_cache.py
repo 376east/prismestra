@@ -8,7 +8,7 @@ import re
 import shutil
 import tempfile
 
-from build_openrgb_component import BUNDLE, REPO
+from build_openrgb_component import BUNDLE, REPO, verify_openrgb_gitlink
 from component_archive import extract_component
 from components.package_openrgb_component import LICENSES, RECIPES, checked, hidapi_patch, read_json, safe_name
 from components.verify_openrgb_component import MSVC_RUNTIME, REQUIRED, fingerprint
@@ -31,6 +31,7 @@ def build_input_pins(repo):
     overlay = hidapi_patch(dependency_lock, dependencies)
     # Include the recipes and notices shipped in the ZIP even if the build does not execute them.
     paths = [
+        ".gitmodules",
         "scripts/build_openrgb_component.py",
         "scripts/pinned_setup_download.py",
         "scripts/component_archive.py",
@@ -51,9 +52,10 @@ def build_input_pins(repo):
 def cache_key(repo, image, toolchain, tools):
     if not image or not toolchain or not tools:
         raise ValueError("OpenRGB cache requires exact source, image and toolchain inputs")
+    revision = verify_openrgb_gitlink(repo)
     _, runtime_floor = read_prerequisite_lock(repo / "scripts/installer/prerequisites.lock.json")
     selected_tools = {name: fingerprint(path) for name, path in tools.items()}
-    data = json.dumps([build_input_pins(repo), runtime_floor, image, toolchain, selected_tools],
+    data = json.dumps([revision, build_input_pins(repo), runtime_floor, image, toolchain, selected_tools],
                       sort_keys=True).encode("utf-8")
     return KEY_PREFIX + hashlib.sha256(data).hexdigest()
 
