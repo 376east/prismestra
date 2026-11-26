@@ -4,7 +4,7 @@ Run one lighting scene across a keyboard, an LED strip and the lights behind a m
 
 **[Get Windows Setup](https://376east.github.io/prismestra/?download=1)** · [Find your device](https://376east.github.io/prismestra/devices/) · [Get help](#get-help) · [Русский](README.ru.md)
 
-Setup supports 64-bit Windows 10 and 11. It includes OpenRGB, the background component that controls compatible PC lighting. [All release files](https://github.com/376east/prismestra/releases/latest)
+Setup requires Windows 10 version 1903 or later, or Windows 11 (x64). It includes OpenRGB, the background component that controls compatible PC lighting. [All release files](https://github.com/376east/prismestra/releases/latest)
 
 ## Get started
 

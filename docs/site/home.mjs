@@ -14,7 +14,15 @@ if (['q', 'category', 'route'].some((key) => params.has(key))) {
     params.delete('download');
     const query = params.toString();
     history.replaceState(null, '', location.pathname + (query ? '?' + query : '') + location.hash);
-    setup.then((url) => { if (url) location.assign(url); });
+    setup.then((url) => {
+      if (url) {
+        location.assign(url);
+      } else {
+        document.getElementById('download-status').textContent = russian
+          ? 'Загрузка не началась. Откройте «Все файлы релиза» и выберите Prismestra-Setup-…-x64.exe.'
+          : 'The download did not start. Open All release files and choose Prismestra-Setup-…-x64.exe.';
+      }
+    });
   }
 }
 
@@ -24,7 +32,7 @@ function showRussian() {
     summary: 'Продолжите эффект с клавиатуры на подсветке за монитором и на ленте в комнате. На совместимом LCD оставьте медиа и температуры.',
     download: 'Установщик для Windows',
     devices: 'Проверить мои устройства',
-    platform: 'Windows 10 или 11 (64-разрядная версия).',
+    platform: 'Windows 10 версии 1903 или новее либо Windows 11 (x64).',
     'manual-download': 'Все файлы релиза',
     bundled: 'В установщик входит OpenRGB. Он в фоне управляет совместимой подсветкой компьютера.',
     'first-scene': 'Первая сцена',

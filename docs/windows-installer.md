@@ -1,6 +1,6 @@
 # Windows installer
 
-Download Setup for Windows 10 or 11 (64-bit) from [Get Windows Setup](https://376east.github.io/prismestra/?download=1). If the download does not start, choose `Prismestra-Setup-…-x64.exe` from [all release files](https://github.com/376east/prismestra/releases/latest). If you have an older Preview installed, run the current Setup over it to switch to the stable channel. Device support depends on the model and firmware. See the [compatibility guide](compatibility.md).
+Download Setup from [Get Windows Setup](https://376east.github.io/prismestra/?download=1). It requires Windows 10 version 1903 (build 18362) or later, or Windows 11, on x64. If the download does not start, choose `Prismestra-Setup-…-x64.exe` from [all release files](https://github.com/376east/prismestra/releases/latest). If you have an older Preview installed, run the current Setup over it to switch to the stable channel. Device support depends on the model and firmware. See the [compatibility guide](compatibility.md).
 
 ## Install and use
 
