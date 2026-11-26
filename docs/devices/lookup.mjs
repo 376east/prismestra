@@ -13,6 +13,7 @@ const connectionDocs = 'https://github.com/376east/prismestra/blob/master/docs/u
 
 const copy = {
   en: {
+    nav: 'Project',
     title: 'Check your devices', intro: 'Find your model to see what Prismestra can control and how to set it up.',
     installNote: 'Setup includes OpenRGB for supported PC lighting.',
     download: 'Get Windows Setup', manualDownload: 'All release files', device: 'Model or device type', filter: 'Category', all: 'All devices',
@@ -45,6 +46,7 @@ const copy = {
     categories: ['Keyboards and mice', 'PC components', 'Strips and controllers', 'Displays', 'Home lighting', 'Other devices', 'OpenRGB listings', 'Prismestra connections', 'Research candidates'],
   },
   ru: {
+    nav: 'Проект',
     title: 'Проверьте свои устройства', intro: 'Найдите свою модель, чтобы узнать, чем можно управлять и как подключить устройство.',
     installNote: 'В установщик входит OpenRGB для совместимой подсветки ПК.',
     download: 'Установщик для Windows', manualDownload: 'Все файлы релиза', device: 'Модель или тип устройства', filter: 'Категория', all: 'Все устройства',
@@ -111,7 +113,9 @@ function deviceRow(card, t, lang) {
     const scope = supported[0]?.scope;
     const scoped = scope && supported.every((entry) => entry.scope === scope);
     const feature = node('p', '', 'feature');
-    feature.append(node('strong', t[capability]), ' · ', scoped ? t.scopes[scope] : t.featureStatuses[status]);
+    const statusLabel = node('span', scoped ? t.scopes[scope] : t.featureStatuses[status], 'feature-status');
+    if (supported.length) statusLabel.dataset.state = 'supported';
+    feature.append(node('strong', t[capability]), ' ', statusLabel);
     row.append(feature);
     const connection = entries.find((entry) => entry.status === status && entry.note);
     const note = connection?.[lang === 'ru' ? 'noteRu' : 'note'];
@@ -162,6 +166,7 @@ async function start() {
   const params = new URLSearchParams(location.search);
   const lang = params.get('lang') === 'ru' ? 'ru' : 'en';
   const t = copy[lang];
+  el('device-nav').setAttribute('aria-label', t.nav);
   if (lang === 'ru') el('home').href = '../?lang=ru';
   document.documentElement.lang = lang;
   document.title = t.title + ' · Prismestra';

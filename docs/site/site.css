@@ -1,0 +1,68 @@
+:root {
+  color-scheme: dark;
+  --site-bg: #080a0f;
+  --site-surface: #10131d;
+  --site-text: #f4f3fa;
+  --site-muted: #a9adbe;
+  --site-line: #2a2e3b;
+  --site-accent: #c3b9ff;
+  --site-on-accent: #16122b;
+  --site-radius: 14px;
+  --site-radius-large: 22px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  scroll-padding-top: 4.7rem;
+  color: var(--site-text);
+  background: var(--site-bg);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; }
+[hidden] { display: none !important; }
+button, input, select { font: inherit; }
+a { color: var(--site-accent); text-underline-offset: .2em; }
+:where(a, button, input, select, summary):focus-visible {
+  outline: 2px solid var(--site-accent);
+  outline-offset: 4px;
+}
+.site-wrap { width: min(100% - 3.25rem, 76rem); margin-inline: auto; }
+.site-nav {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: #080a0f;
+  border-bottom: 1px solid var(--site-line);
+}
+@supports (backdrop-filter: blur(1px)) {
+  .site-nav {
+    background: rgb(8 10 15 / .88);
+    backdrop-filter: blur(20px);
+  }
+}
+.site-nav-inner, .site-links, .footer-inner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  column-gap: 1.55rem;
+}
+.site-nav-inner { min-height: 3.85rem; justify-content: space-between; }
+.wordmark, .site-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  text-decoration: none;
+  color: var(--site-text);
+}
+.wordmark { gap: .55rem; font-size: 1.04rem; font-weight: 720; letter-spacing: -.025em; }
+.wordmark img { display: block; }
+.site-links a, .text-link { font-size: .88rem; font-weight: 550; }
+.site-links a:hover, .text-link:hover { color: var(--site-text); text-decoration: underline; }
+.text-link { color: var(--site-muted); }
+
+@media (max-width: 40rem) {
+  .site-wrap { width: calc(100% - 2rem); }
+  .site-nav-inner, .site-links { column-gap: .85rem; }
+  .site-nav-inner { min-height: 3.4rem; }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .site-nav { background: var(--site-bg); backdrop-filter: none; }
+}
