@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getWindowsSetup } from './setup-download.mjs';
+import { connectWindowsSetup, getWindowsSetup } from './setup-download.mjs';
 
 const filename = 'Prismestra-Setup-0.2.0.0-x64.exe';
 const url = `https://github.com/376east/prismestra/releases/download/v0.2.0/${filename}`;
@@ -27,4 +27,31 @@ test('keeps the release page as fallback for unusable release data or request er
   ]) assert.equal(await getWindowsSetup(from(data)), null);
   assert.equal(await getWindowsSetup(async () => ({ ok: false })), null);
   assert.equal(await getWindowsSetup(async () => { throw new Error('offline'); }), null);
+});
+
+test('download controls wait for a pending lookup and keep native links when ready', async () => {
+  const fallback = 'https://github.com/376east/prismestra/releases/latest';
+  for (const resolved of [url, null]) {
+    let finish;
+    let click;
+    const calls = [];
+    const link = { href: fallback, addEventListener: (_, listener) => { click = listener; } };
+    const ready = connectWindowsSetup(link, {
+      resolve: () => new Promise((resolve) => { finish = resolve; }),
+      navigate: (href) => calls.push(href),
+    });
+    await click({ ctrlKey: true });
+    let prevented = 0;
+    const event = { preventDefault: () => { prevented++; } };
+    const firstClick = click(event);
+    assert.equal(prevented, 1);
+    assert.deepEqual(calls, []);
+    finish(resolved);
+    assert.equal(await ready, resolved);
+    await firstClick;
+    assert.deepEqual(calls, [resolved ?? fallback]);
+    assert.equal(link.href, resolved ?? fallback);
+    await click(event);
+    assert.equal(prevented, 1);
+  }
 });

@@ -18,3 +18,20 @@ export async function getWindowsSetup(fetchRelease = fetch) {
     return null;
   }
 }
+
+export function connectWindowsSetup(link, {
+  resolve = getWindowsSetup, navigate = (url) => location.assign(url),
+} = {}) {
+  let pending = true;
+  const setup = resolve().then((url) => {
+    if (url) link.href = url;
+    pending = false;
+    return url;
+  });
+  link.addEventListener('click', async (event) => {
+    if (!pending || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    navigate(await setup ?? link.href);
+  });
+  return setup;
+}

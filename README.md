@@ -2,15 +2,15 @@
 
 Run one lighting scene across a keyboard, an LED strip and the lights behind a monitor. Keep temperatures on a compatible LCD. Prismestra runs on Windows and keeps the scene active when you close the editor.
 
-**[Get the Prismestra installer](https://github.com/376east/prismestra/releases/latest)** · [Find your device](https://376east.github.io/prismestra/devices/) · [Get help](#get-help) · [Русский](README.ru.md)
+**[Get Windows Setup](https://376east.github.io/prismestra/?download=1)** · [Find your device](https://376east.github.io/prismestra/devices/) · [Get help](#get-help) · [Русский](README.ru.md)
 
-On the release page, choose `Prismestra-Setup-…-x64.exe` for Windows 10 or 11. Setup includes OpenRGB, the background component that controls compatible PC lighting.
+Setup supports 64-bit Windows 10 and 11. It includes OpenRGB, the background component that controls compatible PC lighting. [All release files](https://github.com/376east/prismestra/releases/latest)
 
 ## Get started
 
 1. Run the downloaded installer.
-2. Open Prismestra. On first run it searches for supported devices. See **Devices** for what it found and what needs configuration.
-3. Choose a scene and apply it. In the editor, you can move devices on the canvas to match where they sit.
+2. Open Prismestra. It searches for devices and starts a scene on lights it can set up automatically. Open **Devices** to see what connected and what still needs setup.
+3. To change the effect, choose a scene and click **Apply**.
 
 You can keep FanControl for cooling. If two apps control the same lights, choose which app controls those lights. Home lighting may need a network connection or sign-in. [Installation guide](docs/windows-installer.md)
 

@@ -1,4 +1,5 @@
 import { buildCatalog, findCards, modelWithoutRevision } from './catalog.mjs';
+import { connectWindowsSetup } from '../setup-download.mjs';
 
 const pageSize = 24;
 const exampleQueries = ['B650 Eagle AX', 'Surplife E1', 'NZXT Kraken'];
@@ -7,8 +8,8 @@ const filters = ['peripherals', 'pc', 'strips', 'displays', 'home', 'other', 'ro
 const copy = {
   en: {
     title: 'Check your devices', intro: 'Search for your model to see which features you can try and how to connect it.',
-    installNote: 'On the release page, choose Prismestra-Setup-…-x64.exe. It installs Prismestra and includes OpenRGB, which controls compatible PC lighting in the background.',
-    download: 'Prismestra Setup for Windows', device: 'Model or device type', filter: 'Category', all: 'All devices',
+    installNote: 'Setup includes OpenRGB, which controls compatible PC lighting in the background.',
+    download: 'Get Windows Setup', manualDownload: 'All release files', device: 'Model or device type', filter: 'Category', all: 'All devices',
     examples: 'Try', results: 'Matching devices', more: 'Show more', report: 'Report a device',
     guide: 'Compatibility guide', catalog: 'About the catalog', upstream: 'OpenRGB development catalog',
     placeholder: 'Surplife E1, keyboard, B650 Eagle AX…', loading: 'Loading devices…',
@@ -38,8 +39,8 @@ const copy = {
   },
   ru: {
     title: 'Проверьте свои устройства', intro: 'Найдите свою модель, чтобы узнать, что можно попробовать и как подключить устройство.',
-    installNote: 'На странице релиза выберите Prismestra-Setup-…-x64.exe. Он устанавливает Prismestra и OpenRGB, который в фоне управляет совместимой подсветкой ПК.',
-    download: 'Установщик Prismestra', device: 'Модель или тип устройства', filter: 'Категория', all: 'Все устройства',
+    installNote: 'В установщик входит OpenRGB. Он в фоне управляет совместимой подсветкой компьютера.',
+    download: 'Установщик для Windows', manualDownload: 'Все файлы релиза', device: 'Модель или тип устройства', filter: 'Категория', all: 'Все устройства',
     examples: 'Для примера', results: 'Найденные устройства', more: 'Показать ещё', report: 'Сообщить об устройстве',
     guide: 'Справочник совместимости', catalog: 'О каталоге', upstream: 'Каталог новых сборок OpenRGB',
     placeholder: 'Surplife E1, клавиатура, B650 Eagle AX…', loading: 'Загружаем устройства…',
@@ -141,6 +142,7 @@ function deviceRow(card, t) {
 }
 
 async function start() {
+  connectWindowsSetup(document.getElementById('download'));
   const el = (id) => document.getElementById(id);
   const params = new URLSearchParams(location.search);
   const lang = params.get('lang') === 'ru' ? 'ru' : 'en';
@@ -158,7 +160,7 @@ async function start() {
   const examples = el('examples');
   const language = el('language');
   for (const [id, value] of Object.entries({
-    title: t.title, intro: t.intro, 'install-note': t.installNote, download: t.download, 'query-label': t.device,
+    title: t.title, intro: t.intro, 'install-note': t.installNote, download: t.download, 'manual-download': t.manualDownload, 'query-label': t.device,
     'filter-label': t.filter, count: t.loading, report: t.report, guide: t.guide,
     'catalog-label': t.catalog, upstream: t.upstream, more: t.more, 'report-missing': t.report,
   })) el(id).textContent = value;
