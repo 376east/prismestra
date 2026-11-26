@@ -199,7 +199,8 @@ Assert-Expected ((Sha256 $profile) -ceq $profileHash -and (Sha256 $bindings) -ce
 $downgrade = Join-Path $report 'blocked-downgrade.log'
 Run-Setup $first.Path '/TASKS=autostart' $downgrade -ExpectFailure
 Assert-Expected ((Get-Content -LiteralPath $downgrade -Raw).Contains(
-    "Installed Prismestra $($upgrade.Manifest.installer_version) is newer than this Setup")) 'Setup did not identify the lower installed version attempt.'
+    "Prismestra $($upgrade.Manifest.installer_version) is already installed. This Setup is for $($first.Manifest.installer_version).")) (
+    'Setup did not identify the installed and attempted versions.')
 Check-Payload $upgrade.Manifest
 Assert-Expected ((Get-ItemPropertyValue -LiteralPath $arp -Name DisplayVersion) -ceq $upgrade.Manifest.installer_version -and
     (Sha256 $profile) -ceq $profileHash -and (Sha256 $bindings) -ceq $bindingsHash -and
