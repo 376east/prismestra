@@ -1,4 +1,4 @@
-import { getWindowsSetup } from './setup-download.mjs';
+import { connectWindowsSetup } from './setup-download.mjs';
 
 const params = new URLSearchParams(location.search);
 const language = document.getElementById('language');
@@ -8,8 +8,14 @@ const russian = params.get('lang') === 'ru';
 if (['q', 'category', 'route'].some((key) => params.has(key))) {
   location.replace(new URL('devices/' + location.search + location.hash, location.href));
 } else {
-  connectDownload();
   if (russian) showRussian();
+  const setup = connectWindowsSetup(document.getElementById('download'));
+  if (params.get('download') === '1') {
+    params.delete('download');
+    const query = params.toString();
+    history.replaceState(null, '', location.pathname + (query ? '?' + query : '') + location.hash);
+    setup.then((url) => { if (url) location.assign(url); });
+  }
 }
 
 function showRussian() {
@@ -22,9 +28,9 @@ function showRussian() {
     'manual-download': 'Все файлы релиза',
     bundled: 'В установщик входит OpenRGB. Он в фоне управляет совместимой подсветкой компьютера.',
     'first-scene': 'Первая сцена',
-    'step-1': 'Установите Prismestra и откройте «Устройства», чтобы увидеть найденное оборудование.',
-    'step-2': 'Выберите сцену. Если хотите привязать эффект к расположению устройств, расставьте их на карте.',
-    'step-3': 'Закройте редактор, когда закончите. Сцена продолжит работать в трее.',
+    'step-1': 'Запустите скачанный установщик и откройте Prismestra. Она сама ищет устройства и запускает стартовую сцену на совместимой подсветке, которую может настроить автоматически.',
+    'step-2': 'Клавиатура загорелась, а лента ещё нет? Откройте «Устройства». Там видно, что подключилось, что ещё ищется и что нужно настроить. После подключения нажмите «Найти устройства», когда поиск доступен.',
+    'step-3': 'Чтобы сменить эффект, откройте «Сцены», выберите сцену и нажмите «Применить». После закрытия редактора подсветка продолжит работать.',
     guide: 'Помощь с установкой',
     contribute: 'Как помочь проекту',
   };
@@ -37,19 +43,4 @@ function showRussian() {
   language.lang = 'en';
   language.hreflang = 'en';
   language.textContent = 'English';
-}
-
-function connectDownload() {
-  const download = document.getElementById('download');
-  let pending = true;
-  const setup = getWindowsSetup().then((url) => {
-    if (url) download.href = url;
-    pending = false;
-    return download.href;
-  });
-  download.addEventListener('click', async (event) => {
-    if (!pending || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    event.preventDefault();
-    location.assign(await setup);
-  });
 }

@@ -6,7 +6,6 @@ h1 { max-width: 17ch; letter-spacing: -.035em; text-wrap: balance; }
 .install:hover { text-decoration: underline; }
 a:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 .install-note { color: var(--muted); margin-top: .35rem; }
-.install-note code { overflow-wrap: anywhere; }
 section { border-top: 1px solid var(--line); padding-block: 1rem .5rem; }
 h2 { font-size: 1.3rem; margin-block: .4rem; }
 ol { padding-left: 1.4rem; }
