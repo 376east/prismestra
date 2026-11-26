@@ -28,11 +28,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: node --test docs/devices/lookup.test.mjs
+      - run: node --test docs/devices/lookup.test.mjs docs/site/setup-download.test.mjs
       - name: Prepare product site
         run: |
           mkdir -p _site/devices
-          cp docs/site/{index.html,home.css,home.mjs} _site/
+          cp docs/site/{index.html,home.css,home.mjs,setup-download.mjs} _site/
           cp docs/devices/{index.html,lookup.css,lookup.mjs,catalog.mjs,openrgb.json,prismestra.json} _site/devices/
       - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         if: github.ref == 'refs/heads/master'
