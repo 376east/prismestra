@@ -56,35 +56,10 @@
   background: #17191e;
 }
 .scene-shot {
+  --light-mask: url("./shots/01-mask.webp");
   position: absolute;
   inset: 0;
   isolation: isolate;
-  opacity: 0;
-  animation: next-desk 3s step-end infinite;
-}
-.scene-shot-graphite {
-  --light-mask: url("./shots/graphite-mask.webp");
-  --screen-x: 35.2%;
-  --screen-y: 40.2%;
-  --screen-yaw: 20deg;
-  opacity: 1;
-}
-.scene-shot-peripherals {
-  --light-mask: url("./shots/peripherals-mask.webp");
-  --screen-x: 52.5%;
-  --screen-y: 23.8%;
-  --screen-yaw: -26deg;
-  --screen-roll: -3.2deg;
-  --phase: -11%;
-  animation-delay: -2s;
-}
-.scene-shot-daylight {
-  --light-mask: url("./shots/daylight-mask.webp");
-  --screen-x: 47%;
-  --screen-y: 38.5%;
-  --screen-yaw: -1deg;
-  --phase: -21%;
-  animation-delay: -1s;
 }
 .scene-photo {
   display: block;
@@ -104,33 +79,26 @@
 }
 .scene-wordmark {
   position: absolute;
-  top: var(--screen-y);
-  left: var(--screen-x);
-  transform: translate(-50%, -50%) perspective(480px) rotateZ(var(--screen-roll, 0deg)) rotateY(var(--screen-yaw));
-  transform: translate(-50%, -50%) perspective(72cqw) rotateZ(var(--screen-roll, 0deg)) rotateY(var(--screen-yaw));
+  inset: 0;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: .27em;
-  color: #eeeef7;
-  text-shadow: 0 0 .45em #d9deff2b;
-  font-size: clamp(1.05rem, 3.2vw, 2.7rem);
-  font-size: clamp(1.05rem, 6cqw, 2.7rem);
+  color: #f5f4fb;
+  background: radial-gradient(ellipse at center, #080a0f70, transparent 63%);
+  text-shadow: 0 2px .5em #090b12ce;
+  font-size: clamp(1.7rem, 5vw, 4rem);
+  font-size: clamp(1.7rem, 9cqw, 4rem);
   font-weight: 720;
   line-height: 1;
   letter-spacing: -.05em;
   white-space: nowrap;
+  pointer-events: none;
 }
 .scene-wordmark img {
   width: .94em;
   height: .94em;
-  filter: brightness(0) invert(.94) drop-shadow(0 0 .32em #d9deff32);
-}
-@keyframes next-desk {
-  0% { opacity: 1; }
-  33.333333%, 100% { opacity: 0; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .scene-shot { animation: none; }
+  filter: brightness(0) invert(1) drop-shadow(0 2px .28em #090b12ce);
 }
 .scene-light::before {
   content: "";
