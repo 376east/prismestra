@@ -1,17 +1,25 @@
 <img src="docs/assets/prismestra-nameplate.png" alt="Prismestra" width="760">
 
-[![CI](https://github.com/376east/prismestra/actions/workflows/windows.yml/badge.svg?branch=master&event=push)](https://github.com/376east/prismestra/actions/workflows/windows.yml) [![Stack](https://img.shields.io/badge/Stack-Rust%20%C2%B7%20Windows-555?style=flat)](Cargo.toml)
+Run one lighting scene across a keyboard, an LED strip and the lights behind a monitor. Keep temperatures on a compatible LCD. Prismestra runs on Windows and keeps the scene active when you close the editor.
 
-**[Download for Windows](https://github.com/376east/prismestra/releases/latest)** · [Compatible devices](docs/compatibility.md) · [Русский](README.ru.md)
+**[Download for Windows](https://github.com/376east/prismestra/releases/latest)** · [Check my devices](docs/compatibility.md) · [Get help](#get-help) · [Русский](README.ru.md)
 
-Arrange PC lighting, supported Bluetooth strips, LCDs, and home lights in one scene. Prismestra runs locally and keeps the scene active when you close the editor.
+## Get started
 
-## Install on Windows
+1. Download and run **Windows x64 Setup** on Windows 10 or 11. Setup includes OpenRGB and the required Windows runtimes.
+2. Open Prismestra. On first run it searches for supported devices. See **Devices** for what it found and what needs configuration.
+3. Choose a scene and apply it. In the editor, you can move devices on the canvas to match where they sit.
 
-Run the x64 installer and choose whether to start Prismestra at sign-in. Setup includes the background OpenRGB backend and the Windows runtimes. See the [installation guide](docs/windows-installer.md) for permissions and first-run setup.
+You can keep FanControl for cooling. If two apps control the same lights, choose which app controls those lights. Home lighting may need a network connection or sign-in. [Installation guide](docs/windows-installer.md)
 
-[What’s new in 0.2.0](CHANGELOG.md#020---2026-11-26)
+## Get help
+
+- [Installation or app problem](https://github.com/376east/prismestra/issues/new?template=bug.yml)
+- [Report a device or check its support](https://github.com/376east/prismestra/issues/new?template=device.yml)
+- [Report a security issue privately](SECURITY.md)
 
 ## Project links
 
-[Changelog](CHANGELOG.md) · [Build from source](docs/development.md#check-and-build) · [Contributing](CONTRIBUTING.md) · [GPL-2.0-or-later](LICENSE)
+[Changelog](CHANGELOG.md) · [Release verification](docs/status.md) · [Build from source](docs/development.md#check-and-build) · [Contributing](CONTRIBUTING.md) · [GPL-2.0-or-later](LICENSE)
+
+[![Windows CI](https://github.com/376east/prismestra/actions/workflows/windows.yml/badge.svg?branch=master&event=push)](https://github.com/376east/prismestra/actions/workflows/windows.yml)

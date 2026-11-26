@@ -429,7 +429,10 @@ jobs:
           $sources = Get-ChildItem -LiteralPath $directory -Filter 'Prismestra-Sources-*.zip' -File
           if (@($sources).Count -ne 1) { throw 'Expected one corresponding source archive.' }
           $title = "Prismestra $($tag.TrimStart('v'))"
-          $notes = "Download **$(Split-Path -Leaf $candidate.Setup)** for Windows x64. Setup includes the background OpenRGB backend and required runtimes. See the [device compatibility guide](https://github.com/$env:GITHUB_REPOSITORY/blob/$env:GITHUB_SHA/docs/compatibility.md). The source ZIP is for developers.`n`nSetup SHA-256: $($candidate.SetupSha256)"
+          $asset = Split-Path -Leaf $candidate.Setup
+          $setupUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$asset"
+          $runUrl = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          $notes = "**[Download Windows x64 Setup]($setupUrl)** · Windows 10 or 11 (x64).`n`nSetup includes the background OpenRGB backend and required runtimes. See the [device compatibility guide](https://github.com/$env:GITHUB_REPOSITORY/blob/$env:GITHUB_SHA/docs/compatibility.md) and [Windows release checks]($runUrl). The source ZIP contains the corresponding sources.`n`nSetup SHA-256: $($candidate.SetupSha256)"
           $releaseArgs = @('release', 'create', $tag, $candidate.Setup, $sources.FullName, '--repo', $env:GITHUB_REPOSITORY, '--verify-tag', '--title', $title, '--notes', $notes, '--generate-notes')
           if ($tag.Contains('-preview.')) { $releaseArgs += @('--prerelease', '--latest=false') }
           gh @releaseArgs
