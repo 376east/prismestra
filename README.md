@@ -2,11 +2,13 @@
 
 Run one lighting scene across a keyboard, an LED strip and the lights behind a monitor. Keep temperatures on a compatible LCD. Prismestra runs on Windows and keeps the scene active when you close the editor.
 
-**[Download for Windows](https://github.com/376east/prismestra/releases/latest)** · [Find your device](https://376east.github.io/prismestra/) · [Get help](#get-help) · [Русский](README.ru.md)
+**[Get the Prismestra installer](https://github.com/376east/prismestra/releases/latest)** · [Find your device](https://376east.github.io/prismestra/) · [Get help](#get-help) · [Русский](README.ru.md)
+
+On the release page, choose `Prismestra-Setup-…-x64.exe` for Windows 10 or 11. Setup includes OpenRGB, the background component that controls compatible PC lighting.
 
 ## Get started
 
-1. Download and run **Windows x64 Setup** on Windows 10 or 11. Setup includes OpenRGB and the required Windows runtimes.
+1. Run the downloaded installer.
 2. Open Prismestra. On first run it searches for supported devices. See **Devices** for what it found and what needs configuration.
 3. Choose a scene and apply it. In the editor, you can move devices on the canvas to match where they sit.
 
@@ -20,6 +22,4 @@ You can keep FanControl for cooling. If two apps control the same lights, choose
 
 ## Project links
 
-[Changelog](CHANGELOG.md) · [Release verification](docs/status.md) · [Build from source](docs/development.md#check-and-build) · [Contributing](CONTRIBUTING.md) · [GPL-2.0-or-later](LICENSE)
-
-[![Windows CI](https://github.com/376east/prismestra/actions/workflows/windows.yml/badge.svg?branch=master&event=push)](https://github.com/376east/prismestra/actions/workflows/windows.yml)
+[Documentation](docs/README.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [GPL-2.0-or-later](LICENSE)

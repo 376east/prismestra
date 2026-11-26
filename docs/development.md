@@ -19,7 +19,16 @@ This is the single current Prismestra source repository. It must be a self-conta
 
 Installed releases, profiles, private captures, rollback backups and raw acceptance results are local artifacts. They are not a second source checkout and must not be copied wholesale into Git. For the maintained product's actual state, read [status](status.md), not a filename containing `final` in an experimental directory.
 
+## Runtime boundaries
+
+- [`src/app/runtime.rs`](../src/app/runtime.rs) coordinates an application session. It applies the saved or requested scene, manages output lifecycles and recovery, and gives the editor a snapshot of the session. Its [coordinator](../src/app/runtime/coordinator.rs) owns the runtime outside the window thread.
+- [`src/runtime/`](../src/runtime/mod.rs) is the frame engine. It renders a shared scene, maps colors to device geometry and schedules output at each device's rate.
+
+Start in `app::runtime` for startup, applying a scene, retrying an output or reporting state to the UI. Start in `runtime` for frame timing, rendering or sending updates to an active output.
+
 ## Check and build
+
+[Windows CI](https://github.com/376east/prismestra/actions/workflows/windows.yml) shows the results for each source revision.
 
 Pull requests and pushes to `master` run formatting and embedded editor checks. In GitHub Actions, dispatch CI with `software` for the full software suite or `setup` to also build and test the installer. Both modes are for validation. A stable release tag runs the [Windows release checks](windows-installer.md#windows-actions-candidates-and-releases) automatically.
 
