@@ -22,9 +22,10 @@ Installed releases, profiles, private captures, rollback backups and raw accepta
 ## Runtime boundaries
 
 - [`src/app/runtime.rs`](../src/app/runtime.rs) coordinates an application session. It applies the saved or requested scene, manages output lifecycles and recovery, and gives the editor a snapshot of the session. Its [coordinator](../src/app/runtime/coordinator.rs) owns the runtime outside the window thread.
+- [`src/app/first_run/startup.rs`](../src/app/first_run/startup.rs) defines installed first-run phases, retry timing and cancellation. The [Windows host](../src/ui/windows/first_run.rs) runs the handover and discovery jobs, sends output plans to the runtime, saves completed plans and publishes status.
 - [`src/runtime/`](../src/runtime/mod.rs) is the frame engine. It renders a shared scene, maps colors to device geometry and schedules output at each device's rate.
 
-Start in `app::runtime` for startup, applying a scene, retrying an output or reporting state to the UI. Start in `runtime` for frame timing, rendering or sending updates to an active output.
+Start in `app::first_run` for initial discovery and automatic setup. Start in `app::runtime` for applying a scene, retrying an output or reporting session state to the UI. Start in `runtime` for frame timing, rendering or sending updates to an active output.
 
 ## Check and build
 
