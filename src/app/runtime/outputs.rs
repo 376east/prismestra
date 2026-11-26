@@ -150,29 +150,23 @@ impl Runtime {
         if let Some(error) = recovery.and_then(|state| state.start_error.as_ref()) {
             return failed_activity(Some(error.message().into()));
         }
-        let (phase, frames, error) = if is_lcd {
+        let (phase, error) = if is_lcd {
             let Some(status) = self.lcd_status(id) else {
                 return OutputActivity::Unavailable(None);
             };
             if status.phase == lcd_worker::Phase::Ready {
-                if group_off {
-                    return match status.lcd_state {
-                        Some(lcd::State::Failed(error)) => failed_activity(Some(error)),
-                        Some(lcd::State::Blanked)
-                            if status.processed_revision == status.last_accepted_revision =>
-                        {
-                            OutputActivity::OffSubmitted
-                        }
-                        _ => OutputActivity::TurningOff,
-                    };
+                if let Some(lcd::State::Failed(error)) = status.lcd_state {
+                    return failed_activity(Some(error));
                 }
                 let acknowledged = status.last_ack.is_some_and(|ack| {
-                    ack.active && ack.revision >= self.lcd_power_revision[target.index()]
+                    ack.active != group_off
+                        && ack.revision >= self.lcd_power_revision[target.index()]
                 });
-                return match status.lcd_state {
-                    Some(lcd::State::Failed(error)) => failed_activity(Some(error)),
-                    _ if acknowledged => OutputActivity::Sent(status.frames_sent),
-                    _ => OutputActivity::Connecting,
+                return match (group_off, acknowledged) {
+                    (true, true) => OutputActivity::OffSubmitted,
+                    (true, false) => OutputActivity::TurningOff,
+                    (false, true) => OutputActivity::Sent(status.frames_sent),
+                    (false, false) => OutputActivity::Connecting,
                 };
             }
             let phase = match status.phase {
@@ -182,7 +176,7 @@ impl Runtime {
                 lcd_worker::Phase::Stopped => Phase::Stopped,
                 lcd_worker::Phase::Failed => Phase::Failed,
             };
-            (phase, status.frames_sent, status.error)
+            (phase, status.error)
         } else {
             let Some(status) = self.host.status(id) else {
                 return OutputActivity::Unavailable(None);
@@ -198,10 +192,9 @@ impl Runtime {
                     (false, false) => OutputActivity::Connecting,
                 };
             }
-            (status.phase, status.submitted, status.error)
+            (status.phase, status.error)
         };
         match phase {
-            Phase::Ready if frames > 0 => OutputActivity::Sent(frames),
             Phase::Connecting => error.map_or(OutputActivity::Connecting, OutputActivity::Retrying),
             Phase::Ready => OutputActivity::Connecting,
             Phase::Failed => failed_activity(error),

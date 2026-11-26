@@ -246,8 +246,10 @@ impl Controller {
         self.suspended = false;
     }
 
-    pub(crate) fn refresh_content(&mut self) {
-        if let Some(player) = &mut self.player {
+    pub(crate) fn refresh_power_intent(&mut self, active: bool) {
+        if !active {
+            self.off_done = false;
+        } else if let Some(player) = &mut self.player {
             player.refresh_content();
         }
     }

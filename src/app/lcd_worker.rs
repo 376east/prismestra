@@ -366,15 +366,16 @@ where
             epoch = next_epoch;
         }
         let changed = pending.is_some() || barrier;
-        if let Some(intent) = pending {
-            if intent.active
-                && !intent.suspended
+        let power_changed = pending.as_ref().is_some_and(|intent| {
+            !intent.suspended
                 && current
                     .as_ref()
                     .is_some_and(|previous| previous.power_revision != intent.power_revision)
-            {
-                // The latest-value mailbox may have skipped the preceding Off.
-                controller.refresh_content();
+        });
+        if let Some(intent) = pending {
+            if power_changed {
+                // The latest-value mailbox may already have skipped a power change.
+                controller.refresh_power_intent(intent.active);
             }
             current = Some(intent);
         }
@@ -400,7 +401,7 @@ where
             lcd::State::Failed(message) => return Err(message),
             lcd::State::Disabled => false,
             lcd::State::Stopped => intent.active || changed,
-            lcd::State::Blanked => intent.active,
+            lcd::State::Blanked => intent.active || power_changed,
             lcd::State::Suspended => changed,
             lcd::State::Running => {
                 if !intent.active {

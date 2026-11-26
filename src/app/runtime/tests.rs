@@ -145,7 +145,7 @@ fn lighting_resume_does_not_wait_for_a_stalled_audio_worker() {
 }
 
 #[test]
-fn lighting_resumes_while_stalled_capture_and_sensor_keep_their_owners() {
+fn repeated_resume_keeps_lighting_and_ambient_fallback_while_inputs_drain() {
     let mut stand = Stand::new();
     stand.document.temperatures.sources.push(sensors::Source {
         key: "gpu".into(),
@@ -155,6 +155,7 @@ fn lighting_resumes_while_stalled_capture_and_sensor_keep_their_owners() {
     });
     let mut runtime = stand.runtime(false);
     let rgb = Arc::new(Record::default());
+    let ambient = Arc::new(Record::default());
     runtime
         .attach_rgb(
             "body",
@@ -163,6 +164,18 @@ fn lighting_resumes_while_stalled_capture_and_sensor_keep_their_owners() {
                 &stand.document,
                 "body",
                 rgb.clone(),
+                Arc::new(AtomicUsize::new(0)),
+            ),
+        )
+        .unwrap();
+    runtime
+        .attach_rgb(
+            "ambient",
+            vec![],
+            rgb_factory(
+                &stand.document,
+                "ambient",
+                ambient.clone(),
                 Arc::new(AtomicUsize::new(0)),
             ),
         )
@@ -216,25 +229,36 @@ fn lighting_resumes_while_stalled_capture_and_sensor_keep_their_owners() {
         runtime.tick(now(), wall()).unwrap();
         rgb.last().is_some() && runtime.lcd_status("lcd").unwrap().frames_sent > 0
     });
-    let old_rgb = runtime.host.status("body").unwrap().generation;
-    let old_lcd = runtime.lcd_status("lcd").unwrap().generation;
     let old_capture = runtime.capture_status().unwrap().generation;
     let old_sensor = runtime.sensor_status("gpu-slot").unwrap().generation;
-    let base = now();
-    runtime.notify_power(true, base).unwrap();
-    runtime.notify_power(false, base + 1_000).unwrap();
-    let mut clock = base + 8_000_000;
-    wait(|| {
-        clock += 50_000;
-        runtime.tick(clock, wall()).unwrap();
-        runtime
-            .host
-            .status("body")
-            .is_some_and(|s| s.generation != old_rgb && s.submitted > 0)
-            && runtime
-                .lcd_status("lcd")
-                .is_some_and(|s| s.generation != old_lcd && s.frames_sent > 0)
-    });
+    let mut clock = now();
+    for _ in 0..2 {
+        let old_rgb = runtime.host.status("body").unwrap().generation;
+        let old_ambient = runtime.host.status("ambient").unwrap().generation;
+        let old_lcd = runtime.lcd_status("lcd").unwrap().generation;
+        runtime.notify_power(true, clock).unwrap();
+        runtime.notify_power(false, clock + 1_000).unwrap();
+        clock += 8_000_000;
+        wait(|| {
+            clock += 50_000;
+            runtime.tick(clock, wall()).unwrap();
+            runtime
+                .host
+                .status("body")
+                .is_some_and(|s| s.generation != old_rgb && s.submitted > 0)
+                && runtime
+                    .lcd_status("lcd")
+                    .is_some_and(|s| s.generation != old_lcd && s.frames_sent > 0)
+                && runtime
+                    .host
+                    .status("ambient")
+                    .is_some_and(|s| s.generation != old_ambient && s.submitted > 0)
+                && ambient
+                    .last()
+                    .is_some_and(|colors| colors.iter().any(|color| *color != Rgb::default()))
+        });
+        assert_eq!(runtime.capture_status().unwrap().generation, old_capture);
+    }
     let healthy_rgb = runtime.host.status("body").unwrap();
     let healthy_lcd = runtime.lcd_status("lcd").unwrap().generation;
     clock += 60_000_000;
@@ -281,7 +305,7 @@ fn lighting_resumes_while_stalled_capture_and_sensor_keep_their_owners() {
 
 #[cfg(windows)]
 #[test]
-fn lcd_on_requires_content_ack_after_blanking_and_coalesced_off() {
+fn lcd_power_status_requires_a_matching_ack_even_after_coalescing() {
     struct HeldAck {
         count: usize,
         clock: Arc<AtomicU64>,
@@ -300,7 +324,7 @@ fn lcd_on_requires_content_ack_after_blanking_and_coalesced_off() {
 
         fn read_ack(&mut self, response: &mut [u8; ACK_BYTES], _: u64) -> Result<usize, String> {
             self.count += 1;
-            if matches!(self.count, 3 | 4) {
+            if matches!(self.count, 3 | 4 | 6) {
                 self.entered.send(()).map_err(|e| e.to_string())?;
                 self.release.recv().map_err(|e| e.to_string())?;
             }
@@ -419,6 +443,38 @@ fn lcd_on_requires_content_ack_after_blanking_and_coalesced_off() {
         runtime.output_activity(device),
         OutputActivity::Sent(4)
     ));
+
+    runtime.set_group(Target::Pc, false).unwrap();
+    wait(|| {
+        runtime.tick(now(), wall()).unwrap();
+        matches!(
+            runtime.output_activity(device),
+            OutputActivity::OffSubmitted
+        )
+    });
+    assert_eq!(runtime.lcd_status("lcd").unwrap().frames_sent, 5);
+    runtime.set_group(Target::Pc, true).unwrap();
+    runtime.set_group(Target::Pc, false).unwrap();
+    assert!(matches!(
+        runtime.output_activity(device),
+        OutputActivity::TurningOff
+    ));
+    runtime.tick(now(), wall()).unwrap();
+    waiting.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(matches!(
+        runtime.output_activity(device),
+        OutputActivity::TurningOff
+    ));
+    assert_eq!(runtime.lcd_status("lcd").unwrap().frames_sent, 5);
+    release.send(()).unwrap();
+    wait(|| {
+        runtime.tick(now(), wall()).unwrap();
+        matches!(
+            runtime.output_activity(device),
+            OutputActivity::OffSubmitted
+        )
+    });
+    assert_eq!(runtime.lcd_status("lcd").unwrap().frames_sent, 6);
 }
 
 fn gpu_binding() -> crate::sensors::nvidia::PciIdentity {

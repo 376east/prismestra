@@ -258,12 +258,17 @@ impl Core {
     fn clear_feed(&mut self) {
         if let Some(feed) = self.feed.take() {
             for (id, r) in feed.routes() {
-                if self.fallback_routes.contains_key(id) {
-                    self.external.remove(id);
-                } else {
+                if !self.fallback_routes.contains_key(id) {
                     self.external
                         .insert(id.clone(), vec![Rgb::default(); r.leds].into());
                 }
+                self.cadences.remove(id);
+            }
+        }
+        // A later suspend can stage black after the original feed was detached.
+        // On unbind, a route with scene fallback must stop using external colors.
+        for id in self.fallback_routes.keys() {
+            if self.external.remove(id).is_some() {
                 self.cadences.remove(id);
             }
         }
