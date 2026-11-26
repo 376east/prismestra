@@ -21,11 +21,8 @@ impl Shutdown {
     pub fn message(&self) -> String {
         match self.phase {
             Phase::Open => String::new(),
-            Phase::Waiting => {
-                "Завершаю операции подсветки и чтения датчиков. Окно закроется автоматически."
-                    .into()
-            }
-            Phase::Ready => "Операции завершены. Закрываю приложение.".into(),
+            Phase::Waiting => "Завершаем операции подсветки, LCD и датчиков…".into(),
+            Phase::Ready => "Операции завершены.".into(),
         }
     }
     pub fn request(&mut self, runtime: &mut Runtime) {

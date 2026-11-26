@@ -434,7 +434,7 @@ pub(super) fn exercise_lcd_retry(state: &State) -> Result<(), String> {
     fixture.released.store(6, Ordering::SeqCst);
     wait(state, "submitted frame feedback and focus", || {
         check(
-            "document.querySelector('#device-status-retry-lcd-retry-status').textContent==='Кадры отправлены' && retryRequest===2 && document.activeElement?.dataset.outputRetry==='retry-lcd' && document.querySelector('[data-output-status=retry-lcd]').textContent==='Кадры отправлены'",
+            "document.querySelector('#device-status-retry-lcd-retry-status').textContent==='Отправлено на устройство' && retryRequest===2 && document.activeElement?.dataset.outputRetry==='retry-lcd' && document.querySelector('[data-output-status=retry-lcd]').textContent==='Отправлено на устройство'",
         )
     })?;
     assert!(status(FAILED_LCD).frames_sent > 0);

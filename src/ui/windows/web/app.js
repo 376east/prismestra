@@ -65,12 +65,16 @@ const englishRuntimeStatus=new Map([
  ['Включён синтетический кадр. Рабочий стол не захватывается.','The test pattern is active. Desktop capture is off.'],
  ['Параметры обновлены. Проверяйте статусы передачи устройств.','Settings updated. Check device output status.'],
  ['Параметры обновлены на программном стенде.','Settings updated in the software test environment.'],
+ ['Завершаем операции подсветки, LCD и датчиков…','Finishing lighting, LCD and sensor operations…'],
+ ['Операции завершены.','Operations finished.'],
+ ['Lighting and LCD output stopped. Prismestra is still running. The LCD may keep its last image. Select Turn lights on to resume.','Lighting and LCD output stopped. Prismestra is still running. The LCD may keep its last image. Select Turn lights on to resume.'],
+ ['Lighting and LCD output stopped. Prismestra is still running. The LCD may keep its last image. To resume, open Connections and select Apply.','Lighting and LCD output stopped. Prismestra is still running. The LCD may keep its last image. To resume, open Connections and select Apply.'],
+ ['Removed draft bindings for devices and screen sources outside this profile.','Removed draft bindings for devices and screen sources outside this profile.'],
 ]);
 const outputDetails=new Map([
  ['Экранная подсветка выключена','Screen lighting is off'],
  ['Источник кадров — края общей сцены','Frame source: Scene edges'],
  ['Источник кадров — монитор','Frame source: Monitor'],
- ['Базовая сцена · кадр монитора устарел','Base scene · Monitor frame expired'],
  ['Базовая сцена · нет свежего кадра монитора','Base scene · Waiting for a fresh monitor frame'],
  ['Базовая сцена · источник экрана недоступен','Base scene · Screen source unavailable'],
  ['Добавьте ленту в «Устройствах» и выберите назначение «От экрана».','Add a lighting device in Devices and select Screen lighting as its output mode.'],
@@ -104,6 +108,14 @@ const outputErrors=new Map([
  ['Показатель: имя=подпись','Use key=label for each reading.'],
 ]);
 function outputDetail(text) {
+ if(view==='ambient'&&text==='Базовая сцена · кадр монитора устарел')
+  return ui('Используем цвета сцены, пока с экрана не поступает новое изображение.','Using scene colors while screen capture is delayed.');
+ if(english&&view==='devices'){
+  const updates=/^Отправлено обновлений: ([0-9]+)$/.exec(text);
+  if(updates)return `Updates sent: ${updates[1]}`;
+  const commands=/^Отправлено команд: ([0-9]+)$/.exec(text);
+  if(commands)return `Commands sent: ${commands[1]}`;
+ }
  if(!english||!outputPage(view))return text;
  if(text.startsWith('Предпросмотр недоступен: '))return 'LCD preview unavailable. Check the device connection.';
  return outputDetails.get(text)??text;
@@ -192,7 +204,7 @@ function receiveOutputRetry({id,request,scope,status,message}) {
  const retry=outputRetries.get(id);
  if(!retry||scope!==retryScope()||retry.request!==request||retry.status!=='pending')return;
  if(status==='failed')retry.message=ui(message||'Подключение не удалось','Connection failed');
- else if(status==='submitted')retry.message=ui('Кадры отправлены','Frames sent');
+ else if(status==='submitted')retry.message=ui('Отправлено на устройство','Sent to device');
  else if(status==='cancelled')retry.message=ui('Подключение отменено','Connection cancelled');
  else return;
  retry.status=status;
@@ -543,7 +555,7 @@ function reorderPalette(actionCode) {
 function renderScene() {
  const effectIds=Object.keys(effects);
  if(!Object.hasOwn(effects,draft.effect))effectIds.unshift(draft.effect);
- return heading(draftDisplayName,ui('Применение обновляет активную сцену. Сохранение записывает версию в библиотеку.','Apply updates the active scene. Save keeps a version in your library.'),action(ui('Сохранить в библиотеку','Save to library'),'save-scene')+action(ui('Создать копию','Make a copy'),'clone')+(selectedId?action(ui('Переименовать','Rename'),'rename'):'')+action(ui('Применить сцену','Apply scene'),'apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status" role="status" aria-atomic="true"></p><p id="editor-lamp-status" class="scene-activation-status" role="status"></p><div class="editor-layout"><section class="preview-panel" aria-label="${ui('Предпросмотр','Preview')}"><div class="stage"><canvas id="stage" aria-label="${ui('Предпросмотр сцены из движка Prismestra','Prismestra engine scene preview')}"></canvas><div class="stage-bar"><span class="stage-chip">${ui('Предпросмотр','Preview')}</span></div><div class="stage-caption">${ui('Кадр движка · черновик','Engine frame · draft')}</div>${renderPlacementObjects()}</div>${renderPlacementControls()}<p class="preview-description">${ui('Предпросмотр не меняет подсветку. Выходы RGB и LCD включаются отдельно.','Preview leaves lighting unchanged. RGB and LCD outputs are enabled separately.')}</p><div class="native-field"><label for="scene-effect">${ui('Эффект','Effect')}</label><select id="scene-effect" data-mutation ${disabled()}>${effectIds.map(id=>effectOption(id,draft.effect)).join('')}</select></div><div class="parameter-panel" style="margin-top:20px"><h2>${ui('Выходы','Outputs')}</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> ${ui('Основной свет · RGB и LCD','Primary lighting · RGB and LCD')}</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> ${ui('Дополнительный свет','Secondary lighting')}</label><button class="button" data-view="devices">${ui('Устройства и свойства','Devices and properties')}</button></div></section><aside class="parameter-panel" id="scene-parameters" aria-label="${ui('Параметры сцены','Scene parameters')}">${sceneParameters()}</aside></div>`;
+ return heading(draftDisplayName,ui('«Применить сцену» меняет текущую подсветку. «Сохранить в библиотеку» сохраняет черновик, чтобы использовать его позже.','Apply scene updates the current lighting scene. Save to library keeps this draft for later.'),action(ui('Сохранить в библиотеку','Save to library'),'save-scene')+action(ui('Создать копию','Make a copy'),'clone')+(selectedId?action(ui('Переименовать','Rename'),'rename'):'')+action(ui('Применить сцену','Apply scene'),'apply-scene',true,'data-needs-change="scene"'))+`<p class="scene-status" role="status" aria-atomic="true"></p><p id="editor-lamp-status" class="scene-activation-status" role="status"></p><div class="editor-layout"><section class="preview-panel" aria-label="${ui('Предпросмотр','Preview')}"><div class="stage"><canvas id="stage" aria-label="${ui('Предпросмотр черновика сцены','Scene draft preview')}"></canvas><div class="stage-bar"><span class="stage-chip">${ui('Предпросмотр','Preview')}</span></div><div class="stage-caption">${ui('Черновик сцены','Scene draft')}</div>${renderPlacementObjects()}</div>${renderPlacementControls()}<p class="preview-description">${ui('Переключатели ниже управляют передачей на подсветку и LCD.','The switches below control lighting and LCD output.')}</p><div class="native-field"><label for="scene-effect">${ui('Эффект','Effect')}</label><select id="scene-effect" data-mutation ${disabled()}>${effectIds.map(id=>effectOption(id,draft.effect)).join('')}</select></div><div class="parameter-panel" style="margin-top:20px"><h2>${ui('Выходы','Outputs')}</h2><label class="native-group"><input type="checkbox" data-group="pc" ${state.groups.pc?'checked':''} data-mutation ${disabled()}> ${ui('Основной свет · RGB и LCD','Primary lighting · RGB and LCD')}</label><label class="native-group"><input type="checkbox" data-group="door" ${state.groups.door?'checked':''} data-mutation ${disabled()}> ${ui('Дополнительный свет','Secondary lighting')}</label><button class="button" data-view="devices">${ui('Устройства и свойства','Devices and properties')}</button></div></section><aside class="parameter-panel" id="scene-parameters" aria-label="${ui('Параметры сцены','Scene parameters')}">${sceneParameters()}</aside></div>`;
 }
 function placementLabel(object,objects) {
  return objects.some(other=>other.id!==object.id&&other.label===object.label)
@@ -761,13 +773,13 @@ const transportLabels = new Map([
 const outputStatuses=new Map([
  ['Выключено','Off'],['Выключается','Turning off'],['Подключается','Connecting'],
  ['Команда выключения отправлена','Off command sent'],
- ['Ожидает повтора','Waiting to retry'],['Кадры отправлены','Frames sent'],['Недоступно','Unavailable'],
+ ['Ожидает повтора','Waiting to retry'],['Кадры отправлены','Sent to device'],['Недоступно','Unavailable'],
  ['Предпросмотр','Preview'],['Подключение занято другим выходом Prismestra','Connection in use by another Prismestra output'],
  ['Проверьте доступ Home Assistant','Check Home Assistant access'],
  ['Нет данных о состоянии','Status unavailable'],
 ]);
-const outputStatusLabel=(label,device)=>label==='Кадры отправлены'&&device?.driver?.type==='home_assistant'
- ? ui('Команды отправлены','Commands sent')
+const outputStatusLabel=(label,device)=>label==='Кадры отправлены'
+ ? (device?.driver?.type==='home_assistant'?ui('Команды отправлены','Commands sent'):ui('Отправлено на устройство','Sent to device'))
  : ui(label,outputStatuses.get(label)??(label?'Status unavailable':''));
 async function copyOutputStatus(id) {
  if(view!=='devices'||closing||pendingView||commandPending||state?.editor?.page!=='devices'||state.editor.deviceId!==id)return;
@@ -781,7 +793,7 @@ async function copyOutputStatus(id) {
  const lines=[ui(`Транспорт: ${transport}`,`Transport: ${transport}`),ui(`Состояние: ${safeStatus}`,`Status: ${safeStatus}`)];
  if(rawStatus==='Кадры отправлены'&&typeof frames==='string'&&/^[1-9][0-9]{0,19}$/.test(frames)){
   lines.push(device.driver?.type==='home_assistant'?ui(`Отправлено команд: ${frames}`,`Commands sent: ${frames}`)
-   :ui(`Отправлено кадров: ${frames}`,`Frames sent: ${frames}`));
+   :ui(`Отправлено обновлений: ${frames}`,`Updates sent: ${frames}`));
  }
  const sceneAccepted=deviceSceneAccepted(device,rawStatus);
  if(sceneAccepted)lines.push(sceneAccepted);
@@ -1187,10 +1199,6 @@ const englishAliceStatus=new Map([
  ['Для лампы сцены войдите через Яндекс ID.','Sign in with Yandex ID to use the scene lamp.'],
  ['Дождитесь завершения операции Алисы и примените сцену заново.','Wait for the current Alice operation before applying the scene again.'],
  ['Команда лампе отменена.','The lamp command was cancelled.'],
- ['Яндекс не подтвердил команду. Автоматического повтора не будет.','Yandex did not confirm the command. No automatic retry.'],
- ['Результат команды не подтверждён. Автоматического повтора не будет. Текущая доступность неизвестна.','The lamp command was not confirmed. No automatic retry. Current availability is unknown.'],
- ['Результат команды не подтверждён. Автоматического повтора не будет. Последнее наблюдение перед командой: лампа была включена. Текущая доступность неизвестна.','The lamp command was not confirmed. No automatic retry. Last observed before the command: the light was on. Current availability is unknown.'],
- ['Результат команды не подтверждён. Автоматического повтора не будет. Последнее наблюдение перед командой: лампа была выключена. Текущая доступность неизвестна.','The lamp command was not confirmed. No automatic retry. Last observed before the command: the light was off. Current availability is unknown.'],
  ['Проверьте системное время для входа в Алису.','Check the system clock before signing in to Alice.'],
  ['Доступ к Алисе истёк или отозван. Войдите через Яндекс ID заново.','Alice access expired or was revoked. Sign in with Yandex ID again.'],
  ['Яндекс отклонил доступ. Войдите заново и проверьте права на лампу.','Yandex denied access. Sign in again and check access to the lamp.'],
@@ -1231,10 +1239,18 @@ const englishAliceStatus=new Map([
 ]);
 function aliceStatusText(message) {
  if(message==='Применяем яркость лампы сцены…')return ui('Отправляем разовую команду лампе сцены…','Sending one command to the scene light…');
+ if(message==='Яндекс не подтвердил команду. Автоматического повтора не будет.'
+    || message?.startsWith('Результат команды не подтверждён. Автоматического повтора не будет.')){
+  const before=message.includes('Последнее наблюдение перед командой: лампа была включена.')
+   ?ui(' До команды лампа была включена.',' Before the command, the lamp was on.')
+   :message.includes('Последнее наблюдение перед командой: лампа была выключена.')
+    ?ui(' До команды лампа была выключена.',' Before the command, the lamp was off.')
+    :'';
+  return ui('Яндекс не подтвердил результат. Prismestra не повторит команду автоматически.','Yandex didn’t confirm the result. Prismestra won’t retry automatically.')
+   +before+ui(' Проверьте лампу перед повтором.',' Check the lamp before trying again.');
+ }
  if(!english||!message)return message;
- return englishAliceStatus.get(message)??(message.endsWith('Автоматического повтора не будет.')
-  ?'The lamp command was not confirmed. No automatic retry.'
-  :/[А-Яа-яЁё]/u.test(message)?'Alice could not complete the request.':message);
+ return englishAliceStatus.get(message)??(/[А-Яа-яЁё]/u.test(message)?'Alice could not complete the request.':message);
 }
 function receiveSceneLamp({request,message}) {
  if(sceneActivation?.request!==request||!sceneActivation.applied||!sceneActivation.binding)return;
