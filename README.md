@@ -2,7 +2,7 @@
 
 Run one lighting scene across a keyboard, an LED strip and the lights behind a monitor. Keep temperatures on a compatible LCD. Prismestra runs on Windows and keeps the scene active when you close the editor.
 
-**[Download for Windows](https://github.com/376east/prismestra/releases/latest)** · [Check my devices](docs/compatibility.md) · [Get help](#get-help) · [Русский](README.ru.md)
+**[Download for Windows](https://github.com/376east/prismestra/releases/latest)** · [Find your device](https://376east.github.io/prismestra/) · [Get help](#get-help) · [Русский](README.ru.md)
 
 ## Get started
 

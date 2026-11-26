@@ -1,20 +1,22 @@
 # Compatibility
 
-Prismestra supports specific device families and connection modes. Check your model, firmware and connection before relying on an output.
+Prismestra supports specific device families and connection modes. The model catalog shows entries from the bundled OpenRGB backend, Prismestra connections and research candidates. Check your model, firmware and connection before relying on an output. [Find your device](https://376east.github.io/prismestra/)
 
 | Device family | How to connect | Verification scope |
 | --- | --- | --- |
-| PC RGB via OpenRGB | Setup includes an SDK6 backend. First run searches for Direct-capable controllers. Configure the controller manually in **Devices** if needed. | Inventory and frame submissions checked on one kit at `6839f196`. Coverage depends on the controller and backend. |
-| Surplife E1 Bluetooth | First run searches for compatible controllers. You can also select the BLE address manually. | A 13 November 2026 research probe lit one LED on one 153-point strip. Native capability checks and other models need separate acceptance. [Probe record](validation/surplife-153.json) |
-| Thermaltake LCD | First run searches for supported USB interfaces. Check the saved device connection if Windows can see the LCD but the app cannot. | JPEG acknowledgments and temperature reads checked on one TT 264A:233C at `6839f196`. |
+| Lighting through OpenRGB | Setup includes an SDK6 backend. First run searches for Direct-capable controllers. Configure the controller manually in **Devices** if needed. | Inventory and frame submissions checked on one kit at `6839f196`. Coverage depends on the controller and backend. |
+| Bluetooth lighting | First run searches for supported Surplife E1 controllers. Known legacy BLE profiles can be configured manually. | A 13 November 2026 research probe lit one LED on one 153-point strip. Native capability checks and other models need separate acceptance. [Probe record](validation/surplife-153.json) |
+| LCD displays | First run searches for supported Thermaltake USB interfaces. Check the saved device connection if Windows can see the LCD but the app cannot. | JPEG acknowledgments and temperature reads checked on one TT 264A:233C at `6839f196`. |
 | Skydimo RGB | Use a configured connection for a supported model. | Frame submissions recorded for one configured output at `6839f196`. See the [local kit record](validation/windows-local-kit.json). |
-| WLED | Find an advertised controller on the LAN or enter its DDP endpoint. DDP sends per-pixel animation. | Software receiver tests. Physical output still needs acceptance. |
+| WLED | WLED is firmware for networked LED controllers. Find one on the LAN or enter its address. Prismestra sends per-pixel animation over DDP. | Software receiver tests. Physical output still needs acceptance. |
 | Home Assistant | Find the server on the LAN or enter its URL, save a token and select a light for whole-light commands. | Software and HTTP fixture tests. Physical output still needs acceptance. |
 | Alice pilot | Sign in with Yandex ID and select a supported lamp for explicit controls or optional scene brightness. | Physical lamp output remains unverified for 0.2.0. [Alice scene binding](https://github.com/376east/prismestra/pull/221) |
 
 If a device needs manual setup, choose its family in **Devices** and open its connection settings. LED layouts may need manual configuration. [First-run setup](windows-installer.md) · [Device connections](universal-connections.md)
 
 Keep FanControl running for fans and pumps. Assign one lighting writer to each device. If a WLED controller also appears in Home Assistant, choose one route and check whether other automations control it. [Choose one WLED write path](universal-connections.md#choose-one-write-path-for-a-wled-controller)
+
+[Device expansion backlog](devices/expansion.md) tracks known protocols that still need an adapter or verification.
 
 ## Device paths and evidence
 

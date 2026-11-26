@@ -1,0 +1,854 @@
+{
+  "revision": "550017bb09f933a653ef113290c55137b469cf78",
+  "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/docs/compatibility.md",
+  "devices": [
+    {
+      "name": "WLED",
+      "vendor": "WLED",
+      "type": "LED controller",
+      "aliases": [
+        "WLED DDP",
+        "Distributed Display Protocol"
+      ],
+      "connection": "LAN / UDP DDP",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/wled.rs",
+      "route": "Prismestra WLED DDP",
+      "status": "implemented",
+      "detail": "WLED runs on networked LED controllers such as ESP32 boards. Prismestra sends per-pixel lighting over DDP. Software receiver tests cover packet submission."
+    },
+    {
+      "name": "Home Assistant",
+      "vendor": "Home Assistant",
+      "type": "Light integration",
+      "aliases": [
+        "HA",
+        "Home Assistant light"
+      ],
+      "connection": "LAN / HTTP(S)",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/devices/home_assistant.rs",
+      "route": "Prismestra Home Assistant REST",
+      "status": "implemented",
+      "detail": "Binds a light entity and issues capability-aware whole-light commands. Check the entity, integration and model separately."
+    },
+    {
+      "name": "Alice (Yandex Smart Home)",
+      "vendor": "Yandex",
+      "type": "Light integration",
+      "aliases": [
+        "Yandex Alice",
+        "Yandex Smart Home",
+        "Алиса",
+        "Умный дом Яндекса"
+      ],
+      "connection": "Yandex cloud / OAuth",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/ui/windows/alice.rs",
+      "route": "Prismestra Alice pilot",
+      "status": "implemented",
+      "detail": "Supports explicit on/off and brightness controls for selected lamps, plus opted-in brightness on scene Apply. Physical lamp output remains unverified for 0.2.0."
+    },
+    {
+      "name": "Surplife E1",
+      "vendor": "Surplife",
+      "type": "LED controller",
+      "aliases": [
+        "Surplife BLE",
+        "E104"
+      ],
+      "connection": "Bluetooth LE / GATT",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/docs/surplife-e1-pixels.md",
+      "route": "Prismestra Surplife E1 pixels",
+      "status": "implemented",
+      "detail": "The native path requires a compatible controller and a confirmed single-segment point count before sending E104 pixel frames. Full optical mapping and physical reconnect need acceptance."
+    },
+    {
+      "name": "Surplife BLE legacy 20 groups",
+      "vendor": "Surplife",
+      "type": "LED controller profile",
+      "aliases": [
+        "Door BLE",
+        "door20",
+        "E103"
+      ],
+      "connection": "Bluetooth LE / GATT",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/app/device_setup.rs#L69-L85",
+      "route": "Prismestra Door BLE legacy",
+      "status": "implemented",
+      "detail": "20 logical groups via the legacy profile. Select the matching geometry explicitly."
+    },
+    {
+      "name": "Surplife BLE legacy 153 LED",
+      "vendor": "Surplife",
+      "type": "LED controller profile",
+      "aliases": [
+        "Door BLE",
+        "door153",
+        "E103"
+      ],
+      "connection": "Bluetooth LE / GATT",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/app/device_setup.rs#L69-L85",
+      "route": "Prismestra Door BLE legacy",
+      "status": "implemented",
+      "detail": "153-point legacy profile. Visible one-to-one mapping for the legacy 153-point command is unconfirmed."
+    },
+    {
+      "name": "Surplife E1 153-point optical marker",
+      "vendor": "Surplife",
+      "type": "LED controller",
+      "aliases": [
+        "Surplife 153",
+        "E104"
+      ],
+      "connection": "Bluetooth LE / GATT",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/docs/validation/surplife-153.json",
+      "route": "Pre-integration E104 probe",
+      "status": "verified",
+      "detail": "On 13 November 2026 a single E104 marker at index 0 lit one physical LED on one 153-point, single-segment controller (product 170, LED protocol 11). Hardware revision and firmware were unrecorded. This historical probe leaves other indices, models, and the native build open."
+    },
+    {
+      "name": "Thermaltake LCD 264A:233C",
+      "vendor": "Thermaltake",
+      "type": "LCD",
+      "aliases": [
+        "TT LCD",
+        "264A:233C MI_01",
+        "264A 233C"
+      ],
+      "connection": "USB HID",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/lcd/hid_policy.rs",
+      "route": "Prismestra TT LCD",
+      "status": "implemented",
+      "detail": "Matches the 264A:233C MI_01 JPEG display interface and reads liquid temperature via MI_00. One historical run recorded JPEG ACKs. Retail SKU, firmware and visible overlay acceptance remain open."
+    },
+    {
+      "name": "Gigabyte RGB Fusion 2 USB",
+      "vendor": "Gigabyte",
+      "type": "Motherboard RGB controller",
+      "aliases": [
+        "Fusion2",
+        "RGB Fusion 2.0",
+        "048D:5702",
+        "B650 EAGLE AX",
+        "Gigabyte B650 EAGLE AX",
+        "IT5702"
+      ],
+      "connection": "USB HID",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/fixtures/fusion2-provenance.md",
+      "route": "Prismestra Fusion2 (two ARGB headers)",
+      "status": "implemented",
+      "detail": "Native path uses the 048D:5702 IT5702 layout derived from the B650 EAGLE AX's two ARGB controller zones. LED_C is outside the native route. Check the descriptor and exact board revision."
+    },
+    {
+      "name": "ENE DRAM AUDA0-E6K5-0101",
+      "vendor": "ENE",
+      "type": "RGB memory controller",
+      "aliases": [
+        "ENE DRAM",
+        "ENE RGB RAM",
+        "ENE8"
+      ],
+      "connection": "SMBus / PawnIO",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/ene.rs",
+      "route": "Prismestra native ENE DRAM",
+      "status": "implemented",
+      "detail": "Native path checks this controller version and an eight-LED layout. DIMMs with other controller versions or layouts need separate acceptance."
+    },
+    {
+      "name": "Valkyrie VK99",
+      "vendor": "Valkyrie",
+      "type": "Keyboard",
+      "aliases": [
+        "VK99",
+        "VK-99"
+      ],
+      "connection": "USB HID",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/fixtures/valkyrie-provenance.md",
+      "route": "Prismestra native Valkyrie feature HID",
+      "status": "implemented",
+      "detail": "102 LEDs, interface 2. Model-specific descriptor checks and packet fixtures are available. Physical layout and recovery need acceptance."
+    },
+    {
+      "name": "Valkyrie VK99 Pro",
+      "vendor": "Valkyrie",
+      "type": "Keyboard",
+      "aliases": [
+        "VK99 Pro",
+        "VK-99 Pro"
+      ],
+      "connection": "USB HID",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/fixtures/valkyrie-provenance.md",
+      "route": "Prismestra native Valkyrie feature HID",
+      "status": "implemented",
+      "detail": "98 LEDs, interface 3. Model-specific descriptor checks and packet fixtures are available. Physical layout and recovery need acceptance."
+    },
+    {
+      "name": "Skydimo SK0121",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 51 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0124",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 54 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0127",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 65 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0132",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 77 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0134",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 71 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0149",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 107 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0201",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 40 LEDs (two sides). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0202",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 60 LEDs (two sides). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0204",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 50 LEDs (two sides). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0402",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 72 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0403",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 96 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0404",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 144 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0410",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table permits a resizable layout up to 300 LEDs. Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0801",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 2 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0802",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 18 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0803",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 10 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0901",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 14 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0E01",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 16 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0F01",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 58 LEDs (two sides). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0F02",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 50 LEDs (two sides). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0H01",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 2 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0H02",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 4 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0K01",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 120 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0K02",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 15 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0L21",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 76 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0L24",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 80 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0L27",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 96 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0L32",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 114 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0L34",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 112 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0M01",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 24 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0N01",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 256 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0N02",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 1024 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0N03",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 253 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SK0S01",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 32 LEDs (strip). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SKA124",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 70 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SKA127",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 81 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SKA132",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 95 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SKA134",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 93 LEDs (three-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SKB124",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 104 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SKB127",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 122 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SKB132",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 138 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "Skydimo SKB134",
+      "vendor": "Skydimo",
+      "type": "RGB controller",
+      "connection": "USB serial",
+      "source": "https://github.com/376east/prismestra/blob/550017bb09f933a653ef113290c55137b469cf78/src/transport/skydimo.rs",
+      "route": "Prismestra Skydimo Serial",
+      "status": "implemented",
+      "detail": "Native table defines 142 LEDs (four-sided perimeter). Physical binding and LED order need acceptance."
+    },
+    {
+      "name": "BanlanX SP611E",
+      "vendor": "BanlanX",
+      "type": "LED controller",
+      "aliases": [
+        "SP611E",
+        "BanlanX2"
+      ],
+      "connection": "Bluetooth LE / GATT",
+      "source": "https://github.com/monty68/uniled/blob/7b2536984403f0212f8c5959953a6b6492c46e12/custom_components/uniled/lib/ble/banlanx2.py",
+      "route": "Candidate BLE whole-light commands",
+      "status": "research",
+      "detail": "UniLED implements status and whole RGB commands. Need matched advertisement, GATT and full status from one confirmed hardware and firmware revision before binding. No Prismestra adapter."
+    },
+    {
+      "name": "BanlanX SP621E",
+      "vendor": "BanlanX",
+      "type": "LED controller",
+      "aliases": [
+        "SP621E"
+      ],
+      "connection": "Bluetooth LE / GATT",
+      "source": "https://github.com/monty68/uniled/blob/7b2536984403f0212f8c5959953a6b6492c46e12/custom_components/uniled/lib/ble/banlanx2.py",
+      "route": "Candidate BLE whole-light commands",
+      "status": "research",
+      "detail": "UniLED lists this separately from SP611E. Shared status markers are insufficient to distinguish the two. Need model-specific identity and Prismestra acceptance."
+    },
+    {
+      "name": "LED Hue SP110E",
+      "vendor": "LED Hue",
+      "type": "LED controller",
+      "aliases": [
+        "SP110E"
+      ],
+      "connection": "Bluetooth LE / GATT",
+      "source": "https://github.com/monty68/uniled/blob/7b2536984403f0212f8c5959953a6b6492c46e12/custom_components/uniled/lib/ble/led_hue.py",
+      "route": "Candidate BLE whole-light commands",
+      "status": "research",
+      "detail": "UniLED implements its model-specific whole-color commands. Need a matching revision, a status fixture and a Prismestra adapter."
+    },
+    {
+      "name": "Govee H6053",
+      "vendor": "Govee",
+      "type": "Zone light",
+      "aliases": [
+        "H6053"
+      ],
+      "connection": "Bluetooth LE / GATT",
+      "source": "https://github.com/Jaano/govee_lights/blob/52461db4b5834754f4551a1a284aaf4cec8d70e8/custom_components/govee_lights/govee_ble.py",
+      "route": "Candidate BLE zone commands",
+      "status": "research",
+      "detail": "Upstream implements model-dependent zone masks. Need a fixture for this SKU and firmware, physical zone mapping and Prismestra implementation."
+    },
+    {
+      "name": "Govee H6072",
+      "vendor": "Govee",
+      "type": "Zone light",
+      "aliases": [
+        "H6072"
+      ],
+      "connection": "Bluetooth LE / GATT",
+      "source": "https://github.com/Jaano/govee_lights/blob/52461db4b5834754f4551a1a284aaf4cec8d70e8/custom_components/govee_lights/govee_ble.py",
+      "route": "Candidate BLE zone commands",
+      "status": "research",
+      "detail": "Upstream implements model-dependent zone masks. Need distinct SKU and firmware evidence, actual zone count and Prismestra implementation."
+    },
+    {
+      "name": "ELK-BLEDOM",
+      "vendor": "ELK-BLEDOM",
+      "type": "LED controller family",
+      "connection": "Bluetooth LE / GATT",
+      "source": "https://github.com/dave-code-ruiz/elkbledom/blob/1.6.6/custom_components/elkbledom/model.py",
+      "route": "Candidate BLE whole-light commands",
+      "status": "research",
+      "detail": "Upstream has multiple command layouts under similar advertised names. Need one revision with a unique descriptor and known write contract before Prismestra implementation."
+    },
+    {
+      "name": "Corsair H150i ELITE LCD XT",
+      "vendor": "Corsair",
+      "type": "LCD",
+      "aliases": [
+        "CW-9060075-WW",
+        "iCUE H150i ELITE LCD XT"
+      ],
+      "connection": "USB HID",
+      "source": "https://github.com/v912485/h150i-lcd/tree/76d235b226585a3b474eafb88d7dd55386067076",
+      "route": "Candidate LCD media",
+      "status": "research",
+      "detail": "Need to match CW-9060075-WW to the exact LCD PID and firmware, then verify exclusive display binding, visible output and cooling coexistence on Windows."
+    },
+    {
+      "name": "Thermalright Trofeo Vision 6.86 V1.02",
+      "vendor": "Thermalright",
+      "type": "LCD",
+      "aliases": [
+        "Trofeo Vision",
+        "0416:5302"
+      ],
+      "connection": "USB HID",
+      "source": "https://github.com/Sandjab/Trofeo/blob/6f6af6286cd74e0a0221b889eb5c8b2bad52dfca/docs/PROTOCOL.md",
+      "route": "Candidate LCD media",
+      "status": "research",
+      "detail": "Published Type 2 panel evidence uses 0416:5302 and 1280×480 JPEG. Need exact panel identity beyond VID/PID, repeated frames and timeout recovery on Windows."
+    },
+    {
+      "name": "Thermalright Frozen Warframe 240",
+      "vendor": "Thermalright",
+      "type": "LCD",
+      "aliases": [
+        "Frozen Warframe 240 SCSI",
+        "0402:3922"
+      ],
+      "connection": "USB mass storage / SCSI",
+      "source": "https://github.com/Lexonight1/thermalright-trcc-linux/blob/41a79a734c5993cb0a790a245a84fad00176625b/doc/REFERENCE_DEVICES.md",
+      "route": "Candidate LCD media",
+      "status": "research",
+      "detail": "The device registry lists a 320×240 SCSI variant. Need exact panel, orientation and Windows access requirements before using a display-only transport."
+    },
+    {
+      "name": "NZXT Kraken Z53",
+      "vendor": "NZXT",
+      "type": "LCD",
+      "aliases": [
+        "Kraken Z3",
+        "1E71:3008"
+      ],
+      "connection": "USB HID + bulk",
+      "source": "https://github.com/liquidctl/liquidctl/blob/v1.16.0/liquidctl/driver/kraken3.py",
+      "route": "Candidate LCD media",
+      "status": "research",
+      "detail": "liquidctl covers the Kraken Z3 1E71:3008 path. Need to pair both interfaces to one instance, verify firmware-specific media behavior and check Windows coexistence with CAM."
+    },
+    {
+      "name": "NZXT Kraken Z63",
+      "vendor": "NZXT",
+      "type": "LCD",
+      "aliases": [
+        "Kraken Z3",
+        "1E71:3008"
+      ],
+      "connection": "USB HID + bulk",
+      "source": "https://github.com/liquidctl/liquidctl/blob/v1.16.0/liquidctl/driver/kraken3.py",
+      "route": "Candidate LCD media",
+      "status": "research",
+      "detail": "liquidctl covers the Kraken Z3 1E71:3008 path. Need to pair both interfaces to one instance, verify firmware-specific media behavior and check Windows coexistence with CAM."
+    },
+    {
+      "name": "NZXT Kraken Z73",
+      "vendor": "NZXT",
+      "type": "LCD",
+      "aliases": [
+        "Kraken Z3",
+        "1E71:3008"
+      ],
+      "connection": "USB HID + bulk",
+      "source": "https://github.com/liquidctl/liquidctl/blob/v1.16.0/liquidctl/driver/kraken3.py",
+      "route": "Candidate LCD media",
+      "status": "research",
+      "detail": "liquidctl covers the Kraken Z3 1E71:3008 path. Need to pair both interfaces to one instance, verify firmware-specific media behavior and check Windows coexistence with CAM."
+    },
+    {
+      "name": "NZXT Kraken Elite 2023",
+      "vendor": "NZXT",
+      "type": "LCD",
+      "aliases": [
+        "300C",
+        "Kraken 2023 Elite"
+      ],
+      "connection": "USB HID + bulk",
+      "source": "https://github.com/liquidctl/liquidctl/blob/v1.16.0/liquidctl/driver/kraken3.py",
+      "route": "Candidate LCD media",
+      "status": "research",
+      "detail": "Separate 1E71:300C path. Upstream describes firmware-specific limitations. Need exact firmware, display-only binding and Windows media tests."
+    },
+    {
+      "name": "NZXT Kraken Elite RGB 2024",
+      "vendor": "NZXT",
+      "type": "LCD",
+      "aliases": [
+        "3012",
+        "Kraken 2024 Elite RGB"
+      ],
+      "connection": "USB HID + bulk",
+      "source": "https://github.com/liquidctl/liquidctl/blob/v1.16.0/liquidctl/driver/kraken3.py",
+      "route": "Candidate LCD media",
+      "status": "research",
+      "detail": "Separate 1E71:3012 path. Need to reproduce the upstream static and GIF sequence on the target firmware and verify Windows interface access."
+    },
+    {
+      "name": "Lian Li Galahad II LCD",
+      "vendor": "Lian Li",
+      "type": "LCD",
+      "aliases": [
+        "GA II LCD",
+        "0416:7395"
+      ],
+      "connection": "USB bulk",
+      "source": "https://github.com/sbulav/galahad-linux-control/blob/5cd182b44b4101a69d9f75da347b3d930eb1aa93/src/usb.rs",
+      "route": "Candidate LCD media",
+      "status": "research",
+      "detail": "Upstream uses H.264 over bulk on 0416:7395. Need Windows access, display-only ownership, an encoder plan and evidence that cooling is unaffected."
+    },
+    {
+      "name": "Woox R9077",
+      "vendor": "Woox",
+      "type": "Smart bulb",
+      "aliases": [
+        "R9077",
+        "Woox RGB+CCT LED"
+      ],
+      "connection": "Zigbee / Zigbee2MQTT / Home Assistant",
+      "source": "https://www.zigbee2mqtt.io/devices/R9077.html",
+      "route": "Candidate validation over Home Assistant REST",
+      "status": "research",
+      "detail": "Upstream exposes brightness, XY color and color temperature. Need the resulting Home Assistant light entity and visible command acceptance for this model."
+    },
+    {
+      "name": "Matter lights via Home Assistant",
+      "vendor": "Matter",
+      "type": "Light integration",
+      "connection": "Matter / Home Assistant REST",
+      "source": "https://www.home-assistant.io/integrations/matter/",
+      "route": "Candidate validation over Home Assistant REST",
+      "status": "research",
+      "detail": "Need one exact commissioned model and a stable light entity with reported modes and visible command results. The route relies on Home Assistant and its Matter Server."
+    },
+    {
+      "name": "Zigbee lights via ZHA",
+      "vendor": "Zigbee",
+      "type": "Light integration",
+      "connection": "Zigbee / ZHA / Home Assistant REST",
+      "source": "https://www.home-assistant.io/integrations/zha/",
+      "route": "Candidate validation over Home Assistant REST",
+      "status": "research",
+      "detail": "Need an exact light model, coordinator and entity capability record with visible command results. The route relies on ZHA."
+    },
+    {
+      "name": "Windows Dynamic Lighting",
+      "vendor": "Microsoft",
+      "type": "RGB integration",
+      "aliases": [
+        "LampArray",
+        "HID LampArray"
+      ],
+      "connection": "Windows LampArray API",
+      "source": "https://learn.microsoft.com/en-us/windows/apps/develop/devices-sensors/lighting-dynamic-lamparray",
+      "route": "Candidate native LampArray",
+      "status": "research",
+      "detail": "Need a LampArray adapter and tests on one Windows model and OS build covering ownership, topology, visible output and returning control."
+    }
+  ]
+}

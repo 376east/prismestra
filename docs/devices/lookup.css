@@ -1,0 +1,55 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f7f6f9;
+  --surface: #fff;
+  --text: #201e25;
+  --muted: #55515e;
+  --line: #dedbe4;
+  --accent: #51358e;
+  font: 16px/1.5 system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15141a;
+    --surface: #1d1b23;
+    --text: #f4f1f8;
+    --muted: #c0bacb;
+    --line: #3c3748;
+    --accent: #cbb6ff;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); }
+main { width: min(100% - 2rem, 58rem); margin: 0 auto; padding-bottom: 3rem; }
+nav { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .75rem; border-bottom: 1px solid var(--line); padding-block: 1rem; }
+nav a:first-child { font-weight: 750; color: var(--text); text-decoration: none; }
+header { margin-block: clamp(2.5rem, 8vw, 5rem) 2rem; }
+h1 { margin: 0 0 .4rem; font-size: clamp(2.35rem, 7vw, 4.2rem); line-height: 1.06; letter-spacing: -.05em; }
+p { margin: 0; }
+header p, footer, .metadata, #count { color: var(--muted); }
+a { color: var(--accent); text-underline-offset: .2em; }
+form { display: flex; align-items: end; gap: 1rem; flex-wrap: wrap; }
+form > div { flex: 1 1 14rem; }
+form .query { flex: 3 1 22rem; }
+label { display: block; margin-bottom: .35rem; font-weight: 650; }
+input, select, button { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: .4rem; padding: .65rem .8rem; }
+input, select { width: 100%; }
+button { margin-top: 1rem; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+details { margin-top: 1rem; color: var(--muted); }
+summary { cursor: pointer; }
+details p { margin-top: .35rem; }
+#count { margin-block: 1.25rem .5rem; }
+.results { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.results li { display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: .15rem 1rem; align-items: baseline; padding-block: .9rem; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.results h2 { font-size: 1.08rem; margin: 0; }
+.metadata, .details { grid-column: 1; }
+.status { color: var(--accent); font-size: .84rem; }
+.results a { grid-column: 2; grid-row: 2; font-size: .9rem; }
+footer { margin-top: 2rem; }
+footer p { margin-bottom: .6rem; }
+footer a { margin-right: 1rem; }
+@media (max-width: 32rem) {
+  .results li { display: block; }
+  .results li > * { margin-block: .2rem; }
+}
