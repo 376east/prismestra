@@ -102,7 +102,8 @@ impl Runtime {
 
         let id = &device.id;
         let is_lcd = device.role == Role::Lcd;
-        let group_off = !self.desired.on(self.target(id));
+        let target = self.target(id);
+        let group_off = !self.desired.on(target);
         // A registered output still has to submit Off. Keep its failure visible.
         let no_off_status = group_off
             && if is_lcd {
@@ -149,19 +150,23 @@ impl Runtime {
         if let Some(error) = recovery.and_then(|state| state.start_error.as_ref()) {
             return failed_activity(Some(error.message().into()));
         }
-        let (phase, frames, error) = if is_lcd {
+        let (phase, error) = if is_lcd {
             let Some(status) = self.lcd_status(id) else {
                 return OutputActivity::Unavailable(None);
             };
-            if group_off && status.phase == lcd_worker::Phase::Ready {
-                return match status.lcd_state {
-                    Some(lcd::State::Failed(error)) => failed_activity(Some(error)),
-                    Some(lcd::State::Blanked)
-                        if status.processed_revision == status.last_accepted_revision =>
-                    {
-                        OutputActivity::OffSubmitted
-                    }
-                    _ => OutputActivity::TurningOff,
+            if status.phase == lcd_worker::Phase::Ready {
+                if let Some(lcd::State::Failed(error)) = status.lcd_state {
+                    return failed_activity(Some(error));
+                }
+                let acknowledged = status.last_ack.is_some_and(|ack| {
+                    ack.active != group_off
+                        && ack.revision >= self.lcd_power_revision[target.index()]
+                });
+                return match (group_off, acknowledged) {
+                    (true, true) => OutputActivity::OffSubmitted,
+                    (true, false) => OutputActivity::TurningOff,
+                    (false, true) => OutputActivity::Sent(status.frames_sent),
+                    (false, false) => OutputActivity::Connecting,
                 };
             }
             let phase = match status.phase {
@@ -171,7 +176,7 @@ impl Runtime {
                 lcd_worker::Phase::Stopped => Phase::Stopped,
                 lcd_worker::Phase::Failed => Phase::Failed,
             };
-            (phase, status.frames_sent, status.error)
+            (phase, status.error)
         } else {
             let Some(status) = self.host.status(id) else {
                 return OutputActivity::Unavailable(None);
@@ -187,10 +192,9 @@ impl Runtime {
                     (false, false) => OutputActivity::Connecting,
                 };
             }
-            (status.phase, status.submitted, status.error)
+            (status.phase, status.error)
         };
         match phase {
-            Phase::Ready if frames > 0 => OutputActivity::Sent(frames),
             Phase::Connecting => error.map_or(OutputActivity::Connecting, OutputActivity::Retrying),
             Phase::Ready => OutputActivity::Connecting,
             Phase::Failed => failed_activity(error),
@@ -252,7 +256,7 @@ impl Runtime {
         self.output_revision
     }
     pub fn outputs_ready(&self) -> Result<bool, String> {
-        self.ready(|_| false)
+        self.ready(|_| false, true)
     }
     /// Reuse the configuration drain/persistence barrier.
     pub fn request_outputs(&mut self, outputs: OutputPlan) -> Result<u64, String> {

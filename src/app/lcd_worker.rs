@@ -15,6 +15,8 @@ pub(crate) mod receipt;
 #[derive(Clone, Debug)]
 pub struct Intent {
     pub revision: u64,
+    /// Intent revision of the latest on/off transition for this output group.
+    pub power_revision: u64,
     pub active: bool,
     pub suspended: bool,
     pub samples: Arc<[lcd::Sample]>,
@@ -36,10 +38,17 @@ pub struct Snapshot {
     /// Latest consumed intent, not acknowledgement of visible pixels.
     pub processed_revision: u64,
     pub frames_sent: u64,
+    pub(crate) last_ack: Option<AcknowledgedFrame>,
     pub preview: Arc<[u8]>,
     pub lcd_state: Option<lcd::State>,
     pub error: Option<String>,
     pub replaced: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AcknowledgedFrame {
+    pub(crate) revision: u64,
+    pub(crate) active: bool,
 }
 struct State {
     pending: Option<Intent>,
@@ -59,6 +68,9 @@ pub struct Worker {
 fn validate(intent: &Intent) -> Result<(), String> {
     if intent.revision == 0 || intent.samples.len() > 4096 {
         return Err("LCD intent requires a nonzero revision and at most 4096 samples".into());
+    }
+    if intent.power_revision == 0 || intent.power_revision > intent.revision {
+        return Err("LCD power revision must be within the intent revision".into());
     }
     let mut keys = BTreeSet::new();
     for sample in intent.samples.iter() {
@@ -115,6 +127,7 @@ impl Worker {
                     last_accepted_revision: 0,
                     processed_revision: 0,
                     frames_sent: 0,
+                    last_ack: None,
                     preview: Arc::from([]),
                     lcd_state: None,
                     error: None,
@@ -247,7 +260,12 @@ impl<T: ReportTransport> ReportTransport for Guarded<'_, T> {
         self.transport.read_ack(response, timeout)
     }
 }
-fn publish(shared: &Shared, controller: &Controller, revision: u64) {
+fn publish(
+    shared: &Shared,
+    controller: &Controller,
+    revision: u64,
+    acknowledged_active: Option<bool>,
+) {
     let frames = controller.frames_sent();
     let changed = shared
         .state
@@ -262,6 +280,9 @@ fn publish(shared: &Shared, controller: &Controller, revision: u64) {
     state.snapshot.processed_revision = state.snapshot.processed_revision.max(revision);
     if let Some(preview) = preview {
         state.snapshot.preview = preview;
+    }
+    if let Some(active) = acknowledged_active {
+        state.snapshot.last_ack = Some(AcknowledgedFrame { revision, active });
     }
     state.snapshot.frames_sent = frames;
     state.snapshot.lcd_state = Some(match controller.state() {
@@ -345,7 +366,17 @@ where
             epoch = next_epoch;
         }
         let changed = pending.is_some() || barrier;
+        let power_changed = pending.as_ref().is_some_and(|intent| {
+            !intent.suspended
+                && current
+                    .as_ref()
+                    .is_some_and(|previous| previous.power_revision != intent.power_revision)
+        });
         if let Some(intent) = pending {
+            if power_changed {
+                // The latest-value mailbox may already have skipped a power change.
+                controller.refresh_power_intent(intent.active);
+            }
             current = Some(intent);
         }
         let Some(intent) = &current else {
@@ -362,7 +393,7 @@ where
             }
         }
         if intent.suspended {
-            publish(shared, &controller, intent.revision);
+            publish(shared, &controller, intent.revision, None);
             wait(shared, epoch, None);
             continue;
         }
@@ -370,7 +401,7 @@ where
             lcd::State::Failed(message) => return Err(message),
             lcd::State::Disabled => false,
             lcd::State::Stopped => intent.active || changed,
-            lcd::State::Blanked => intent.active,
+            lcd::State::Blanked => intent.active || power_changed,
             lcd::State::Suspended => changed,
             lcd::State::Running => {
                 if !intent.active {
@@ -396,7 +427,12 @@ where
             } else {
                 Ok(())
             };
-            publish(shared, &controller, intent.revision);
+            let acknowledged_active = result
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .map(|frame| frame.frame_index.is_some());
+            publish(shared, &controller, intent.revision, acknowledged_active);
             let sent = result?;
             completed_clock?;
             if intent.active
@@ -407,7 +443,7 @@ where
                 receipt.record(generation, controller.frames_sent(), controller.preview());
             }
         } else if changed {
-            publish(shared, &controller, intent.revision);
+            publish(shared, &controller, intent.revision, None);
         }
         if shared.cancel.cancelled() {
             return Ok(());
@@ -661,6 +697,7 @@ mod tests {
     fn intent(revision: u64, active: bool, suspended: bool) -> Intent {
         Intent {
             revision,
+            power_revision: 1,
             active,
             suspended,
             samples: Arc::from([]),

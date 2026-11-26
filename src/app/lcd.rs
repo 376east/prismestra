@@ -245,6 +245,15 @@ impl Controller {
     pub fn resume(&mut self) {
         self.suspended = false;
     }
+
+    pub(crate) fn refresh_power_intent(&mut self, active: bool) {
+        if !active {
+            self.off_done = false;
+        } else if let Some(player) = &mut self.player {
+            player.refresh_content();
+        }
+    }
+
     pub fn poll<T: ReportTransport>(
         &mut self,
         transport: &mut T,
