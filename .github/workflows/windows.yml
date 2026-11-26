@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [master]
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   pull_request:
   workflow_dispatch:
     inputs:
@@ -17,10 +18,6 @@ on:
         required: true
         default: '0.1.0.8'
         type: string
-      publish_release:
-        description: Publish the tested Setup when running on an annotated release tag
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -32,13 +29,32 @@ concurrency:
 jobs:
   quick:
     name: Quick checks
+    if: >-
+      github.event_name != 'push' || github.ref_type != 'tag' ||
+      (github.repository_id == '1450402221' && github.event.created && !github.event.deleted)
+    permissions:
+      contents: read
+      actions: read
     runs-on: windows-latest
     timeout-minutes: 5
+    outputs:
+      release_version: ${{ steps.release.outputs.version }}
+      tag_object: ${{ steps.release.outputs.tag_object }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: ${{ github.event_name == 'push' && github.ref_type == 'tag' && '0' || '2' }}
+      - name: Verify the release tag and green master commit
+        id: release
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = ./scripts/installer/verify_release_tag.ps1 -Tag $env:GITHUB_REF_NAME -Commit $env:GITHUB_SHA -Repository $env:GITHUB_REPOSITORY
+          "version=$($release.Version)" >> $env:GITHUB_OUTPUT
+          "tag_object=$($release.TagObject)" >> $env:GITHUB_OUTPUT
       - name: Check formatting
         run: cargo +stable fmt --all -- --check
       - name: Check embedded editor commands
@@ -51,6 +67,9 @@ jobs:
         run: python scripts/test_pinned_setup_download.py
       - name: Check release packaging boundaries
         run: python scripts/test_package_release.py
+      - name: Check stable release tag verification
+        shell: pwsh
+        run: ./scripts/installer/test_release_tag.ps1
       - name: Check Inno source when installer inputs change
         if: github.event_name == 'pull_request'
         run: |
@@ -70,7 +89,9 @@ jobs:
 
   software:
     name: Full software checks
-    if: github.event_name == 'workflow_dispatch' && (inputs.validation == 'software' || inputs.validation == 'setup')
+    if: >-
+      needs.quick.outputs.release_version != '' ||
+      (github.event_name == 'workflow_dispatch' && (inputs.validation == 'software' || inputs.validation == 'setup'))
     needs: quick
     runs-on: windows-latest
     timeout-minutes: 25
@@ -94,8 +115,9 @@ jobs:
           cargo clippy --locked --manifest-path scripts/installer/policy-tool/Cargo.toml --target x86_64-pc-windows-msvc --all-targets -- -D warnings
       - name: Exercise native policy provisioning on the disposable runner
         if: >-
-          github.repository_id == '1450402221' && github.event_name == 'workflow_dispatch' &&
-          inputs.validation == 'setup' && runner.environment == 'github-hosted'
+          github.repository_id == '1450402221' && runner.environment == 'github-hosted' &&
+          (needs.quick.outputs.release_version != '' ||
+           (github.event_name == 'workflow_dispatch' && inputs.validation == 'setup'))
         env:
           RUSTFLAGS: -C target-feature=+crt-static
         run: |
@@ -122,12 +144,14 @@ jobs:
 
   package:
     name: ${{ inputs.validation == 'openrgb' && 'Warm OpenRGB component cache' || 'Build Windows Setup candidate' }}
+    needs: quick
     if: >-
       github.repository_id == '1450402221' &&
-      github.event_name == 'workflow_dispatch' &&
-      (inputs.validation == 'setup' ||
-       (inputs.validation == 'openrgb' && github.ref == 'refs/heads/master' &&
-        github.event.repository.default_branch == 'master' && !inputs.publish_release))
+      (needs.quick.outputs.release_version != '' ||
+       (github.event_name == 'workflow_dispatch' &&
+        (inputs.validation == 'setup' ||
+         (inputs.validation == 'openrgb' && github.ref == 'refs/heads/master' &&
+          github.event.repository.default_branch == 'master'))))
     permissions:
       contents: read
       actions: read
@@ -192,7 +216,7 @@ jobs:
         id: build
         shell: pwsh
         env:
-          DISPATCH_VERSION: ${{ inputs.installer_version }}
+          INSTALLER_VERSION: ${{ needs.quick.outputs.release_version || inputs.installer_version }}
           VSDEVCMD: ${{ steps.msvc.outputs.vsdevcmd }}
           OPENRGB_CACHE_KEY: ${{ steps.openrgb.outputs.key }}
           OPENRGB_ONLY: ${{ inputs.validation == 'openrgb' }}
@@ -214,22 +238,10 @@ jobs:
             "openrgb_cache_ready=$(Test-Path -LiteralPath (Join-Path $output 'openrgb-cache-ready') -PathType Leaf)" >> $env:GITHUB_OUTPUT
             return
           }
-          $version = $env:DISPATCH_VERSION
-          if ($env:GITHUB_REF_TYPE -ceq 'tag') {
-            if ($env:GITHUB_REF_NAME -cmatch '^v(\d+\.\d+\.\d+)-preview\.([1-9]\d*)$') {
-              $version = "$($Matches[1]).$($Matches[2])"
-            } elseif ($env:GITHUB_REF_NAME -cmatch '^v(\d+\.\d+\.\d+)$') {
-              $version = "$($Matches[1]).0"
-            } else {
-              throw 'Expected vX.Y.Z or vX.Y.Z-preview.N'
-            }
-          } elseif (-not $version) {
-            $version = '0.1.0.8'
-          }
           rustup toolchain install 1.99.1 --profile minimal
           if ($LASTEXITCODE) { throw 'Installing the candidate Rust toolchain failed' }
           $env:RUSTUP_TOOLCHAIN = '1.99.1'
-          python scripts/build_windows_candidate.py --commit $env:GITHUB_SHA --version $version --vsdevcmd $env:VSDEVCMD --output $output @cacheArgs
+          python scripts/build_windows_candidate.py --commit $env:GITHUB_SHA --version $env:INSTALLER_VERSION --vsdevcmd $env:VSDEVCMD --output $output @cacheArgs
           if ($LASTEXITCODE) { throw 'Building the Windows candidate failed' }
           "candidate=prismestra-compiled-$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_OUTPUT
           "fixtures=prismestra-lifecycle-inputs-$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_OUTPUT
@@ -245,7 +257,7 @@ jobs:
           path: ${{ runner.temp }}/prismestra-openrgb-cache
           key: ${{ steps.openrgb.outputs.key }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: inputs.validation == 'setup'
+        if: github.event_name == 'push' || inputs.validation == 'setup'
         with:
           name: ${{ steps.build.outputs.candidate }}
           path: ${{ runner.temp }}/prismestra-candidate/candidate/
@@ -253,7 +265,7 @@ jobs:
           compression-level: 0
           retention-days: 14
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: inputs.validation == 'setup'
+        if: github.event_name == 'push' || inputs.validation == 'setup'
         with:
           name: ${{ steps.build.outputs.fixtures }}
           path: ${{ runner.temp }}/prismestra-candidate/fixtures/
@@ -261,7 +273,7 @@ jobs:
           compression-level: 0
           retention-days: 14
       - name: Retain the matching portable ZIP for QA
-        if: inputs.validation == 'setup'
+        if: github.event_name == 'push' || inputs.validation == 'setup'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: prismestra-portable-candidate-${{ github.run_attempt }}
@@ -283,7 +295,7 @@ jobs:
   installer:
     name: Windows lifecycle (${{ matrix.test }})
     needs: package
-    if: inputs.validation == 'setup'
+    if: github.event_name == 'push' || inputs.validation == 'setup'
     runs-on: windows-2025
     timeout-minutes: 15
     strategy:
@@ -364,9 +376,7 @@ jobs:
   candidate:
     name: Retain verified Windows candidate
     needs: [software, package, installer]
-    if: >-
-      github.event_name == 'workflow_dispatch' && inputs.validation == 'setup' &&
-      (!inputs.publish_release || !startsWith(github.ref, 'refs/tags/v'))
+    if: github.event_name == 'workflow_dispatch' && inputs.validation == 'setup'
     runs-on: windows-2025
     timeout-minutes: 10
     steps:
@@ -394,13 +404,14 @@ jobs:
 
   publish:
     name: Publish the tested Windows Setup
-    needs: [software, package, installer]
+    needs: [quick, software, package, installer]
     if: >-
-      github.repository_id == '1450402221' && github.event_name == 'workflow_dispatch' &&
-      inputs.validation == 'setup' && inputs.publish_release && startsWith(github.ref, 'refs/tags/v')
+      github.repository_id == '1450402221' && github.event_name == 'push' &&
+      github.ref_type == 'tag' && needs.quick.outputs.tag_object != ''
     runs-on: windows-2025
     timeout-minutes: 15
     permissions:
+      actions: read
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -416,24 +427,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SUMS_SHA256: ${{ needs.package.outputs.sums_sha256 }}
+          TAG_OBJECT: ${{ needs.quick.outputs.tag_object }}
+          INSTALLER_VERSION: ${{ needs.quick.outputs.release_version }}
         run: |
           $tag = $env:GITHUB_REF_NAME
-          if ((git cat-file -t "refs/tags/$tag") -cne 'tag' -or
-              (git rev-parse "refs/tags/${tag}^{commit}") -cne $env:GITHUB_SHA) {
-            throw 'The release must use an annotated tag on this commit.'
-          }
-          git merge-base --is-ancestor $env:GITHUB_SHA refs/remotes/origin/master
-          if ($LASTEXITCODE) { throw 'Release commit must be in master.' }
           $directory = Join-Path $env:RUNNER_TEMP candidate
           $candidate = ./scripts/installer/verify_candidate.ps1 -Directory $directory -Commit $env:GITHUB_SHA -SumsSha256 $env:SUMS_SHA256
-          $sources = Get-ChildItem -LiteralPath $directory -Filter 'Prismestra-Sources-*.zip' -File
-          if (@($sources).Count -ne 1) { throw 'Expected one corresponding source archive.' }
-          $title = "Prismestra $($tag.TrimStart('v'))"
           $asset = Split-Path -Leaf $candidate.Setup
+          if ($asset -cne "Prismestra-Setup-$env:INSTALLER_VERSION-x64.exe") {
+            throw 'The tested installer version differs from the release tag.'
+          }
+          $sources = Join-Path $directory "Prismestra-Sources-$env:INSTALLER_VERSION.zip"
+          $title = "Prismestra $($tag.Substring(1))"
           $setupUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$asset"
           $runUrl = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           $notes = "**[Download Windows x64 Setup]($setupUrl)** · Windows 10 or 11 (x64).`n`nSetup includes the background OpenRGB backend and required runtimes. See the [device compatibility guide](https://github.com/$env:GITHUB_REPOSITORY/blob/$env:GITHUB_SHA/docs/compatibility.md) and [Windows release checks]($runUrl). The source ZIP contains the corresponding sources.`n`nSetup SHA-256: $($candidate.SetupSha256)"
-          $releaseArgs = @('release', 'create', $tag, $candidate.Setup, $sources.FullName, '--repo', $env:GITHUB_REPOSITORY, '--verify-tag', '--title', $title, '--notes', $notes, '--generate-notes')
-          if ($tag.Contains('-preview.')) { $releaseArgs += @('--prerelease', '--latest=false') }
-          gh @releaseArgs
+          $null = ./scripts/installer/verify_release_tag.ps1 -Tag $tag -Commit $env:GITHUB_SHA -Repository $env:GITHUB_REPOSITORY -ExpectedTagObject $env:TAG_OBJECT
+          gh release create $tag $candidate.Setup $sources --repo $env:GITHUB_REPOSITORY --verify-tag --title $title --notes $notes --generate-notes
           if ($LASTEXITCODE) { throw 'Publishing the tested Setup failed.' }
