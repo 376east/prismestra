@@ -3,55 +3,70 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#080a0f">
   <meta name="description" content="Find your device and see what Prismestra can control.">
   <title>Check your devices · Prismestra</title>
   <link rel="icon" href="../favicon.ico" sizes="any">
   <link rel="icon" type="image/svg+xml" href="../favicon.svg">
+  <link rel="stylesheet" href="../site.css">
   <link rel="stylesheet" href="lookup.css">
   <script src="lookup.mjs" type="module"></script>
 </head>
-<body>
-  <main>
-    <nav aria-label="Project">
-      <a id="home" href="../">Prismestra</a>
-      <span class="nav-links">
-        <a id="download" class="download" href="https://github.com/376east/prismestra/releases/latest">Get Windows Setup</a>
+<body class="device-page">
+  <div class="site-nav">
+    <nav id="device-nav" class="device-nav site-wrap" aria-label="Project">
+      <a id="home" class="device-brand" href="../">
+        <img src="../favicon.svg" width="22" height="22" alt="">
+        <span>Prismestra</span>
+      </a>
+      <div class="device-nav-actions">
         <a id="language" href="?lang=ru" hreflang="ru" lang="ru">Русский</a>
-      </span>
+        <a id="download" class="device-download" href="https://github.com/376east/prismestra/releases/latest">Get Windows Setup</a>
+      </div>
     </nav>
-    <header>
+  </div>
+  <main class="device-shell">
+    <header class="device-intro">
       <h1 id="title">Check your devices</h1>
       <p id="intro">Find your model to see what Prismestra can control and how to set it up.</p>
-      <p><span id="install-note">Setup includes OpenRGB for supported PC lighting.</span> <a id="manual-download" href="https://github.com/376east/prismestra/releases/latest">All release files</a></p>
     </header>
-    <form id="filters" role="search">
-      <div class="query">
-        <label for="query" id="query-label">Model or device type</label>
-        <input id="query" name="q" type="search" placeholder="Surplife E1, keyboard, B650 Eagle AX…" autocomplete="off">
-      </div>
-      <div>
-        <label for="filter" id="filter-label">Category</label>
-        <select id="filter" name="filter">
-          <option value="">All devices</option>
-        </select>
-      </div>
-    </form>
-    <div id="examples" class="examples" hidden></div>
-    <p id="count" role="status">Loading devices…</p>
-    <a id="report-missing" href="https://github.com/376east/prismestra/issues/new?template=device.yml" hidden>Report a device</a>
-    <ul id="results" class="results" aria-label="Matching devices"></ul>
-    <button id="more" type="button" hidden>Show more</button>
-    <noscript><p>JavaScript is required for search. See the <a href="https://github.com/376east/prismestra/blob/master/docs/compatibility.md">compatibility guide</a>.</p></noscript>
-    <footer>
+    <div class="device-search-panel">
+      <form id="filters" role="search">
+        <div>
+          <label for="query" id="query-label">Model or device type</label>
+          <div class="device-search-field">
+            <input id="query" name="q" type="search" placeholder="Surplife E1, keyboard, B650 Eagle AX…" autocomplete="off">
+          </div>
+        </div>
+        <div>
+          <label for="filter" id="filter-label">Category</label>
+          <select id="filter" name="filter">
+            <option value="">All devices</option>
+          </select>
+        </div>
+      </form>
+      <div id="examples" class="examples device-examples" hidden></div>
+    </div>
+    <div class="device-results">
+      <p id="count" role="status">Loading devices…</p>
+      <a id="report-missing" href="https://github.com/376east/prismestra/issues/new?template=device.yml" hidden>Report a device</a>
+      <ul id="results" class="results" role="list" aria-label="Matching devices"></ul>
+      <button id="more" type="button" hidden>Show more</button>
+      <noscript><p>JavaScript is required for search. See the <a href="https://github.com/376east/prismestra/blob/master/docs/compatibility.md">compatibility guide</a>.</p></noscript>
+    </div>
+  </main>
+  <footer class="device-footer device-shell">
+    <div class="device-help-links">
       <a id="setup" href="https://github.com/376east/prismestra/blob/master/docs/windows-installer.md">Setup guide</a>
       <a id="report" href="https://github.com/376east/prismestra/issues/new?template=device.yml">Report a device</a>
       <a id="guide" href="https://github.com/376east/prismestra/blob/master/docs/compatibility.md">Compatibility guide</a>
-      <details>
-        <summary id="catalog-label">About the catalog</summary>
-        <p id="provenance"></p>
-        <a id="upstream" href="https://openrgb.org/devices_pipeline.html">OpenRGB development catalog</a>
-      </details>
-    </footer>
-  </main>
+    </div>
+    <p class="device-install-note"><span id="install-note">Setup includes OpenRGB for supported PC lighting.</span> <a id="manual-download" href="https://github.com/376east/prismestra/releases/latest">All release files</a></p>
+    <details>
+      <summary id="catalog-label">About the catalog</summary>
+      <p id="provenance"></p>
+      <a id="upstream" href="https://openrgb.org/devices_pipeline.html">OpenRGB development catalog</a>
+    </details>
+  </footer>
 </body>
 </html>
