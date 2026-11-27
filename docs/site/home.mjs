@@ -1,5 +1,5 @@
 import { connectWindowsSetup } from './setup-download.mjs';
-import { connectScenePreview } from './scene-preview.mjs?v=100-sets';
+import { connectScenePreview } from './scene-preview.mjs?v=flipbook-align';
 
 const params = new URLSearchParams(location.search);
 const language = document.getElementById('language');
@@ -36,9 +36,9 @@ function showRussian() {
     devices: 'Устройства',
     platform: 'Windows 10 (1903+) или 11, x64',
     'manual-download': 'Файлы релиза',
-    'effect-rainbow': 'Радуга',
+    'effect-miami': 'Майами',
     'effect-breathing': 'Дыхание',
-    'effect-noise': 'Мягкий свет',
+    'effect-rainbow': 'Радуга',
     'compatibility-title': 'Подойдёт ли моё устройство?',
     'compatibility-summary': 'Найдите свою модель и узнайте, чем Prismestra может управлять и как её подключить.',
     'browse-pc': 'Комплектующие ПК',
