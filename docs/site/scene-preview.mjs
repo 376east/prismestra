@@ -1,9 +1,7 @@
 const columns = 4;
 const rows = 3;
 const frameCount = columns * rows;
-const flipMs = 360;
-const restMs = 2400;
-const openingMs = 1350;
+const flipMs = 560;
 
 function shuffleFrames(current) {
   const frames = Array.from({ length: frameCount }, (_, index) => index);
@@ -22,7 +20,7 @@ async function loadAtlas(file) {
   const image = new Image();
   image.fetchPriority = 'low';
   image.crossOrigin = 'anonymous';
-  image.src = new URL(`./shots/flipbook/${file}.webp`, import.meta.url);
+  image.src = new URL(`./shots/flipbook/${file}.webp?v=hd`, import.meta.url);
   await image.decode();
   return image;
 }
@@ -75,7 +73,7 @@ export function connectScenePreview() {
       mounted = true;
     }
     // The light layer stays in place, keeping its animation phase across cuts.
-    timer = setTimeout(showNext, frames.length ? flipMs : restMs);
+    timer = setTimeout(showNext, flipMs);
   }
 
   function syncMotion() {
@@ -90,7 +88,7 @@ export function connectScenePreview() {
     } else if (!atlas) {
       void prepareMontage();
     } else if (timer === undefined) {
-      timer = setTimeout(showNext, mounted ? restMs : openingMs);
+      timer = setTimeout(showNext, flipMs);
     }
   }
 

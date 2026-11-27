@@ -1,5 +1,5 @@
 import { connectWindowsSetup } from './setup-download.mjs';
-import { connectScenePreview } from './scene-preview.mjs?v=flipbook';
+import { connectScenePreview } from './scene-preview.mjs?v=flipbook-hd';
 
 const params = new URLSearchParams(location.search);
 const language = document.getElementById('language');
