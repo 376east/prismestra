@@ -56,10 +56,18 @@
   background: #17191e;
 }
 .scene-shot {
-  --light-mask: url("./shots/flipbook/poster-mask.webp?v=hd");
+  --light-mask: url("./shots/flipbook/poster-mask.webp?v=spill");
   position: absolute;
   inset: 0;
   isolation: isolate;
+}
+.scene-shot::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: #09081238;
+  pointer-events: none;
 }
 .scene-photo {
   position: absolute;
@@ -77,10 +85,10 @@
 .scene-shot .scene-light {
   position: absolute;
   inset: 0;
+  z-index: 2;
   overflow: hidden;
   -webkit-mask: var(--light-mask) var(--mask-position, center) / var(--mask-size, 100% 100%) no-repeat;
   mask: var(--light-mask) var(--mask-position, center) / var(--mask-size, 100% 100%) no-repeat;
-  mix-blend-mode: screen;
   pointer-events: none;
 }
 .scene-wordmark {
@@ -108,27 +116,33 @@
 .scene-light::before {
   content: "";
   position: absolute;
-  inset: 0 -200% 0 0;
-  background: linear-gradient(90deg, #b681f5, #f994c8 18%, #ffad77 34%, #f4c989 49%, #8ecdf8 65%, #78a8f7 82%, #b681f5);
-  opacity: .82;
-  background-size: calc(100% / 3) 100%;
-  animation: light-travel 5.2s linear infinite;
+  inset: 0 -100% 0 0;
+  background-color: #b477f2;
+  background-image: repeating-linear-gradient(90deg,
+    #b477f2 0cqw, #f681b1 18cqw, #ffb56f 33cqw, #f66eaa 51cqw,
+    #8d87ff 70cqw, #77c8ff 85cqw, #b477f2 100cqw);
+  opacity: .9;
+  animation: light-travel 3.2s linear infinite;
 }
 #scene-breathing:checked ~ .scene-frame .scene-light::before {
-  background: #ffad69;
-  opacity: .78;
-  animation: light-breathing 4.8s ease-in-out infinite;
+  inset: 0;
+  background: #5b9fff;
+  animation: light-breathing 3.2s ease-in-out infinite;
 }
 #scene-miami:checked ~ .scene-frame .scene-light::before {
-  background-image: linear-gradient(90deg, #885bea, #ff4ba6 23%, #f763aa 36%, #7569dc 52%, #54cdec 71%, #4494ee 88%, #885bea);
-  opacity: .78;
-  animation: light-travel 9s linear infinite reverse;
+  background-color: #a76df4;
+  /* At 105deg, moving 100cqw horizontally advances 96.5926cqw along the wave. */
+  background-image: repeating-linear-gradient(105deg,
+    #4f317b 0cqw, #813ca1 11cqw, #f560bd 21cqw, #ffa1d6 26cqw,
+    #c16aee 35cqw, #634191 47cqw, #425b9d 58cqw, #5cbdfb 66cqw,
+    #93d9ff 71cqw, #617cdd 82cqw, #4f317b 96.5926cqw);
+  animation-duration: 2.4s;
 }
 #scene[data-motion-stopped] .scene-frame .scene-light::before { animation-play-state: paused; }
 @media (prefers-reduced-motion: reduce) {
   #scene .scene-frame .scene-shot .scene-light::before { animation-name: none; }
 }
-@keyframes light-travel { to { transform: translateX(-33.333333%); } }
+@keyframes light-travel { to { transform: translateX(-50%); } }
 @keyframes light-breathing { 50% { opacity: .34; } }
 .scene-controls {
   min-height: 3.75rem;
@@ -158,8 +172,6 @@
   font-size: .83rem;
 }
 .scene-option:hover { color: var(--site-text); }
-.scene-motion { margin-inline-start: auto; }
-.scene-motion[hidden] { display: none; }
 /* Native controls remain focusable and work before any script loads. */
 .scene-choice {
   position: absolute;
@@ -242,18 +254,6 @@
   .steps { grid-template-columns: 1fr; gap: .6rem; }
   .scene-controls { padding-inline: .5rem; }
   .scene-option { padding-inline: .3rem; }
-  .scene-motion { width: 44px; justify-content: center; gap: 0; font-size: 0; }
-  .scene-motion::before {
-    content: "";
-    width: .66rem;
-    height: .75rem;
-    border-inline: .15rem solid currentColor;
-  }
-  .scene[data-paused] .scene-motion::before {
-    border: 0;
-    background: currentColor;
-    clip-path: polygon(0 0, 100% 50%, 0 100%);
-  }
 }
 @media (prefers-reduced-motion: reduce) {
   .primary-button, .search-button { transition: none; }
