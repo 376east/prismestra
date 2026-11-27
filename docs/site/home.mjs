@@ -1,5 +1,5 @@
 import { connectWindowsSetup } from './setup-download.mjs';
-import { connectScenePreview } from './scene-preview.mjs?v=aligned-montage';
+import { connectScenePreview } from './scene-preview.mjs?v=100-sets';
 
 const params = new URLSearchParams(location.search);
 const language = document.getElementById('language');
