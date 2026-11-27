@@ -1,7 +1,7 @@
 const columns = 4;
 const rows = 3;
 const frameCount = columns * rows;
-const flipMs = 560;
+const flipMs = 300;
 
 function shuffleFrames(current) {
   const frames = Array.from({ length: frameCount }, (_, index) => index);
