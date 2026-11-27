@@ -42,7 +42,7 @@ export function connectScenePreview() {
     if (loading) return;
     loading = true;
     try {
-      atlas = await Promise.all([loadAtlas('rooms.webp?v=hd'), loadAtlas('lights.webp?v=spill')]);
+      atlas = await Promise.all([loadAtlas('rooms.webp?v=aligned'), loadAtlas('lights.webp?v=aligned')]);
     } catch {
       // The poster and its lighting controls stay usable if the atlases fail.
       loading = false;
