@@ -1,8 +1,9 @@
-const shotOrder = [1, 12, 17, 15, 26, 7, 2, 29, 4, 6, 3, 18, 11, 39, 24, 22, 33, 9, 14, 37, 10, 16, 23, 20, 40, 36, 38, 13, 34, 8, 25, 30, 5, 32, 28, 27, 31, 21, 19, 35];
-const cutIntervalMs = 500;
+const shotCount = 100;
+const cutIntervalMs = 1000 / 3;
 const columns = 5;
 const rows = 4;
 const tilesPerSheet = columns * rows;
+const sheetCount = shotCount / tilesPerSheet;
 
 export function connectScenePreview() {
   const scene = document.getElementById('scene');
@@ -26,8 +27,7 @@ function loadImage(name) {
 
 function connectMontage(shot) {
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
-  let loading = false;
-  let sheets;
+  const sheets = new Map();
   let current = 0;
   let visibleSheet = -1;
   let timer;
@@ -36,11 +36,11 @@ function connectMontage(shot) {
   function showFrame(index) {
     const sheet = Math.floor(index / tilesPerSheet);
     if (sheet !== visibleSheet) {
-      const photo = sheets[sheet].photo;
+      const { photo, mask } = sheets.get(sheet).images;
       photo.className = 'scene-photo';
       photo.alt = '';
       shot.querySelector('.scene-photo').replaceWith(photo);
-      shot.style.setProperty('--light-mask', `url("${sheets[sheet].mask.src}")`);
+      shot.style.setProperty('--light-mask', `url("${mask.src}")`);
       shot.style.setProperty('--tile-size', `${columns * 100}% ${rows * 100}%`);
       shot.style.setProperty('--sheet-width', `${columns * 100}%`);
       shot.style.setProperty('--sheet-height', `${rows * 100}%`);
@@ -55,15 +55,46 @@ function connectMontage(shot) {
     shot.style.setProperty('--sheet-x', `${-column / columns * 100}%`);
     shot.style.setProperty('--sheet-y', `${-row / rows * 100}%`);
     shot.style.setProperty('--tile-position', `${x}% ${y}%`);
-    shot.dataset.shot = String(shotOrder[index]).padStart(2, '0');
+    shot.dataset.shot = String(index + 1).padStart(3, '0');
+  }
+
+  function preload(sheet) {
+    if (sheets.has(sheet)) return;
+    const entry = {};
+    sheets.set(sheet, entry);
+    const name = `sets-${sheet + 1}`;
+    Promise.all([loadImage(name), loadImage(`${name}-mask`)]).then(([photo, mask]) => {
+      entry.images = { photo, mask };
+      syncTimer();
+    }).catch(() => {
+      // The visible frame stays on screen if a download fails.
+      sheets.delete(sheet);
+    });
+  }
+
+  function advance() {
+    const next = (current + 1) % shotCount;
+    const sheet = Math.floor(next / tilesPerSheet);
+    if (!sheets.get(sheet)?.images) {
+      preload(sheet);
+      return false;
+    }
+
+    const oldSheet = visibleSheet;
+    showFrame(next);
+    current = next;
+    if (oldSheet !== sheet) {
+      sheets.delete(oldSheet);
+      preload((sheet + 2) % sheetCount);
+    }
+    return true;
   }
 
   function cut() {
-    current = (current + 1) % shotOrder.length;
-    showFrame(current);
+    const advanced = advance();
     const now = performance.now();
-    // Hold a full beat after a long browser stall instead of replaying missed cuts.
-    nextCut = now - nextCut >= cutIntervalMs ? now + cutIntervalMs : nextCut + cutIntervalMs;
+    // Resume on the next beat after slow downloads or a long browser stall.
+    nextCut = !advanced || now - nextCut >= cutIntervalMs ? now + cutIntervalMs : nextCut + cutIntervalMs;
     timer = setTimeout(cut, Math.max(0, nextCut - now));
   }
 
@@ -71,25 +102,21 @@ function connectMontage(shot) {
     if (reducedMotion.matches || document.hidden) {
       clearTimeout(timer);
       timer = undefined;
-    } else if (sheets && timer === undefined) {
-      showFrame(current);
-      nextCut = performance.now() + cutIntervalMs;
-      timer = setTimeout(cut, cutIntervalMs);
-    } else if (!loading) {
-      loading = true;
-      // Prime the complete loop before the first cut so the clock never waits for a request.
-      Promise.all([1, 2].map(async (sheet) => {
-        const [photo, mask] = await Promise.all([loadImage(`desk-${sheet}`), loadImage(`desk-${sheet}-mask`)]);
-        return { photo, mask };
-      })).then((ready) => {
-        sheets = ready;
-        syncTimer();
-      }).catch(() => {
-        loading = false;
-      });
+      return;
     }
-  }
+    if (timer !== undefined) return;
 
+    const sheet = Math.floor(current / tilesPerSheet);
+    const nextSheet = (sheet + 1) % sheetCount;
+    preload(sheet);
+    preload(nextSheet);
+    if (!sheets.get(sheet)?.images || !sheets.get(nextSheet)?.images) return;
+
+    showFrame(current);
+    preload((sheet + 2) % sheetCount);
+    nextCut = performance.now() + cutIntervalMs;
+    timer = setTimeout(cut, cutIntervalMs);
+  }
   reducedMotion.addEventListener('change', syncTimer);
   document.addEventListener('visibilitychange', syncTimer);
   syncTimer();

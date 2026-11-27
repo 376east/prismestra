@@ -56,7 +56,7 @@
   background: #17191e;
 }
 .scene-shot {
-  --light-mask: url("./shots/opening-mask.webp");
+  --light-mask: url("./shots/sets-opening-mask.webp");
   position: absolute;
   inset: 0;
   isolation: isolate;
