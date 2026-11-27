@@ -20,7 +20,7 @@ async function loadAtlas(file) {
   const image = new Image();
   image.fetchPriority = 'low';
   image.crossOrigin = 'anonymous';
-  image.src = new URL(`./shots/flipbook/${file}.webp?v=hd`, import.meta.url);
+  image.src = new URL(`./shots/flipbook/${file}`, import.meta.url);
   await image.decode();
   return image;
 }
@@ -29,8 +29,6 @@ export function connectScenePreview() {
   const scene = document.getElementById('scene');
   const frame = scene.querySelector('.scene-frame');
   const shot = scene.querySelector('.scene-shot');
-  const motionButton = document.getElementById('scene-motion');
-  const pauseLabel = motionButton.textContent;
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
   let frames = [];
   let current = 0;
@@ -44,7 +42,7 @@ export function connectScenePreview() {
     if (loading) return;
     loading = true;
     try {
-      atlas = await Promise.all([loadAtlas('rooms'), loadAtlas('lights')]);
+      atlas = await Promise.all([loadAtlas('rooms.webp?v=hd'), loadAtlas('lights.webp?v=spill')]);
     } catch {
       // The poster and its lighting controls stay usable if the atlases fail.
       loading = false;
@@ -77,11 +75,8 @@ export function connectScenePreview() {
   }
 
   function syncMotion() {
-    motionButton.hidden = reducedMotion.matches;
-    const paused = scene.hasAttribute('data-paused');
-    const stopped = paused || !onScreen || document.hidden || reducedMotion.matches;
+    const stopped = !onScreen || document.hidden || reducedMotion.matches;
     scene.toggleAttribute('data-motion-stopped', stopped);
-    motionButton.textContent = paused ? motionButton.dataset.resume : pauseLabel;
     if (stopped) {
       clearTimeout(timer);
       timer = undefined;
@@ -92,10 +87,6 @@ export function connectScenePreview() {
     }
   }
 
-  motionButton.addEventListener('click', () => {
-    scene.toggleAttribute('data-paused');
-    syncMotion();
-  });
   const observer = new IntersectionObserver(([entry]) => {
     onScreen = entry.isIntersecting;
     syncMotion();
