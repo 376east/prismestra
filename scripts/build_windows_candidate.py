@@ -78,20 +78,26 @@ def package_candidate(root, commit, version, component, prerequisites, iscc, paw
     production = root / "production"
     candidate = root / "candidate"
     candidate.mkdir()
-    recipe("package_installer.py", *common, "--version", version, "--output", production,
-           "--release-dir", binary, "--prerequisite-lock", INSTALLER / "prerequisites.lock.json",
-           "--prerequisite-dir", prerequisites)
+    for output, manifest_name, flags in (
+        (production, "install-manifest.json", ("--lightweight",)),
+        (root / "production-offline", "offline-install-manifest.json", ()),
+    ):
+        recipe("package_installer.py", *common, "--version", version, "--output", output,
+               "--release-dir", binary, "--prerequisite-lock", INSTALLER / "prerequisites.lock.json",
+               "--prerequisite-dir", prerequisites, *flags)
+        receipt = read(output / "installer-receipt.json")
+        setup = output / receipt["installer"]
+        shutil.copyfile(setup, candidate / setup.name)
+        shutil.copyfile(output / "stage/payload/install-manifest.json", candidate / manifest_name)
+        print(f"{setup.name}: {receipt['installer_bytes']} bytes (SHA-256 {receipt['installer_sha256']})",
+              flush=True)
     receipt = read(production / "installer-receipt.json")
-    setup = production / receipt["installer"]
-    shutil.copyfile(setup, candidate / setup.name)
-    shutil.copyfile(production / "stage/payload/install-manifest.json", candidate / "install-manifest.json")
     sources = candidate / f"Prismestra-Sources-{version}.zip"
     recipe("package_installer_source.py", "--app-source", release / manifest["source_archive"],
            "--component", component, "--pawnio-source-tree", pawnio, "--output", sources)
     (candidate / "SHA256SUMS.txt").write_text(
         "".join(f"{sha256(path)}  {path.name}\n" for path in sorted(candidate.iterdir())), encoding="utf-8")
     retain_binary_zip(release, root / "portable", manifest)
-    print(f"Compiled Setup SHA-256: {receipt['installer_sha256']}", flush=True)
 
     # These two builds exercise repair and version transitions in a disposable
     # namespace. The ordinary-user test uses the production EXE above.

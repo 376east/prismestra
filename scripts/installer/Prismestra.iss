@@ -42,7 +42,13 @@ Source: "prerequisites\Prismestra-Setup-Probe.exe"; Flags: dontcopy solidbreak
 Source: "payload\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 #ifndef LifecycleTest
 Source: "prerequisites\vc_redist.x64.exe"; Flags: dontcopy solidbreak
+#ifdef DownloadWebView
+Source: "prerequisites\MicrosoftEdgeWebview2Setup.exe"; Flags: dontcopy solidbreak
+#define WebViewInstaller "MicrosoftEdgeWebview2Setup.exe"
+#else
 Source: "prerequisites\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Flags: dontcopy solidbreak
+#define WebViewInstaller "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+#endif
 #ifdef IncludePawnIO
 Source: "prerequisites\PawnIO_setup.exe"; Flags: dontcopy solidbreak
 #endif
@@ -208,7 +214,11 @@ begin
   AppendReadySection(Result, MemoGroupInfo, NewLine);
   AppendReadySection(Result, MemoTasksInfo, NewLine);
   AppendReadySection(Result, 'Microsoft WebView2 Runtime:' + NewLine + Space +
+#ifdef DownloadWebView
+    'If needed, Setup downloads WebView2 from Microsoft.', NewLine);
+#else
     'Setup installs the bundled runtime offline if it is needed.', NewLine);
+#endif
 end;
 
 function PawnIOPresent: Boolean;
@@ -394,14 +404,20 @@ begin
     if Result <> '' then Exit;
   end;
   if not WebViewReady then begin
-    if not InstallPrerequisite('MicrosoftEdgeWebView2RuntimeInstallerX64.exe', '/silent /install', Code) then
-      Result := 'Could not start the offline WebView2 installer.'
+    if not InstallPrerequisite('{#WebViewInstaller}', '/silent /install', Code) then
+      Result := 'Could not start the WebView2 installer.'
     else if (Code = 3010) or (Code = 1641) then RebootRequired := True
     else if (Code <> 0) and (Code <> 1638) then
       Result := 'The required WebView2 Runtime could not be installed.'
     else if not WebViewReady then
       Result := 'Setup could not verify the required WebView2 Runtime.';
-    if Result <> '' then Exit;
+    if Result <> '' then begin
+#ifdef DownloadWebView
+      Result := Result + #13#10#13#10 +
+        'Check your Internet connection or use Prismestra Offline Setup from the release page.';
+#endif
+      Exit;
+    end;
   end;
 #ifdef IncludePawnIO
   if WizardIsTaskSelected('pawnio') and not PawnIOPresent then begin

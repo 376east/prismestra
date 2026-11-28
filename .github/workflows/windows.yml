@@ -358,7 +358,7 @@ jobs:
           SUMS_SHA256: ${{ needs.package.outputs.sums_sha256 }}
         run: |
           $candidate = ./scripts/installer/verify_candidate.ps1 -Directory (Join-Path $env:RUNNER_TEMP candidate) -Commit $env:GITHUB_SHA -SumsSha256 $env:SUMS_SHA256
-          ./scripts/installer/test_offline_setup.ps1 -Installer $candidate.Setup -Sha256 $candidate.SetupSha256 -Commit $env:GITHUB_SHA -ManifestSha256 $candidate.ManifestSha256 -ReportDirectory evidence -DisposableRunner
+          ./scripts/installer/test_offline_setup.ps1 -Installer $candidate.OfflineSetup -Sha256 $candidate.OfflineSetupSha256 -Commit $env:GITHUB_SHA -ManifestSha256 $candidate.OfflineManifestSha256 -ReportDirectory evidence -DisposableRunner
       - name: Upgrade the published Setup to this candidate
         if: matrix.test == 'stable-upgrade'
         shell: pwsh
@@ -375,7 +375,7 @@ jobs:
           Invoke-WebRequest -Uri $baseline.source -OutFile $previous -TimeoutSec 180
           $fixtures = Join-Path $env:RUNNER_TEMP fixtures
           $routeProbeSha = (Get-Content -LiteralPath (Join-Path $fixtures 'upgrade-routes.sha256') -Raw).Trim()
-          ./scripts/installer/test_offline_setup.ps1 -PreviousInstaller $previous -Installer $candidate.Setup -Sha256 $candidate.SetupSha256 -Commit $env:GITHUB_SHA -ManifestSha256 $candidate.ManifestSha256 -ReportDirectory evidence -UpgradeRouteProbe (Join-Path $fixtures 'setup_upgrade_routes.exe') -UpgradeRouteProbeSha256 $routeProbeSha -DisposableRunner
+          ./scripts/installer/test_offline_setup.ps1 -PreviousInstaller $previous -Lightweight -Installer $candidate.Setup -Sha256 $candidate.SetupSha256 -Commit $env:GITHUB_SHA -ManifestSha256 $candidate.ManifestSha256 -ReportDirectory evidence -UpgradeRouteProbe (Join-Path $fixtures 'setup_upgrade_routes.exe') -UpgradeRouteProbeSha256 $routeProbeSha -DisposableRunner
           ./scripts/installer/verify_upgrade_receipts.ps1 -Directory evidence -Commit $env:GITHUB_SHA -SetupSha256 $candidate.SetupSha256 -ManifestSha256 $candidate.ManifestSha256 -ProbeSha256 $routeProbeSha
       - name: Launch the same Setup payload as a fresh standard user
         if: matrix.test == 'standard-user' || matrix.ddp_devices > 0
@@ -468,3 +468,16 @@ jobs:
           TAG_OBJECT: ${{ needs.quick.outputs.tag_object }}
         run: |
           ./scripts/installer/publish_release.ps1 -Directory (Join-Path $env:RUNNER_TEMP candidate) -Tag $env:GITHUB_REF_NAME -Commit $env:GITHUB_SHA -Repository $env:GITHUB_REPOSITORY -TagObject $env:TAG_OBJECT -SumsSha256 $env:SUMS_SHA256 -RunId $env:GITHUB_RUN_ID
+
+
+  refresh-site:
+    name: Refresh website downloads
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch Pages on master
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run device-lookup.yml --repo "$GITHUB_REPOSITORY" --ref master

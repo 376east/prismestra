@@ -4,9 +4,11 @@ This file records notable changes to Prismestra. The format follows [Keep a Chan
 
 [Download for Windows](https://376east.github.io/prismestra/?download=1) · [Device compatibility](docs/compatibility.md)
 
-## Unreleased
+## 0.2.1 - 2026-11-28
 
 ### Changed
+
+- **Windows Setup.** The default download installs Microsoft WebView2 from Microsoft when required. A separate offline installer includes the full runtime.
 
 - **Download and device lookup.** Download Setup from the product website, README or device catalog. The catalog separates models listed by OpenRGB from models where live-scene support has been checked.
 - **Updates.** The tray check uses the app language. If there is no newer Preview, it can offer a newer Stable release. Setup blocks installation over a newer version.

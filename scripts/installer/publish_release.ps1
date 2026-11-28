@@ -20,12 +20,15 @@ if ((Split-Path -Leaf $candidate.Setup) -cne $setupName) {
 }
 $sourceName = "Prismestra-Sources-$($release.Version).zip"
 $sources = Join-Path $Directory $sourceName
+$offlineName = Split-Path -Leaf $candidate.OfflineSetup
 $expected = @{}
 $expected[$setupName] = @{ Path = $candidate.Setup; Sha256 = $candidate.SetupSha256 }
+$expected[$offlineName] = @{ Path = $candidate.OfflineSetup; Sha256 = $candidate.OfflineSetupSha256 }
 $expected[$sourceName] = @{ Path = $sources; Sha256 = (Get-FileHash -LiteralPath $sources).Hash.ToLowerInvariant() }
 
 $title = "Prismestra $($Tag.Substring(1))"
 $setupUrl = "https://github.com/$Repository/releases/download/$Tag/$setupName"
+$offlineUrl = "https://github.com/$Repository/releases/download/$Tag/$offlineName"
 $runUrl = "https://github.com/$Repository/actions/runs/$RunId"
 $sourceUrl = "https://github.com/$Repository/blob/$Commit"
 $marker = "<!-- Prismestra release run $RunId, commit $Commit, tag $TagObject -->"
@@ -34,11 +37,12 @@ $signatureNote = if ($signature.Status -eq 'NotSigned') { 'The Setup is unsigned
 $notes = @"
 **[Download Windows x64 Setup]($setupUrl)** · Windows 10 version 1903 or later, or Windows 11 (x64).
 
-Setup includes OpenRGB and the required Windows runtimes. The ZIP contains the corresponding sources. $signatureNote
+Setup includes OpenRGB and downloads Microsoft WebView2 only if needed. [Offline Setup]($offlineUrl) includes the full runtime. The ZIP contains the corresponding sources. $signatureNote
 
 [Changelog]($sourceUrl/CHANGELOG.md) · [Device compatibility]($sourceUrl/docs/compatibility.md) · [Windows release checks]($runUrl)
 
 Setup SHA-256: $($candidate.SetupSha256)
+Offline Setup SHA-256: $($candidate.OfflineSetupSha256)
 $marker
 "@
 $api = "repos/$Repository/releases"

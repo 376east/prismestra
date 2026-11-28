@@ -1,4 +1,3 @@
-import { connectWindowsSetup } from './setup-download.mjs';
 import { connectScenePreview } from './scene-preview.mjs?v=flipbook-align';
 
 const params = new URLSearchParams(location.search);
@@ -11,20 +10,18 @@ if (['q', 'category', 'route'].some((key) => params.has(key))) {
 } else {
   if (russian) showRussian();
   connectScenePreview();
-  const setup = connectWindowsSetup(document.getElementById('download'));
   if (params.get('download') === '1') {
     params.delete('download');
     const query = params.toString();
     history.replaceState(null, '', location.pathname + (query ? '?' + query : '') + location.hash);
-    setup.then((url) => {
-      if (url) {
-        location.assign(url);
-      } else {
-        document.getElementById('download-status').textContent = russian
-          ? 'Загрузка не началась. Откройте «Файлы релиза» и выберите установщик Prismestra для x64.'
-          : 'The download did not start. Open Release files and choose the Prismestra x64 installer.';
-      }
-    });
+    const setup = document.getElementById('download').href;
+    if (setup !== document.getElementById('manual-download').href) {
+      location.assign(setup);
+    } else {
+      document.getElementById('download-status').textContent = russian
+        ? 'Загрузка не началась. Откройте «Файлы релиза» и выберите установщик Prismestra для x64.'
+        : 'The download did not start. Open Release files and choose the Prismestra x64 installer.';
+    }
   }
 }
 
@@ -35,6 +32,8 @@ function showRussian() {
     download: 'Скачать для Windows',
     devices: 'Устройства',
     platform: 'Windows 10 (1903+) или 11, x64',
+    'download-network': 'Для лёгкой установки нужен интернет.',
+    'offline-download': 'Скачать полный офлайн-установщик',
     'manual-download': 'Файлы релиза',
     'effect-miami': 'Майами',
     'effect-breathing': 'Дыхание',
@@ -47,7 +46,7 @@ function showRussian() {
     'browse-home': 'Умный свет',
     'model-label': 'Модель устройства',
     'model-search': 'Найти устройство',
-    bundled: 'В установщик входит OpenRGB для совместимой подсветки ПК.',
+    bundled: 'Установщик добавляет OpenRGB для совместимой подсветки ПК.',
     'first-scene': 'Первая сцена',
     'step-title-1': 'Установите Prismestra',
     'step-title-2': 'Проверьте подсветку',

@@ -31,6 +31,8 @@ LEGACY_STARTUP_TOOL_IMPORTS = POLICY_TOOL_IMPORTS | {"bcryptprimitives.dll", "us
 PREREQUISITES = {
     "vc_redist_x64": ("vc_redist.x64.exe", 10 << 20, "Microsoft Corporation", {"aka.ms", "download.visualstudio.microsoft.com"}),
     "webview2_x64": ("MicrosoftEdgeWebView2RuntimeInstallerX64.exe", 30 << 20, "Microsoft Corporation", {"go.microsoft.com", "msedge.sf.dl.delivery.mp.microsoft.com", "msedge.api.cdp.microsoft.com"}),
+    "webview2_bootstrapper": ("MicrosoftEdgeWebview2Setup.exe", 1 << 20, "Microsoft Corporation",
+                              {"msedge.sf.dl.delivery.mp.microsoft.com", "msedge.api.cdp.microsoft.com"}),
     "pawnio": ("PawnIO_setup.exe", 1 << 16, "namazso.eu", {"pawnio.eu", "github.com"}),
 }
 
@@ -97,7 +99,7 @@ def stage_prerequisites(packages, source, destination):
                     and not url.path.startswith("/namazso/PawnIO.Setup/releases/download/"))
                 or not re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+)?", package["version"])
                 or type(package["size"]) is not int or not min_size <= package["size"] <= 512 << 20):
-            raise ValueError(f"Invalid offline prerequisite pin: {key}")
+            raise ValueError(f"Invalid prerequisite pin: {key}")
         pinned = source / filename
         file_pin(pinned, package["sha256"])
         if pinned.stat().st_size != package["size"]:
@@ -176,7 +178,7 @@ def stage_setup_tools(destination):
 
 
 def stage_inno_source(stage, version, stem, *, test_namespace, webview_probe_hash,
-                      setup_tool_hashes, include_pawnio, runtime_floor):
+                      setup_tool_hashes, include_pawnio, runtime_floor, light=False):
     app_name = "Prismestra Lifecycle Test" if test_namespace else "Prismestra"
     app_dir = f"{app_name}\\{test_namespace}" if test_namespace else app_name
     compiler_defs = [
@@ -193,6 +195,8 @@ def stage_inno_source(stage, version, stem, *, test_namespace, webview_probe_has
         defs.append(f'#define WebViewProbeSha256 "{webview_probe_hash}"')
         defs.append(f'#define PolicyToolSha256 "{setup_tool_hashes[POLICY_TOOL]}"')
         defs.append(f'#define LegacyStartupToolSha256 "{setup_tool_hashes[LEGACY_STARTUP_TOOL]}"')
+    if light:
+        defs.append("#define DownloadWebView")
     if include_pawnio:
         defs.append("#define IncludePawnIO")
     if runtime_floor is not None:
@@ -211,18 +215,26 @@ def package(args):
     if any(int(part) > 65535 for part in args.version.split(".")):
         raise ValueError("Installer version components must fit in a 16-bit number")
     test_mode = args.test_namespace is not None
+    light = args.lightweight
     if test_mode:
         if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", args.test_namespace):
             raise ValueError("Use a lowercase GUID for the isolated test namespace")
         if args.test_namespace == APP_ID:
             raise ValueError("Test namespace must differ from the production AppId")
-        if args.prerequisite_lock or args.prerequisite_dir:
+        if args.prerequisite_lock or args.prerequisite_dir or light:
             raise ValueError("Lifecycle fixtures cannot contain prerequisites or drivers")
     elif not all((args.prerequisite_lock, args.prerequisite_dir, args.release_dir)):
-        raise ValueError("Production requires the offline prerequisite lock, its files and the release notices")
+        raise ValueError("Production requires the prerequisite lock, its files and the release notices")
     if not args.stage_only and not args.iscc:
         raise ValueError("Provide --iscc or choose --stage-only")
     packages, runtime_floor = ({}, None) if test_mode else read_prerequisite_lock(args.prerequisite_lock)
+    packages = dict(packages)
+    if light:
+        if "webview2_bootstrapper" not in packages:
+            raise ValueError("Light Setup requires a pinned WebView2 bootstrapper")
+        del packages["webview2_x64"]
+    else:
+        packages.pop("webview2_bootstrapper", None)
     file_pin(args.app_exe, args.app_sha256)
     with args.app_exe.open("rb") as image:
         check_amd64_executable(image, "Prismestra.exe", runtime_floor)
@@ -257,10 +269,11 @@ def package(args):
     if test_mode:
         stem = f"Prismestra-{args.version}-{args.expected_commit[:12]}-x64-test-{args.test_namespace}"
     else:
-        stem = f"Prismestra-Setup-{args.version}-x64"
+        variant = "" if light else "-Offline"
+        stem = f"Prismestra-Setup{variant}-{args.version}-x64"
     stage_inno_source(stage, args.version, stem, test_namespace=args.test_namespace,
                       webview_probe_hash=webview_probe_hash, setup_tool_hashes=setup_tool_hashes,
-                      include_pawnio="pawnio" in packages, runtime_floor=runtime_floor)
+                      include_pawnio="pawnio" in packages, runtime_floor=runtime_floor, light=light)
 
     receipt = {"scope": "staged_only", "manifest_sha256": sha256(payload / "install-manifest.json")}
     if webview_probe_hash is not None:
@@ -286,6 +299,7 @@ def main():
     for name in ("release-dir", "prerequisite-lock", "prerequisite-dir", "iscc"):
         parser.add_argument("--" + name, type=Path)
     parser.add_argument("--test-namespace", "--data-namespace", dest="test_namespace")
+    parser.add_argument("--lightweight", action="store_true")
     parser.add_argument("--stage-only", action="store_true")
     args = parser.parse_args()
     try:

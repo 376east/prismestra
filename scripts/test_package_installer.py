@@ -136,7 +136,7 @@ class InstallerPackaging(unittest.TestCase):
         path = self.root / "prerequisites.json"
         installer.write_json(path, lock)
         with patch.object(installer, "authenticode") as verify:
-            with self.assertRaisesRegex(ValueError, "Invalid offline prerequisite pin"):
+            with self.assertRaisesRegex(ValueError, "Invalid prerequisite pin"):
                 packages, _ = installer.read_prerequisite_lock(path)
                 installer.stage_prerequisites(packages, self.root, self.root / "staged")
         verify.assert_not_called()
@@ -173,6 +173,7 @@ class InstallerPackaging(unittest.TestCase):
             prerequisite_lock=None, prerequisite_dir=None, release_dir=None,
             stage_only=True, iscc=None,
         )
+        defaults["lightweight"] = False
         return SimpleNamespace(**(defaults | overrides))
 
     def test_namespace_and_version_reject_traversal_and_non_numeric_versions(self):

@@ -8,6 +8,7 @@ param(
     [string]$PreviousInstaller,
     [string]$UpgradeRouteProbe,
     [ValidatePattern('^[0-9a-f]{64}$')][string]$UpgradeRouteProbeSha256,
+    [switch]$Lightweight,
     [switch]$DisposableRunner
 )
 
@@ -483,7 +484,7 @@ try {
     $receipt.reboot_required = $receipt.setup_exit_code -in @(8, 1641, 3010) -or
         $log -match 'Restart Windows to complete|exit code (1641|3010)\b'
     $receipt.prereq_installer_log_mentions = @([regex]::Matches(
-        $log, '(?im)\b(vc_redist\.x64\.exe|MicrosoftEdgeWebView2RuntimeInstallerX64\.exe) exit code (\d+)'
+        $log, '(?im)\b(vc_redist\.x64\.exe|MicrosoftEdgeWebView2RuntimeInstallerX64\.exe|MicrosoftEdgeWebview2Setup\.exe) exit code (\d+)'
     ) | ForEach-Object { $_.Value })
     Assert-Expected ($receipt.setup_exit_code -in @(0, 3010)) "Setup returned $($receipt.setup_exit_code)."
     Assert-Expected (Test-Path -LiteralPath $setupLog -PathType Leaf) 'Setup did not write its log.'
@@ -493,14 +494,16 @@ try {
     $receipt.manifest_sha256 = Get-Sha256 $manifestPath
     Assert-Expected ($receipt.manifest_sha256 -ceq $ManifestSha256) 'Installed manifest SHA-256 differs from the candidate.'
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $webview = if ($Lightweight) { $manifest.prerequisites.webview2_bootstrapper } else { $manifest.prerequisites.webview2_x64 }
+    $webviewFile = if ($Lightweight) { 'MicrosoftEdgeWebview2Setup.exe' } else { 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe' }
+    $webviewSizeMatches = if ($Lightweight) { $webview.size -lt 10MB } else { $webview.size -ge 30MB }
     Assert-Expected ($manifest.version -eq 1 -and $manifest.product -ceq 'Prismestra' -and
         [string]::IsNullOrEmpty($manifest.data_namespace) -and $manifest.commit -ceq $Commit -and
         $manifest.prerequisites.vc_redist_x64.file -ceq 'vc_redist.x64.exe' -and
         $manifest.prerequisites.vc_redist_x64.sha256 -cmatch '^[a-f0-9]{64}$' -and
         $manifest.prerequisites.vc_redist_x64.size -ge 10MB -and
-        $manifest.prerequisites.webview2_x64.file -ceq 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe' -and
-        $manifest.prerequisites.webview2_x64.sha256 -cmatch '^[a-f0-9]{64}$' -and
-        $manifest.prerequisites.webview2_x64.size -ge 30MB) 'Expected a production manifest with embedded offline prerequisites.'
+        $webview.file -ceq $webviewFile -and $webview.sha256 -cmatch '^[a-f0-9]{64}$' -and
+        $webviewSizeMatches) 'Expected a production manifest with the selected prerequisites.'
     $receipt.commit = $manifest.commit
     $receipt.app_sha256 = Get-Sha256 $image
     $receipt.backend_sha256 = Get-Sha256 (Join-Path $install $backend)

@@ -21,7 +21,9 @@ if ($manifest.product -cne 'Prismestra' -or $manifest.commit -cne $Commit -or
     throw 'Expected the production installer manifest for this commit.'
 }
 $setupName = "Prismestra-Setup-$version-x64.exe"
-$expected = @($setupName, "Prismestra-Sources-$version.zip", 'install-manifest.json')
+$offlineName = "Prismestra-Setup-Offline-$version-x64.exe"
+$expected = @($setupName, $offlineName, "Prismestra-Sources-$version.zip",
+    'install-manifest.json', 'offline-install-manifest.json')
 $actual = @(Get-ChildItem -LiteralPath $root -Force | ForEach-Object Name)
 if (Compare-Object -ReferenceObject ($expected + 'SHA256SUMS.txt') -DifferenceObject $actual -CaseSensitive) {
     throw 'Unexpected candidate files.'
@@ -35,7 +37,18 @@ foreach ($line in Get-Content -LiteralPath $sums) {
     $hashes[$name] = $hash
 }
 if ($hashes.Count -ne $expected.Count) { throw 'Candidate is missing file checksums.' }
+$offline = Get-Content -LiteralPath (Join-Path $root 'offline-install-manifest.json') -Raw | ConvertFrom-Json
+if ($offline.product -cne $manifest.product -or $offline.commit -cne $Commit -or
+    $offline.installer_version -cne $version -or $null -ne $offline.data_namespace -or
+    $offline.app_sha256 -cne $manifest.app_sha256 -or $offline.backend.sha256 -cne $manifest.backend.sha256 -or
+    $null -eq $manifest.prerequisites.webview2_bootstrapper -or $null -ne $manifest.prerequisites.webview2_x64 -or
+    $null -eq $offline.prerequisites.webview2_x64 -or $null -ne $offline.prerequisites.webview2_bootstrapper) {
+    throw 'Expected two installer variants for the same Prismestra payload.'
+}
 [pscustomobject]@{
+    OfflineSetup = Join-Path $root $offlineName
+    OfflineSetupSha256 = $hashes[$offlineName]
+    OfflineManifestSha256 = $hashes['offline-install-manifest.json']
     Setup = Join-Path $root $setupName
     SetupSha256 = $hashes[$setupName]
     ManifestSha256 = $hashes['install-manifest.json']

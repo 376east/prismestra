@@ -1,5 +1,4 @@
 import { buildCatalog, findCards, modelWithoutRevision } from './catalog.mjs';
-import { connectWindowsSetup } from '../setup-download.mjs';
 
 const pageSize = 24;
 const exampleQueries = ['B650 Eagle AX', 'Surplife E1', 'NZXT Kraken'];
@@ -15,7 +14,8 @@ const copy = {
   en: {
     nav: 'Project',
     title: 'Check your devices', intro: 'Find your model to see what Prismestra can control and how to set it up.',
-    installNote: 'Setup includes OpenRGB for supported PC lighting.',
+    installNote: 'Setup installs OpenRGB for supported PC lighting.',
+    downloadNetwork: 'Light Setup requires an internet connection.', offlineDownload: 'Download full offline installer',
     download: 'Get Windows Setup', manualDownload: 'All release files', device: 'Model or device type', filter: 'Category', all: 'All devices',
     examples: 'Try', results: 'Matching devices', more: 'Show more', report: 'Report a device',
     guide: 'Compatibility guide', catalog: 'About the catalog', upstream: 'OpenRGB development catalog',
@@ -25,7 +25,7 @@ const copy = {
     partial: ' Part of the catalog could not be loaded.', details: 'Technical details',
     byDevice: 'Device type', bySource: 'Connection source',
     sources: { openrgb: 'OpenRGB source', native: 'Prismestra source', research: 'Technical reference' },
-    checked: 'Hardware check', noCheck: 'The catalog uses Prismestra drivers and the OpenRGB version included in Setup.',
+    checked: 'Hardware check', noCheck: 'The catalog uses Prismestra drivers and the OpenRGB version installed by Setup.',
     lighting: 'Lighting', display: 'LCD', openrgb: 'Built-in OpenRGB', 'no-direct': 'Built-in OpenRGB',
     implemented: 'Prismestra driver', research: 'Research', unconfirmed: 'Model identification',
     board: 'Check the two ARGB headers in Devices.', wired: 'Connect by cable.',
@@ -48,7 +48,8 @@ const copy = {
   ru: {
     nav: 'Проект',
     title: 'Проверьте свои устройства', intro: 'Найдите свою модель, чтобы узнать, чем можно управлять и как подключить устройство.',
-    installNote: 'В установщик входит OpenRGB для совместимой подсветки ПК.',
+    installNote: 'Установщик добавляет OpenRGB для совместимой подсветки ПК.',
+    downloadNetwork: 'Для лёгкой установки нужен интернет.', offlineDownload: 'Скачать полный офлайн-установщик',
     download: 'Установщик для Windows', manualDownload: 'Все файлы релиза', device: 'Модель или тип устройства', filter: 'Категория', all: 'Все устройства',
     examples: 'Для примера', results: 'Найденные устройства', more: 'Показать ещё', report: 'Сообщить об устройстве',
     guide: 'Справочник совместимости', catalog: 'О каталоге', upstream: 'Каталог новых сборок OpenRGB',
@@ -58,7 +59,7 @@ const copy = {
     partial: ' Часть каталога не загрузилась.', details: 'Технические подробности',
     byDevice: 'Тип устройства', bySource: 'Источник подключения',
     sources: { openrgb: 'Исходники OpenRGB', native: 'Исходники Prismestra', research: 'Технический источник' },
-    checked: 'Проверка на устройстве', noCheck: 'Каталог основан на драйверах Prismestra и версии OpenRGB, которая входит в установщик.',
+    checked: 'Проверка на устройстве', noCheck: 'Каталог основан на драйверах Prismestra и версии OpenRGB, которую ставит установщик.',
     lighting: 'Подсветка', display: 'LCD', openrgb: 'Встроенный OpenRGB', 'no-direct': 'Встроенный OpenRGB',
     implemented: 'Драйвер Prismestra', research: 'Исследование', unconfirmed: 'Идентификация модели',
     board: 'Проверьте два разъёма ARGB в разделе «Устройства».', wired: 'Подключите кабелем.',
@@ -161,7 +162,6 @@ function deviceRow(card, t, lang) {
 }
 
 async function start() {
-  connectWindowsSetup(document.getElementById('download'));
   const el = (id) => document.getElementById(id);
   const params = new URLSearchParams(location.search);
   const lang = params.get('lang') === 'ru' ? 'ru' : 'en';
@@ -181,6 +181,7 @@ async function start() {
   const language = el('language');
   for (const [id, value] of Object.entries({
     title: t.title, intro: t.intro, 'install-note': t.installNote, download: t.download, 'manual-download': t.manualDownload, 'query-label': t.device,
+    'download-network': t.downloadNetwork, 'offline-download': t.offlineDownload,
     'filter-label': t.filter, count: t.loading, report: t.report, guide: t.guide,
     'catalog-label': t.catalog, upstream: t.upstream, more: t.more, 'report-missing': t.report,
     setup: t.setup,

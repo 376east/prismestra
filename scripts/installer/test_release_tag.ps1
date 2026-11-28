@@ -128,11 +128,16 @@ try {
     $fixtureState.Releases = $originalReleases
 
     $payload = New-Item -ItemType Directory -Path (Join-Path $fixture candidate)
-    foreach ($file in 'Prismestra-Setup-1.2.3.0-x64.exe', 'Prismestra-Sources-1.2.3.0.zip') {
+    foreach ($file in 'Prismestra-Setup-1.2.3.0-x64.exe', 'Prismestra-Setup-Offline-1.2.3.0-x64.exe',
+            'Prismestra-Sources-1.2.3.0.zip') {
         Set-Content -LiteralPath (Join-Path $payload.FullName $file) -Value $file
     }
-    @{ product = 'Prismestra'; commit = $fixtureCommit; installer_version = '1.2.3.0' } |
-        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $payload.FullName 'install-manifest.json')
+    $manifest = @{ product = 'Prismestra'; commit = $fixtureCommit; installer_version = '1.2.3.0'
+        app_sha256 = 'a' * 64; backend = @{ sha256 = 'b' * 64 } }
+    $manifest.prerequisites = @{ webview2_bootstrapper = @{ file = 'MicrosoftEdgeWebview2Setup.exe' } }
+    $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $payload.FullName 'install-manifest.json')
+    $manifest.prerequisites = @{ webview2_x64 = @{ file = 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe' } }
+    $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $payload.FullName 'offline-install-manifest.json')
     $sums = Join-Path $payload.FullName 'SHA256SUMS.txt'
     Get-ChildItem -LiteralPath $payload.FullName -File | ForEach-Object {
         "$((Get-FileHash -LiteralPath $_.FullName).Hash.ToLowerInvariant())  $($_.Name)"
@@ -158,7 +163,7 @@ try {
     $fixtureState.Corrupt = $false
     $fixtureState.AdvanceVersion = $true
     Assert-PublishRejected 'newer than the already published v1.2.4'
-    if (($fixtureState.Calls -join ',') -cne 'create,upload' -or $fixtureState.Draft.assets.Count -ne 2) {
+    if (($fixtureState.Calls -join ',') -cne 'create,upload' -or $fixtureState.Draft.assets.Count -ne 3) {
         throw 'Expected verified draft assets to be retained after a newer publication.'
     }
     $fixtureState.Calls = @()

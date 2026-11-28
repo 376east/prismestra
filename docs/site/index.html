@@ -9,8 +9,8 @@
   <link rel="icon" type="image/png" sizes="32x32" href="site-icon.png">
   <link rel="icon" type="image/svg+xml" href="site-icon.svg" sizes="any">
   <link rel="stylesheet" href="site.css">
-  <link rel="stylesheet" href="home.css?v=flipbook-align">
-  <script type="module" src="home.mjs?v=flipbook-align"></script>
+  <link rel="stylesheet" href="home.css?v=setup-downloads">
+  <script type="module" src="home.mjs?v=setup-downloads"></script>
 </head>
 <body class="home-page">
   <nav class="site-nav" aria-label="Main navigation">
@@ -30,8 +30,12 @@
         <p id="summary" class="lead">Run the same effect on your keyboard, PC and LED strips. Pick a built-in scene or create your own.</p>
         <a class="primary-button" id="download" href="https://github.com/376east/prismestra/releases/latest">Download for Windows</a>
         <p class="platform-note" id="platform">Windows 10 (1903+) or 11, x64</p>
+        <p class="platform-note" id="download-network" hidden>Light Setup requires an internet connection.</p>
         <p id="download-status" class="platform-note" role="status"></p>
-        <a class="text-link" id="manual-download" href="https://github.com/376east/prismestra/releases/latest">Release files</a>
+        <div class="download-links">
+          <a class="text-link" id="offline-download" hidden>Download full offline installer</a>
+          <a class="text-link" id="manual-download" href="https://github.com/376east/prismestra/releases/latest">Release files</a>
+        </div>
       </div>
 
       <figure class="scene" id="scene">
@@ -79,7 +83,7 @@
     <section class="onboarding site-wrap" aria-labelledby="first-scene">
       <div class="onboarding-heading">
         <h2 id="first-scene">Your first scene</h2>
-        <p id="bundled">Setup includes OpenRGB for supported PC lighting.</p>
+        <p id="bundled">Setup installs OpenRGB for supported PC lighting.</p>
       </div>
       <ol class="steps">
         <li><h3 id="step-title-1">Install Prismestra</h3><p id="step-1">Run Setup and open the app. It searches for supported lights and starts a scene on the ones it can set up automatically.</p></li>
