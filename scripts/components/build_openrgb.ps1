@@ -4,6 +4,8 @@ param(
     [Parameter(Mandatory=$true)][string]$QtRoot,
     [Parameter(Mandatory=$true)][string]$Jom,
     [Parameter(Mandatory=$true)][string]$VsDevCmd,
+    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$MsvcToolset,
+    [ValidatePattern('^\d+\.\d+\.\d+\.\d+$')][string]$WindowsSdk,
     [ValidateRange(1,8)][int]$Jobs = 4
 )
 $ErrorActionPreference = 'Stop'
@@ -41,10 +43,16 @@ try {
     $mappedBuild = $buildDrive + '/' + (Split-Path -Leaf $buildPath)
     $mappedQt = $qtDrive + '/' + (Split-Path -Leaf $qtPath)
     $env:PATH = "$env:SystemRoot/System32;$env:SystemRoot;$env:SystemRoot/System32/WindowsPowerShell/v1.0;$gitDirectory"
-    $environment = & $env:ComSpec /c ('call "' + $vsPath + '" -no_logo -arch=x64 -host_arch=x64 && set')
+    if ([bool]$MsvcToolset -ne [bool]$WindowsSdk) { throw 'Specify both MSVC and Windows SDK versions.' }
+    $selection = if ($MsvcToolset) { " -vcvars_ver=$MsvcToolset -winsdk=$WindowsSdk" } else { '' }
+    $environment = & $env:ComSpec /c ('call "' + $vsPath + '" -no_logo -arch=x64 -host_arch=x64' + $selection + ' && set')
     if ($LASTEXITCODE -ne 0) { throw 'MSVC environment initialization failed' }
     foreach ($line in $environment) {
         if ($line -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process') }
+    }
+    if ($MsvcToolset -and ($env:VCToolsVersion.TrimEnd('\','/') -cne $MsvcToolset -or
+        $env:WindowsSDKVersion.TrimEnd('\','/') -cne $WindowsSdk)) {
+        throw 'Selected MSVC or Windows SDK differs from the requested version.'
     }
     $env:CL = '/MP1'
     Push-Location $mappedBuild

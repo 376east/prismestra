@@ -173,8 +173,10 @@ def build_component(root, vsdevcmd):
     archives = root / "component-sources"
     assets = COMPONENT / "distribution-assets.json"
     stage_sources(archives, assets)
-    environment = msvc_environment(vsdevcmd)
     dependencies = read(dependency_lock)
+    hidapi_pins = dependencies["files"]["hidapi-hotplug.dll"]
+    environment = msvc_environment(vsdevcmd, hidapi_pins)
+    print(f"Selected MSVC {hidapi_pins['msvc_toolset']} and Windows SDK {hidapi_pins['windows_sdk']}", flush=True)
     stage_runtime(source, runtime, environment)
     stage_pinned_pawnio(runtime, archives, dependencies["files"]["PawnIOLib.dll"],
                        root / "pawnio-build", vsdevcmd, environment)
@@ -192,7 +194,8 @@ def build_component(root, vsdevcmd):
     run(POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
         "-File", REPO / "scripts/components/build_openrgb.ps1", "-SourceRoot", source,
         "-BuildRoot", build, "-QtRoot", qmake.parent.parent, "-Jom", jom / "jom.exe",
-        "-VsDevCmd", vsdevcmd)
+        "-VsDevCmd", vsdevcmd, "-MsvcToolset", hidapi_pins["msvc_toolset"],
+        "-WindowsSdk", hidapi_pins["windows_sdk"])
     shutil.copy2(build / "release/OpenRGB.exe", runtime)
     inventory = root / "openrgb-inventory.json"
     recipe("components/verify_openrgb_component.py", "--source-root", source, "--release-dir", runtime,

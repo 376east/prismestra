@@ -92,9 +92,13 @@ class OpenRGBCacheTests(unittest.TestCase):
     def test_hidapi_dev_command_path_can_contain_spaces(self):
         script = self.root / "Visual Studio Tools" / "VsDevCmd.bat"
         script.parent.mkdir()
-        script.write_bytes(b'@set "PrismestraDevCmdFixture=loaded"\r\n')
-        env = build_hidapi.msvc_environment(script)
-        self.assertEqual(env["PRISMESTRADEVCMDFIXTURE"], "loaded")
+        script.write_bytes(b'@set "PrismestraDevCmdFixture=%*"\r\n'
+                           b'@set "VCToolsVersion=14.44.35207"\r\n'
+                           b'@set "WindowsSDKVersion=10.0.26100.0\\"\r\n')
+        pins = {"msvc_toolset": "14.44.35207", "windows_sdk": "10.0.26100.0"}
+        env = build_hidapi.msvc_environment(script, pins)
+        self.assertIn("-vcvars_ver=14.44.35207", env["PRISMESTRADEVCMDFIXTURE"])
+        self.assertIn("-winsdk=10.0.26100.0", env["PRISMESTRADEVCMDFIXTURE"])
 
     def test_patched_hidapi_staging_requires_exact_build_tools_and_dll(self):
         runtime = self.root / "runtime"
@@ -129,8 +133,10 @@ class OpenRGBCacheTests(unittest.TestCase):
         def stage(work):
             builder.stage_pinned_hidapi(runtime, archive.parent, lock, dependencies, work, devcmd)
 
-        with patch.object(build_hidapi, "msvc_environment", return_value={**env, "VCTOOLSVERSION": "15"}):
-            with self.assertRaisesRegex(ValueError, "toolchain differs"):
+        with patch.dict(build_hidapi.os.environ, {"ComSpec": "cmd.exe"}), \
+             patch.object(build_hidapi.subprocess, "check_output",
+                          return_value="VCToolsVersion=15\nWindowsSDKVersion=10.0.26100.0\\\n"):
+            with self.assertRaisesRegex(ValueError, "selected MSVC 15"):
                 stage(self.root / "drifted-toolset")
         self.assertEqual(dll.read_bytes(), b"old baseline DLL")
         with patch.object(build_hidapi, "msvc_environment", return_value=env), \
@@ -159,13 +165,19 @@ class OpenRGBCacheTests(unittest.TestCase):
             "repository": self.source, "revision": self.revision, "patch": "test.patch",
             "patch_sha256": pin(patch_bytes)["sha256"],
         })
-        dependencies = {"PawnIOLib.dll": pin(files["runtime/PawnIOLib.dll"])}
+        dependencies = {
+            "PawnIOLib.dll": pin(files["runtime/PawnIOLib.dll"]),
+            "hidapi-hotplug.dll": {
+                **pin(files["runtime/hidapi-hotplug.dll"]),
+                "msvc_toolset": "14.44.35207", "windows_sdk": "10.0.26100.0",
+            },
+        }
         if patched_hidapi:
             overlay = self.write("components/openrgb/hidapi-teardown.patch", b"fixture HIDAPI patch")
             files["build/hidapi-teardown.patch"] = overlay
             files["runtime/hidapi-hotplug.dll"] = b"fixture rebuilt DLL"
             dependencies["hidapi-hotplug.dll"] = {
-                **pin(files["runtime/hidapi-hotplug.dll"]),
+                **dependencies["hidapi-hotplug.dll"], **pin(files["runtime/hidapi-hotplug.dll"]),
                 "patch": "hidapi-teardown.patch", "patch_sha256": pin(overlay)["sha256"],
             }
         files["build/dependency-lock.json"] = lock("dependency-lock.json", {"files": dependencies})

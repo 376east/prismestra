@@ -1,13 +1,23 @@
 $ErrorActionPreference = 'Stop'
 
 if (!$env:ImageOS -or !$env:ImageVersion -or $env:RUNNER_ARCH -ne 'X64') { throw 'Expected an exact hosted Windows x64 image' }
+$lock = Get-Content -LiteralPath components/openrgb/dependency-lock.json -Raw | ConvertFrom-Json
+$pin = $lock.files.'hidapi-hotplug.dll'
+if ($pin.msvc_toolset -cnotmatch '^\d+\.\d+\.\d+$' -or $pin.windows_sdk -cnotmatch '^\d+\.\d+\.\d+\.\d+$') {
+  throw 'Invalid MSVC or Windows SDK version in the dependency lock'
+}
 $selected = @{}
-& $env:ComSpec /c ('call "' + $env:VSDEVCMD + '" -no_logo -arch=x64 -host_arch=x64 >NUL && set') | ForEach-Object {
+& $env:ComSpec /c ('call "' + $env:VSDEVCMD + '" -no_logo -arch=x64 -host_arch=x64' +
+  " -vcvars_ver=$($pin.msvc_toolset) -winsdk=$($pin.windows_sdk) >NUL && set") | ForEach-Object {
   if ($_ -match '^(VCToolsInstallDir|VCToolsVersion|VCToolsRedistDir|WindowsSdkDir|WindowsSDKVersion)=(.+)$') {
     $selected[$Matches[1]] = $Matches[2]
   }
 }
 if ($LASTEXITCODE -ne 0 -or $selected.Count -ne 5) { throw 'MSVC or Windows SDK inputs could not be established' }
+if ($selected.VCToolsVersion.TrimEnd('\','/') -cne $pin.msvc_toolset -or
+    $selected.WindowsSDKVersion.TrimEnd('\','/') -cne $pin.windows_sdk) {
+  throw 'Selected MSVC or Windows SDK differs from the dependency lock'
+}
 $compiler = Join-Path $selected.VCToolsInstallDir 'bin/Hostx64/x64'
 $sdk = Join-Path (Join-Path $selected.WindowsSdkDir 'bin') ($selected.WindowsSDKVersion.TrimEnd('\') + '/x64')
 $vs = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $env:VSDEVCMD))

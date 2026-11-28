@@ -44,6 +44,8 @@ When the HIDAPI entry pins a local patch, check the unchanged upstream archive a
 
 The Windows 2022 cold build uses the pinned [HIDAPI recipe](../scripts/components/build_hidapi.py). The recipe applies the patch, builds with `/Brepro`, and accepts only the recorded DLL hash. Two independent Windows 2022 jobs produced this hash and confirmed matching export names and ordinals. The cold build copies libusb and the PawnIO modules from the pinned OpenRGB checkout and stages the CRT from the selected Visual Studio installation. [HIDAPI CI evidence](https://github.com/376east/prismestra/actions/runs/45373290694)
 
+The candidate builder selects MSVC and the Windows SDK from the HIDAPI entry in the dependency lock for the OpenRGB executable and DLL builds. The cache key fingerprints the tools and CRT from that selection. The PawnIOLib recipe also verifies its own toolchain pins.
+
 ```text
 python scripts/components/verify_openrgb_component.py --source-root SOURCE --release-dir RELEASE --source-lock components/openrgb/source-lock.json --dependency-lock components/openrgb/dependency-lock.json --output audit.json
 python scripts/components/test_verify_openrgb_component.py

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import subprocess
 from zipfile import ZipFile
@@ -15,11 +16,15 @@ def sha256(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def msvc_environment(vsdevcmd):
+def msvc_environment(vsdevcmd, pins):
+    toolset, sdk = pins["msvc_toolset"], pins["windows_sdk"]
+    if not re.fullmatch(r"\d+\.\d+\.\d+", toolset) or not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", sdk):
+        raise ValueError("Invalid MSVC or Windows SDK version in the dependency lock")
     cmd = os.environ["ComSpec"]
     # cmd.exe parses the /c command itself. CRT argument quoting would escape
     # the quotes around the Visual Studio path as literal backslashes.
-    setup = f'"{cmd}" /d /s /u /c "call "{vsdevcmd}" -no_logo -arch=x64 -host_arch=x64 >NUL && set"'
+    setup = (f'"{cmd}" /d /s /u /c "call "{vsdevcmd}" -no_logo -arch=x64 -host_arch=x64'
+             f' -vcvars_ver={toolset} -winsdk={sdk} >NUL && set"')
     lines = subprocess.check_output(setup, executable=cmd, encoding="utf-16-le")
     env = {key.upper(): value for key, value in os.environ.items()}
     for line in lines.splitlines():
@@ -28,6 +33,10 @@ def msvc_environment(vsdevcmd):
             env[key.upper()] = value
     for key in ("CL", "_CL_", "LINK", "_LINK_", "CFLAGS", "CXXFLAGS", "LDFLAGS"):
         env.pop(key, None)
+    actual_toolset = env.get("VCTOOLSVERSION", "").rstrip("\\/")
+    actual_sdk = env.get("WINDOWSSDKVERSION", "").rstrip("\\/")
+    if (actual_toolset, actual_sdk) != (toolset, sdk):
+        raise ValueError(f"Expected MSVC {toolset}, SDK {sdk}; selected MSVC {actual_toolset}, SDK {actual_sdk}")
     return env
 
 
@@ -47,11 +56,7 @@ def extract_source(archive, source, upstream_root):
 def build(archive, patch, pins, work, vsdevcmd):
     if sha256(archive) != pins["source_archive_sha256"] or sha256(patch) != pins["patch_sha256"]:
         raise ValueError("HIDAPI source archive or patch differs from the dependency lock")
-    env = msvc_environment(vsdevcmd)
-    toolset = env.get("VCTOOLSVERSION", "").rstrip("\\/")
-    sdk = env.get("WINDOWSSDKVERSION", "").rstrip("\\/")
-    if (toolset, sdk) != (pins["msvc_toolset"], pins["windows_sdk"]):
-        raise ValueError(f"HIDAPI toolchain differs from the dependency lock: MSVC {toolset}, SDK {sdk}")
+    env = msvc_environment(vsdevcmd, pins)
 
     source = work / "source"
     extract_source(archive, source, "hidapi-hotplug-" + pins["source_revision"])

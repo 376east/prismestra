@@ -8,7 +8,7 @@ Release CI built and published Setup from `2c1675c2`. Quick and Full software ch
 
 The downloaded Setup matched the published SHA-256 `0818ed7e00983a40c9616257d4dcaf440a6cdf207941404e50463828f7625482`. Windows Authenticode inspection of that EXE returned `NotSigned`. Physical output on real devices remains unverified for this exact release, including after Windows sign-in. [Release and checksum](https://github.com/376east/prismestra/releases/tag/v0.2.0)
 
-The upstream-only OpenRGB build inputs need a cold Windows Setup run on the changed revision. Windows Setup CI tests upgrades from the last stable installer. [Component inputs](openrgb-component-verification.md#build-and-inspect)
+The upstream-only OpenRGB build passed a cold Windows Setup run, including upgrade from the last stable installer. The component build selects the MSVC and Windows SDK versions recorded in the dependency lock. [Upstream-only build](https://github.com/376east/prismestra/actions/runs/46130538039) · [Component inputs](openrgb-component-verification.md#build-and-inspect)
 
 ## Implemented behavior
 
