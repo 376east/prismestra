@@ -17,11 +17,6 @@ OPENRGB_UPSTREAM = "components/openrgb/upstream"
 POWERSHELL = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
 BUNDLE = "Prismestra-OpenRGB-component.zip"
 PINNED_INPUTS = {
-    "Prismestra-Sources-0.1.0.5.zip": (
-        "https://github.com/376east/prismestra/releases/download/build-inputs-v1/Prismestra-Sources-0.1.0.5.zip",
-        "a3ed186b4d08cf25930689902a0f1d260cc3eca678379d897281a51bc2b0307e",
-        55900191,
-    ),
     "jom.zip": (
         "https://download.qt.io/official_releases/jom/jom_1_1_4.zip",
         "d533c1ef49214229681e90196ed2094691e8c4a0a0bef0b2c901debcb562682b",
@@ -34,6 +29,7 @@ PINNED_INPUTS = {
         39484220,
     ),
 }
+CRT_FILES = ("msvcp140.dll", "msvcp140_codecvt_ids.dll", "vcruntime140.dll", "vcruntime140_1.dll")
 
 
 def run(*args, cwd=REPO, env=None):
@@ -93,7 +89,8 @@ def apply_locked_patch(source, patch, expected_sha256):
     if sha256(patch) != expected_sha256:
         raise ValueError("OpenRGB patch differs from its source lock")
     run("git", "-C", source, "apply", "--check", patch)
-    run("git", "-C", source, "apply", "--intent-to-add", patch)
+    run("git", "-C", source, "apply", patch)
+    run("git", "-C", source, "add", "--intent-to-add", "--all")
     if working_diff(source) != patch.read_bytes():
         raise ValueError(
             "OpenRGB patch differs from the applied Git diff; "
@@ -114,8 +111,55 @@ def stage_pinned_hidapi(runtime, archives, dependency_lock, dependencies, root, 
     shutil.copy2(rebuilt, runtime / "hidapi-hotplug.dll")
 
 
+def stage_sources(archives, assets):
+    from components.package_openrgb_component import safe_name
+
+    archives.mkdir()
+    for entry in read(assets)["files"]:
+        path = safe_name(entry["path"])
+        if path.parent.as_posix() == "source":
+            fetch(archives, path.name, entry["url"], entry["sha256"], entry["size"])
+
+
+def stage_runtime(source, runtime, environment):
+    from components.verify_openrgb_component import SOURCE_FILES
+
+    runtime.mkdir()
+    for name, path in SOURCE_FILES.items():
+        if name != "PawnIOLib.dll":
+            shutil.copy2(source / path, runtime / name)
+    redist = Path(environment["VCTOOLSREDISTDIR"]) / "x64/Microsoft.VC143.CRT"
+    for name in CRT_FILES:
+        shutil.copy2(redist / name, runtime / name)
+
+
+def stage_pinned_pawnio(runtime, archives, pins, work, vsdevcmd, environment):
+    from components.build_hidapi import extract_source
+
+    stem = f"PawnIO-{pins['source_revision']}"
+    archive = archives / f"{stem}-source.zip"
+    if sha256(archive) != pins["source_archive_sha256"]:
+        raise ValueError("PawnIO source archive differs from the dependency lock")
+    toolset = environment["VCTOOLSVERSION"].rstrip("\\/")
+    sdk = environment["WINDOWSSDKVERSION"].rstrip("\\/")
+    if (toolset, sdk) != (pins["msvc_toolset"], pins["windows_sdk"]):
+        raise ValueError(f"PawnIO toolchain differs from the dependency lock: MSVC {toolset}, SDK {sdk}")
+    source = work / "source"
+    extract_source(archive, source, stem)
+    tools = vsdevcmd.parents[2] / "Common7/IDE/CommonExtensions/Microsoft/CMake"
+    cmake = tools / "CMake/bin/cmake.exe"
+    ninja = tools / "Ninja/ninja.exe"
+    output = work / "build"
+    run(cmake, "-S", REPO / "scripts/components/pawniolib", "-B", output, "-G", "Ninja",
+        f"-DCMAKE_MAKE_PROGRAM={ninja}", "-DCMAKE_BUILD_TYPE=Release",
+        f"-DPAWN_SOURCE:PATH={source}", env=environment)
+    run(cmake, "--build", output, "--target", "PawnIOLib", "--verbose", env=environment)
+    shutil.copy2(output / "PawnIOLib.dll", runtime / "PawnIOLib.dll")
+
+
 def build_component(root, vsdevcmd):
-    from components.verify_openrgb_component import REQUIRED, MSVC_RUNTIME
+    from components.build_hidapi import msvc_environment
+
     source_lock = COMPONENT / "source-lock.json"
     dependency_lock = COMPONENT / "dependency-lock.json"
     lock = read(source_lock)
@@ -125,28 +169,16 @@ def build_component(root, vsdevcmd):
     tools = {name: fetch(root, name, *PINNED_INPUTS[name])
              for name in PINNED_INPUTS}
 
-    # Reuse the pinned source archives and unchanged user-mode dependencies.
-    # The previous OpenRGB.exe is deliberately excluded from the new component.
-    with ZipFile(tools["Prismestra-Sources-0.1.0.5.zip"]) as previous:
-        base = root / "previous-component.zip"
-        base.write_bytes(previous.read("openrgb/Prismestra-OpenRGB-component.zip"))
-    if sha256(base) != "42ab552ffb4d429a9df7d83aab8d53a1df30269491f2e28c9dd57c7d9187f8e7":
-        raise ValueError("Unexpected dependency baseline component")
     runtime = root / "runtime"
     archives = root / "component-sources"
-    runtime.mkdir()
-    archives.mkdir()
     assets = COMPONENT / "distribution-assets.json"
-    with ZipFile(base) as previous:
-        for name in sorted((REQUIRED - {"OpenRGB.exe"}) | MSVC_RUNTIME):
-            member = f"runtime/{name}"
-            if member in previous.namelist():
-                (runtime / name).write_bytes(previous.read(member))
-        for entry in read(assets)["files"]:
-            role, name = entry["path"].split("/")
-            if role == "source":
-                (archives / name).write_bytes(previous.read(entry["path"]))
-    stage_pinned_hidapi(runtime, archives, dependency_lock, read(dependency_lock), root, vsdevcmd)
+    stage_sources(archives, assets)
+    environment = msvc_environment(vsdevcmd)
+    dependencies = read(dependency_lock)
+    stage_runtime(source, runtime, environment)
+    stage_pinned_pawnio(runtime, archives, dependencies["files"]["PawnIOLib.dll"],
+                       root / "pawnio-build", vsdevcmd, environment)
+    stage_pinned_hidapi(runtime, archives, dependency_lock, dependencies, root, vsdevcmd)
 
     jom = root / "jom"
     with ZipFile(tools["jom.zip"]) as archive:

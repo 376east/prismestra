@@ -39,7 +39,13 @@ class InvalidPE(ValueError):
     pass
 
 
-def pe_imports(data):
+def source_built_pawnio(name, pin):
+    return (name == "PawnIOLib.dll" and pin.get("build_from_source") is True and "sha256" not in pin
+            and re.fullmatch(r"\d+\.\d+\.\d+", str(pin.get("msvc_toolset", ""))) is not None
+            and re.fullmatch(r"\d+\.\d+\.\d+\.\d+", str(pin.get("windows_sdk", ""))) is not None)
+
+
+def pe_imports(data, *, require_pawnio_exports=False):
     """Read normal and RVA-style delay imports of a bounded AMD64 PE32+ image."""
     def unpack(fmt, offset):
         size = struct.calcsize(fmt)
@@ -87,7 +93,7 @@ def pe_imports(data):
             raise InvalidPE("unmapped or ambiguous RVA")
         return matches[0]
 
-    def dll_name(rva):
+    def ascii_name(rva):
         value = bytearray()
         for index in range(260):
             byte = data[file_offset(rva + index, 1)]
@@ -95,14 +101,40 @@ def pe_imports(data):
                 break
             value.append(byte)
         else:
-            raise InvalidPE("unterminated DLL name")
+            raise InvalidPE("unterminated PE name")
         try:
-            name = value.decode("ascii").lower()
+            return value.decode("ascii")
         except UnicodeDecodeError as error:
-            raise InvalidPE("non-ASCII DLL name") from error
+            raise InvalidPE("non-ASCII PE name") from error
+
+    def dll_name(rva):
+        name = ascii_name(rva).lower()
         if not re.fullmatch(r"[a-z0-9_.-]+\.(?:dll|drv)", name):
             raise InvalidPE("invalid DLL basename")
         return name
+
+    if require_pawnio_exports:
+        if not directories:
+            raise InvalidPE("PawnIOLib export directory is missing")
+        rva, size = unpack("<II", optional + 112)
+        if not rva or size < 40:
+            raise InvalidPE("invalid PawnIOLib export directory")
+        _, functions, count, addresses, names, ordinals = unpack("<6I", file_offset(rva, 40) + 16)
+        expected = sorted(f"pawnio_{operation}{suffix}"
+                          for operation in ("close", "execute", "execute_async", "load", "open", "version")
+                          for suffix in ("", "_nt", "_win32"))
+        if functions != count or count != len(expected):
+            raise InvalidPE("unexpected PawnIOLib export count")
+        name_table = unpack(f"<{count}I", file_offset(names, count * 4))
+        ordinal_table = unpack(f"<{count}H", file_offset(ordinals, count * 2))
+        address_table = unpack(f"<{count}I", file_offset(addresses, count * 4))
+        if ([ascii_name(name) for name in name_table] != expected
+                or set(ordinal_table) != set(range(count))):
+            raise InvalidPE("unexpected PawnIOLib exports")
+        for address in address_table:
+            if not address or rva <= address < rva + size:
+                raise InvalidPE("PawnIOLib export is missing or forwarded")
+            file_offset(address, 1)
 
     result = {"normal": [], "delay": []}
     for directory, kind, descriptor_size in ((1, "normal", 20), (13, "delay", 32)):
@@ -180,7 +212,8 @@ def verify(source, release, source_lock=None, dependency_lock=None):
                 raise ValueError("dependency overrides are restricted to the three user-mode DLLs")
             for name, item in overrides.items():
                 if (not isinstance(item, dict)
-                        or not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", "")))
+                        or not (source_built_pawnio(name, item)
+                                or re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", ""))))
                         or not re.fullmatch(r"[0-9a-f]{64}", str(item.get("source_archive_sha256", "")))
                         or not re.fullmatch(r"[0-9a-f]{40}", str(item.get("source_revision", "")))):
                     raise ValueError("dependency override needs binary/source hashes and exact revision: " + name)
@@ -241,7 +274,10 @@ def verify(source, release, source_lock=None, dependency_lock=None):
                     data = path.read_bytes()
                     if hashlib.sha256(data).hexdigest() != metadata["sha256"]:
                         raise ValueError("image changed between hash and import inspection")
-                    entry["imports"] = pe_imports(data)
+                    pawnio = "PawnIOLib.dll"
+                    entry["imports"] = pe_imports(data, require_pawnio_exports=(
+                        path.name.lower() == pawnio.lower()
+                        and source_built_pawnio(pawnio, overrides.get(pawnio, {}))))
                 canonical = next((name for name in SOURCE_FILES if name.lower() == path.name.lower()), None)
                 if canonical:
                     source_path = source / SOURCE_FILES[canonical]
@@ -249,7 +285,8 @@ def verify(source, release, source_lock=None, dependency_lock=None):
                     entry["source_fingerprint"] = fingerprint(source_path)
                     if canonical in overrides:
                         entry["rebuilt_dependency"] = overrides[canonical]
-                        if metadata["sha256"] != overrides[canonical]["sha256"]:
+                        if (not source_built_pawnio(canonical, overrides[canonical])
+                                and metadata["sha256"] != overrides[canonical]["sha256"]):
                             errors.append(f"rebuilt dependency hash mismatch: {path.name}")
                     elif metadata != entry["source_fingerprint"]:
                         errors.append(f"source-copy hash/size mismatch: {path.name}")

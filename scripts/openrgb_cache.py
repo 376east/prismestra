@@ -11,7 +11,7 @@ import tempfile
 from build_openrgb_component import BUNDLE, REPO, verify_openrgb_gitlink
 from component_archive import extract_component
 from components.package_openrgb_component import LICENSES, RECIPES, checked, hidapi_patch, read_json, safe_name
-from components.verify_openrgb_component import MSVC_RUNTIME, REQUIRED, fingerprint
+from components.verify_openrgb_component import MSVC_RUNTIME, REQUIRED, fingerprint, pe_imports, source_built_pawnio
 from package_installer import read_prerequisite_lock
 
 
@@ -92,7 +92,7 @@ def verify_members(manifest, repo):
         if any(entries[path][field] != value for field, value in pin.items()):
             raise ValueError(f"Cached OpenRGB member differs from the checked input: {path}")
     for name, pin in dependencies["files"].items():
-        if entries[f"runtime/{name}"]["sha256"] != pin["sha256"]:
+        if not source_built_pawnio(name, pin) and entries[f"runtime/{name}"]["sha256"] != pin["sha256"]:
             raise ValueError(f"Cached OpenRGB dependency differs from the checked pin: {name}")
 
 
@@ -115,6 +115,10 @@ def restore(cache, key, work, repo=REPO):
         extract_component(bundle, staged, digest, runtime_floor)
         manifest, _ = read_json(staged / "component-manifest.json")
         verify_members(manifest, repo)
+        pawnio = "PawnIOLib.dll"
+        dependencies, _ = read_json(repo / "components/openrgb/dependency-lock.json")
+        if source_built_pawnio(pawnio, dependencies["files"].get(pawnio, {})):
+            pe_imports((staged / "runtime" / pawnio).read_bytes(), require_pawnio_exports=True)
     return bundle
 
 

@@ -45,27 +45,32 @@
     {
       "path": "source/hidapi-hotplug-238df449ecc0a56a70a3c8f4ebf46bb46857af27-source.zip",
       "size": 485368,
-      "sha256": "d4197d1756dbb0f6d7ff167d1e92ec5b44d9d9ce6b87cb8ff3603272edcb1817"
+      "sha256": "d4197d1756dbb0f6d7ff167d1e92ec5b44d9d9ce6b87cb8ff3603272edcb1817",
+      "url": "https://codeload.github.com/OpenRGBDevelopers/hidapi-hotplug/zip/238df449ecc0a56a70a3c8f4ebf46bb46857af27"
     },
     {
       "path": "source/libusb-1.0.27-source.tar.bz2",
       "size": 643680,
-      "sha256": "ffaa41d741a8a3bee244ac8e54a72ea05bf2879663c098c82fc5757853441575"
+      "sha256": "ffaa41d741a8a3bee244ac8e54a72ea05bf2879663c098c82fc5757853441575",
+      "url": "https://github.com/libusb/libusb/releases/download/v1.0.27/libusb-1.0.27.tar.bz2"
     },
     {
       "path": "source/openrgb-headless-6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43-source.zip",
-      "size": 16015548,
-      "sha256": "a2764813036e49f8627fdf84dafa81e0347717006b27091ef5609256bfb2a10d"
+      "size": 16297584,
+      "sha256": "fedf8ca8ad13e242c1b16a6f932cfa589aad29260fd81d3d5fcccd6305f88a82",
+      "url": "https://codeload.github.com/hello-nexus/openrgb-headless/zip/6bf7d9f5348be41dcf6a45dc7ad57f00b0b69b43"
     },
     {
       "path": "source/PawnIO-9d52965895588b0ffa3703b72eec75ba19f4ccc0-source.zip",
       "size": 129963,
-      "sha256": "a595c331091d1173a6a9e337a81832c98155a57009a9f99f825e29073da4f704"
+      "sha256": "a595c331091d1173a6a9e337a81832c98155a57009a9f99f825e29073da4f704",
+      "url": "https://codeload.github.com/namazso/PawnIO/zip/9d52965895588b0ffa3703b72eec75ba19f4ccc0"
     },
     {
       "path": "source/PawnIO.Modules-52a7e536dff3e53c96917a28caac5e0fa6510696-source.zip",
       "size": 1048104,
-      "sha256": "3766588abec0a353aa8824a1f138a443a4e54c62a38eec30b2d44d770c59e62a"
+      "sha256": "3766588abec0a353aa8824a1f138a443a4e54c62a38eec30b2d44d770c59e62a",
+      "url": "https://codeload.github.com/namazso/PawnIO.Modules/zip/52a7e536dff3e53c96917a28caac5e0fa6510696"
     }
   ]
 }

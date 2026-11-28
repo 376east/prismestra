@@ -177,8 +177,11 @@ def package(args):
         if (name not in ("PawnIOLib.dll", "hidapi-hotplug.dll", "libusb-1.0.dll")
                 or not re.fullmatch(r"[0-9a-f]{40}", str(item.get("source_revision", "")))
                 or item.get("source_archive_sha256") not in source_hashes
-                or files.get("runtime/" + name, (None, {}))[1].get("sha256") != item.get("sha256")):
+                or (not verifier.source_built_pawnio(name, item)
+                    and files.get("runtime/" + name, (None, {}))[1].get("sha256") != item.get("sha256"))):
             raise ValueError("rebuilt dependency binary/source pins mismatch: " + name)
+        if verifier.source_built_pawnio(name, item):
+            verifier.pe_imports(files["runtime/" + name][0].read_bytes(), require_pawnio_exports=True)
     for name in RECIPES:
         add(recipes / name, "build/" + name)
     if args.verification_doc:

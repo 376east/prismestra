@@ -158,17 +158,17 @@ def detector_names(source, macros):
         yield line_number, json.loads(literal), connection, device_type, alias
 
 
-def gigabyte_board_names(archive):
+def gigabyte_board_names(read):
     usb = "Controllers/GigabyteRGBFusion2USBController/GigabyteFusion2USB_Devices.cpp"
     smbus = "Controllers/GigabyteRGBFusion2SMBusController/GigabyteRGBFusion2SMBusControllerDetect.cpp"
-    usb_source = remove_comments(archive.read(usb).decode("utf-8"))
+    usb_source = remove_comments(read(usb).decode("utf-8"))
     usb_definitions, usb_list = usb_source.split("const gb_fusion2_device* gb_fusion2_device_list_data[]", 1)
     usb_ids = set(re.findall(r"&([a-z0-9_]+),", usb_list.split("};", 1)[0])) - {"null"}
     for match in re.finditer(rf"static const gb_fusion2_device (\w+)\s*=\s*\{{[^{{}}]*?({CPP_STRING})", usb_definitions):
         if match[1] in usb_ids and not match[1].startswith("generic_"):
             yield usb, usb_source.count("\n", 0, match.start(2)) + 1, json.loads(match[2]), "HID"
 
-    smbus_source = remove_comments(archive.read(smbus).decode("utf-8"))
+    smbus_source = remove_comments(read(smbus).decode("utf-8"))
     match = re.search(r"json rgb_fusion_2_smbus_motherboards\[\]\s*=\s*\{([^}]+)\}", smbus_source)
     if match is None:
         raise ValueError("Gigabyte Fusion 2 SMBus model table was not found")
@@ -184,12 +184,12 @@ def table_body(source, declaration):
     return match[1], source.count("\n", 0, match.start(1)) + 1
 
 
-def retail_models(archive, registrations, blob):
-    for path, line, name, connection in gigabyte_board_names(archive):
+def retail_models(read, registrations, blob):
+    for path, line, name, connection in gigabyte_board_names(read):
         yield model_row(f"Gigabyte {name}", path, line, blob, connection, "Motherboard")
 
     corsair = "Controllers/CorsairDRAMController/CorsairDRAMDevices.cpp"
-    source = remove_comments(archive.read(corsair).decode("utf-8-sig"))
+    source = remove_comments(read(corsair).decode("utf-8-sig"))
     table, _ = table_body(source, r"corsair_dram_device\* device_list\[\]")
     for device in re.findall(r"&(\w+)\b", table):
         model = re.search(rf"corsair_dram_device {re.escape(device)}\s*=\s*\{{\s*({CPP_STRING})", source)
@@ -209,7 +209,7 @@ def retail_models(archive, registrations, blob):
         (sol, "thrustmaster_sol_device", "USB", "Joystick"),
     ):
         path = "Controllers/" + file
-        source = remove_comments(archive.read(path).decode("utf-8-sig"))
+        source = remove_comments(read(path).decode("utf-8-sig"))
         table, start = table_body(source, rf"{struct} device_list\[\]")
         for offset, line in enumerate(table.splitlines()):
             if model := re.search(rf",\s*({CPP_STRING})\s*\}}", line):
@@ -222,16 +222,16 @@ def retail_models(archive, registrations, blob):
                     row["aliases"] = [name.removesuffix(" FE") + " Founders Edition"]
                 yield row
 
-    yield from msi_boards(archive, registrations, blob)
-    yield from keychron_layouts(archive, blob)
+    yield from msi_boards(read, registrations, blob)
+    yield from keychron_layouts(read, blob)
 
 
-def msi_boards(archive, registrations, blob):
+def msi_boards(read, registrations, blob):
     msi = "Controllers/MSIMotherboardController/MSIMotherboard{size}Controller/MSIMotherboard{size}Controller.cpp"
     by_name = {row["name"]: row for row in registrations}
     for size in (162, 185):
         path = msi.format(size=size)
-        source = archive.read(path).decode("utf-8-sig")
+        source = read(path).decode("utf-8-sig")
         # These comments identify individual rows of the model-specific lighting table.
         for line, text in enumerate(source.splitlines(), 1):
             row = re.match(r"\s*\{\s*0x([0-9A-Fa-f]{4}),(.+?)\}\s*,?\s*//\s*(.+)", text)
@@ -253,7 +253,7 @@ def msi_boards(archive, registrations, blob):
             yield result
 
     path = msi.format(size=761)
-    source = remove_comments(archive.read(path).decode("utf-8-sig"))
+    source = remove_comments(read(path).decode("utf-8-sig"))
     table, start = table_body(source, r"std::string board_names\[\]")
     configs, _ = table_body(source, r"\w+ board_configs\[\]")
     indices = {int(index) for index in re.findall(r"&\(board_names\[(\d+)\]\)", configs)}
@@ -268,13 +268,13 @@ def msi_boards(archive, registrations, blob):
         yield result
 
 
-def keychron_layouts(archive, blob):
+def keychron_layouts(read, blob):
     qmk = "Controllers/QMKController/QMKKeychronController/"
     path = qmk + "QMKKeychronController_Devices.cpp"
-    source = archive.read(path).decode("utf-8-sig")
+    source = read(path).decode("utf-8-sig")
     stripped = remove_comments(source)
-    header = archive.read(qmk + "QMKKeychronController_Devices.h").decode("utf-8-sig")
-    vendor_header = archive.read(qmk + "QMKKeychronController.h").decode("utf-8-sig")
+    header = read(qmk + "QMKKeychronController_Devices.h").decode("utf-8-sig")
+    vendor_header = read(qmk + "QMKKeychronController.h").decode("utf-8-sig")
     definitions = dict((match[1], match[2][2:].upper()) for line in (header + "\n" + vendor_header).splitlines()
                        if (match := ID_DEFINE.fullmatch(line)))
     table, _ = table_body(stripped, r"keychron_patch\* const keychron_patches\[\]")
@@ -338,19 +338,25 @@ def build_catalog(source_zip):
     blob = f"{lock['repository']}/blob/{revision}"
     rows = []
     with ZipFile(source_zip) as archive:
-        header = archive.read("DetectionManager.h").decode("utf-8")
+        prefix = f"openrgb-headless-{revision}/"
+
+        def read(path):
+            return archive.read(prefix + path)
+
+        header = read("DetectionManager.h").decode("utf-8")
         macros = {
             macro
             for macro in re.findall(r"^#define (REGISTER_\w+)\(name,", header, re.M)
             if not macro.endswith("_DISABLED") and not macro.startswith("REGISTER_DYNAMIC_HID_")
         }
         macros.add("REGISTER_WOOTING_DETECTOR")
-        for path in sorted(archive.namelist()):
+        for member in sorted(archive.namelist()):
+            path = member.removeprefix(prefix)
             if windows_controller(path, exclusions):
-                source = archive.read(path).decode("utf-8-sig")
+                source = read(path).decode("utf-8-sig")
                 for line, name, connection, device_type, alias in detector_names(source, macros):
                     rows.append(model_row(name, path, line, blob, connection, device_type, alias))
-        rows.extend(retail_models(archive, rows, blob))
+        rows.extend(retail_models(read, rows, blob))
     return {
         "revision": revision,
         "source": f"{lock['repository']}/tree/{revision}",

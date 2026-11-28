@@ -31,6 +31,19 @@ def msvc_environment(vsdevcmd):
     return env
 
 
+def extract_source(archive, source, upstream_root):
+    source.mkdir(parents=True)
+    with ZipFile(archive) as zipped:
+        for item in zipped.infolist():
+            path = PurePosixPath(item.filename)
+            if not path.parts or path.parts[0] != upstream_root or ".." in path.parts or "\\" in item.filename:
+                raise ValueError(f"Unexpected HIDAPI archive member: {item.filename}")
+            if not item.is_dir():
+                target = source.joinpath(*path.parts[1:])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(zipped.read(item))
+
+
 def build(archive, patch, pins, work, vsdevcmd):
     if sha256(archive) != pins["source_archive_sha256"] or sha256(patch) != pins["patch_sha256"]:
         raise ValueError("HIDAPI source archive or patch differs from the dependency lock")
@@ -41,17 +54,7 @@ def build(archive, patch, pins, work, vsdevcmd):
         raise ValueError(f"HIDAPI toolchain differs from the dependency lock: MSVC {toolset}, SDK {sdk}")
 
     source = work / "source"
-    source.mkdir(parents=True)
-    upstream_root = "hidapi-hotplug-" + pins["source_revision"]
-    with ZipFile(archive) as zipped:
-        for item in zipped.infolist():
-            path = PurePosixPath(item.filename)
-            if not path.parts or path.parts[0] != upstream_root or ".." in path.parts or "\\" in item.filename:
-                raise ValueError(f"Unexpected HIDAPI archive member: {item.filename}")
-            if not item.is_dir():
-                target = source.joinpath(*path.parts[1:])
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(zipped.read(item))
+    extract_source(archive, source, "hidapi-hotplug-" + pins["source_revision"])
     git = ["git", "-C", source]
     subprocess.run([*git, "init", "-q"], check=True)
     apply = [*git, "-c", "core.autocrlf=false", "apply"]

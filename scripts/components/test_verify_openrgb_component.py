@@ -50,6 +50,30 @@ class PEChecks(unittest.TestCase):
         self.assertEqual(verifier.pe_imports(image(["KERNEL32.dll"], ["Qt6Core.dll"])),
                          {"normal": ["kernel32.dll"], "delay": ["qt6core.dll"]})
 
+    def test_source_built_pawnio_requires_complete_unforwarded_exports(self):
+        data = bytearray(image())
+        names = sorted(f"pawnio_{operation}{suffix}"
+                       for operation in ("close", "execute", "execute_async", "load", "open", "version")
+                       for suffix in ("", "_nt", "_win32"))
+        struct.pack_into("<II", data, 0x98 + 112, 4096, 1400)
+        struct.pack_into("<6I", data, 512 + 16, 1, len(names), len(names), 4200, 4300, 4400)
+        name_rva = 4500
+        for index, name in enumerate(names):
+            encoded = name.encode() + b"\0"
+            struct.pack_into("<I", data, 512 + 104 + index * 4, 5600 + index)
+            struct.pack_into("<I", data, 512 + 204 + index * 4, name_rva)
+            struct.pack_into("<H", data, 512 + 304 + index * 2, index)
+            offset = 512 + name_rva - 4096
+            data[offset:offset + len(encoded)] = encoded
+            name_rva += len(encoded)
+        self.assertEqual(verifier.pe_imports(data, require_pawnio_exports=True),
+                         {"normal": [], "delay": []})
+        struct.pack_into("<I", data, 512 + 104, 4500)
+        with self.assertRaisesRegex(verifier.InvalidPE, "forwarded"):
+            verifier.pe_imports(data, require_pawnio_exports=True)
+        with self.assertRaisesRegex(verifier.InvalidPE, "export directory"):
+            verifier.pe_imports(image(), require_pawnio_exports=True)
+
     def test_malformed_pe_is_rejected(self):
         fixtures = [b"", b"MZ", image()[:300]]
         wrong_machine = bytearray(image())

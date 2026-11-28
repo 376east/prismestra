@@ -1,7 +1,6 @@
 """Use synthetic ZIPs and tools to check the cache without running a build."""
 
 import hashlib
-import io
 import json
 from pathlib import Path
 import sys
@@ -381,11 +380,6 @@ class OpenRGBCacheTests(unittest.TestCase):
         original = self.make_bundle()
         downloads = self.root / "downloads"
         downloads.mkdir()
-        previous_component = io.BytesIO()
-        with ZipFile(previous_component, "w") as archive:
-            archive.writestr("source/fixture.zip", b"source/fixture.zip")
-        with ZipFile(downloads / "Prismestra-Sources-0.1.0.5.zip", "w") as archive:
-            archive.writestr("openrgb/Prismestra-OpenRGB-component.zip", previous_component.getvalue())
         with ZipFile(downloads / "jom.zip", "w") as archive:
             archive.writestr("jom.exe", b"fixture")
 
@@ -410,11 +404,6 @@ class OpenRGBCacheTests(unittest.TestCase):
             else:
                 self.fail(f"unexpected subprocess: {exe}")
 
-        def digest(path):
-            if path == self.root / "previous-component.zip":
-                return "42ab552ffb4d429a9df7d83aab8d53a1df30269491f2e28c9dd57c7d9187f8e7"
-            return sha256(path)
-
         def recipe(name, *args):
             calls.append(call(name))
             if name == "components/package_openrgb_component.py":
@@ -425,16 +414,25 @@ class OpenRGBCacheTests(unittest.TestCase):
 
         with (
             patch.dict(builder.os.environ, {"ProgramFiles": str(self.root)}),
-            patch.multiple(builder, COMPONENT=self.component, run=run, recipe=recipe, sha256=digest),
+            patch.multiple(builder, COMPONENT=self.component, run=run, recipe=recipe),
             patch.object(builder, "checkout_openrgb", return_value=source),
-            patch.object(builder, "fetch", side_effect=lambda _, name, *pin: downloads / name),
+            patch.object(builder, "fetch", side_effect=lambda _, name, *pin: downloads / name) as fetch,
+            patch.object(build_hidapi, "msvc_environment", return_value={}),
+            patch.object(builder, "stage_sources") as stage_sources,
+            patch.object(builder, "stage_runtime", side_effect=lambda _, runtime, __: runtime.mkdir()),
+            patch.object(builder, "stage_pinned_pawnio") as stage_pawnio,
             patch.object(verifier, "working_diff", return_value=patch_path.read_bytes()) as exported,
         ):
             result = candidate.load_or_build_component(self.root, vsdevcmd, self.cache, self.key, write_cache=True)
         exported.assert_called_once_with(source)
+        stage_sources.assert_called_once_with(self.root / "component-sources",
+                                              self.component / "distribution-assets.json")
+        stage_pawnio.assert_called_once()
+        self.assertEqual([args.args[1] for args in fetch.call_args_list], ["jom.zip", "qtbase.7z"])
         self.assertEqual(calls, [
             call("git", "-C", source, "apply", "--check", patch_path),
-            call("git", "-C", source, "apply", "--intent-to-add", patch_path),
+            call("git", "-C", source, "apply", patch_path),
+            call("git", "-C", source, "add", "--intent-to-add", "--all"),
             call("components/verify_openrgb_component.py"),
             call("components/package_openrgb_component.py"),
             call("components/test_parent_pipe.py"),
