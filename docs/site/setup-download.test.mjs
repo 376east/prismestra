@@ -12,29 +12,16 @@ function setupAsset(tag, kind = '') {
   return { name, browser_download_url: `${releases}/download/${tag}/${name}` };
 }
 
-test('uses the light installer as primary and publishes the full offline link on both pages', () => {
-  const tag_name = 'v0.3.0';
-  const primary = setupAsset(tag_name);
-  const offline = setupAsset(tag_name, 'Offline-');
-  for (const page of pages) {
-    const html = renderWindowsDownloads(page, { tag_name, assets: [primary, offline] });
-    assert.ok(html.includes(`id="download" href="${primary.browser_download_url}"`));
-    assert.ok(html.includes(`id="offline-download" href="${offline.browser_download_url}"`));
-    assert.ok(html.includes(`id="manual-download" href="${releases}/latest"`));
-    assert.doesNotMatch(html, /id="download-network" hidden/);
-  }
-});
-
-test('links directly to the legacy Setup and hides the second link and internet requirement', () => {
-  const tag_name = 'v0.2.0';
-  const primary = setupAsset(tag_name);
-  const wrongOffline = { ...setupAsset(tag_name, 'Offline-'), browser_download_url: 'https://example.com/setup.exe' };
-  for (const assets of [[primary], [primary, wrongOffline]]) {
+test('links directly to the regular Setup and keeps other assets in Release files', () => {
+  for (const tag_name of ['v0.2.0', 'v0.3.0']) {
+    const primary = setupAsset(tag_name);
+    const offline = setupAsset(tag_name, 'Offline-');
+    const assets = tag_name === 'v0.2.0' ? [primary] : [offline, primary];
     for (const page of pages) {
       const html = renderWindowsDownloads(page, { tag_name, assets });
       assert.ok(html.includes(`id="download" href="${primary.browser_download_url}"`));
-      assert.match(html, /id="offline-download" hidden/);
-      assert.match(html, /id="download-network" hidden/);
+      assert.ok(html.includes(`id="manual-download" href="${releases}/latest"`));
+      assert.ok(!html.includes(offline.browser_download_url));
     }
   }
 });

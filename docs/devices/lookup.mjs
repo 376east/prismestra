@@ -15,7 +15,6 @@ const copy = {
     nav: 'Project',
     title: 'Check your devices', intro: 'Find your model to see what Prismestra can control and how to set it up.',
     installNote: 'Setup installs OpenRGB for supported PC lighting.',
-    downloadNetwork: 'Light Setup requires an internet connection.', offlineDownload: 'Download full offline installer',
     download: 'Get Windows Setup', manualDownload: 'All release files', device: 'Model or device type', filter: 'Category', all: 'All devices',
     examples: 'Try', results: 'Matching devices', more: 'Show more', report: 'Report a device',
     guide: 'Compatibility guide', catalog: 'About the catalog', upstream: 'OpenRGB development catalog',
@@ -49,7 +48,6 @@ const copy = {
     nav: 'Проект',
     title: 'Проверьте свои устройства', intro: 'Найдите свою модель, чтобы узнать, чем можно управлять и как подключить устройство.',
     installNote: 'Установщик добавляет OpenRGB для совместимой подсветки ПК.',
-    downloadNetwork: 'Для лёгкой установки нужен интернет.', offlineDownload: 'Скачать полный офлайн-установщик',
     download: 'Установщик для Windows', manualDownload: 'Все файлы релиза', device: 'Модель или тип устройства', filter: 'Категория', all: 'Все устройства',
     examples: 'Для примера', results: 'Найденные устройства', more: 'Показать ещё', report: 'Сообщить об устройстве',
     guide: 'Справочник совместимости', catalog: 'О каталоге', upstream: 'Каталог новых сборок OpenRGB',
@@ -181,7 +179,6 @@ async function start() {
   const language = el('language');
   for (const [id, value] of Object.entries({
     title: t.title, intro: t.intro, 'install-note': t.installNote, download: t.download, 'manual-download': t.manualDownload, 'query-label': t.device,
-    'download-network': t.downloadNetwork, 'offline-download': t.offlineDownload,
     'filter-label': t.filter, count: t.loading, report: t.report, guide: t.guide,
     'catalog-label': t.catalog, upstream: t.upstream, more: t.more, 'report-missing': t.report,
     setup: t.setup,

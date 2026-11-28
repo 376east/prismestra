@@ -38,8 +38,6 @@
 .primary-button:active, .search-button:active { transform: scale(.98); }
 .hero .platform-note { margin-block: .8rem .1rem; color: var(--site-muted); font-size: .86rem; }
 .hero .platform-note:empty { display: none; }
-.hero #download-network { margin-block-start: .3rem; }
-.download-links { display: flex; flex-wrap: wrap; column-gap: 1.25rem; }
 .hero .text-link { display: inline-block; padding-block: .4rem; min-height: 44px; }
 .scene {
   position: relative;

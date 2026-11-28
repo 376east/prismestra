@@ -42,7 +42,7 @@ jobs:
           cp src/ui/windows/web/assets/favicon.svg _site/
           cp resources/prismestra.ico _site/favicon.ico
           cp docs/devices/{index.html,lookup.css,lookup.mjs,catalog.mjs,openrgb-coverage.mjs,openrgb.json,prismestra.json} _site/devices/
-      - name: Set direct links to the published Windows installers
+      - name: Link directly to the published Windows Setup
         if: github.ref == 'refs/heads/master'
         env:
           GH_TOKEN: ${{ github.token }}

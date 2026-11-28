@@ -32,8 +32,6 @@ function showRussian() {
     download: 'Скачать для Windows',
     devices: 'Устройства',
     platform: 'Windows 10 (1903+) или 11, x64',
-    'download-network': 'Для лёгкой установки нужен интернет.',
-    'offline-download': 'Скачать полный офлайн-установщик',
     'manual-download': 'Файлы релиза',
     'effect-miami': 'Майами',
     'effect-breathing': 'Дыхание',
